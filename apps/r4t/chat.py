@@ -1,8 +1,8 @@
-"""r4t chat — the roster human's seat at the team, in one window.
+"""r4t chat — the roster human's seat, in one window.
 
 Interleaves the seat mailbox (messages parked for the human by dispatch),
-r4t turn/event lines from the team's daily log, and an input line that
-speaks as the human. There is no a8s coupling: intra-team mail rides the
+r4t turn/event lines from the roster's daily log, and an input line that
+speaks as the human. There is no a8s coupling: intra-roster mail rides the
 node's own pending queue, sends invoke dispatch directly, and a presence
 file tells dispatch to skip the `Address:` doorbell while a session is
 attached. The walled garden works with zero routers; a8s only matters for
@@ -72,7 +72,7 @@ def render_envelope(envelope: dict, roster: Roster | None = None) -> str:
 
 
 def filter_log_line(line: str) -> str | None:
-    """Compact one team-log line into an activity event, or None to skip.
+    """Compact one roster-log line into an activity event, or None to skip.
 
     The daily log interleaves single-line events with full multi-line turn
     transcripts; chat shows the events and the turn boundaries, never the
@@ -88,7 +88,7 @@ def filter_log_line(line: str) -> str | None:
 
 
 def resolve_target(roster: Roster, node: str, arg: str) -> str | None:
-    """A /to argument as a dispatchable address: bare team name = leader,
+    """A /to argument as a dispatchable address: bare roster name = leader,
     a member name = that member; None when nothing in the roster matches."""
     arg = arg.strip().lower()
     if not arg or arg == node:
@@ -111,7 +111,7 @@ def send_as_human(ctx: DispatchContext, human: Member, to: str, text: str) -> st
 
 
 class SeatFeed:
-    """Polls the seat inbox and the team's daily log into (kind, payload)
+    """Polls the seat inbox and the roster's daily log into (kind, payload)
     events: 'in' = the raw envelope dict parked for the human (marked read
     on read) — consumers render it (the line UI flattens, the TUI draws
     markdown); 'act' = compacted activity line as text. Log history before
@@ -137,7 +137,7 @@ class SeatFeed:
     def poll_log(self) -> list[tuple[str, str]]:
         # append_log names day files by UTC date — matching local time here
         # would watch a file that stops receiving writes after UTC midnight.
-        path = state.team_dir(self.node) / "log" / (
+        path = state.roster_dir(self.node) / "log" / (
             datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
         )
         if path != self.log_path:
@@ -279,7 +279,7 @@ def format_who(node: str, roster: Roster, human: Member) -> list[str]:
 
 
 def member_log_event(line: str, name: str) -> str | None:
-    """Compact a team-log line into a gemba event for one member, or None when
+    """Compact a roster-log line into a gemba event for one member, or None when
     the line does not name it — messages enqueued for it, its turn boundaries,
     and the governance lines that mention it, nothing else."""
     event = filter_log_line(line)
@@ -292,7 +292,7 @@ def member_log_event(line: str, name: str) -> str | None:
 
 
 class MemberWatch:
-    """Read-only live view of one AI member for a gemba attach: the team-log
+    """Read-only live view of one AI member for a gemba attach: the roster-log
     events that name it (every message enqueued for it, its turn boundaries)
     plus its turn output tailed live from agents/<name>/live.log as it streams.
     Observation only — attaching never sends to the member."""
@@ -305,7 +305,7 @@ class MemberWatch:
         self._live_offset = 0
 
     def _poll_log(self) -> list[tuple[str, str]]:
-        path = state.team_dir(self.node) / "log" / (
+        path = state.roster_dir(self.node) / "log" / (
             datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".md"
         )
         if path != self._log_path:
@@ -347,7 +347,7 @@ def member_backfill(
 ) -> list[tuple[str, str]]:
     """Recent history for a gemba attach, so a message sent to the member
     before attach-time is not invisible: its received-message and turn events
-    from the team log (current + previous UTC day), bounded to the last
+    from the roster log (current + previous UTC day), bounded to the last
     `limit`, then whatever is still waiting in its queue. Read-only; the live
     stream picks up from here forward."""
     key = name.strip().lower()
@@ -365,11 +365,11 @@ def member_backfill(
 
 
 HELP = """\
-/to <name|team>   set message target (bare team = leader)
+/to <name|roster>   set message target (bare roster = leader)
 /attach <name>    watch a member read-only (messages in + turn output live)
 /detach           stop watching
 /who              roster and live turn locks
-/threads          open threads for this team
+/threads          open threads for this roster
 /help             this help
 /quit             leave the seat"""
 

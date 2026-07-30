@@ -240,7 +240,7 @@ class TestRouteOutboxes:
     def test_alias_fanout_excludes_sender(self, three_agents):
         a, b, c = three_agents
         # A writes to alias devs (which contains [A, B, C]).
-        _write_outbox("A", a.root, "devs", "team meeting", [])
+        _write_outbox("A", a.root, "devs", "roster meeting", [])
         n = route_outboxes([a, b, c], all_agents=[a, b, c])
         # Sender excluded → 2 recipients (B, C).
         assert n == 2
@@ -317,11 +317,11 @@ class TestRouteOutboxes:
 
     def test_from_in_foreign_namespace_is_overwritten(self, two_agents):
         a, b = two_agents
-        save_namespaces({"crew": "B"})  # bound to someone else
+        save_namespaces({"acme": "B"})  # bound to someone else
         outbox = outbox_dir(a.root)
         f = outbox / "20260101T000000_A.json"
         f.write_text(json.dumps({
-            "from": "crew:gerry",
+            "from": "acme:gerry",
             "to": "B",
             "content": "spoof attempt",
             "files": [],
@@ -399,10 +399,10 @@ class TestNamespaceRouting:
 
     def test_prefix_case_insensitive_sub_address_verbatim(self, namespace_agents):
         a, node = namespace_agents
-        _write_outbox("A", a.root, "ACME:Team:Phil", "hi", [])
+        _write_outbox("A", a.root, "ACME:Ops:Phil", "hi", [])
         route_outboxes([a, node], all_agents=[a, node])
         msg = json.loads(next(inbox_dir("NODE").iterdir()).read_text())
-        assert msg["to"] == "ACME:Team:Phil"
+        assert msg["to"] == "ACME:Ops:Phil"
 
     def test_empty_sub_address_is_trashed(self, namespace_agents):
         # Malformed address — same handling as any malformed recipient.
@@ -690,7 +690,7 @@ class TestAtomicFanout:
 
     def test_uses_source_filename_in_inbox(self, three_agents):
         a, b, c = three_agents
-        out_path = _write_outbox("A", a.root, "devs", "team msg", [])
+        out_path = _write_outbox("A", a.root, "devs", "roster msg", [])
         save_aliases({"devs": ["A", "B", "C"]})
         route_outboxes([a, b, c], all_agents=[a, b, c])
         # Recipients receive a file named exactly like the source outbox file.
@@ -703,7 +703,7 @@ class TestAtomicFanout:
     def test_inbox_tmp_is_empty_after_clean_run(self, three_agents):
         a, b, c = three_agents
         save_aliases({"devs": ["A", "B", "C"]})
-        _write_outbox("A", a.root, "devs", "team msg", [])
+        _write_outbox("A", a.root, "devs", "roster msg", [])
         route_outboxes([a, b, c], all_agents=[a, b, c])
         for p in (a, b, c):
             assert list(inbox_tmp_dir(p.name).iterdir()) == []
@@ -715,7 +715,7 @@ class TestAtomicFanout:
         # to B, only fill in C; the outbox file is then unlinked.
         a, b, c = three_agents
         save_aliases({"devs": ["A", "B", "C"]})
-        out_path = _write_outbox("A", a.root, "devs", "team msg", [])
+        out_path = _write_outbox("A", a.root, "devs", "roster msg", [])
         # Pre-populate B's inbox with a copy of the message under the same
         # filename — represents a successful prior staging that promoted to
         # inbox/ before the process died.
@@ -779,7 +779,7 @@ class TestFileTransfer:
         a = agents["A"]
         payload = a.root / "data.csv"
         payload.write_text("col1,col2\n1,2\n")
-        out_path = _write_staged("A", a.root, "devs", "team data", payload)
+        out_path = _write_staged("A", a.root, "devs", "roster data", payload)
         msg_id = out_path.stem
         route_outboxes(list(agents.values()), all_agents=list(agents.values()))
         for n in ("B", "C"):

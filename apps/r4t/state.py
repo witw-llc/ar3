@@ -1,8 +1,8 @@
-"""Out-of-repo team state under ~/.config/r4t/teams/<node>/ (honors
+"""Out-of-repo roster state under ~/.config/r4t/rosters/<node>/ (honors
 XDG_CONFIG_HOME; relocate wholesale with R4T_HOME, mirroring how a8s
 honors A8S_HOME).
 
-    teams/<node>/
+    rosters/<node>/
     ├── agents/<name>/history.md   rolling conversation memory (messages only), ~8KB cap
     ├── agents/<name>/queue/       durable inbound queue — one envelope per file,
     │                              ULID-named; a turn drains the whole queue at once
@@ -21,18 +21,18 @@ honors A8S_HOME).
     │                              (full prompt + raw output; most recent 50 kept)
     ├── tasks/<id>.json            thread ledger (see tasks.py)
     ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
-    ├── buckets.json               per-member + team spend budgets (turns, not tokens)
+    ├── buckets.json               per-member + roster spend budgets (turns, not tokens)
     ├── rotation.json              per-rig round-robin index for harness pools
-    ├── last-turn-start            cadence stamp for the team throttle
+    ├── last-turn-start            cadence stamp for the roster throttle
     ├── log/<date>.md              full I/O transcript, append-only; `r4t clear`
     │                              drops whole days past `log_retention_days`
     ├── velocity.csv               one row per harness turn, current month
     └── velocity-<month>.csv       finished months, rotated out by `r4t clear`
                                    and never pruned (the cost record)
 
-One file sits ABOVE the teams, at the R4T_HOME root — rig-buckets.json, the
+One file sits ABOVE the rosters, at the R4T_HOME root — rig-buckets.json, the
 machine-global rig spend buckets: a rig maps to a real subscription shared by
-every team on the machine, so its bucket cannot be per-team.
+every roster on the machine, so its bucket cannot be per-roster.
 
 Never inside the repo: the working tree is only touched by the harness
 subprocesses themselves.
@@ -73,27 +73,27 @@ def r4t_home() -> Path:
     return base / "r4t"
 
 
-def teams_dir() -> Path:
-    return r4t_home() / "teams"
+def rosters_dir() -> Path:
+    return r4t_home() / "rosters"
 
 
-def team_dir(node: str) -> Path:
-    return teams_dir() / node.strip().lower()
+def roster_dir(node: str) -> Path:
+    return rosters_dir() / node.strip().lower()
 
 
 def agent_dir(node: str, name: str) -> Path:
-    return team_dir(node) / "agents" / name.strip().lower()
+    return roster_dir(node) / "agents" / name.strip().lower()
 
 
-def known_teams() -> list[str]:
-    root = teams_dir()
+def known_rosters() -> list[str]:
+    root = rosters_dir()
     if not root.is_dir():
         return []
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
 def root_path(node: str) -> Path:
-    return team_dir(node) / "root"
+    return roster_dir(node) / "root"
 
 
 def stamp_root(node: str, root: Path) -> None:
@@ -116,17 +116,17 @@ def read_root(node: str) -> Path | None:
 
 
 def node_for_root(cwd: Path) -> str | None:
-    """The team whose stamped org-dir root — or, in a portable org, whose
+    """The roster whose stamped org-dir root — or, in a portable org, whose
     workplace repo — is cwd or an ancestor of it. The org-dir root matches
     first; the workplace is a fallback so that standing in the repo a portable
-    team works in also infers the node. A workplace shared by two org dirs (the
+    roster works in also infers the node. A workplace shared by two org dirs (the
     A/B case) is ambiguous and matches neither, so the caller still asks for
     --node."""
     from org import load_org
 
     by_root: dict[Path, str] = {}
     by_workplace: dict[Path, str | None] = {}
-    for node in known_teams():
+    for node in known_rosters():
         root = read_root(node)
         if root is None:
             continue
@@ -304,11 +304,11 @@ class ProcessLock:
 
 
 def admission_lock(node: str) -> ProcessLock:
-    return ProcessLock(team_dir(node) / ".admission.lock")
+    return ProcessLock(roster_dir(node) / ".admission.lock")
 
 
 def task_lock(node: str, task_id: str) -> ProcessLock:
-    return ProcessLock(team_dir(node) / "tasks" / f".{task_id}.lock")
+    return ProcessLock(roster_dir(node) / "tasks" / f".{task_id}.lock")
 
 
 def read_lock(path: Path) -> dict | None:
@@ -322,7 +322,7 @@ def read_lock(path: Path) -> dict | None:
 def live_locks(node: str, *, prune: bool = True) -> list[dict]:
     """Scan agents/*/.lock; return live ones as dicts with an `agent` key.
     Dead-PID locks are removed when `prune` (they're stale by definition)."""
-    agents_root = team_dir(node) / "agents"
+    agents_root = roster_dir(node) / "agents"
     if not agents_root.is_dir():
         return []
     out: list[dict] = []
@@ -350,7 +350,7 @@ def count_rig_locks(node: str, rig: str) -> int:
 
 
 def prune_stale_locks(node: str) -> int:
-    agents_root = team_dir(node) / "agents"
+    agents_root = roster_dir(node) / "agents"
     if not agents_root.is_dir():
         return 0
     before = sum(1 for e in agents_root.iterdir() if (e / ".lock").is_file())
@@ -448,7 +448,7 @@ def claim_queue(node: str, name: str) -> list[dict]:
 
 
 def members_with_queue(node: str) -> list[str]:
-    root = team_dir(node) / "agents"
+    root = roster_dir(node) / "agents"
     if not root.is_dir():
         return []
     out: list[str] = []
@@ -464,7 +464,7 @@ def members_with_queue(node: str) -> list[str]:
 # ---------- seat (the roster human's mailbox on the node) ----------
 
 def seat_dir(node: str, name: str) -> Path:
-    return team_dir(node) / "seat" / name.strip().lower()
+    return roster_dir(node) / "seat" / name.strip().lower()
 
 
 def seat_inbox_dir(node: str, name: str) -> Path:
@@ -554,7 +554,7 @@ def seat_attached(node: str, name: str) -> bool:
 # ---------- transcript log + velocity ----------
 
 def append_log(node: str, text: str) -> None:
-    log_dir = team_dir(node) / "log"
+    log_dir = roster_dir(node) / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with (log_dir / f"{day}.md").open("a", encoding="utf-8") as f:
@@ -564,7 +564,7 @@ def append_log(node: str, text: str) -> None:
 def recent_log_lines(node: str, *, days: int = 2) -> list[str]:
     """Raw lines from the last `days` UTC day log files, oldest first — a
     read-only view for chat/attach backfill. Never writes."""
-    log_dir = team_dir(node) / "log"
+    log_dir = roster_dir(node) / "log"
     if not log_dir.is_dir():
         return []
     lines: list[str] = []
@@ -584,7 +584,7 @@ def prune_day_logs(node: str, retention_days: int) -> list[str]:
     keeps every day forever. Returns the days dropped, oldest first."""
     if retention_days <= 0:
         return []
-    log_dir = team_dir(node) / "log"
+    log_dir = roster_dir(node) / "log"
     if not log_dir.is_dir():
         return []
     cutoff = (
@@ -619,7 +619,7 @@ def record_velocity(
     duration_seconds: float,
     exit_code: int,
 ) -> None:
-    path = team_dir(node) / "velocity.csv"
+    path = roster_dir(node) / "velocity.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     fresh = not path.is_file()
     row = ",".join(
@@ -644,13 +644,13 @@ def rotate_velocity(node: str) -> list[str]:
     """Move rows from finished months out of velocity.csv into
     `velocity-<YYYY-MM>.csv` siblings, leaving the live file holding the
     current month. The monthly files are never pruned — turn economics is the
-    record of what the team cost, and a row per turn stays small — so rotation
+    record of what the roster cost, and a row per turn stays small — so rotation
     bounds what every reader parses without dropping anything. Returns the
     months archived, oldest first.
 
     The caller rotates only while no turn is live: a running turn appends to
     velocity.csv, and rewriting it underneath that append would lose the row."""
-    path = team_dir(node) / "velocity.csv"
+    path = roster_dir(node) / "velocity.csv"
     if not path.is_file():
         return []
     try:
@@ -714,7 +714,7 @@ def clear_turn(node: str, name: str) -> None:
 # ---------- mission-review backoff (idle liveness) ----------
 
 def mission_review_path(node: str) -> Path:
-    return team_dir(node) / "mission-review.json"
+    return roster_dir(node) / "mission-review.json"
 
 
 def read_mission_review(node: str) -> dict:
@@ -835,7 +835,7 @@ def write_turn_capture(node: str, name: str, stamp: str, thread: str, content: s
 # ---------- dead letters ----------
 
 def dead_letter_dir(node: str) -> Path:
-    return team_dir(node) / "dead-letter"
+    return roster_dir(node) / "dead-letter"
 
 
 def record_dead_letter(
@@ -930,7 +930,7 @@ def _bucket_level(
 
 
 def buckets_path(node: str) -> Path:
-    return team_dir(node) / "buckets.json"
+    return roster_dir(node) / "buckets.json"
 
 
 def read_buckets(node: str) -> dict:
@@ -981,12 +981,12 @@ def budget_seconds_until(
     return (target - level) / earn_per_hour * 3600.0
 
 
-# ---------- rig spend bucket (MACHINE-GLOBAL: one subscription, many teams) ----------
+# ---------- rig spend bucket (MACHINE-GLOBAL: one subscription, many rosters) ----------
 #
 # A rig maps to a real subscription (an Antigravity plan good for ~20 prompts an
-# hour, a Claude seat). Its ceiling is set ON THE RIG and binds every r4t team
+# hour, a Claude seat). Its ceiling is set ON THE RIG and binds every r4t roster
 # on the machine, so one rig is safely shared across projects. This bucket
-# therefore lives at the r4t_home ROOT, not under any one team, and every team
+# therefore lives at the r4t_home ROOT, not under any one roster, and every roster
 # node charges it concurrently — so the read-modify-write is serialized by a
 # machine-global lock. The gate itself (check-then-charge) is best-effort across
 # nodes; the charge clamps at zero and the queue holds, so a rare double-spend
@@ -1152,7 +1152,7 @@ def take_rotation(node: str, rig: str, pool_size: int) -> int:
     the advance. Single-variant rigs always get 0 without touching disk."""
     if pool_size <= 1:
         return 0
-    path = team_dir(node) / "rotation.json"
+    path = roster_dir(node) / "rotation.json"
     data: dict = {}
     if path.is_file():
         try:
@@ -1170,10 +1170,10 @@ def take_rotation(node: str, rig: str, pool_size: int) -> int:
     return index
 
 
-# ---------- team throttle cadence ----------
+# ---------- roster throttle cadence ----------
 
 def last_turn_start_path(node: str) -> Path:
-    return team_dir(node) / "last-turn-start"
+    return roster_dir(node) / "last-turn-start"
 
 
 def stamp_last_turn_start(node: str) -> None:

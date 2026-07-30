@@ -64,7 +64,7 @@ def seat_messages(name="neil"):
 
 
 def read_log():
-    files = (state.team_dir(NODE) / "log").glob("*.md")
+    files = (state.roster_dir(NODE) / "log").glob("*.md")
     return "".join(f.read_text(encoding="utf-8") for f in files)
 
 
@@ -91,7 +91,7 @@ def empty_member_budget(ctx, name):
 
 TREE_ROSTER = textwrap.dedent(
     """\
-    # Tree Team
+    # Tree Roster
 
     ### Vic
     - **Rig:** leader
@@ -170,7 +170,7 @@ class TestIngressAndTurn:
         assert tasks_list[0]["creator"] == "gerry"
 
     def test_internal_message_mints_thread_and_carries_it_as_a_field(self, ctx, fake_harness):
-        # No header parsing: an intra-team send opens a fresh thread and the id
+        # No header parsing: an intra-roster send opens a fresh thread and the id
         # travels on the queued r4t-message, not as text inside the body.
         handle_message(ctx, f"{NODE}:phil", "acme:gerry", "continue please", drain_after=False)
         threads = tasks.list_tasks(NODE)
@@ -214,7 +214,7 @@ class TestIngressAndTurn:
 
     def test_velocity_recorded(self, ctx, fake_harness):
         handle_message(ctx, "acme:gerry", "acme:phil", "job")
-        rows = (state.team_dir(NODE) / "velocity.csv").read_text().splitlines()
+        rows = (state.roster_dir(NODE) / "velocity.csv").read_text().splitlines()
         assert len(rows) == 2  # header + one turn
 
     def test_transcript_logged(self, ctx, fake_harness):
@@ -259,7 +259,7 @@ class TestRejections:
         sent, _ = tells
         handle_message(ctx, "acme:gerry", "acme:nobody", "hi")
         assert not harness_calls(fake_harness)
-        assert any("no team member named" in b for _, b in sent)
+        assert any("no roster member named" in b for _, b in sent)
         assert "unknown-recipient" in dead_reasons()
 
     def test_human_message_parks_in_seat(self, ctx, tells, fake_harness):
@@ -344,7 +344,7 @@ class TestStagingRelease:
         assert "status: done" in history
 
     def test_quota_overflow_dead_letters(self, chatty_ctx, repo, chatty_harness, monkeypatch):
-        # Quota is orthogonal to egress; drive it on an intra-team fan-out from
+        # Quota is orthogonal to egress; drive it on an intra-roster fan-out from
         # phil so the top-leader egress gate never enters the picture.
         monkeypatch.setenv("CHATTY_TO", "gerry")
         monkeypatch.setenv("CHATTY_SENDS", "4")  # max_sends_per_turn is 2
@@ -353,7 +353,7 @@ class TestStagingRelease:
         assert dead_reasons() == ["quota", "quota"]
         assert outbox_envelopes(repo) == []
 
-    def test_intra_team_release_enqueues_and_drains(
+    def test_intra_roster_release_enqueues_and_drains(
         self, chatty_ctx, chatty_harness, monkeypatch
     ):
         monkeypatch.setenv("CHATTY_TO", "acme:gerry")
@@ -370,7 +370,7 @@ class TestStagingRelease:
         assert "please review my patch" in prompts[1]
         assert len(tasks.list_tasks(NODE)) == 1  # one thread across the hop
 
-    def test_bare_teammate_name_enqueues_internal(
+    def test_bare_member_name_enqueues_internal(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
         monkeypatch.setenv("CHATTY_TO", "Gerry")
@@ -469,15 +469,15 @@ class TestStagingRelease:
 
 
 class TestBudgets:
-    def test_turn_charges_member_and_team_one_unit(self, ctx, fake_harness):
+    def test_turn_charges_member_and_roster_one_unit(self, ctx, fake_harness):
         config = load_rig_config(ctx.config_path)
         handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert member_budget(ctx, "phil") == pytest.approx(99.0, abs=0.3)
-        team = state.budget_level(
+        roster = state.budget_level(
             NODE, state.CELL_BUDGET_KEY,
             config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
-        assert team == pytest.approx(199.0, abs=0.3)
+        assert roster == pytest.approx(199.0, abs=0.3)
 
     def test_empty_member_budget_rests_and_holds_queue(self, ctx, fake_harness):
         empty_member_budget(ctx, "phil")
@@ -561,7 +561,7 @@ class TestRigBudgets:
         log = read_log()
         assert "RESTING phil" in log and "rig junior-dev exhausted" in log
 
-    def test_rig_bucket_is_shared_across_two_teams(self, repo, fake_harness, tells, tmp_path, r4t_home):
+    def test_rig_bucket_is_shared_across_two_rosters(self, repo, fake_harness, tells, tmp_path, r4t_home):
         repo2 = tmp_path / "repo2"
         repo2.mkdir()
         (repo2 / "ROSTER.md").write_text(
@@ -574,11 +574,11 @@ class TestRigBudgets:
             root=repo2, node="beta", roster_path=repo2 / "ROSTER.md",
             config_path=cfg_b, tell_fn=capture,
         )
-        # Two turns on two DIFFERENT teams spend the ONE shared rig bucket (2 -> 0).
+        # Two turns on two DIFFERENT rosters spend the ONE shared rig bucket (2 -> 0).
         assert run_one(ctx_a, "acme:gerry", "acme:phil", "one") == 1
         assert run_one(ctx_b, "beta:gerry", "beta:phil", "two") == 1
         assert state.rig_budget_level("junior-dev", 2, 0.001) == pytest.approx(0.0, abs=0.3)
-        # A third turn, on either team, now rests on the exhausted rig.
+        # A third turn, on either roster, now rests on the exhausted rig.
         handle_message(ctx_a, "acme:gerry", "acme:phil", "three")
         assert state.queue_depth("acme", "phil") == 1
 
@@ -663,7 +663,7 @@ class TestFailureBreaker:
 
 CONTINUE_ROSTER = textwrap.dedent(
     """\
-    # Continue Team
+    # Continue Roster
 
     ### Ana
     - **Rig:** resuming
@@ -678,7 +678,7 @@ CONTINUE_ROSTER = textwrap.dedent(
 
 @pytest.fixture
 def continue_ctx(r4t_home, tmp_path, tells):
-    """A team whose CLI refuses to launch with --continue until a conversation
+    """A roster whose CLI refuses to launch with --continue until a conversation
     exists in the turn directory — the real cursor behavior, faked. The marker
     file stands in for that conversation."""
     from dispatch import DispatchContext
@@ -1116,7 +1116,7 @@ class TestFlushCommand:
     def test_unknown_member_is_an_error(self, continue_ctx, capsys):
         ctx, _calls = continue_ctx
         assert flush_cli(ctx, "zed") == 2
-        assert "no team member named 'zed'" in capsys.readouterr().err
+        assert "no roster member named 'zed'" in capsys.readouterr().err
 
     def test_named_member_flushes(self, continue_ctx, capsys):
         ctx, _calls = continue_ctx
@@ -1323,7 +1323,7 @@ class TestEchoRig:
         set_echo(ctx.config_path)
         handle_message(ctx, "boss", "acme:gerry", "what is the plan?")
         prompt = read_prompt(harness_calls(fake_harness)[0])
-        assert "You are Gerry, a member of the acme team." in prompt
+        assert "You are Gerry, a member of the acme roster." in prompt
         assert "## Messages since your last turn" in prompt
         assert "From: boss" in prompt
         assert "what is the plan?" in prompt
@@ -1331,7 +1331,7 @@ class TestEchoRig:
         assert "tell" not in prompt.lower()
         assert "## How to work" not in prompt
         assert "This is one turn" not in prompt
-        assert "Teammates" not in prompt
+        assert "Members" not in prompt
 
     def test_stdout_staged_as_echo_reply_through_the_gates(self, ctx, repo, r4t_home):
         set_echo(ctx.config_path)
@@ -1562,7 +1562,7 @@ def make_ctx(repo, config_path, tell_fn):
     )
 
 
-class TestTeamThrottle:
+class TestRosterThrottle:
     def _ctx(self, repo, fake_harness, tells, tmp_path, **throttle):
         script, _out = fake_harness
         config = _local_base_config(script)
@@ -1794,7 +1794,7 @@ class TestExternalClassIngress:
 
     def test_internal_relay_keeps_the_originating_thread_owed(self, ctx, r4t_home):
         # The class means the same thing inside the walls (member mail is relay
-        # too), but an intra-team message rides an existing thread — the
+        # too), but an intra-roster message rides an existing thread — the
         # human's — and must not turn it into a relay thread.
         handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
         thread_id = tasks.list_tasks(NODE)[0]["id"]
@@ -2078,10 +2078,10 @@ class TestRunHarness:
         handle_message(ctx, "boss", "acme", "hi")
         assert any("failed to start" in b for _, b in sent)
 
-    def test_spawn_failure_to_intra_team_sender_feeds_error_in_band(
+    def test_spawn_failure_to_intra_roster_sender_feeds_error_in_band(
         self, ctx, repo, tells, fake_harness, rig_config
     ):
-        # #160: an operational error to an INTRA-team sender is not a headerless
+        # #160: an operational error to an INTRA-roster sender is not a headerless
         # a8s tell that mints a fresh task — it is an in-band class=error message
         # on the ORIGINATING thread. No tell leaves the garden; no new thread.
         self._break_junior_rig(rig_config)
@@ -2097,16 +2097,16 @@ class TestRunHarness:
         assert len(tasks.list_tasks(NODE)) == 1  # no fresh thread minted
 
 
-class TestTeammateScoping:
-    def test_flat_roster_lists_whole_team(self, ctx):
+class TestMemberScoping:
+    def test_flat_roster_lists_whole_roster(self, ctx):
         roster = load_roster(ctx.roster_path)
-        lines = "\n".join(dispatch._teammate_lines(ctx, roster, roster.find("phil")))
+        lines = "\n".join(dispatch._member_lines(ctx, roster, roster.find("phil")))
         assert "Gerry" in lines and "Neil" in lines
         assert "Broken" not in lines  # errored member is excluded
 
     def test_tree_roster_hides_non_adjacent(self, tree_ctx):
         roster = load_roster(tree_ctx.roster_path)
-        lines = "\n".join(dispatch._teammate_lines(tree_ctx, roster, roster.find("ann")))
+        lines = "\n".join(dispatch._member_lines(tree_ctx, roster, roster.find("ann")))
         assert "Vic" in lines and "Bea" in lines and "Ned" in lines
         assert "Cal" not in lines  # the build cell is invisible to a design IC
 
@@ -2221,7 +2221,7 @@ class TestCommsSetting:
     ):
         ctx = _tree_ctx(tmp_path, chatty_config, tells)
         # An explicit internal sub-address that names no member still dead-letters
-        # (a bare unknown name is an external address, not an intra-team miss).
+        # (a bare unknown name is an external address, not an intra-roster miss).
         monkeypatch.setenv("CHATTY_TO", "acme:nobody")
         monkeypatch.setenv("CHATTY_BODY", "who are you")
         assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
@@ -2444,7 +2444,7 @@ class TestCli:
         assert "parked earlier" in prompt and "live one" in prompt
 
     def test_status(self, r4t_home, repo, rig_config, capsys):
-        state.team_dir(NODE).mkdir(parents=True, exist_ok=True)
+        state.roster_dir(NODE).mkdir(parents=True, exist_ok=True)
         rc = self.run(
             "status", "--root", str(repo), "--node", NODE,
             "--rig-config", str(rig_config), "--no-notify",
@@ -2569,12 +2569,12 @@ class TestCli:
         assert tasks.load_task(NODE, stale["id"]) is None
 
     def test_clear_applies_log_retention(self, r4t_home, repo, rig_config, capsys):
-        log_dir = state.team_dir(NODE) / "log"
+        log_dir = state.roster_dir(NODE) / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "2020-01-01.md").write_text("ancient\n", encoding="utf-8")
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         (log_dir / f"{today}.md").write_text("fresh\n", encoding="utf-8")
-        velocity = state.team_dir(NODE) / "velocity.csv"
+        velocity = state.roster_dir(NODE) / "velocity.csv"
         velocity.write_text(
             state.VELOCITY_HEADER + "2020-01-01T00:00:00Z,phil,junior-dev,x,0,1.00,0\n",
             encoding="utf-8",
@@ -2592,7 +2592,7 @@ class TestCli:
         assert "fresh" in today_log
         assert "r4t: PRUNED 1 day log(s) past 14-day retention" in today_log
         assert "r4t: ROTATED velocity rows" in today_log
-        assert (state.team_dir(NODE) / "velocity-2020-01.csv").is_file()
+        assert (state.roster_dir(NODE) / "velocity-2020-01.csv").is_file()
         assert velocity.read_text(encoding="utf-8") == state.VELOCITY_HEADER
 
     def test_clear_keeps_everything_at_zero_retention(
@@ -2603,7 +2603,7 @@ class TestCli:
         config["log_retention_days"] = 0
         config_path = tmp_path / "keep-forever-rigs.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
-        log_dir = state.team_dir(NODE) / "log"
+        log_dir = state.roster_dir(NODE) / "log"
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "2019-06-01.md").write_text("ancient\n", encoding="utf-8")
         rc = self.run(
@@ -2754,12 +2754,12 @@ class TestDefault:
     def test_no_args_shows_overview(self, r4t_home, repo, rig_config, capsys, monkeypatch):
         r4t_home.mkdir(parents=True, exist_ok=True)
         (r4t_home / "rigs.json").write_text(rig_config.read_text(encoding="utf-8"), encoding="utf-8")
-        state.team_dir(NODE).mkdir(parents=True, exist_ok=True)
+        state.roster_dir(NODE).mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(repo)
         rc = self.run()
         assert rc == 0
         out = capsys.readouterr().out
-        assert "r4t — Roster For Teams" in out
+        assert "r4t — the roster" in out
         assert f"R4T_HOME: {r4t_home}" in out
         assert "Rigs" in out and "junior-dev" in out and "RIG " in out
         assert "Getting started" in out and "init" in out
@@ -3096,7 +3096,7 @@ class TestMcpKnob:
         prompt = self._prompt(ctx, Rig(name="t", preset="opencode", mcp=True))
         assert "`a8s_tell` tool" in prompt
         assert HEREDOC_TEACHING not in prompt
-        assert "Teammates:" in prompt
+        assert "Members:" in prompt
 
     def _echo_env_rig(self, tmp_path, **kwargs):
         script = tmp_path / "show_env.py"

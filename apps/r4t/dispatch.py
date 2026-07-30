@@ -9,12 +9,12 @@ a member — except the roster human's own Address, whose doorbell reply lands
 in the seat path as the human speaking. A separate drain loop picks a runnable
 member with a non-empty queue and runs ONE turn that drains the WHOLE queue:
 the prompt renders every queued message at once, so an agent that sees
-"teammates discussed X, then the lead overrode with Y" pivots in one reading
+"members discussed X, then the lead overrode with Y" pivots in one reading
 instead of burning a turn per message.
 
 Runnability is governed autonomously — no human gates. A member runs when its
 own spend bucket and the shared cell bucket both hold at least 1 unit (a turn
-costs 1 of each), its failure breaker is closed, and the team throttle
+costs 1 of each), its failure breaker is closed, and the roster throttle
 (max_concurrent, cadence) admits another start. An empty bucket means the
 member is *resting*: its queue holds and it runs again when the bucket
 refills. Nothing is lost.
@@ -25,7 +25,7 @@ files as r4t-message DRAFTS (`to` + `body` + optional `files`), then releases
 them: attribution (only this turn wrote there), the thread/hop/class stamped as
 structured fields, per-turn send quota, then either the node's real outbox
 (external — converted to an a8s envelope at the wall) or straight onto the
-recipient member's queue (intra-team, no header, no round-trip). A reply is
+recipient member's queue (intra-roster, no header, no round-trip). A reply is
 attributed to the thread of the message it answers.
 
 Requeueing note: a8s treats exit 0 as the only delivery ack and redelivers the
@@ -73,7 +73,7 @@ DRAIN_MAX_PASSES = 20
 # {creator}, {thread}. Structural section headers stay in code (not doctrine).
 PROMPT_DEFAULTS: dict[str, str] = {
     "intro": (
-        "You are {name}, a member of the {node} team. Your working directory "
+        "You are {name}, a member of the {node} roster. Your working directory "
         "is {workplace} — that absolute path is your root. Every file you "
         "create or reference belongs under it unless a message tells you "
         "otherwise: write it under that absolute path rather than trusting a "
@@ -81,11 +81,11 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "\"workspace root\" or \"project root\", ignore it for file placement — "
         "yours is the directory named above."
     ),
-    "echo_intro": "You are {name}, a member of the {node} team.",
+    "echo_intro": "You are {name}, a member of the {node} roster.",
     "mission_header": "## The mission (MISSION.md — outranks every other document)",
     "workdir_note": (
-        "The team repo (org workplace) is at {workplace} — use that absolute "
-        "path to reach shared team files."
+        "The roster repo (org workplace) is at {workplace} — use that absolute "
+        "path to reach shared roster files."
     ),
     "work_batch": (
         "- This is one turn: you were woken with every message above at once. "
@@ -95,7 +95,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
     ),
     "work_never_wait": (
         "- Never wait for a reply inside a turn. If you need work from "
-        "teammates, message them and END your turn without answering the "
+        "members, message them and END your turn without answering the "
         "original request; when their replies wake you later, answer the "
         "person who asked once you have enough."
     ),
@@ -107,7 +107,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "        <your message>\n"
         "        EOF\n"
         "    Or write the body with your file tool: tell <name> - < msg.md. "
-        "<name> is whoever asked, or a teammate. Teammates:"
+        "<name> is whoever asked, or a member. Members:"
     ),
     # Used in place of `work_tell` on a rig with the `mcp` knob on. It names the
     # tool verbatim: a tool described generically goes unused on small models,
@@ -116,10 +116,10 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "- Send messages by calling the `a8s_tell` tool (call the tool — "
         "printing text sends nothing). Pass `recipient` (the name) and `body` "
         "(your message). The body is delivered byte-exact; there is no shell. "
-        "`recipient` is whoever asked, or a teammate. Teammates:"
+        "`recipient` is whoever asked, or a member. Members:"
     ),
     "work_direct": (
-        "- Speak to teammates directly and one at a time — do not post to "
+        "- Speak to members directly and one at a time — do not post to "
         "chat rooms or broadcast channels."
     ),
     "work_no_ack": (
@@ -143,7 +143,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
     "flush_dump": "Save your current state and progress to STATUS.md.",
     "refound_preamble": "Check your STATUS.md to refresh your memory.",
     "mission_review": (
-        "The team's queues are empty and no thread is open, but the mission "
+        "The roster's queues are empty and no thread is open, but the mission "
         "may not be met. Review MISSION.md against where things stand and "
         "decide the next move — delegate the next step down the tree if there "
         "is one. No communication to the human NEEDS to happen: this is a "
@@ -196,7 +196,7 @@ class DispatchContext:
     definition_path: Path | None = None
 
     def __post_init__(self) -> None:
-        # `root` is where the team's documents live (ROSTER.md, MISSION.md, the
+        # `root` is where the roster's documents live (ROSTER.md, MISSION.md, the
         # a8s node's outbox); `workplace` is the repo where turns run and commits
         # land. A portable org splits them (see org.py); the in-repo default has
         # them equal.
@@ -310,7 +310,7 @@ def _tell_error(
     thread: str | None = None,
     roster: Roster | None = None,
 ) -> None:
-    """Operational feedback to a sender. For an INTRA-team sender it is an
+    """Operational feedback to a sender. For an INTRA-roster sender it is an
     internal `class=error` r4t-message carrying the ORIGINATING thread id (#160):
     because it already has a thread it can never mint a fresh one, so it cannot
     spawn a headerless new-task turn — it dies at the normal budget/answer gates
@@ -444,11 +444,11 @@ def _dispatchable_names(roster: Roster) -> list[str]:
     return [m.name for m in roster.members if not m.is_human and not m.errors]
 
 
-def _teammate_lines(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
+def _member_lines(ctx: DispatchContext, roster: Roster, member: Member) -> list[str]:
     # Information hiding: when the roster declares a tree, a member sees only
     # its tree-adjacent names (lead, reports, cell-mates) plus the human seat —
     # lateral contact becomes informationally unthinkable, not just rerouted.
-    # A flat roster (no Lead lines) still lists the whole team, as before.
+    # A flat roster (no Lead lines) still lists the whole roster, as before.
     if roster.declares_tree:
         pool = roster.adjacent(member)
     else:
@@ -520,7 +520,7 @@ def build_prompt(
     the missing section never reads as amnesia. Echo members always get the
     transcript: they have no CLI conversation at all."""
     history = state.read_history(ctx.node, member.name)
-    teammates = _teammate_lines(ctx, roster, member)
+    members = _member_lines(ctx, roster, member)
     message_lines: list[str] = []
     for env in batch:
         sender = _display_name(ctx.node, str(env.get("from", "?")))
@@ -541,14 +541,14 @@ def build_prompt(
         message_lines.append("")
     if rig.echo:
         # An echo member has no tools and no concept of messages: no tell
-        # instructions, no teammate list, no how-to-work doctrine. It gets who
+        # instructions, no member list, no how-to-work doctrine. It gets who
         # it is, what has been said, and the new messages — its stdout IS the
         # reply (_stage_echo_reply).
         parts = [
             ctx.prompt("echo_intro", name=member.name, node=ctx.node),
             "",
             *_mission_section(ctx, roster, member),
-            "## Who you are (from the team roster)",
+            "## Who you are (from the roster)",
             member.persona or f"### {member.name}",
             "",
             "## Your conversation so far (messages you received and sent)",
@@ -578,7 +578,7 @@ def build_prompt(
         *workdir_lines,
         "",
         *_mission_section(ctx, roster, member),
-        "## Who you are (from the team roster)",
+        "## Who you are (from the roster)",
         member.persona or f"### {member.name}",
         "",
         "## Your conversation so far (messages you received and sent)",
@@ -590,7 +590,7 @@ def build_prompt(
         ctx.prompt("work_batch"),
         ctx.prompt("work_never_wait"),
         ctx.prompt("work_tell_mcp" if rig.mcp_on else "work_tell"),
-        *(teammates or ["    - (none)"]),
+        *(members or ["    - (none)"]),
         ctx.prompt("work_direct"),
         ctx.prompt("work_no_ack"),
         ctx.prompt("work_body_only"),
@@ -646,7 +646,7 @@ def run_harness(
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
 
-    # The rig's `env` map (docs/rigs.md): static harness knobs on every turn.
+    # The rig's `env` map (docs/r4t-rigs.md): static harness knobs on every turn.
     # It goes on before r4t's own per-turn injections below (the mcp idiom's
     # variables, the PWD pin) so those still win, and a name the turn owns fails
     # the rig closed at parse time, so this cannot shadow one.
@@ -771,7 +771,7 @@ def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
         live = len(state.live_locks(ctx.node))
         if live >= throttle.max_concurrent:
             return (
-                f"team throttle: {live} live turn(s) >= max_concurrent "
+                f"roster throttle: {live} live turn(s) >= max_concurrent "
                 f"{throttle.max_concurrent}"
             )
     if throttle.min_seconds_between_turn_starts > 0:
@@ -780,7 +780,7 @@ def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
             elapsed = time.time() - last
             if elapsed < throttle.min_seconds_between_turn_starts:
                 return (
-                    f"team throttle: last turn started {elapsed:.0f}s ago < "
+                    f"roster throttle: last turn started {elapsed:.0f}s ago < "
                     f"min_seconds_between_turn_starts "
                     f"{throttle.min_seconds_between_turn_starts:g}"
                 )
@@ -828,7 +828,7 @@ def _ingest(
     (duplicate-collapsed) and returns QUEUED. No text header is parsed or
     stamped — `thread`/`hop`/`class` travel as fields end to end.
 
-    Routing turns on `internal`. Intra-team and seat traffic honors
+    Routing turns on `internal`. Intra-roster and seat traffic honors
     `node:member` addressing — that is how the tree delivers between members and
     how the human seat reaches anyone — and carries the resolved `thread`/`hop`.
     External mail does NOT: the topmost leader IS the garden from outside, so
@@ -857,7 +857,7 @@ def _ingest(
             names = ", ".join(_dispatchable_names(roster)) or "(none)"
             _tell_error(
                 ctx, sender,
-                f"no team member named {sub!r}. Dispatchable members: {names}.",
+                f"no roster member named {sub!r}. Dispatchable members: {names}.",
                 thread=thread, roster=roster,
             )
             state.record_dead_letter(
@@ -985,7 +985,7 @@ def _release_one(
             if _human_member(ctx.node, roster, to) is None:
                 state.append_log(
                     ctx.node,
-                    f"r4t: WARN attachments dropped on intra-team route "
+                    f"r4t: WARN attachments dropped on intra-roster route "
                     f"{sender_addr} -> {to}",
                 )
         state.append_log(
@@ -1032,7 +1032,7 @@ def _release_one(
 def _reachable_names(
     ctx: DispatchContext, roster: Roster, member: Member, batch: list[dict]
 ) -> set[str]:
-    """Names this member may address intra-team without rerouting: its
+    """Names this member may address intra-roster without rerouting: its
     tree-adjacent members (lead, reports, cell-mates), every human seat, and
     whoever messaged it this turn (answering a batch sender never reroutes)."""
     names = {m.name.lower() for m in roster.adjacent(member)}
@@ -1185,7 +1185,7 @@ def release_staging(
                     f"to top leader {top_leader.name.lower()}",
                 )
 
-        # Hard tree enforcement (comms=closed): an intra-team tell to a member
+        # Hard tree enforcement (comms=closed): an intra-roster tell to a member
         # who is not tree-adjacent (and did not message the sender this turn)
         # reroutes to the sender's lead. The human seat and batch senders are
         # always reachable — answering must never reroute. Unknown names fall
@@ -1866,7 +1866,7 @@ def _cadence_wait(ctx: DispatchContext) -> float:
 
 
 def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
-    """Drain repeatedly until a pass runs nothing — a released intra-team
+    """Drain repeatedly until a pass runs nothing — a released intra-roster
     message enqueues the next member and can enable another turn in the same
     invocation. A pass that runs nothing while queued work remains and no turn
     is live means either the cadence window is the only thing in the way (sleep

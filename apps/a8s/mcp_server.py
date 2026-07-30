@@ -39,7 +39,7 @@ TELL_TIMEOUT_SECONDS = 60
 TOOL = {
     "name": TOOL_NAME,
     "description": (
-        "Send a message to a teammate or the human on the a8s network. "
+        "Send a message to a roster member or the human on the a8s network. "
         "The body is delivered byte-exact; no shell is involved."
     ),
     "inputSchema": {
@@ -47,7 +47,7 @@ TOOL = {
         "properties": {
             "recipient": {
                 "type": "string",
-                "description": "Name of the teammate or human to send to.",
+                "description": "Name of the member or human to send to.",
             },
             "body": {
                 "type": "string",

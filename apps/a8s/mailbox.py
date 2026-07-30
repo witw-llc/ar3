@@ -503,7 +503,7 @@ def _stamp_from(
     Ownership is settled by the filesystem — a claim the sender's own
     namespaces don't back is discarded. By default a namespace changes nothing
     about presentation: a sub-sender claim under the node's own prefix stands
-    to any recipient (`crew:gerry` arrives as `crew:gerry`), because
+    to any recipient (`acme:gerry` arrives as `acme:gerry`), because
     attribution is the default and only the bound node writes this outbox.
 
     A binding made with `--opaque` conceals instead: mail leaving that prefix

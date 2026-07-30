@@ -1,6 +1,6 @@
 # a8s — Agent Infinity System
 
-A lightweight way to wire multiple agents — Claude Code sessions, Gemini CLI projects, codex sessions, plain scripts, eventually humans — into a team that can talk to each other.
+A lightweight way to wire multiple agents — Claude Code sessions, Gemini CLI projects, codex sessions, plain scripts, eventually humans — into a roster that can talk to each other.
 
 > **Status: pre-v1.** Surface and storage layout will keep changing without migration paths until the design settles.
 
@@ -13,7 +13,7 @@ Modern agent tooling like Claude Code's subagents is great inside one process an
 - **Recipient opacity is the load-bearing invariant.** The sender doesn't know whether the recipient is a Claude session, a script, or a person on the other end of an email-to-message bridge. That's how this scales — anywhere the abstraction fits, you plug in.
 - **Eventually, one fabric across machines.** Tracked in #63: two a8s clusters on the same network see each other and route messages as peers. The local design today is shaped to accommodate that without breaking.
 
-The win at scale: a team of agents that share knowledge through ordinary conversation grows faster than a collection of silos, and you interact with all of them through one verb (`tell`).
+The win at scale: a roster of agents that share knowledge through ordinary conversation grows faster than a collection of silos, and you interact with all of them through one verb (`tell`).
 
 ## Desktop filedrop
 
@@ -22,7 +22,7 @@ Humans and desktop IDE sessions (Cursor, Claude Code, Codex) can run a
 with `tells -f` (inbound only). Deployed agents do not use this path — a8s
 sets `TELL_OUTBOX_DIR` on wake, so `tell` works from their own root.
 
-→ **[Filedrop setup](docs/filedrop.md)** (`a8s add … filedrop`, handler)
+→ **[Filedrop setup](../../docs/a8s-filedrop.md)** (`a8s add … filedrop`, handler)
 → **[Agent playbook](https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent)** (IDE seats: send/receive norms)
 
 ## Mental model
@@ -62,7 +62,7 @@ Three concepts:
 
 - **Registry** (`~/.a8s/a8s.json`) — the list of agents, aliases, and namespace prefixes. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
 - **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
-- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/` for CLI agents (wake from there). **Filedrop** nodes (`definitions/filedrop.json`) instead receive into `<root>/.inbox/` with no CLI wake — see [docs/filedrop.md](docs/filedrop.md).
+- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/` for CLI agents (wake from there). **Filedrop** nodes (`definitions/filedrop.json`) instead receive into `<root>/.inbox/` with no CLI wake — see [docs/a8s-filedrop.md](../../docs/a8s-filedrop.md).
 
 The router doesn't trust the sender. The `from` field is force-overwritten to the actual enclosing agent at routing time. An agent can't impersonate another by hand-writing JSON.
 
@@ -98,7 +98,7 @@ a8s ps
 
 # Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s. Manual / desktop
 # tell uses that env var, or a unique CWD-matched configured outbox
-# (see docs/filedrop.md / docs/tell.md).
+# (see docs/a8s-filedrop.md / docs/a8s-tell.md).
 # Body on stdin with a quoted delimiter: $, backticks, and backslashes survive.
 cd ~/projects/code-review
 tell GEMINI - <<'EOF'
@@ -155,7 +155,7 @@ A namespace binds an address **prefix** to a single node agent. Recipients
 `<prefix>:<sub-address>` and a bare `<prefix>` (no colon) both route to that
 one agent — single delivery by design, the opposite of alias fan-out, which
 is why the bind target must be an agent, not an alias. The address splits on
-the FIRST colon and everything after it is opaque to a8s (`acme:team:phil`
+the FIRST colon and everything after it is opaque to a8s (`acme:ops:phil`
 still routes on prefix `acme`); the sub-address must be non-empty when a colon
 is present (`acme:` is malformed). A bare `<prefix>` is delivered with `to`
 equal to the prefix; the node self-routes (r4t sends that to the roster
@@ -170,7 +170,7 @@ a8s namespace acme acme-node
 
 tell acme "status?"               # delivered to acme-node with to = "acme"
 tell acme:phil "lunch at noon?"      # delivered to acme-node with to = "acme:phil"
-tell acme:team:ops "deploy done"     # same node; sub-address opaque to a8s
+tell acme:ops:lee "deploy done"      # same node; sub-address opaque to a8s
 ```
 
 By default a binding changes nothing about how the node presents: a sub-sender
@@ -220,7 +220,7 @@ any prefixes pointing at it.
 |                                                                             |                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> [<msg>\|-]`                                                | Routed message via `_write_outbox` into the sender's configured outbox. `-` reads the body from stdin (`- <<'EOF'` / `- < file.md`), which keeps shell expansion out of it. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
-| `tell <name> [<msg>\|-]` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](docs/filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/tell.md](docs/tell.md)`. |
+| `tell <name> [<msg>\|-]` (top-level shim, `[~/bin/tell](/Users/neilo/bin/tell)`) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when `~/.a8s` is readable (see [filedrop.md](../../docs/a8s-filedrop.md)). Drops a JSON envelope. When the registry is reachable, recipient validation and `from` stamping apply. Windows: `tell.cmd`. Operator internals: `[docs/a8s-tell.md](../../docs/a8s-tell.md)`. |
 | `tells [-f] [--timeout SEC] [--body-max N] [--glow [theme]]` (shim `[~/bin/tells](/Users/neilo/bin/tells)`) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited) print a `python3 -c` recovery command for the inbox JSON. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `a8s update` retains `convo_max_rows` rows (default 50000). |
@@ -295,7 +295,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`.                                                                                                                       |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `ollama-opencode.json` | OpenCode via `ollama launch` — requires a8s var `MODEL`. Example: `a8s add bob ./ ollama-opencode --model=qwen3.6`. |
-| `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/filedrop.md](docs/filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
+| `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](../../docs/a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](../r4t/README.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
@@ -498,7 +498,7 @@ a8s add my-email /mnt/gdrive/my-email/ my-filedrop.json
 
 ### Use cases
 
-- Local human / desktop IDE filedrops (`tells -f` — see [filedrop.md](docs/filedrop.md))
+- Local human / desktop IDE filedrops (`tells -f` — see [filedrop.md](../../docs/a8s-filedrop.md))
 - Google Apps Script participants (GAS polls Drive natively)
 - Cross-machine agents without exposed ports
 - Any system that can read/write files but can't run MQTT or hold sockets
@@ -626,7 +626,7 @@ Pre-v1 — the surface still moves. Tracked threads:
 - **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
 - **#62** — Cross-cluster file payloads. `FILE:` entries currently stay local-only across remotes; cross-cluster transfer needs a payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys) so the sender's bytes can move with the message envelope.
 
-Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between teams.
+Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between rosters.
 
 ## Pre-v1 / scorch-the-earth note
 

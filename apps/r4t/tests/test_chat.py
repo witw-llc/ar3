@@ -78,7 +78,7 @@ def test_filter_log_line_shapes():
     )
     assert filter_log_line("### Output (Ada, exit 0 in 13.7s)") == "done: Ada, exit 0 in 13.7s"
     assert filter_log_line("### Prompt") is None
-    assert filter_log_line("You are Ada, a member of the crew team") is None
+    assert filter_log_line("You are Ada, a member of the trio roster") is None
 
 
 def test_to_command_targets(session, capsys):
@@ -150,9 +150,9 @@ def test_handle_command_reports_target_and_quit(roster, human):
 
 
 def test_plain_line_queues_send(session, capsys):
-    session.handle_line("hello team")
-    assert session.sends.get_nowait() == (NODE, "hello team")
-    assert "you -> acme: hello team" in capsys.readouterr().out
+    session.handle_line("hello roster")
+    assert session.sends.get_nowait() == (NODE, "hello roster")
+    assert "you -> acme: hello roster" in capsys.readouterr().out
 
 
 def test_poll_inbox_consumes_and_renders(session, r4t_home):
@@ -270,7 +270,7 @@ def test_member_backfill_is_bounded(r4t_home):
 def test_member_backfill_spans_the_previous_utc_day(r4t_home):
     from chat import member_backfill
 
-    log_dir = state.team_dir(NODE) / "log"
+    log_dir = state.roster_dir(NODE) / "log"
     log_dir.mkdir(parents=True)
     (log_dir / "2020-01-01.md").write_text(
         'r4t: QUEUED gerry -> phil thread=T hop=0 "from yesterday" (depth 1)\n',

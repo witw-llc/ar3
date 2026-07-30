@@ -53,4 +53,4 @@ Genuinely new or changed knowledge becomes new entries.
 - `k7e compile <tag> [--dry-run]` — synthesize the active entries for a tag into
   a single `compiled` reference page (LLM).
 
-See [cli.md](cli.md) for full command/flag reference.
+See [k7e-cli.md](k7e-cli.md) for full command/flag reference.

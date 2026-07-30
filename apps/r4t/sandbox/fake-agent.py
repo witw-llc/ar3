@@ -60,7 +60,7 @@ if __name__ == "__main__":
 
 VERIFIED_RE = re.compile(r"VERIFIED:", re.I)
 
-TEAM = {"lead", "dev", "tester", "owner"}
+MEMBERS = {"lead", "dev", "tester", "owner"}
 
 FLAGS = set(sys.argv[2:])
 SILENT = "--silent" in FLAGS
@@ -103,7 +103,7 @@ def send(to: str, content: str) -> None:
 
 def first_external_sender(prompt: str) -> str:
     for name in re.findall(r"(?m)^(?:## \S+ from|From:) (\S+)", prompt):
-        if ":" not in name and name != "r4t" and name.lower() not in TEAM:
+        if ":" not in name and name != "r4t" and name.lower() not in MEMBERS:
             return name
     return "human"
 
@@ -151,7 +151,7 @@ def main() -> int:
         else:
             # Ack the human AND delegate in the same turn — the real leader
             # pattern that must not close the task and kill the delegation.
-            ack_to = sender if sender.lower() not in TEAM else first_external_sender(prompt)
+            ack_to = sender if sender.lower() not in MEMBERS else first_external_sender(prompt)
             send(
                 ack_to,
                 "Acknowledged — delegating the battleship build to Dev now; "

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""r4t — Roster For Teams.
+"""r4t — the roster: rigs, dispatch, verdicts, isolation.
 
-Turns a repo into a team of lightweight AI agents on the a8s network: a
+Turns a repo into a roster of lightweight AI agents on the a8s network: a
 human-readable ROSTER.md declares the members, an out-of-repo rig config
 decides what each symbolic rig is allowed to run, and r4t dispatches turns
 through the roster.
@@ -104,18 +104,18 @@ COMMAND_HELP = [
         [
             Command(
                 "status",
-                "Where a team stands: budgets, queues, open threads",
+                "Where a roster stands: budgets, queues, open threads",
                 "status",
             ),
             Command(
                 "logs",
-                "Everything the team does, as it happens",
+                "Everything the roster does, as it happens",
                 "logs",
                 "r4t logs -f",
             ),
             Command(
                 "chat",
-                "Your seat at the team: speak, and watch the work land",
+                "Your seat at the roster: speak, and watch the work land",
                 "chat",
             ),
             Command(
@@ -128,7 +128,7 @@ COMMAND_HELP = [
                 "Save a member's state and start the conversation fresh",
                 "flush",
             ),
-            Command("task list", "The team's conversation threads", "task"),
+            Command("task list", "The roster's conversation threads", "task"),
             Command("task show <id>", "One thread, in full"),
         ],
     ),
@@ -137,7 +137,7 @@ COMMAND_HELP = [
         [
             Command(
                 "check",
-                "Sweep a team's work for the patterns you forbid",
+                "Sweep a roster's work for the patterns you forbid",
                 "check",
             ),
             Command(
@@ -160,10 +160,10 @@ PARSER_HELP = {
 HIDDEN_COMMANDS = ("clear", "dispatch", "idle", "judge", "lab", "sandbox")
 
 ROSTER_TEMPLATE = """\
-# Team Roster
+# Roster
 
 Members are `### <Name>` blocks. AI is the default and carries no marker.
-`Human: yes` members are never dispatched: mail to them parks in the team's
+`Human: yes` members are never dispatched: mail to them parks in the roster's
 seat mailbox (`r4t seat`, `r4t chat`), and the optional `Address:` is a
 doorbell — a copy forwarded over a8s when no seat session is attached.
 `Rig:` names a SYMBOLIC rig defined in the out-of-repo rig config
@@ -178,9 +178,9 @@ block becomes the member's persona.
 ### Lead
 - **Rig:** leader
 - **Leader:** yes
-- **Role:** Team lead — delegates work and answers the owner
+- **Role:** Roster lead — delegates work and answers the owner
 
-Coordinates the team. Delegates implementation, follows up on replies, and
+Coordinates the roster. Delegates implementation, follows up on replies, and
 synthesizes answers for whoever asked.
 
 ### Dev
@@ -200,16 +200,16 @@ def _resolve_root(raw: str | None) -> Path:
 def _resolve_node(raw: str | None) -> str | None:
     if raw:
         return raw.strip().lower()
-    teams = state.known_teams()
-    if len(teams) == 1:
-        return teams[0]
+    rosters = state.known_rosters()
+    if len(rosters) == 1:
+        return rosters[0]
     match = state.node_for_root(Path.cwd())
     if match:
         return match
-    if not teams:
-        print("no teams found under ~/.config/r4t/teams — pass --node", file=sys.stderr)
+    if not rosters:
+        print("no rosters found under ~/.config/r4t/rosters — pass --node", file=sys.stderr)
     else:
-        print(f"multiple teams ({', '.join(teams)}) — pass --node", file=sys.stderr)
+        print(f"multiple rosters ({', '.join(rosters)}) — pass --node", file=sys.stderr)
     return None
 
 
@@ -397,12 +397,12 @@ def _print_rig_summary(
         _print_roster_table(config, roster_path, indent)
 
 
-def _print_team_summaries() -> None:
-    teams = state.known_teams()
-    if not teams:
-        print("  (none — register a team after `r4t init`; see printed a8s steps)")
+def _print_roster_summaries() -> None:
+    rosters = state.known_rosters()
+    if not rosters:
+        print("  (none — register a roster after `r4t init`; see printed a8s steps)")
         return
-    for node in teams:
+    for node in rosters:
         locks = state.live_locks(node)
         open_tasks = [
             t for t in tasks.list_tasks(node) if t.get("status") == tasks.STATUS_OPEN
@@ -441,7 +441,7 @@ def _next_steps(
     *,
     config_missing: bool,
     roster_path: Path,
-    teams: list[str],
+    rosters: list[str],
 ) -> list[str]:
     steps: list[str] = []
     if config_missing:
@@ -452,14 +452,14 @@ def _next_steps(
         steps.append("`r4t roster check` — lint the roster and rig mapping")
         steps.append("`r4t rig presets` — named CLI rigs aligned with a8s definitions")
         steps.append("`r4t rig add <rig> <preset>` — add a rig to the rig config")
-    if not teams:
+    if not rosters:
         steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
-    elif len(teams) == 1:
-        steps.append(f"`r4t status --node {teams[0]}` — budgets, queues, threads")
-        steps.append(f"`r4t chat --node {teams[0]}` — take your seat at the team")
+    elif len(rosters) == 1:
+        steps.append(f"`r4t status --node {rosters[0]}` — budgets, queues, threads")
+        steps.append(f"`r4t chat --node {rosters[0]}` — take your seat at the roster")
     else:
-        steps.append("`r4t status --node <team>` — pick a team from the list above")
-        steps.append("`r4t chat --node <team>` — take your seat at the team")
+        steps.append("`r4t status --node <roster>` — pick a roster from the list above")
+        steps.append("`r4t chat --node <roster>` — take your seat at the roster")
     return steps
 
 
@@ -467,9 +467,9 @@ def cmd_default(_args: argparse.Namespace) -> int:
     root = Path.cwd().resolve()
     config_path = default_config_path()
     roster_path = resolve_roster_path(root, None)
-    teams = state.known_teams()
+    rosters = state.known_rosters()
 
-    print("r4t — Roster For Teams")
+    print("r4t — the roster")
     print("Define agents in ROSTER.md; ~/.config/r4t/rigs.json maps roster rigs")
     print("to what actually runs. r4t dispatches governed turns on a8s.")
     print()
@@ -481,8 +481,8 @@ def cmd_default(_args: argparse.Namespace) -> int:
     print("Rigs")
     _print_rig_summary(config_path, roster_path)
     print()
-    print(f"Teams ({state.teams_dir()})")
-    _print_team_summaries()
+    print(f"Rosters ({state.rosters_dir()})")
+    _print_roster_summaries()
     print()
     print("This repo")
     if roster_path.is_file():
@@ -505,7 +505,7 @@ def cmd_default(_args: argparse.Namespace) -> int:
     for step in _next_steps(
         config_missing=not config_path.is_file(),
         roster_path=roster_path,
-        teams=teams,
+        rosters=rosters,
     ):
         print(f"  - {step}")
     print()
@@ -603,7 +603,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
             if member is None:
                 names = ", ".join(roster.names()) or "(none)"
                 print(
-                    f"flush: no team member named {raw!r} — "
+                    f"flush: no roster member named {raw!r} — "
                     f"(try: r4t flush --node {node} <name>; members: {names})",
                     file=sys.stderr,
                 )
@@ -673,7 +673,7 @@ def _roster_rows(
                 None,
                 m.name,
                 f"Human  address={m.address or '(none)'}{suffix}",
-                None if m.address else "add an **Address:** line so the team can reach them",
+                None if m.address else "add an **Address:** line so the roster can reach them",
             ))
             continue
         if m.errors:
@@ -850,8 +850,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     if node is None:
         return 2
     ctx = _context(args, node)
-    print(f"team: {node}")
-    print(f"state: {state.team_dir(node)}")
+    print(f"roster: {node}")
+    print(f"state: {state.roster_dir(node)}")
     iso = _isolation_tag(ctx.isolation)
     if iso:
         print(f"isolation: {iso}  (every member turn runs behind this boundary)")
@@ -870,7 +870,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         config_err = str(e)
 
     print("Health")
-    for v in verdict.team_verdicts(node, roster, config):
+    for v in verdict.roster_verdicts(node, roster, config):
         line = f"  {verdict.MARKS[v.level]} {v.text}"
         if v.hint:
             line += f"   (try: {v.hint})"
@@ -912,7 +912,7 @@ def _resolve_log_member(args: argparse.Namespace, node: str) -> str | None | boo
     if member is None:
         names = ", ".join(roster.names()) or "(none)"
         print(
-            f"logs --agent: no team member named {args.agent!r} — "
+            f"logs --agent: no roster member named {args.agent!r} — "
             f"(try: r4t logs --node {node} --agent <name>; members: {names})",
             file=sys.stderr,
         )
@@ -953,7 +953,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return _print_member_turns(node, member)
 
     mention = re.compile(rf"\b{re.escape(member)}\b", re.IGNORECASE) if member else None
-    log_dir = state.team_dir(node) / "log"
+    log_dir = state.roster_dir(node) / "log"
 
     def rendered(raw: str) -> list[str]:
         if args.full:
@@ -1053,9 +1053,9 @@ def _ensure_tell_outbox(ctx: DispatchContext) -> None:
 
 
 def _adopt_root(ctx: DispatchContext) -> None:
-    """A seat session is team ingress just like dispatch — chat/seat sends
+    """A seat session is roster ingress just like dispatch — chat/seat sends
     call handle_message directly and never pass cmd_dispatch, the only place
-    the root stamp was written. A team driven entirely through the seat
+    the root stamp was written. A roster driven entirely through the seat
     therefore had no stamp, and every observer command fell back to guessing
     the root from cwd (the live quill repro). First successful seat
     resolution writes the stamp; an existing stamp is never overridden here
@@ -1304,7 +1304,7 @@ def _print_model_note(preset_key: str, model: str | None) -> None:
 
 def _rig_usage(config, roster, rig_key: str) -> list[str]:
     """Members and pins still pointing at rig_key — used to refuse a remove that
-    would strand a live team."""
+    would strand a live roster."""
     users: list[str] = []
     for agent, pinned in config.pins.items():
         if pinned == rig_key:
@@ -1504,7 +1504,7 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
             problems += 1
         if m.is_human:
             if not m.address:
-                print(f"{m.name}: note — Human without an Address (team cannot tell them)")
+                print(f"{m.name}: note — Human without an Address (roster cannot tell them)")
             continue
         if config is not None and not m.errors:
             rig, err, _pinned = config.rig_for(m)
@@ -1576,17 +1576,17 @@ def cmd_init(args: argparse.Namespace) -> int:
         state.atomic_write_json(config_path, default_config_payload())
         print(f"rig config: wrote starter {config_path}")
 
-    team = re.sub(r"[^a-z0-9_-]+", "-", root.name.lower()).strip("-") or "team"
-    node = f"{team}-node"
+    prefix = re.sub(r"[^a-z0-9_-]+", "-", root.name.lower()).strip("-") or "roster"
+    node = f"{prefix}-node"
     print()
-    print("Register and start the team (a namespace prefix cannot share a")
-    print("name with its agent, so the node is registered as <team>-node):")
+    print("Register and start the roster (a namespace prefix cannot share a")
+    print("name with its agent, so the node is registered as <roster>-node):")
     print()
     print(f"  a8s add {node} {root} r4t")
-    print(f"  a8s namespace {team} {node}")
+    print(f"  a8s namespace {prefix} {node}")
     print(f"  a8s start {node}")
-    print(f'  tell {team} "hello"            # bare namespace -> roster leader')
-    print(f'  tell {team}:dev "hello"        # namespace:member -> specific member')
+    print(f'  tell {prefix} "hello"            # bare namespace -> roster leader')
+    print(f'  tell {prefix}:dev "hello"        # namespace:member -> specific member')
     return 0
 
 
@@ -1643,7 +1643,7 @@ def cmd_lab_ledger(args: argparse.Namespace) -> int:
 
 
 def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
-    p.add_argument("--root", help="Team repo root (default: cwd).")
+    p.add_argument("--root", help="Roster repo root (default: cwd).")
     p.add_argument(
         "--roster",
         help="Roster path, absolute or root-relative (default: <root>/ROSTER.md).",
@@ -1658,7 +1658,7 @@ def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
         "prompt overrides under its `prompts` key.",
     )
     if with_node:
-        p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
+        p.add_argument("--node", help="Roster node name (default: sole ~/.config/r4t roster).")
 
 
 def _add_tell_flags(p: argparse.ArgumentParser) -> None:
@@ -1690,7 +1690,7 @@ def _add_older_than(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="r4t",
-        description="Roster For Teams — define agents in ROSTER.md; govern turns on a8s.",
+        description="The roster — define agents in ROSTER.md; govern turns on a8s.",
     )
     sub = p.add_subparsers(dest="command", required=False, metavar="COMMAND")
     p.set_defaults(func=cmd_default)
@@ -1886,7 +1886,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_p = sub.add_parser(
         "chat",
         help=_cmd_help("chat"),
-        description="Interactive human seat: messages and team activity in one window.",
+        description="Interactive human seat: messages and roster activity in one window.",
     )
     _add_common(chat_p, with_node=True)
     _add_tell_flags(chat_p)
@@ -1903,7 +1903,7 @@ def build_parser() -> argparse.ArgumentParser:
     seat_p = sub.add_parser(
         "seat",
         help=_cmd_help("seat"),
-        description="The roster human's team mailbox and voice (bare: summary).",
+        description="The roster human's mailbox and voice (bare: summary).",
     )
     seat_p.add_argument(
         "action", nargs="?", choices=["inbox", "send"],
@@ -1947,7 +1947,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     task_p.add_argument("action", choices=["list", "show", "trace"])
     task_p.add_argument("id", nargs="?", help="Task ULID.")
-    task_p.add_argument("--node", help="Team node name (default: sole ~/.config/r4t team).")
+    task_p.add_argument("--node", help="Roster node name (default: sole ~/.config/r4t roster).")
     task_p.add_argument(
         "--json", action="store_true",
         help="With trace: the reconstruction as JSON instead of the panel.",
@@ -1963,7 +1963,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(check_p)
     check_p.add_argument(
         "node", nargs="?",
-        help="Team node name (default: sole ~/.config/r4t team).",
+        help="Roster node name (default: sole ~/.config/r4t roster).",
     )
     check_p.set_defaults(func=cmd_check)
 
@@ -2023,7 +2023,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     judge_p.add_argument(
         "node", nargs="?",
-        help="Team node name (default: sole ~/.config/r4t team).",
+        help="Roster node name (default: sole ~/.config/r4t roster).",
     )
     judge_p.add_argument(
         "--rig", required=True,
@@ -2041,7 +2041,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sandbox_p = sub.add_parser(
         "sandbox",
-        description="Disposable end-to-end team run in a temp A8S_HOME/R4T_HOME; "
+        description="Disposable end-to-end roster run in a temp A8S_HOME/R4T_HOME; "
         "logs to stderr, report on stdout.",
     )
     sandbox_p.add_argument(

@@ -60,18 +60,18 @@ def test_bare_node_resolves_from_cwd(
     r4t_home, repo, rig_config, monkeypatch, capsys
 ):
     state.stamp_root(NODE, repo)
-    state.team_dir("other").mkdir(parents=True)  # two teams: ambiguity is real
+    state.roster_dir("other").mkdir(parents=True)  # two rosters: ambiguity is real
     monkeypatch.chdir(repo)
     rc = r4t_main(["status", "--rig-config", str(rig_config)])
     assert rc == 0
-    assert "team: acme" in capsys.readouterr().out
+    assert "roster: acme" in capsys.readouterr().out
 
 
 def test_bare_node_still_errors_outside_any_root(
     r4t_home, repo, tmp_path, monkeypatch, capsys
 ):
-    state.team_dir(NODE).mkdir(parents=True)
-    state.team_dir("other").mkdir(parents=True)
+    state.roster_dir(NODE).mkdir(parents=True)
+    state.roster_dir("other").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)
     rc = r4t_main(["status"])
     assert rc == 2
@@ -133,11 +133,11 @@ def test_bare_status_resolves_from_workplace_cwd(
         "- **Leader:** yes\n",
         encoding="utf-8",
     )
-    state.team_dir("other").mkdir(parents=True)  # two teams: ambiguity is real
+    state.roster_dir("other").mkdir(parents=True)  # two rosters: ambiguity is real
     monkeypatch.chdir(workplace)
     rc = r4t_main(["status"])
     assert rc == 0
-    assert f"team: {NODE}" in capsys.readouterr().out
+    assert f"roster: {NODE}" in capsys.readouterr().out
 
 
 # ---------- ambiguity is an error, not a result: every command exits non-zero ----------
@@ -156,14 +156,14 @@ AMBIGUOUS_ARGVS = [
 
 
 @pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
-def test_ambiguous_team_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
+def test_ambiguous_roster_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
     # The live hour-long stall: a scripted `r4t seat send` printed the
     # pass-node hint but the pipeline read exit 0 (the pipe's last command
     # masked it). r4t's side of the contract is a hard non-zero exit from
     # EVERY command that resolves a node, so a plain (unpiped) invocation
     # can never mask a no-op as success.
-    state.team_dir("aaa").mkdir(parents=True)
-    state.team_dir("bbb").mkdir(parents=True)
+    state.roster_dir("aaa").mkdir(parents=True)
+    state.roster_dir("bbb").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)  # no stamped root matches cwd
     rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
     assert rc == 2
@@ -171,7 +171,7 @@ def test_ambiguous_team_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, a
 
 
 @pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
-def test_no_teams_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
+def test_no_rosters_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
     monkeypatch.chdir(tmp_path)
     rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
     assert rc == 2

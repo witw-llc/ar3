@@ -3,7 +3,7 @@
 Findings dated 2026-07-14. agy version 1.1.2 on macOS (`sandbox-exec`).
 
 `agy` is Antigravity, Google's headless coding-agent CLI. r4t drives it through
-the `agy` preset in [`rig.py`](../rig.py). This note maps what agy can and
+the `agy` preset in [`rig.py`](../apps/r4t/rig.py). This note maps what agy can and
 cannot do under its flags — chiefly `--sandbox` — because the sandbox silently
 breaks `tell`, and that surprised a live org before it was understood.
 
@@ -14,7 +14,7 @@ Every turn, `dispatch.py` runs the rig's argv with:
 - **CWD** = the workplace repo (`ctx.workplace`), the tree the member edits and
   commits in.
 - **`TELL_OUTBOX_DIR`** = a per-turn staging dir under the a8s node root,
-  `~/.config/r4t/teams/<node>/agents/<member>/staging/`. `tell` writes its
+  `~/.config/r4t/rosters/<node>/agents/<member>/staging/`. `tell` writes its
   envelope JSON there; dispatch reads it back, applies quota and thread rules,
   then releases it to the real outbox. The staging dir is **outside the
   workplace repo**.

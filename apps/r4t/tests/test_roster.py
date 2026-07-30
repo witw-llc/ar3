@@ -261,8 +261,8 @@ class TestPathResolution:
 
     def test_root_relative(self, tmp_path):
         assert (
-            resolve_roster_path(tmp_path, "docs/TEAM.md")
-            == tmp_path / "docs" / "TEAM.md"
+            resolve_roster_path(tmp_path, "docs/ROSTER.md")
+            == tmp_path / "docs" / "ROSTER.md"
         )
 
     def test_absolute(self, tmp_path):

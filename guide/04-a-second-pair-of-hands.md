@@ -7,7 +7,7 @@
 At the end of this chapter the roster is two: Wren leads, and **Moss** — a
 zero-cost helper on the same local model — answers his questions. You will
 send Wren a task, watch him delegate to Moss with `tell`, watch Moss's
-answer come back, and read the whole exchange in the team log. You will
+answer come back, and read the whole exchange in the roster log. You will
 also see where a small free model fumbles the last step — and
 why the machinery guarantees the *messages* even when it cannot guarantee
 the model. Then you will starve Moss's budget and watch a message wait,
@@ -36,7 +36,7 @@ Two edits: the roster grows a member, and the rig config grows a rig.
 **Replace** `~/ark/silo/ROSTER.md` (whole file)
 
 ```markdown
-# Team Roster
+# Roster
 
 ### You
 - **Human:** yes
@@ -96,7 +96,7 @@ You: note — Human without an Address (team cannot tell them)
 ```
 
 From this turn on, Wren's prompt carries the messaging doctrine — the
-`tell` command, and a teammate list naming You and Moss.
+`tell` command, and a member list naming You and Moss.
 
 ## 5. Run it
 
@@ -119,7 +119,7 @@ You should see:
 
 Not a typo. On the free path this is the *real* result, and it is worth
 more than a staged success. The work happened — read the thread's spine in
-the team log (`r4t logs --node silo` shows these events; turn boundaries
+the roster log (`r4t logs --node silo` shows these events; turn boundaries
 between them omitted here):
 
 ```
@@ -179,7 +179,7 @@ characters of perfect answer, discarded as terminal chrome by the sub-80
 threshold you met in chapter 2. This is why chapter 2 shipped Wren with
 echo on, and it is the cost of lifting it.
 
-Now the two ways you actually get answers out of this team. First: the
+Now the two ways you actually get answers out of this roster. First: the
 stdout fallback *does* reach you whenever Wren's answer has substance,
 because a fresh question from you makes you the newest sender:
 
@@ -221,7 +221,7 @@ You should see:
 
 (On the subscription path Wren runs `tell` reliably and the first send
 comes back synthesized on hop 3 — the machinery is identical, the model
-discipline is what you are paying for.) Now look at the team as a whole:
+discipline is what you are paying for.) Now look at the roster as a whole:
 
 **Run**
 
@@ -345,8 +345,8 @@ Two things, both concrete: Moss drafted three octopus name options for our masco
 
 Wren knows what his helper has done. (That commit hash is real: the
 "housekeeping drift" in section 6 was the pair committing the roster on
-their own initiative — `git log` in the team repo will show it.) The team
-is whole — and it is a team now.
+their own initiative — `git log` in the roster repo will show it.) The roster
+is whole — and it is two pairs of hands now.
 
 ## 11. Customize
 
@@ -372,7 +372,7 @@ with the full text attached to the same envelope as a markdown file.
 
 ## 12. Commit point
 
-The roster is the team; commit it. (The `helper` rig lives outside the
+The roster is repo state; commit it. (The `helper` rig lives outside the
 repo with `silo`, by design.)
 
 **Run**

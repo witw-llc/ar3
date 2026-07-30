@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORDMARK = ("A R K", "8 4 7", "S T E")
 
 TAGLINE = (
-    "The Ark — a8s routes the messages, r4t governs the teams,",
+    "The Ark — a8s routes the messages, r4t governs the roster,",
     "k7e keeps what they learn. ar3 reads; each product owns its own verbs.",
 )
 
@@ -204,16 +204,16 @@ def r4t_rows() -> list[Row]:
                 f"{len(names)} rig(s): {', '.join(names)}" if names else "no rigs defined",
                 None if names else "r4t rig add <rig> <preset>",
             ))
-    teams_dir = home / "teams"
-    teams = (
-        sorted(p.name for p in teams_dir.iterdir() if p.is_dir())
-        if teams_dir.is_dir() else []
+    rosters_dir = home / "rosters"
+    rosters = (
+        sorted(p.name for p in rosters_dir.iterdir() if p.is_dir())
+        if rosters_dir.is_dir() else []
     )
     rows.append((
-        bool(teams),
-        "teams",
-        f"{len(teams)} team(s): {', '.join(teams)}" if teams else f"none under {teams_dir}",
-        None if teams else "r4t init",
+        bool(rosters),
+        "rosters",
+        f"{len(rosters)} roster(s): {', '.join(rosters)}" if rosters else f"none under {rosters_dir}",
+        None if rosters else "r4t init",
     ))
     return rows
 
@@ -251,7 +251,7 @@ def k7e_rows() -> list[Row]:
 
 PRODUCTS = (
     ("a8s", "agent message router", a8s_home, a8s_rows),
-    ("r4t", "roster for teams", r4t_home, r4t_rows),
+    ("r4t", "the roster", r4t_home, r4t_rows),
     ("k7e", "knowledge engine", k7e_home, k7e_rows),
 )
 

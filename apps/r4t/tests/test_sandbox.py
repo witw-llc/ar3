@@ -64,7 +64,7 @@ def test_fake_sandbox_end_to_end():
     assert "battleship.py" in report
     assert "SHIPS" in report  # produced source is inlined
     assert re.search(r"\| \S+ \| lead \| leader \|", report)  # velocity table rows
-    assert "crew:lead" in report  # conversation section
+    assert "trio:lead" in report  # conversation section
     assert "human" in report
 
 
@@ -118,8 +118,8 @@ def test_fake_sandbox_silent_member_answers_on_stdout():
     # Dev never called tell; r4t staged its cleaned stdout as one reply to the
     # sender, the lead routed it on, and the deliverable still shipped.
     assert "STDOUT-REPLY dev" in report
-    assert "crew:dev -> crew:lead" in report
-    assert "crew:lead -> crew:tester" in report
+    assert "trio:dev -> trio:lead" in report
+    assert "trio:lead -> trio:tester" in report
     assert "BREAKER" not in report
 
 

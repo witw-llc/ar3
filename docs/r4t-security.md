@@ -18,8 +18,8 @@ What keeps a repo edit, or a lying message, from changing what runs.
   outbox ownership. Neither trusts message content.
 
 Related: external ingress is untrusted by design — see
-[message-flow.md](message-flow.md#no-wire-header-inside-the-walls). The
+[r4t-message-flow.md](r4t-message-flow.md#no-wire-header-inside-the-walls). The
 verification round keeps its findings on a surface agents cannot read — see
-[verification.md](verification.md). A rig can also run behind a real OS
+[r4t-verification.md](r4t-verification.md). A rig can also run behind a real OS
 boundary — a Unix user or a container — so the harness sandbox stops being
-load-bearing; see [isolation.md](isolation.md).
+load-bearing; see [r4t-isolation.md](r4t-isolation.md).

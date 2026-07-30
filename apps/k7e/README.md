@@ -57,7 +57,7 @@ k7e config llm_command 'your-stdin-stdout-cli'  # required for distill/recall/co
 k7e config summarize_command '...'              # optional recall override
 ```
 
-Full flags and every command: **[docs/cli.md](docs/cli.md)**.
+Full flags and every command: **[docs/k7e-cli.md](../../docs/k7e-cli.md)**.
 
 ## Install
 
@@ -85,11 +85,11 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
 
 | Doc | What's in it |
 |-----|--------------|
-| [docs/architecture.md](docs/architecture.md) | Storage model, entry format, schema, lifecycle |
-| [docs/retrieval.md](docs/retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
-| [docs/distillation.md](docs/distillation.md) | Extracting knowledge from raw experience |
-| [docs/configuration.md](docs/configuration.md) | Config keys, env, LLM/embedding backends |
-| [docs/cli.md](docs/cli.md) | Full command + flag reference |
+| [docs/k7e-architecture.md](../../docs/k7e-architecture.md) | Storage model, entry format, schema, lifecycle |
+| [docs/k7e-retrieval.md](../../docs/k7e-retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
+| [docs/k7e-distillation.md](../../docs/k7e-distillation.md) | Extracting knowledge from raw experience |
+| [docs/k7e-configuration.md](../../docs/k7e-configuration.md) | Config keys, env, LLM/embedding backends |
+| [docs/k7e-cli.md](../../docs/k7e-cli.md) | Full command + flag reference |
 
 ## Tests
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a hermetic arm root: scratch R4T_HOME + A8S_HOME + team repo.
+"""Build a hermetic arm root: scratch R4T_HOME + A8S_HOME + roster repo.
 
 Usage: setup_arm.py <A|B|C>
 """
@@ -34,7 +34,7 @@ WORK_TELL_A = (
     "- Send messages with the `tell` shell command (run it via your shell "
     "tool — printing it as text sends nothing):\n"
     "    - reply to whoever asked: tell <name> \"<message>\"\n"
-    "    - a teammate: tell <name> \"<message>\". Teammates:"
+    "    - a member: tell <name> \"<message>\". Members:"
 )
 
 # Arm C: the tool, named verbatim (the research showed unnamed tools go unused).
@@ -42,7 +42,7 @@ WORK_TELL_C = (
     "- Send messages by calling the `a8s_tell` tool (call the tool — printing "
     "text sends nothing). Pass `recipient` (the name) and `body` (your "
     "message). The body is delivered byte-exact; there is no shell. "
-    "`recipient` is whoever asked, or a teammate. Teammates:"
+    "`recipient` is whoever asked, or a member. Members:"
 )
 
 

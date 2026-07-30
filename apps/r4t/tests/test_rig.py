@@ -315,7 +315,7 @@ class TestWorkdirPlaceholder:
         assert rig.argv("hi") == ["oc", "--dir", "{workdir}", "hi"]
 
     def test_prompt_text_is_never_read_as_a_placeholder(self, tmp_path):
-        # A teammate may write "{workdir}" in a message; the prompt is data.
+        # A member may write "{workdir}" in a message; the prompt is data.
         rig = self._rig(tmp_path, ["oc", "--dir", "{workdir}", "{prompt}"])
         argv = rig.argv("put it in {workdir}", workdir="/repo/agents/bob")
         assert argv == ["oc", "--dir", "/repo/agents/bob", "put it in {workdir}"]
@@ -521,7 +521,7 @@ class TestContinueCollisions:
             "### Bob\n- **Rig:** solo\n"
         )) == []
 
-    def test_warns_when_a_teammate_shares_the_cli(self, tmp_path):
+    def test_warns_when_a_member_shares_the_cli(self, tmp_path):
         # Bob does not continue — he still writes the conversation Ana resumes.
         warnings = self.collisions(tmp_path, (
             "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"

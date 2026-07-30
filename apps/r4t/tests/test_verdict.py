@@ -71,23 +71,23 @@ class TestRollup:
 class TestSeatVerdict:
     def test_unread_waits_on_you(self, r4t_home, roster, config):
         state.park_seat_message(NODE, "Neil", "acme:gerry", "look at this")
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         bad = by_level(verdicts, verdict.BAD)
         assert any("waiting on YOU" in v.text for v in bad)
         assert any("seat inbox" in (v.hint or "") for v in bad)
 
     def test_quiet_seat_is_ok(self, r4t_home, roster, config):
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert any("nothing waiting on you" in v.text for v in verdicts)
 
     def test_no_roster_skips_seat(self, r4t_home):
-        verdicts = verdict.team_verdicts(NODE, None, None)
+        verdicts = verdict.roster_verdicts(NODE, None, None)
         assert "waiting on you" not in texts(verdicts)
 
 
 class TestRunawayVerdict:
-    def test_quiet_team_no_runaway(self, r4t_home, roster, config):
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+    def test_quiet_roster_no_runaway(self, r4t_home, roster, config):
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert any("no runaway signs" in v.text for v in verdicts)
 
     def test_high_turn_rate_warns(self, r4t_home, roster, config):
@@ -96,7 +96,7 @@ class TestRunawayVerdict:
                 NODE, agent="phil", rig="junior-dev", thread="01X",
                 hop=1, duration_seconds=1.0, exit_code=0,
             )
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any("hot:" in v.text for v in warn)
         assert not any("no runaway signs" in v.text for v in verdicts)
@@ -108,7 +108,7 @@ class TestRunawayVerdict:
                 hop=1, duration_seconds=1.0, exit_code=0,
             )
         later = time.time() + verdict.RECENT_WINDOW_SECONDS + 60
-        verdicts = verdict.team_verdicts(NODE, roster, config, now=later)
+        verdicts = verdict.roster_verdicts(NODE, roster, config, now=later)
         assert any("no runaway signs" in v.text for v in verdicts)
 
     def test_cell_budget_spent_warns(self, r4t_home, roster, config):
@@ -116,14 +116,14 @@ class TestRunawayVerdict:
             NODE, state.CELL_BUDGET_KEY,
             config.cell_budget_max, config.cell_budget_earn_per_hour,
         )
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any("cell budget spent" in v.text for v in warn)
 
 
 class TestMemberVerdicts:
     def test_all_healthy(self, r4t_home, roster, config):
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert any("member(s) healthy" in v.text for v in verdicts)
 
     def test_breaker_open_is_bad(self, r4t_home, roster, config):
@@ -132,7 +132,7 @@ class TestMemberVerdicts:
             consecutive_failures=config.breaker_cap,
             last_failure_at=state.utc_now(),
         )
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         bad = by_level(verdicts, verdict.BAD)
         assert any("Phil broken" in v.text for v in bad)
         assert not any("member(s) healthy" in v.text for v in verdicts)
@@ -141,19 +141,19 @@ class TestMemberVerdicts:
         rig, _e, _p = config.rig_for(next(m for m in roster.members if m.name == "Phil"))
         enqueue_n("phil", 2)
         empty_budget(NODE, "phil", rig.budget_max, rig.budget_earn_per_hour)
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any("Phil resting" in v.text and "queued" in v.text for v in warn)
 
     def test_resting_without_queue_is_quiet(self, r4t_home, roster, config):
         rig, _e, _p = config.rig_for(next(m for m in roster.members if m.name == "Phil"))
         empty_budget(NODE, "phil", rig.budget_max, rig.budget_earn_per_hour)
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert "resting" not in texts(verdicts)
 
     def test_deep_queue_backs_up(self, r4t_home, roster, config):
         enqueue_n("phil", verdict.QUEUE_DEPTH_WARN)
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any("backing up" in v.text for v in warn)
 
@@ -164,7 +164,7 @@ class TestSignalDeadLetters:
             NODE, reason="unknown-recipient", sender="acme:gerry", to="ghost",
             thread="", content="x",
         )
-        verdicts = verdict.team_verdicts(NODE, roster, config)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
         warn = by_level(verdicts, verdict.WARN)
         assert any(
             "unknown-recipient" in v.text and "not on the roster" in v.text
@@ -177,7 +177,7 @@ class TestSignalDeadLetters:
             thread="", content="x",
         )
         later = time.time() + verdict.SIGNAL_RECENT_SECONDS + 60
-        verdicts = verdict.team_verdicts(NODE, roster, config, now=later)
+        verdicts = verdict.roster_verdicts(NODE, roster, config, now=later)
         assert "unknown-recipient" not in texts(verdicts)
 
 

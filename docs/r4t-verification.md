@@ -1,8 +1,8 @@
 # The verification round
 
 An agent cannot be the judge of its own deliverable, so the judge is
-machinery it cannot see into. Design history and the incident that drove it:
-[../plans/history/VERIFY-SPEC.md](../plans/history/VERIFY-SPEC.md).
+machinery it cannot see into. Design history and the incident that drove it
+live in the wiki's Plans archive (VERIFY-SPEC).
 
 ## `r4t check`
 
@@ -26,7 +26,7 @@ private strings like a codename (e.g. `secret-codename`) or a name.
 
 ## Gating the doorbell
 
-Set `doorbell_check` in `r4t-org.json` (see [org.md](org.md#org-settings)) to
+Set `doorbell_check` in `r4t-org.json` (see [r4t-org.md](r4t-org.md#org-settings)) to
 run any command — the sweep or a test suite — before the org may ring an
 absent human, and a failing check parks the message without ringing rather
 than losing it.
@@ -49,7 +49,7 @@ failure MAST has no single mode for.
 
 It is post-hoc and out-of-band by design: a graded org changes behavior, and
 an agent that could read its own grade would learn to game it. Reports land
-under the team dir's `judge/` — a surface no roster agent ever reads — never
+under the roster dir's `judge/` — a surface no roster agent ever reads — never
 inside the workplace repo. Pass `--json` instead of the sectioned panel to
 derive an experiment-ledger column.
 
@@ -71,7 +71,7 @@ Delegation
 ```
 
 Nothing new is written for it, and no new transport is involved: the whole
-trace is read back out of state the team already keeps. The day log is the
+trace is read back out of state the roster already keeps. The day log is the
 spine — append-only, never pruned, and every delivery and turn boundary lands
 in it carrying the thread id — while the thread ledger, the dead-letter dir,
 the members' queues and any in-flight turn supply the originator, what never

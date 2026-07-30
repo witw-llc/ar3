@@ -2,12 +2,12 @@
 
 How a roster grows structure: cells and leads, the mission file, org
 directories that live outside the repo, and the org-level settings that
-travel with them. Rationale and prior art: [governance.md](governance.md)
+travel with them. Rationale and prior art: [r4t-governance.md](r4t-governance.md)
 §8–9.
 
 ## The tree: cells, leads, and information hiding
 
-A team is a tree of small **cells**, not a flat pool of peers. Give each AI
+A roster is a tree of small **cells**, not a flat pool of peers. Give each AI
 member a `Cell:` line (its cell) and a `Lead:` line (the member it reports
 to); the top lead reports to the human:
 
@@ -36,17 +36,17 @@ Once any `Lead:` line is present the tree becomes structural, not advisory:
 exactly one member is the leader, a cell warns past 6 AI members and errors
 past 10, and a tree deeper than 2 levels below the top lead warns (the
 span-of-control bounds from the org research). A roster with **no** `Lead:`
-lines is a flat team — one cell under the leader — and none of this applies.
+lines is a flat roster — one cell under the leader — and none of this applies.
 
 Why: in the first live run a full-roster prompt let a build-cell lead message
 a design-cell lead laterally *because the name was in front of him*. The tree
 held voluntarily, but voluntary is not a control — information hiding removes
 the temptation, rerouting removes the option. See
-[governance.md](governance.md) §8 for the evidence.
+[r4t-governance.md](r4t-governance.md) §8 for the evidence.
 
 ## The mission file
 
-Drop a `MISSION.md` at the repo root and it becomes the team's north star: a
+Drop a `MISSION.md` at the repo root and it becomes the roster's north star: a
 short, **human-owned** page stating *why* the repo exists and what "done"
 looks like — purpose, end state, and the current milestone, never the *how*.
 It outranks every other document in the repo; where anything conflicts with
@@ -99,7 +99,7 @@ touching the codebase), make an **org directory**: put `ROSTER.md` +
 Register the a8s node at the org dir; turns run and commit in `repo`, while the
 roster, mission, and mission injection read from the org dir. Org-to-repo is
 many-to-one: two org dirs (same `MISSION.md`, different `ROSTER.md`) can point
-at two clones of one project without their team state colliding — state is
+at two clones of one project without their roster state colliding — state is
 per-a8s-node, not per-repo. `r4t roster check --root <org-dir>` lints the org,
 including a malformed `r4t-org.json`, a bad setting value, or a workplace repo
 that does not exist. **Graduation is trivial:** copy the two files into the repo
@@ -116,8 +116,8 @@ config without a `repo` key is an in-repo org that just wants settings.
 |---|---|---|
 | `comms` | `open` | `open` delivers a tell to any valid member (learned addresses); `closed` reroutes non-adjacent tells through the sender's lead |
 | `leader_sees_lateral` | `false` | when `true`, a lateral (peer) delivery lands a read-only copy in the lead's history — no turn burned |
-| `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward. Bind the org's namespace `--opaque` and what leaves is stamped with the bare prefix — one name outside the walls; the default binding keeps member attribution (see [message-flow.md](message-flow.md)) |
-| `doorbell_check` | *absent* | a shell command that gates every ring of an absent human's doorbell (see [verification.md](verification.md)); absent or empty means no gate |
-| `run_as` | *absent* | OS-level isolation: wrap every member turn in `sudo -u <username>`. One user serves the whole roster (see [isolation.md](isolation.md)) |
-| `container` | *absent* | OS-level isolation: run every member turn under `docker run --rm <image>`; mutually exclusive with `run_as` (see [isolation.md](isolation.md)) |
+| `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward. Bind the org's namespace `--opaque` and what leaves is stamped with the bare prefix — one name outside the walls; the default binding keeps member attribution (see [r4t-message-flow.md](r4t-message-flow.md)) |
+| `doorbell_check` | *absent* | a shell command that gates every ring of an absent human's doorbell (see [r4t-verification.md](r4t-verification.md)); absent or empty means no gate |
+| `run_as` | *absent* | OS-level isolation: wrap every member turn in `sudo -u <username>`. One user serves the whole roster (see [r4t-isolation.md](r4t-isolation.md)) |
+| `container` | *absent* | OS-level isolation: run every member turn under `docker run --rm <image>`; mutually exclusive with `run_as` (see [r4t-isolation.md](r4t-isolation.md)) |
 | `container_args` | *absent* | extra `docker run` args appended verbatim (credential mounts, `--network`); needs `container` |

@@ -1,4 +1,4 @@
 {
-  "description": "Claude Code filedrop: file-proxy delivery into <root>/.inbox. Watch with `tells -f` (see docs/filedrop.md). Never wakes a CLI.",
+  "description": "Claude Code filedrop: file-proxy delivery into <root>/.inbox. Watch with `tells -f` (see docs/a8s-filedrop.md). Never wakes a CLI.",
   "proxy": "file"
 }

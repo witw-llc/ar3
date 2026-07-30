@@ -153,7 +153,7 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
         return (
             f"cannot probe sudo to {user!r}: {e} "
             f"(try: install sudo and grant the router NOPASSWD — see "
-            f"apps/r4t/docs/isolation.md)"
+            f"docs/r4t-isolation.md)"
         )
     if grant.returncode != 0:
         detail = (grant.stderr or grant.stdout or "").strip()
@@ -161,7 +161,7 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
             f"no passwordless sudo to user {user!r}"
             + (f": {detail}" if detail else "")
             + " (try: add a NOPASSWD sudoers grant for the wake command — see "
-            "apps/r4t/docs/isolation.md)"
+            "docs/r4t-isolation.md)"
         )
     probe = f".r4t-write-probe.{os.getpid()}.{time.time_ns()}"
     try:
@@ -177,7 +177,7 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
             f"workplace {workplace} not writable by user {user!r}"
             + (f": {detail}" if detail else "")
             + " (try: give the agent user's group g+ws on the workplace — see "
-            "apps/r4t/docs/isolation.md)"
+            "docs/r4t-isolation.md)"
         )
     return None
 
@@ -204,7 +204,7 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
         return (
             f"user {user!r} cannot read {first} "
             f"(try: chmod -R a+rX on the r4t checkout and its python, or turn "
-            f"the rig's mcp knob off — see apps/r4t/docs/isolation.md)"
+            f"the rig's mcp knob off — see docs/r4t-isolation.md)"
         )
     return None
 

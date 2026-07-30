@@ -70,7 +70,7 @@ is non-invasive.
 
 **Non-invasive rules (hard):**
 
-- **Never `git checkout` / `git switch` / write in a live team repo.** Read
+- **Never `git checkout` / `git switch` / write in a live roster repo.** Read
   committed state only, via `git -C <repo> show <ref>:<path>` and
   `git -C <repo> log --oneline`. A checkout mutates the working tree a live
   member may be writing into.
@@ -91,7 +91,7 @@ git -C <repo> ls-tree -r --name-only <branch>
 git -C <repo> show <branch>:<artifact-path> | wc -w   # size vs any cap
 
 # Routing / storm signals from the org's own log
-grep -c "REROUTED" ~/.config/r4t/teams/<node>/log/<UTC-date>.md
+grep -c "REROUTED" ~/.config/r4t/rosters/<node>/log/<UTC-date>.md
 r4t logs <node>            # compact event stream
 
 # Cost
@@ -127,7 +127,7 @@ if the clock runs out, stop, regardless of any other state.
   expiry: stop all nodes (`a8s stop <node>`), leave state intact, write the
   retro. (n5a's lesson: it had *no* time box and ran a full day and evening;
   a "one sitting" mission implies a box of a few hours.)
-- **Budget ceiling:** stop if the run exceeds `<X>` of the weekly/team budget
+- **Budget ceiling:** stop if the run exceeds `<X>` of the weekly/roster budget
   (n5a burned ~15% with a frontier model driving free-form — cap this).
 - **Out-of-control criteria:** stop if the artifact overshoots a hard written
   constraint beyond `<factor>` (n5a hit ~2.4x the word cap and should have

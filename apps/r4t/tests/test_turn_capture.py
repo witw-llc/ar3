@@ -66,6 +66,6 @@ def test_capture_failure_only_warns(ctx, fake_harness, monkeypatch):
     # The turn must still complete despite the capture write failing.
     handle_message(ctx, "acme:gerry", "acme:phil", "carry on")
     log = "".join(
-        f.read_text(encoding="utf-8") for f in (state.team_dir(NODE) / "log").glob("*.md")
+        f.read_text(encoding="utf-8") for f in (state.roster_dir(NODE) / "log").glob("*.md")
     )
     assert "WARN turn capture" in log

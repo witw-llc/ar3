@@ -1,4 +1,4 @@
-"""r4t chat — Textual front end over the seat, and the team's control plane.
+"""r4t chat — Textual front end over the seat, and the roster's control plane.
 
 One window: a health header fed by the same verdict engine as `r4t status`,
 a clickable member status panel (who is active, resting, or broken and how
@@ -288,7 +288,7 @@ class ChatApp(App):
         return rows
 
     def _refresh_header(self) -> None:
-        verdicts = verdict.team_verdicts(self.ctx.node, self.roster, self.rig_config)
+        verdicts = verdict.roster_verdicts(self.ctx.node, self.roster, self.rig_config)
         worst = verdict.worst_level(verdicts)
         open_threads = [
             t for t in taskmod.list_tasks(self.ctx.node)

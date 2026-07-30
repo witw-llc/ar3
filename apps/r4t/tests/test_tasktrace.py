@@ -39,7 +39,7 @@ def shape(trace) -> list[tuple[int, str, str, int]]:
 
 @pytest.fixture
 def two_hop(chatty_ctx, chatty_harness, monkeypatch):
-    """boss asks the team; Gerry delegates to Phil; Phil answers the human
+    """boss asks the roster; Gerry delegates to Phil; Phil answers the human
     seat. Three deliveries, two turns, one thread."""
     monkeypatch.setenv("CHATTY_TO", "acme:phil")
     monkeypatch.setenv("CHATTY_BODY", "take the tokenizer")

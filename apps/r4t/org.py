@@ -1,13 +1,13 @@
-"""Portable org resolution — where the team's documents live vs. where it works.
+"""Portable org resolution — where the roster's documents live vs. where it works.
 
-By default a team lives IN its repo: ROSTER.md and MISSION.md sit at the repo
+By default a roster lives IN its repo: ROSTER.md and MISSION.md sit at the repo
 root, which is also where turns run and commits land. This is the slow-furnace
 default — a proven structure graduates INTO the repo.
 
 A portable org splits the two: an org directory holds ROSTER.md + MISSION.md +
 a small `r4t-org.json` naming the workplace repo. That lets two org dirs — same
 MISSION, different ROSTERs — point at two clones of one project (the A/B case:
-a novella-writing experiment with identical intent and different casts). Team
+a novella-writing experiment with identical intent and different casts). Roster
 state never collides because it is keyed per a8s node, not per repo.
 
 Precedence, decided once, here:

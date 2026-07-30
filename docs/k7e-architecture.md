@@ -18,7 +18,7 @@ $K7E_HOME/
 ├── mocs/             # Maps of Content — mutable per-tag index pages
 │   └── networking.md
 ├── assets/XX/        # content-addressed binaries (SHA256, deduped)
-├── config.json       # configuration (see configuration.md)
+├── config.json       # configuration (see k7e-configuration.md)
 └── .index.db         # SQLite FTS5 + embeddings (DERIVED, rebuildable)
 ```
 
@@ -58,7 +58,7 @@ ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion
 
 - `id` — `K7E-BBB-NNNNN`, stable for the life of the entry.
 - `status` — `active` (default), `superseded`, or `compiled`. Only `active`
-  entries appear in default search (see [retrieval.md](retrieval.md)).
+  entries appear in default search (see [k7e-retrieval.md](k7e-retrieval.md)).
 - `confidence` — 0..1, a static prior folded into ranking.
 - `aliases` — alternate names matched by metadata search.
 - Sections (`Verified Protocol`, `Edge Cases`, `False Paths`, `History`) are
@@ -74,7 +74,7 @@ The `nodes` table in `.index.db` mirrors the frontmatter plus two
 - `use_count` — how many times it has been used.
 
 These reset on `reindex` by design: ranking is *re-earned from usage*, not
-frozen forever. See [retrieval.md](retrieval.md) for how they feed scoring.
+frozen forever. See [k7e-retrieval.md](k7e-retrieval.md) for how they feed scoring.
 
 ## Lifecycle
 

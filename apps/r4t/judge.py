@@ -11,7 +11,7 @@ real failure here that MAST has no single mode for.
 
 The judge is a measurement instrument for humans. It runs only after a run,
 reads only recorded state (per-member turn captures, the node log, dead
-letters), and persists its reports under the team dir's judge/ — never inside
+letters), and persists its reports under the roster dir's judge/ — never inside
 the org's workplace, never anywhere a roster agent reads. Org agents must
 never see judge output: a graded org changes behavior, and an agent that can
 read its grader can game it.
@@ -122,7 +122,7 @@ names):
 
 FALLBACK_NOTE = """\
 Delivery semantics you must apply before grading "printed instead of sending":
-this team has a stdout fallback. A turn that ends without staging any message
+this roster has a stdout fallback. A turn that ends without staging any message
 but prints a non-trivial prose answer does NOT lose that answer — the cleaned
 stdout is delivered as ONE reply to the sender of the message the turn was
 answering. Prose-only output is therefore a normal, delivered reply, not a
@@ -175,11 +175,11 @@ class JudgeError(Exception):
 
 
 def judge_dir(node: str) -> Path:
-    return state.team_dir(node) / "judge"
+    return state.roster_dir(node) / "judge"
 
 
 def collect_units(node: str) -> list[Unit]:
-    agents_root = state.team_dir(node) / "agents"
+    agents_root = state.roster_dir(node) / "agents"
     if not agents_root.is_dir():
         return []
     units: list[Unit] = []
@@ -262,7 +262,7 @@ def _taxonomy_block() -> str:
 def build_prompt(chunk: str, *, part: int, parts: int) -> str:
     return f"""\
 You are a failure-mode judge grading recorded transcripts from a finished
-multi-agent AI team run. Each transcript below is one member's turn: the
+multi-agent AI roster run. Each transcript below is one member's turn: the
 verbatim prompt it received and the raw output it produced. You are reading
 part {part} of {parts}.
 
@@ -473,7 +473,7 @@ def run(
     if not units:
         print(
             f"judge: no turn captures for node {node!r} under "
-            f"{state.team_dir(node) / 'agents'}   "
+            f"{state.roster_dir(node) / 'agents'}   "
             f"(try: run the org first; captures land in "
             f"agents/<member>/turns/)",
             file=err,

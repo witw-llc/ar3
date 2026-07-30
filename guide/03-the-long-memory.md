@@ -17,7 +17,7 @@ About 20 minutes.
 
 ## 3. Starting state
 
-- Chapter 2 complete: team `silo` registered on a8s, Wren answering at the
+- Chapter 2 complete: roster `silo` registered on a8s, Wren answering at the
   seat, and the customize step left `Continue: 15m` in his roster block.
 - Wren's conversation is live — if you just restarted the machine, send one
   seat message so there is a conversation to flush.
@@ -88,7 +88,7 @@ You should see:
 flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T052013449271Z.md
 ```
 
-One line per member. The full receipt lives in the team log and on disk,
+One line per member. The full receipt lives in the roster log and on disk,
 which is where the next section takes you.
 
 ## 6. Expected receipt
@@ -115,7 +115,7 @@ continuing turn whose prompt asks one thing: "Save your current state and
 progress to STATUS.md." It is logged, captured, and budgeted like any
 other turn, and only if it exits cleanly does the retirement — and the
 archiving — follow. The `SILENT` line is that turn answering r4t rather than a
-teammate: no one asked, so whatever Wren said on his way to disk stays in the
+member: no one asked, so whatever Wren said on his way to disk stays in the
 turn capture instead of landing in someone's inbox. Look at what Wren wrote:
 
 **Run**
@@ -146,7 +146,7 @@ Wren chose that structure himself — the dump prompt names the file, not the
 format. (Where the file lands depends on the harness: OpenCode anchors
 relative paths at the repo root, so on the free path it appears at
 `~/ark/silo/STATUS.md`; a harness that stays in Wren's `Workdir:` writes
-`agents/wren/STATUS.md` instead. Either way it is inside the team repo,
+`agents/wren/STATUS.md` instead. Either way it is inside the roster repo,
 which matters at the commit point.)
 
 The conversation is retired and the message history is out of the prompt
@@ -294,7 +294,7 @@ recall in section 6 proved anything at all:
 **Run**
 
 ```bash
-ls ~/.config/r4t/teams/silo/agents/wren/
+ls ~/.config/r4t/rosters/silo/agents/wren/
 ```
 
 You should see:
@@ -359,11 +359,11 @@ Codeword: TIDEPOOL — Cache: grid square K-19
 ```
 
 Flushed, refounded, swapped, swapped back, state file deleted and
-rewritten — and Wren still answers. The team is whole.
+rewritten — and Wren still answers. The roster is whole.
 
 ## 11. Customize
 
-Park the whole team on your way out — one flag, every member:
+Park the whole roster on your way out — one flag, every member:
 
 **Run**
 
@@ -408,4 +408,4 @@ git add ROSTER.md STATUS.md
 git commit -q -m "silo: Wren's first memory dump"
 ```
 
-Chapter 4 gives Wren something no amount of memory provides: a teammate.
+Chapter 4 gives Wren something no amount of memory provides: a second member.

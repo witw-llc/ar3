@@ -59,7 +59,7 @@ DEV_RETRY = (
     "When done, run: tell tester \"battleship.py is ready\""
 )
 
-TEAM = {"lead", "dev", "tester", "owner"}
+MEMBERS = {"lead", "dev", "tester", "owner"}
 
 
 def role_name(prompt: str) -> str:
@@ -81,7 +81,7 @@ def sender_from(prompt: str) -> str:
 
 
 def is_external(sender: str) -> bool:
-    return sender.strip().lower() not in TEAM
+    return sender.strip().lower() not in MEMBERS
 
 
 def harness_invoke() -> list[str]:

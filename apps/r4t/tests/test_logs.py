@@ -1,4 +1,4 @@
-"""r4t logs — the team's own event stream, compact by default."""
+"""r4t logs — the roster's own event stream, compact by default."""
 from __future__ import annotations
 
 import state
@@ -9,7 +9,7 @@ NODE = "acme"
 
 def seed_log():
     state.append_log(NODE, "## 2026-07-11T10:00:00Z dispatch gerry -> Phil (task 01X hop 1, rig junior-dev)")
-    state.append_log(NODE, "### Prompt\n\nYou are Phil, a member of the acme team.\nSecret persona details here.")
+    state.append_log(NODE, "### Prompt\n\nYou are Phil, a member of the acme roster.\nSecret persona details here.")
     state.append_log(NODE, "### Output (Phil, exit 0 in 2.0s)")
     state.append_log(NODE, "r4t: RELEASED-internal acme:phil -> acme:gerry thread=01X hop=2")
     state.append_log(NODE, "r4t: SUPPRESSED acme:phil -> acme:gerry thread=01X repeat=2")
@@ -90,7 +90,7 @@ def test_agent_unknown_member_errors(r4t_home, repo, capsys):
     seed_two()
     assert run_logs("--agent", "nobody") == 2
     err = capsys.readouterr().err
-    assert "no team member named 'nobody'" in err
+    assert "no roster member named 'nobody'" in err
     assert "Phil" in err and "Gerry" in err
     assert "(try:" in err
 

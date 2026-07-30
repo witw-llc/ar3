@@ -1,4 +1,4 @@
-"""Roster parsing — in-repo ROSTER.md describing team members.
+"""Roster parsing — in-repo ROSTER.md describing roster members.
 
 Format: `### <Name>` blocks with bullet fields:
 
@@ -23,7 +23,7 @@ other value is a member error.
 
 AI is the default and carries no marker. The human seat is marked
 `- **Human:** yes` and is never dispatched; an optional
-`- **Address:** <a8s-name>` tells teammates how to reach them. A human with
+`- **Address:** <a8s-name>` tells members how to reach them. A human with
 a `Rig:` is an error — humans sit outside the turn system. The Rig
 value is a SYMBOLIC rig name resolved against the out-of-repo rig
 config — never a command. Parsing is defensive: a malformed block disables
@@ -40,7 +40,7 @@ working directory as an argument, and the prompt names it as the member's root.
 No harness is obliged to treat it as the project root, though:
 opencode-family rigs also advertise the enclosing git root to the model as a
 "workspace root". A workdir nested in a repo can therefore still attract writes
-to the repo root (issue #273; see docs/rigs.md).
+to the repo root (issue #273; see docs/r4t-rigs.md).
 """
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ class Roster:
     @property
     def declares_tree(self) -> bool:
         """True once any AI member carries a `Lead:` line. A roster without
-        Lead lines is a flat team — one cell under the leader — and every
+        Lead lines is a flat roster — one cell under the leader — and every
         tree behavior (information hiding, hard rerouting, tree lint) is off."""
         return any(m.lead for m in self.members if not m.is_human)
 

@@ -6,7 +6,7 @@ instead of waking a CLI. Use it from a human terminal or a desktop IDE session
 
 Deployed agents never see this doc: a8s sets `TELL_OUTBOX_DIR` on wake, so
 `tell` resolves their outbox with no setup. Send-side usage for those agents
-reads as [`tell` skill markdown](../skills/tell/SKILL.md).
+reads as [`tell` skill markdown](../apps/a8s/skills/tell/SKILL.md).
 
 **Filedrop agents (IDE seats):** point them at
 [`https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent`](https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent) — session playbook
@@ -85,6 +85,6 @@ For a filedrop loop you want inbound only.
 ## Related
 
 - Agent session playbook: [`https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent`](https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent)
-- File-proxy mechanics: [README — File proxy](../README.md#file-proxy)
-- Tell internals: [tell.md](tell.md)
-- Operator skill (send-only, for deployed agents): [`skills/tell/SKILL.md`](../skills/tell/SKILL.md)
+- File-proxy mechanics: [README — File proxy](../apps/a8s/README.md#file-proxy)
+- Tell internals: [a8s-tell.md](a8s-tell.md)
+- Operator skill (send-only, for deployed agents): [`skills/tell/SKILL.md`](../apps/a8s/skills/tell/SKILL.md)

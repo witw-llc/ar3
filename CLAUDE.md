@@ -16,16 +16,18 @@ teaches them.
   other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
   and usage, [`apps/a8s/DEVELOPMENT.md`](apps/a8s/DEVELOPMENT.md) for hard
   constraints and historical decisions.
-- **`apps/r4t/`** — Roster for teams. Rigs, dispatch, verdicts, isolation.
-  See [`apps/r4t/README.md`](apps/r4t/README.md) and `apps/r4t/docs/`.
+- **`apps/r4t/`** — The roster. Rigs, dispatch, verdicts, isolation.
+  See [`apps/r4t/README.md`](apps/r4t/README.md) and the `docs/r4t-*.md` pages.
 - **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
   SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
   See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
 - **`apps/ar3/`** — The front door. Reads suite state and probes prerequisites;
   it never mutates anything and never wraps another product's verbs.
 - **`guide/`** — *The Ark Raising*, the chapter-by-chapter build-along.
-- **`docs/`** — top-level tool docs with YAML frontmatter, symlinked into
-  `~/.claude/skills/` and `~/.cursor/skills/` by `install.sh --skills`.
+- **`docs/`** — the suite's doc tree. Tool docs with YAML frontmatter
+  (`ar3.md`, `tell.md`) are symlinked into `~/.claude/skills/` and
+  `~/.cursor/skills/` by `install.sh --skills`; app-prefixed pages
+  (`a8s-*.md`, `r4t-*.md`, `k7e-*.md`) are plain docs the installer skips.
 - **`requirements/`** — dependency groups (`a8s-test.txt`, `r4t.txt`). Per-app
   `tests/requirements.txt` files point here.
 
@@ -131,7 +133,7 @@ README or the docstring.
 Implementation lives in `apps/a8s/tell.py`. Outbox resolution: `TELL_OUTBOX_DIR`
 when set (a8s injects it on wake); otherwise a unique configured outbox matched
 from CWD when `~/.config/a8s` is readable (desktop filedrop seats — see
-`apps/a8s/docs/filedrop.md`). When the registry is reachable and CWD is inside
+`docs/a8s-filedrop.md`). When the registry is reachable and CWD is inside
 a registered agent, recipient validation, `from` stamping, and agent logging
 apply on top.
 

@@ -6,13 +6,13 @@ A R K
 S T E
 ```
 
-You will raise a small crew of AI agents from nothing, chapter by chapter,
+You will raise a small roster of AI agents from nothing, chapter by chapter,
 on machinery you own. Each chapter builds one working thing — an agent that
-answers you, a governed roster, a team that remembers — on top of the
+answers you, a governed roster, a memory that survives — on top of the
 previous chapter's state, and every chapter ends with something you can
 break, fix, and commit. The suite underneath is three tools:
 [a8s](../apps/a8s/README.md) routes the messages, [r4t](../apps/r4t/README.md)
-governs the teams, [k7e](../apps/k7e/README.md) keeps what they learn. Every
+governs the roster, [k7e](../apps/k7e/README.md) keeps what it learns. Every
 chapter opens by naming which of the three it teaches, so the guide's spine
 is the build order itself.
 

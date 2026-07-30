@@ -27,7 +27,7 @@ LOG = os.environ.get("A8S_MCP_LOG", "")
 TOOL = {
     "name": "tell",
     "description": (
-        "Send a message to a teammate or the human on the a8s network. "
+        "Send a message to a member or the human on the a8s network. "
         "The body is delivered byte-exact; no shell is involved."
     ),
     "inputSchema": {
@@ -35,7 +35,7 @@ TOOL = {
         "properties": {
             "recipient": {
                 "type": "string",
-                "description": "Name of the teammate or human to send to.",
+                "description": "Name of the member or human to send to.",
             },
             "body": {
                 "type": "string",

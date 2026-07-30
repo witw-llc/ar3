@@ -1,6 +1,6 @@
-# Governance: keeping agent teams from running amok
+# Governance: keeping agent rosters from running amok
 
-r4t is the single execution chokepoint for a team's turns. Every governance
+r4t is the single execution chokepoint for a roster's turns. Every governance
 mechanism below is enforced at dispatch or at outbox release — never inside
 the LLM. Prompt etiquette ("don't send ack-only messages") is kept as a
 courtesy, but no mechanism depends on an agent obeying it.
@@ -8,11 +8,11 @@ courtesy, but no mechanism depends on an agent obeying it.
 Everything here runs autonomously. There are knobs (config) and lenses
 (`r4t status`, the dead-letter dir, a8s logs); the only gate is on
 escalation to an absent human (the doorbell — see
-[verification.md](verification.md)). Member work never waits, and a
+[r4t-verification.md](r4t-verification.md)). Member work never waits, and a
 deliverable message is never dropped.
 The economics are *budgets, not cuts* — an agent that is out of budget does
 not run (its mail queues), rather than having its mail thrown away. The point
-is not only that no team overspends the plan, but that the plan you already
+is not only that no roster overspends the plan, but that the plan you already
 pay for keeps earning: held queues mean refill is the retry, so capacity is
 spent on work rather than left idle.
 
@@ -34,7 +34,7 @@ of them within days:
    so anything keyed on conversation state is defeated on every bounce. The
    defense has to be cost (budgets) and idempotent arrival (duplicate
    collapse), not chain-length bookkeeping.
-3. **Runaway fan-out.** One turn messages N teammates; each of those
+3. **Runaway fan-out.** One turn messages N members; each of those
    messages N more. Unbounded width, multiplied by depth.
 4. **Stalled fan-in.** A leader delegates, a subordinate's process dies,
    and the leader never answers the human because nothing re-engages
@@ -44,7 +44,7 @@ of them within days:
 
 ## Why the transport can't help
 
-All messages — including teammate-to-teammate — round-trip through a8s.
+All messages — including member-to-member — round-trip through a8s.
 a8s is deliberately a dumb pipe (recipient opacity is its core invariant),
 messages can originate from unmanaged senders, and rooms re-broadcast. So
 the transport layer can neither attribute nor police traffic. r4t's answer
@@ -83,7 +83,7 @@ collapse *keeps* the count rather than discarding the repeats.
 
 A turn drains the WHOLE queue at pick time: one prompt renders every waiting
 message chronologically ("Messages since your last turn"). An agent that
-sees "teammates discussed X, then the lead overrode with Y" in one reading
+sees "members discussed X, then the lead overrode with Y" in one reading
 pivots to the current state instead of burning a turn reacting to each
 message in sequence. It is both a quota saver and a storm damper — a burst
 of N arrivals costs one turn, not N.
@@ -106,7 +106,7 @@ lesson is graduated degradation: slow first, queue second, never drop.
 
 ### 5. Cadence throttle and concurrency cap
 
-Team-wide floor on burn rate: a minimum interval between turn starts and a
+Roster-wide floor on burn rate: a minimum interval between turn starts and a
 cap on concurrent turns. Content- and topology-blind, so nothing evades it;
 a perfectly evasive storm degrades into a slow, visible drip. A member that
 can't start yet keeps its queue and runs on a later pass.
@@ -137,7 +137,7 @@ state — NOT to force-finish the work. The human, or the leader, decides what
 "done" means; r4t only makes sure the originator is not left in silence.
 
 A thread opened by relayed mail — an inbound the sending cluster marked
-`meta.class: auto` (see [message-flow.md](message-flow.md#class-across-the-wall))
+`meta.class: auto` (see [r4t-message-flow.md](r4t-message-flow.md#class-across-the-wall))
 — is skipped. Its originator is another cluster's machinery, so a status report
 to it is not attention owed; it is one more inbound that peer must answer, which
 is how two rosters keep each other awake forever. The nudge exists for whoever
@@ -148,7 +148,7 @@ rather than an unbounded retry loop.
 
 ### 8. The tree (information hiding + hard rerouting)
 
-A team is not a flat pool of peers; it is a tree of small **cells**, each
+A roster is not a flat pool of peers; it is a tree of small **cells**, each
 with one lead, composing up to a single top lead. The roster declares it: an
 AI member's `Cell:` line names its cell and its `Lead:` line names the member
 it reports to (the top lead's `Lead:` is the human). Two mechanisms make the
@@ -179,13 +179,13 @@ messaged a design-cell lead (Cass) laterally *because the name was in front of
 him*. The tree held voluntarily otherwise, but "voluntarily" is not a control.
 Information hiding removes the temptation; rerouting removes the option.
 
-Prior art: Team Topologies (Skelton/Pais) — explicit, bounded interaction
-modes rather than ad-hoc cross-team chatter; the parametric bounds trace to
-Hackman's team-size work and the US Army's fire-team/squad structure.
+Prior art: Roster Topologies (Skelton/Pais) — explicit, bounded interaction
+modes rather than ad-hoc cross-roster chatter; the parametric bounds trace to
+Hackman's roster-size work and the US Army's fire-roster/squad structure.
 
 ### 9. The mission file (nested intent)
 
-A `MISSION.md` at the repo root is the team's highest-ranking document — a
+A `MISSION.md` at the repo root is the roster's highest-ranking document — a
 short, human-owned page of *why* the repo exists and what "done" looks like
 (purpose, end state, current milestone), never the *how*. It outranks every
 other document; where anything conflicts with it, it wins.
@@ -208,21 +208,20 @@ before work resumes — the loop that catches a wrong reading cheaply. And the
 milestones themselves stay prose the human interprets; r4t builds no status
 fields or staleness verdicts. The only machinery is injection plus a length
 lint: `roster check` warns when `MISSION.md` exceeds ~40 non-blank lines,
-because intent that outgrows a page has usually drifted into planning. See
-[plans/research/ORG-LESSONS.md](../plans/research/ORG-LESSONS.md) for the
-mission-command evidence.
+because intent that outgrows a page has usually drifted into planning. The
+mission-command evidence lives in the wiki's Plans archive (ORG-LESSONS).
 
 ## Disposal and observability
 
 Undeliverable mail and per-turn send-quota overflow are never silently
-dropped: they move to a dead-letter directory under the team's state dir
+dropped: they move to a dead-letter directory under the roster's state dir
 with an x-death-style record (reason, count, sender, recipient, thread,
 time) — RabbitMQ's audit pattern. That is a lens and a replay source, not a
 queue anyone waits on. Deliverable messages never land here; they queue.
 
 Observability rides on a8s rather than duplicating it:
 
-- Traffic: every message, with full `team:member` addresses, is already
+- Traffic: every message, with full `roster:member` addresses, is already
   in a8s's transaction log and convo history — r4t adds no transport.
 - Decisions: r4t's dispatch stdout is captured into the a8s node log by
   the wake machinery, so every governance action is one structured line

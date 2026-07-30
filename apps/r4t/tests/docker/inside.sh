@@ -22,7 +22,7 @@ usermod -aG r4t-work router
 usermod -aG r4t-work agent
 # r4t re-asserts the staging dir to router:<agent primary group>; a non-root
 # router can only chgrp to a group it belongs to, so it must join the agent
-# group. (Provisioning fact, not a code path — documented in isolation.md.)
+# group. (Provisioning fact, not a code path — documented in docs/r4t-isolation.md.)
 usermod -aG agent router
 # The border: the agent must not be able to read the router's home.
 chmod 700 /home/router
@@ -47,7 +47,7 @@ install -d -o router -g r4t-work -m 2770 /work             # workplace: setgid, 
 # Portable org dir: router-readable ROSTER/MISSION + the run_as/repo pointer.
 install -d -o router -g router /etc/r4t-org
 cat >/etc/r4t-org/ROSTER.md <<'EOF'
-# Team
+# Roster
 
 ### Worker
 - **Rig:** solo

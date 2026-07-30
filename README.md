@@ -1,8 +1,8 @@
 # The Ark
 
-The Ark is a suite for running crews of AI agents on your own machine. **a8s**
-routes messages between independent CLI agents, **r4t** governs the teams that
-send them, and **k7e** keeps what those teams learn. `ar3` is the front door: it
+The Ark is a suite for running a roster of AI agents on your own machine. **a8s**
+routes messages between independent CLI agents, **r4t** governs the roster that
+sends them, and **k7e** keeps what the roster learns. `ar3` is the front door: it
 reports where the suite stands and probes the tools it runs on, and it never
 runs another product's commands for you.
 
@@ -14,22 +14,25 @@ curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 
 That clones the suite into `~/.ar3` and adds one `source` line to your shell
 rc; re-running it updates in place, and so does `git pull`. Nothing installs
-into your projects.
+into your projects. Without git on PATH the same line installs the latest
+release from a tarball, and re-running it updates to the newest release.
+
+With access to the development repo, `AR3_CHANNEL=beta` ahead of the same
+command installs the development tree instead of the latest release (git
+required); re-running pulls it forward.
 
 Prefer it manual? Clone anywhere and `source install.sh` from your shell rc —
 the shims at the repo root — `ar3`, `a8s`, `tell`, `tells`, `r4t`, `k7e` — go
 on `PATH`. Either way, add `--skills` to the source line to link the tool docs
 under `docs/` into Claude Code and Cursor as agent skills.
 
-Development happens in a private repository. The public
-[witw-llc/ar3](https://github.com/witw-llc/ar3) carries one commit per release
-of the whole suite — clone it, pull it, and read it freely; issues and pull
-requests live with the development repo.
+The public [witw-llc/ar3](https://github.com/witw-llc/ar3) is the release
+mirror — one commit per release of the whole suite.
 
 ## Where to start
 
 - **[The Ark Raising](guide/README.md)** — a chapter-by-chapter build-along
-  that raises a crew of agents from nothing.
+  that raises a roster of agents from nothing.
 - **[apps/a8s/README.md](apps/a8s/README.md)** — the message router.
 - **[apps/r4t/README.md](apps/r4t/README.md)** — rosters, rigs, dispatch.
 - **[apps/k7e/README.md](apps/k7e/README.md)** — the knowledge engine.

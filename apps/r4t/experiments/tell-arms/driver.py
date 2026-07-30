@@ -39,21 +39,21 @@ def ollama_up() -> bool:
 
 
 def seat_files(r4t_home: Path) -> set[Path]:
-    d = r4t_home / "teams" / NODE / "seat" / "owner" / "inbox"
+    d = r4t_home / "rosters" / NODE / "seat" / "owner" / "inbox"
     if not d.is_dir():
         return set()
     return {p for p in d.iterdir() if p.name.endswith(".json")}
 
 
 def dead_files(r4t_home: Path) -> set[Path]:
-    d = r4t_home / "teams" / NODE / "dead-letter"
+    d = r4t_home / "rosters" / NODE / "dead-letter"
     if not d.is_dir():
         return set()
     return {p for p in d.iterdir() if p.is_file()}
 
 
 def turn_files(r4t_home: Path) -> set[Path]:
-    d = r4t_home / "teams" / NODE / "agents" / "wren" / "turns"
+    d = r4t_home / "rosters" / NODE / "agents" / "wren" / "turns"
     if not d.is_dir():
         return set()
     return {p for p in d.iterdir() if p.is_file()}

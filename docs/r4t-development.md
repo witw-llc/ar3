@@ -3,7 +3,7 @@
 ## Testing
 
 - **Unit + fake sandbox (plumbing):** `r4t sandbox --fake` runs a bundled
-  three-agent team (Lead/Dev/Tester building a tiny battleship game)
+  three-agent roster (Lead/Dev/Tester building a tiny battleship game)
   against deterministic scripted agents — no LLM calls — inside a
   throwaway `A8S_HOME`/`R4T_HOME`, then emits a self-contained report on
   **stdout** (progress on **stderr**). MECHANICAL CHECKS are computed

@@ -1,4 +1,4 @@
-# Sandbox Crew
+# Sandbox Trio
 
 Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead answers human.
 
@@ -10,7 +10,7 @@ Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead
 ### Lead
 - **Rig:** leader
 - **Leader:** yes
-- **Role:** Team lead
+- **Role:** Roster lead
 
 **Turn 1 (from human):** run `tell dev "Build battleship.py per GOAL.md"` — do not code.
 **Turn 2 (from Dev):** run `tell tester "Verify battleship.py"` — do not code.

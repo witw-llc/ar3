@@ -76,7 +76,7 @@ or the response can't be parsed.
 
 ## Tuning
 
-All tunable via `k7e config` or env (see [configuration.md](configuration.md)):
+All tunable via `k7e config` or env (see [k7e-configuration.md](k7e-configuration.md)):
 
 | Knob | Default | Effect |
 |------|---------|--------|

@@ -6,7 +6,7 @@ qwen3.6:latest (23 GB) unless noted.
 `ollama launch <integration>` starts a coding-agent CLI pointed at the local
 ollama server instead of its cloud backend — no env vars or config files to
 hand-edit. r4t wraps it in the `claude-ollama`, `codex-ollama`, and
-`copilot-ollama` presets in [`rig.py`](../rig.py), alongside the older
+`copilot-ollama` presets in [`rig.py`](../apps/r4t/rig.py), alongside the older
 `opencode-ollama`. Local models mean no cloud quota, which is what makes
 whole-org experiments affordable.
 

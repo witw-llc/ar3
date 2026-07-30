@@ -1,7 +1,7 @@
-"""`r4t sandbox` — disposable end-to-end team run with a graded report.
+"""`r4t sandbox` — disposable end-to-end roster run with a graded report.
 
 Creates a temp dir holding a private A8S_HOME + R4T_HOME, copies the
-bundled team-of-3 seed (apps/r4t/sandbox/) into a temp repo, registers the
+bundled roster-of-3 seed (apps/r4t/sandbox/) into a temp repo, registers the
 node + namespace through the real a8s CLI, starts a handler, kicks off the
 GOAL.md task as a registered "human" agent, waits for quiescence, tears
 everything down (a8s stop is a graceful SIGTERM; the no-orphans invariant
@@ -23,7 +23,7 @@ recovery path (see FAILURE_SHAPES); the mechanical checks assert the path,
 so a governance regression turns the run red.
 
 What fake mode deliberately fakes vs live mode is listed in
-apps/r4t/docs/development.md — every divergence is a place `--fake` can pass
+docs/r4t-development.md — every divergence is a place `--fake` can pass
 while a real roster misbehaves.
 """
 from __future__ import annotations
@@ -48,9 +48,9 @@ SANDBOX_DIR = R4T_DIR / "sandbox"
 A8S_DIR = R4T_DIR.parent / "a8s"
 A8S_PY = A8S_DIR / "a8s.py"
 
-TEAM = "crew"
-NODE = "crew-node"
-ALIAS = "sandboxcrew"
+ROSTER = "trio"
+NODE = "trio-node"
+ALIAS = "sandboxtrio"
 MAX_TURNS = 15
 
 
@@ -116,7 +116,7 @@ def _write_definition(path: Path) -> None:
                     "--root",
                     ".",
                     "--node",
-                    TEAM,
+                    ROSTER,
                 ],
             },
         },
@@ -205,11 +205,11 @@ def _kickoff(human_root: Path, goal: str) -> None:
         outbox / f"{msg_id}.json",
         {
             "id": msg_id,
-            "to": f"{TEAM}:lead",
+            "to": f"{ROSTER}:lead",
             "content": (
                 "Build the battleship game in GOAL.md.\n\n"
                 "Lead: your only action this turn is to delegate — run:\n"
-                f'  tell {TEAM}:dev "Build battleship.py per GOAL.md in this directory."\n'
+                f'  tell {ROSTER}:dev "Build battleship.py per GOAL.md in this directory."\n'
                 "Do not implement it yourself.\n\n" + goal
             ),
             "files": [],
@@ -237,9 +237,9 @@ def _final_answer(a8s_home: Path) -> dict | None:
     for msg in _agent_messages(a8s_home, "human"):
         sender = str(msg.get("from", ""))
         # The human seat is outside the walls, so the router presents the org's
-        # answer as the bare prefix; NODE and `TEAM:member` are the shapes a
+        # answer as the bare prefix; NODE and `ROSTER:member` are the shapes a
         # message takes before it crosses.
-        if sender not in (TEAM, NODE) and not sender.startswith(f"{TEAM}:"):
+        if sender not in (ROSTER, NODE) and not sender.startswith(f"{ROSTER}:"):
             continue
         if str(msg.get("content", "")).strip():
             return msg
@@ -247,11 +247,11 @@ def _final_answer(a8s_home: Path) -> dict | None:
 
 
 def _busy(a8s_home: Path, repo: Path, *, parked: str = "") -> bool:
-    if state.live_locks(TEAM):
+    if state.live_locks(ROSTER):
         return True
     if any(
-        state.queue_depth(TEAM, m)
-        for m in state.members_with_queue(TEAM)
+        state.queue_depth(ROSTER, m)
+        for m in state.members_with_queue(ROSTER)
         if m != parked
     ):
         return True
@@ -357,7 +357,7 @@ def _run_program(repo: Path) -> tuple[bool, str]:
 
 
 def _velocity_rows() -> list[list[str]]:
-    path = state.team_dir(TEAM) / "velocity.csv"
+    path = state.roster_dir(ROSTER) / "velocity.csv"
     if not path.is_file():
         return []
     lines = path.read_text(encoding="utf-8").strip().splitlines()
@@ -366,7 +366,7 @@ def _velocity_rows() -> list[list[str]]:
 
 def _governance_lines() -> list[str]:
     lines: list[str] = []
-    log_dir = state.team_dir(TEAM) / "log"
+    log_dir = state.roster_dir(ROSTER) / "log"
     if not log_dir.is_dir():
         return lines
     for f in sorted(log_dir.glob("*.md")):
@@ -383,20 +383,20 @@ HISTORY_ENTRY_RE = re.compile(
 
 def _conversation() -> list[tuple[str, str, str, str]]:
     """(timestamp, sender, recipient, body) from every agent's history.
-    Intra-team messages appear once (the recipient's `from` entry); external
-    releases come from `to` entries addressed outside the team."""
+    Intra-roster messages appear once (the recipient's `from` entry); external
+    releases come from `to` entries addressed outside the roster."""
     events: list[tuple[str, str, str, str]] = []
-    agents_dir = state.team_dir(TEAM) / "agents"
+    agents_dir = state.roster_dir(ROSTER) / "agents"
     if not agents_dir.is_dir():
         return events
     for history in agents_dir.glob("*/history.md"):
-        agent = f"{TEAM}:{history.parent.name}"
+        agent = f"{ROSTER}:{history.parent.name}"
         for ts, direction, other, body in HISTORY_ENTRY_RE.findall(
             history.read_text(encoding="utf-8")
         ):
             if direction == "from":
                 events.append((ts, other, agent, body.strip()))
-            elif not other.lower().startswith(TEAM):
+            elif not other.lower().startswith(ROSTER):
                 events.append((ts, agent, other, body.strip()))
     events.sort(key=lambda e: e[0])
     return events
@@ -404,7 +404,7 @@ def _conversation() -> list[tuple[str, str, str, str]]:
 
 def _dead_letter_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
-    for record in state.list_dead_letters(TEAM):
+    for record in state.list_dead_letters(ROSTER):
         reason = record.get("reason", "?")
         counts[reason] = counts.get(reason, 0) + 1
     return counts
@@ -430,7 +430,7 @@ def _emit_progress(
             _log(line)
             seen_gov.add(line)
 
-    for lock in state.live_locks(TEAM, prune=True):
+    for lock in state.live_locks(ROSTER, prune=True):
         key = (str(lock.get("agent", "")), str(lock.get("task", "")))
         if key not in seen_locks:
             seen_locks.add(key)
@@ -455,7 +455,7 @@ def _parked_member(failure: tuple[str, str] | None) -> str:
 
 def _scenario_pending(failure: tuple[str, str] | None) -> bool:
     """A failure scenario is over when the recovery path it targets has fired,
-    not when the team first goes quiet — the leader's early ack to the human
+    not when the roster first goes quiet — the leader's early ack to the human
     would otherwise end the run before the failure had any consequence."""
     if not failure:
         return False
@@ -484,7 +484,7 @@ def _failure_checks(
     gov = _governance_lines()
     tripped = [line for line in gov if "BREAKER" in line and "tripped" in line]
     held = [line for line in gov if "BREAKER" in line and "breaker open" in line]
-    level = state.budget_level(TEAM, member, FAILURE_BUDGET_MAX, FAILURE_BUDGET_MAX)
+    level = state.budget_level(ROSTER, member, FAILURE_BUDGET_MAX, FAILURE_BUDGET_MAX)
     checks: list[tuple[str, object, str]] = []
 
     if shape == "exit":
@@ -695,7 +695,7 @@ def run_sandbox(
             shutil.copy(SANDBOX_DIR / name, repo / name)
         workspace = repo.resolve()
         (repo / "WORKSPACE.md").write_text(
-            f"# Workspace\n\nTeam repo root: `{workspace}`\n\n"
+            f"# Workspace\n\nRoster repo root: `{workspace}`\n\n"
             "Write all project files here using relative paths (e.g. "
             "`battleship.py`). Do not write to ~/ or any path outside this "
             "directory.\n",
@@ -712,13 +712,13 @@ def run_sandbox(
         _log("registering node and handlers")
         _a8s("add", NODE, str(repo), str(definition))
         _a8s("add", "human", str(human_root), str(A8S_DIR / "definitions" / "default.json"))
-        _a8s("namespace", TEAM, NODE)
+        _a8s("namespace", ROSTER, NODE)
         _a8s("alias", ALIAS, NODE)
         _a8s("alias", ALIAS, "human")
         _a8s("start", ALIAS)
 
         _kickoff(human_root, goal)
-        _log("kickoff sent to crew:lead")
+        _log("kickoff sent to trio:lead")
 
         deadline = time.time() + timeout
         quiet_polls = 0
@@ -768,7 +768,7 @@ def run_sandbox(
                 _log("quiescent without final answer")
                 break
             if quiet_polls == 1:
-                _log("waiting for team to finish…")
+                _log("waiting for roster to finish…")
 
         _log("stopping handlers")
         _kill_sandbox_processes(tmp)

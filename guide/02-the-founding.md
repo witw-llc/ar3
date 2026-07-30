@@ -4,9 +4,9 @@
 
 ## 1. Capability
 
-At the end of this chapter your agent has a team around it. Same machine,
+At the end of this chapter your agent has a roster around it. Same machine,
 same model, same kind of answers — but the agent is **Wren**, the one member
-of team **silo**, and r4t holds the edges chapter 1's `solo` was holding
+of roster **silo**, and r4t holds the edges chapter 1's `solo` was holding
 bare: a spend budget, a queue that parks messages instead of losing them, a
 conversation that persists across turns, and a seat you speak from as
 yourself. You will prove the persistence with a codeword, break the
@@ -33,16 +33,16 @@ that could hold a conversation open. r4t takes all of that off your hands —
 and it governs *rosters*, not lone agents, so the first move is to give the
 agent a roster to belong to.
 
-A team is two files with two jobs: `ROSTER.md` in the team repo says *who*
+A roster is two files with two jobs: `ROSTER.md` in the roster repo says *who*
 exists, and `~/.config/r4t/rigs.json` — outside the repo, where a repo edit
 can't reach it — says what each member's **rig** actually runs.
 
-The directory name is the team name; r4t reads it off the folder. From
-outside, the team is one address, and who stands behind it is machinery the
+The directory name is the roster name; r4t reads it off the folder. From
+outside, the roster is one address, and who stands behind it is machinery the
 sender never sees. Chapter 4 puts a second pair of hands behind that address
 without the address changing.
 
-Make the team directory and let r4t write the starters:
+Make the roster directory and let r4t write the starters:
 
 **Run**
 
@@ -68,13 +68,13 @@ name with its agent, so the node is registered as <team>-node):
   tell silo:dev "hello"        # namespace:member -> specific member
 ```
 
-The starter roster is a three-member team. Ours is smaller. Replace it
+The starter roster has three members. Ours is smaller. Replace it
 with a roster of one AI and one human — you:
 
 **Replace** `~/ark/silo/ROSTER.md` (whole file)
 
 ```markdown
-# Team Roster
+# Roster
 
 ### You
 - **Human:** yes
@@ -92,8 +92,8 @@ seat. Keep answers short and concrete.
 ```
 
 The prose under Wren's heading does the job the seeded `prompt=` string does
-in chapter 1: it is the character the answers come out in. On a team that
-string lives in the roster, beside the name it belongs to, and r4t puts it in
+in chapter 1: it is the character the answers come out in. On a roster that
+string lives beside the name it belongs to, and r4t puts it in
 Wren's prompt at every turn.
 
 Four lines carry the rest of the weight. `Leader: yes` — external mail
@@ -101,7 +101,7 @@ enters at Wren. `Rig: silo` — a symbolic name; what it runs comes next, from
 outside the repo. `Continue: on` — Wren's turns resume its CLI's own
 conversation instead of starting cold every wake, which is the edge chapter 1
 had no way to hold. `Workdir: agents/wren` — Wren gets its own subfolder, so
-its conversation and files never collide with a future teammate's.
+its conversation and files never collide with a future member's.
 
 Now define the `silo` rig. Pick your path — and note that these two
 presets are only the blessed pair: the other popular harness CLIs are
@@ -160,7 +160,7 @@ That is the right shape for a roster of one — Wren has nobody to message but
 you — and it is the last two lines of chapter 1's `reply.sh` done for you:
 capture what the harness printed, send it to whoever asked. Without echo, a
 member has to run `tell` itself, and prose answers under ~80 characters get
-discarded as terminal chrome. Chapter 4 lifts echo when the team grows.
+discarded as terminal chrome. Chapter 4 lifts echo when the roster grows.
 
 Lint before going live — r4t fails closed on any roster/rig disagreement:
 
@@ -178,7 +178,7 @@ You: note — Human without an Address (team cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
-The note is expected: you have no a8s doorbell address yet, so the team
+The note is expected: you have no a8s doorbell address yet, so the roster
 can't ring you when you're away. You'll read your mail at the seat
 instead. Finally, register the node on a8s exactly as `r4t init` printed:
 
@@ -199,7 +199,7 @@ bound silo: -> silo-node
 started silo-node as PID 23851
 ```
 
-Wren has chapter 1's job now, so retire the bare node and let the team's
+Wren has chapter 1's job now, so retire the bare node and let the roster's
 address take over:
 
 **Run**
@@ -237,7 +237,7 @@ r4t seat send --node silo "In one sentence: what is your job on this team?"
 r4t seat inbox --node silo
 ```
 
-(`--node silo` is needed the first time; once the team has dispatched a
+(`--node silo` is needed the first time; once the roster has dispatched a
 turn, r4t finds the node from inside the repo on its own.)
 
 ## 6. Expected receipt
@@ -358,7 +358,7 @@ You should see:
 TIDEPOOL.
 ```
 
-Wren still knows. Then ask r4t where the team stands:
+Wren still knows. Then ask r4t where the roster stands:
 
 **Run**
 

@@ -10,13 +10,13 @@ optional — every knob has a sane default; see README.md for the table):
 
 - `"pins"` — agent name → rig, silently overriding the roster's Rig
   line (an in-repo roster edit can't upgrade a pinned agent).
-- `"throttle"` — team-wide `max_concurrent` + `min_seconds_between_turn_starts`
+- `"throttle"` — roster-wide `max_concurrent` + `min_seconds_between_turn_starts`
   gates, enforced before any rig check.
 - `"cell_budget_max"` / `"cell_budget_earn_per_hour"` — the shared cell spend
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
 - `"quiet_task_seconds"` — a thread quiet this long with its originator still
   unanswered wakes the leader with a nudge to reply with current state.
-- `"log_retention_days"` — how many UTC days of team transcript `r4t clear`
+- `"log_retention_days"` — how many UTC days of roster transcript `r4t clear`
   keeps; older day files are deleted whole. 0 keeps every day forever.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
   consecutive failed turns (nonzero exit or timeout) that trip it, and how
@@ -27,15 +27,15 @@ later): `budget_max` / `budget_earn_per_hour` — the member spend bucket. A
 turn costs 1 member unit; when it is empty the member is resting.
 `rig_budget_max` / `rig_budget_earn_per_hour` — the MACHINE-GLOBAL rig spend
 bucket (absent = no rig gate). A rig maps to a real subscription, so this
-ceiling binds every team on the machine that shares the rig; a turn also costs
-1 rig unit and an empty rig bucket rests every member on it, on every team. If
+ceiling binds every roster on the machine that shares the rig; a turn also costs
+1 rig unit and an empty rig bucket rests every member on it, on every roster. If
 `rig_budget_max` is set, `rig_budget_earn_per_hour` must be set too — a real
 plan always declares a refill rate.
 
 `mcp` — inject the a8s MCP server (`a8s mcp serve`) into every turn on this
 rig, using the harness's own per-invocation idiom, and teach the member the
 `a8s_tell` tool instead of the shell command. Tri-state: unset takes the
-preset's default (on wherever the idiom is invisible to the team repo — see
+preset's default (on wherever the idiom is invisible to the roster repo — see
 `MCP_DEFAULT_ON_IDIOMS`, off for cursor and for presets with no idiom at all),
 and an explicit true/false in rigs.json always wins. Presets whose CLI takes
 MCP config only globally (agy) or has no tools at all (bare ollama) refuse an
@@ -61,7 +61,7 @@ member asking for it fails closed (see `RigConfig.rig_for`).
 OS-level isolation (`run_as` / `container`) is NOT a rig key — it is a
 per-org decision (rigs are machine-global and shared across orgs, so one Unix
 user or image serves an org's whole roster). It lives in `r4t-org.json`; see
-org.py and apps/r4t/docs/isolation.md.
+org.py and docs/r4t-isolation.md.
 
 Keys starting with `_` anywhere are ignored so shipped examples can carry
 notes.
@@ -319,7 +319,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "longer covers — roster members must run tell and git. OS isolation, "
             "not the harness permission layer, is the security boundary. "
             "No --sandbox: it confines child writes to CWD, blocking tell's "
-            "staging outbox (see docs/harness-agy.md)"
+            "staging outbox (see docs/r4t-harness-agy.md)"
         ),
         "a8s_definition": "agy.json",
         "headless": "--print",
@@ -406,7 +406,7 @@ class RigError(Exception):
 
 @dataclass
 class Throttle:
-    """Team-wide gate applied before any rig check. `max_concurrent` caps
+    """Roster-wide gate applied before any rig check. `max_concurrent` caps
     live turns across ALL rigs (0 = unlimited); the cadence field spaces
     turn STARTS so a human can watch and intervene (0 = no gate)."""
 
@@ -514,7 +514,7 @@ class Rig:
         pool = self.pool()
         chosen = pool[index % len(pool)]
         # {workdir} goes in first: the prompt carries message text, so
-        # substituting it last keeps a `{workdir}` a teammate typed from being
+        # substituting it last keeps a `{workdir}` a member typed from being
         # read as a placeholder.
         if workdir is not None:
             chosen = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in chosen]
@@ -636,7 +636,7 @@ def mcp_presets() -> list[str]:
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("mcp")]
 
 
-# Idioms the team repo never sees: a flag, a `-c` override, or a config file
+# Idioms the roster repo never sees: a flag, a `-c` override, or a config file
 # under the member's own state dir. Those default the knob ON — the tell-arms
 # experiment measured the tool eliminating the no-send failure class outright
 # (20/20 against 9/20), so an untouched rig has to be the one that sends.
@@ -798,7 +798,7 @@ def _write_cursor_mcp(
 def _mcp_config_dir(env: dict, cwd: Path) -> Path:
     """Where a config file the harness reads from disk goes: an `mcp` dir beside
     the member's per-turn staging outbox, so the knob writes nothing into the
-    team repo and a container mounts one dir that holds nothing else."""
+    roster repo and a container mounts one dir that holds nothing else."""
     staging = env.get("TELL_OUTBOX_DIR", "")
     return Path(staging).parent / MCP_CONFIG_DIRNAME if staging else cwd
 
@@ -876,7 +876,7 @@ def _effective_cwd(member: Member, workplace: Path) -> Path:
 
 
 def continue_collisions(roster: Roster, config: RigConfig, workplace: Path) -> list[str]:
-    """Warn (never block) where `Continue: on` will cross wires with a teammate.
+    """Warn (never block) where `Continue: on` will cross wires with a member.
 
     A CLI keys its conversation on the directory it runs from, so two members
     driving the SAME CLI from the SAME effective directory (the workplace root,
@@ -1074,7 +1074,7 @@ def _load_config_payload(path: Path) -> dict:
         "_notes": (
             "Created by `r4t rig add`. Rig names are SYMBOLIC — ROSTER.md "
             "Rig lines reference them. See `r4t rig presets` and "
-            "apps/r4t/docs/rigs.md."
+            "docs/r4t-rigs.md."
         ),
     }
 
@@ -1754,7 +1754,7 @@ def default_config_payload() -> dict:
             "  r4t rig add <rig> <preset>",
             "Presets mirror apps/a8s/definitions/ (claude, codex, cursor, ...).",
             "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
-            "All governance knobs default sanely; see apps/r4t/docs/rigs.md.",
+            "All governance knobs default sanely; see docs/r4t-rigs.md.",
         ],
         "leader": {
             "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],

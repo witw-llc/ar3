@@ -125,7 +125,7 @@ def split_namespace_address(query: str) -> tuple[str, str] | None:
     `(canonical_prefix, sub_address)`, or None when `query` has no colon.
 
     The sub-address is opaque to a8s — further colons belong to it
-    (`acme:team:phil` → prefix `acme`, sub `team:phil`). Raises ValueError on a
+    (`acme:ops:phil` → prefix `acme`, sub `ops:phil`). Raises ValueError on a
     malformed address (empty sub-address, or a prefix outside the NAME_RE
     grammar) — a colon address can never name an agent or alias, so a bad one
     is a malformed recipient, not an unknown one."""

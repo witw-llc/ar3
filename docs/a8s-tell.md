@@ -1,8 +1,8 @@
 # tell — internals
 
 Operator documentation for how `tell` works under the hood. Agent-facing usage
-lives in [`skills/tell/SKILL.md`](../skills/tell/SKILL.md) (send-only). Desktop /
-filedrop setup: [filedrop.md](filedrop.md).
+lives in [`skills/tell/SKILL.md`](../apps/a8s/skills/tell/SKILL.md) (send-only). Desktop /
+filedrop setup: [a8s-filedrop.md](a8s-filedrop.md).
 
 Bodies ride in on stdin — `tell <name> - <<'EOF' … EOF` with the delimiter
 quoted, or `tell <name> - < body.md`. That is what every teaching surface shows,
@@ -25,7 +25,7 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 0. **`tell --check`** — optional self-test: verifies the resolved outbox is writable (creates the path when missing). Optional recipient name validates registry routing. No envelope written.
 1. **`TELL_OUTBOX_DIR` or CWD filedrop** — tell writes to the env path when set;
    otherwise may resolve a unique configured outbox from CWD when the registry
-   is reachable (see [filedrop.md](filedrop.md)). `install-client`
+   is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). `install-client`
    tell-only installs always need the env var.
 2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
 3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
@@ -71,7 +71,7 @@ The outbox path tell writes to.
 
 1. `TELL_OUTBOX_DIR` when set (required for deployed agents — a8s injects it on wake).
 2. Else a unique configured outbox matched from CWD when `~/.a8s` is readable
-   (desktop / filedrop seats — see [filedrop.md](filedrop.md)).
+   (desktop / filedrop seats — see [a8s-filedrop.md](a8s-filedrop.md)).
 3. Else fail.
 
 ```bash

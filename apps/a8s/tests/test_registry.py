@@ -190,7 +190,7 @@ class TestSplitNamespaceAddress:
         assert split_namespace_address("claude") is None
 
     def test_splits_on_first_colon(self):
-        assert split_namespace_address("acme:team:phil") == ("acme", "team:phil")
+        assert split_namespace_address("acme:ops:phil") == ("acme", "ops:phil")
 
     def test_prefix_canonicalized_sub_verbatim(self):
         assert split_namespace_address("ACME:Phil") == ("acme", "Phil")
@@ -226,7 +226,7 @@ class TestResolveNamespace:
     def test_further_colons_are_opaque(self, fake_home):
         save_registry({"NODE": {"root": "/r"}})
         save_namespaces({"acme": "NODE"})
-        assert resolve_name("acme:team:phil") == ("namespace", ["NODE"])
+        assert resolve_name("acme:ops:phil") == ("namespace", ["NODE"])
 
     def test_unknown_prefix_raises_keyerror(self, fake_home):
         with pytest.raises(KeyError):

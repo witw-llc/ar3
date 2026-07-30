@@ -13,7 +13,7 @@ NODE = "acme"
 # Self-contained roster/config (no `from conftest import` — running the a8s and
 # r4t suites together makes the bare `conftest` module ambiguous at collection).
 CLEAN_ROSTER = """\
-# Team Roster
+# Roster
 
 ### Neil
 - **Human:** yes
@@ -217,7 +217,7 @@ def test_roster_check_flags_a_bad_org_config(r4t_home, tmp_path, fake_harness, c
 
 
 def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):
-    # The A/B case: two org dirs (same repo) run as two a8s nodes; team state is
+    # The A/B case: two org dirs (same repo) run as two a8s nodes; roster state is
     # per-node, so nothing collides.
     workplace = tmp_path / "shared-repo"
     workplace.mkdir()
@@ -238,7 +238,7 @@ def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):
 
     assert state.read_root("acme") == tmp_path / "org-a"
     assert state.read_root("beta") == tmp_path / "org-b"
-    assert state.team_dir("acme") != state.team_dir("beta")
+    assert state.roster_dir("acme") != state.roster_dir("beta")
     assert (state.agent_dir("acme", "gerry")).is_dir()
     assert (state.agent_dir("beta", "gerry")).is_dir()
 
@@ -347,7 +347,7 @@ def test_logs_runs_against_an_org_dir_node(
 def test_seat_adopts_the_root_when_no_stamp_exists(
     r4t_home, tmp_path, fake_harness, monkeypatch, capsys
 ):
-    # The live quill sequence: a team driven entirely through the seat never
+    # The live quill sequence: a roster driven entirely through the seat never
     # passes cmd_dispatch, so no stamp exists and observer commands guess
     # from cwd. One seat run with --root writes the stamp; from then on the
     # workplace cwd resolves the node and the org dir.
@@ -362,13 +362,13 @@ def test_seat_adopts_the_root_when_no_stamp_exists(
     assert rc == 0
     assert state.read_root(NODE) == org_dir
 
-    state.team_dir("other").mkdir(parents=True)  # ambiguity is real
+    state.roster_dir("other").mkdir(parents=True)  # ambiguity is real
     monkeypatch.chdir(workplace)
     capsys.readouterr()
     rc = r4t_main(["status", "--rig-config", str(cfg)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert f"team: {NODE}" in out and "Gerry" in out
+    assert f"roster: {NODE}" in out and "Gerry" in out
 
 
 def test_seat_never_overrides_an_existing_stamp(

@@ -1,10 +1,10 @@
-# r4t — Roster For Teams
+# r4t — the roster
 
-An unsupervised agent team once burned 40% of a monthly AI plan thanking
+An unsupervised agent roster once burned 40% of a monthly AI plan thanking
 each other for thanking each other. The quieter waste is the opposite one:
 a subscription costs the same idle or busy, so every unspent prompt is money
 already paid and thrown away. r4t exists to end both — the plan you pay for
-stays earning, and no team can ever blow it. The spend underneath both is
+stays earning, and no roster can ever blow it. The spend underneath both is
 attention: every sharp edge a model mishandles pulls you out of the vision
 seat and into the trenches, so the rule here is that the harness holds the
 edges — defaults do the right thing, prompts remind, skills instruct — and
@@ -32,7 +32,7 @@ r4t sandbox --fake
 Three scripted agents build and test a tiny game; a report lands on stdout
 (`Program runs and exits 0 | PASS`, dead letters 0, ...).
 
-Now a real team on your repo:
+Now a real roster on your repo:
 
 ```bash
 cd ~/your-repo
@@ -45,7 +45,7 @@ The roster names members and symbolic rigs; `~/.config/r4t/rigs.json` maps
 rigs to CLIs (default: OpenCode). Swap any rig in one command —
 `r4t rig swap leader claude` — see `r4t rig presets` for the full list.
 
-Register the team on a8s (`r4t init` prints these with your paths):
+Register the roster on a8s (`r4t init` prints these with your paths):
 
 ```bash
 a8s add your-repo-node ~/your-repo r4t
@@ -68,9 +68,9 @@ r4t status   # health verdicts, member budgets, queues, open threads
 r4t logs -f  # every governance decision and turn as it happens
 ```
 
-The team's reply arrives in `a8s convo me`. Full walkthrough, including
+The roster's reply arrives in `a8s convo me`. Full walkthrough, including
 what fails closed when the roster and rig config disagree:
-[docs/tutorial.md](docs/tutorial.md).
+[docs/r4t-tutorial.md](../../docs/r4t-tutorial.md).
 
 ## How it works
 
@@ -81,20 +81,20 @@ budget rests while its queue holds, and refill is the retry, so the machine's
 one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it
-in production too. Full flow: [docs/message-flow.md](docs/message-flow.md).
+in production too. Full flow: [docs/r4t-message-flow.md](../../docs/r4t-message-flow.md).
 
 ## Learn more
 
 - [The Ark Raising](../../guide/README.md) — the suite build-along; [chapter 2](../../guide/02-the-founding.md) founds a governed roster of one
-- [Tutorial](docs/tutorial.md) — first team, step by step, fail-closed rules
-- [Rigs](docs/rigs.md) — presets, `--model`, settings, the governance knob table
-- [Message flow](docs/message-flow.md) — threads, queues, the stdout fallback
-- [Operations](docs/operations.md) — `status`, `logs`, `chat`, the human seat
-- [Org design](docs/org.md) — cells and leads, `MISSION.md`, portable orgs
-- [Verification](docs/verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge, `r4t task trace`
-- [Governance](docs/governance.md) — why each layer exists, with prior art
-- [Security model](docs/security.md) — what a repo edit can never change
-- [Isolation](docs/isolation.md) — run an org behind a Unix user or a container
-- [Development](docs/development.md) — sandbox testing, module layout
-- Harness notes: [agy](docs/harness-agy.md) ·
-  [ollama launch](docs/harness-ollama-launch.md)
+- [Tutorial](../../docs/r4t-tutorial.md) — first roster, step by step, fail-closed rules
+- [Rigs](../../docs/r4t-rigs.md) — presets, `--model`, settings, the governance knob table
+- [Message flow](../../docs/r4t-message-flow.md) — threads, queues, the stdout fallback
+- [Operations](../../docs/r4t-operations.md) — `status`, `logs`, `chat`, the human seat
+- [Org design](../../docs/r4t-org.md) — cells and leads, `MISSION.md`, portable orgs
+- [Verification](../../docs/r4t-verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge, `r4t task trace`
+- [Governance](../../docs/r4t-governance.md) — why each layer exists, with prior art
+- [Security model](../../docs/r4t-security.md) — what a repo edit can never change
+- [Isolation](../../docs/r4t-isolation.md) — run an org behind a Unix user or a container
+- [Development](../../docs/r4t-development.md) — sandbox testing, module layout
+- Harness notes: [agy](../../docs/r4t-harness-agy.md) ·
+  [ollama launch](../../docs/r4t-harness-ollama-launch.md)

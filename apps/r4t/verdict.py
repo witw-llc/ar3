@@ -1,9 +1,9 @@
-"""Team health verdicts and dead-letter rollup — the shared brain behind
+"""Roster health verdicts and dead-letter rollup — the shared brain behind
 `r4t status` and the chat header.
 
-Everything here is read-only over team state. Callers render the marks;
+Everything here is read-only over roster state. Callers render the marks;
 levels are `ok`/`warn`/`bad`. Thresholds are heuristics tuned for an
-operator glancing at a team, not alerting SLOs.
+operator glancing at a roster, not alerting SLOs.
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def recent_turns(
     node: str, now: float, window: float = RECENT_WINDOW_SECONDS
 ) -> tuple[int, set[str]]:
     """(turn count, distinct task ids) from velocity.csv within the window."""
-    path = state.team_dir(node) / "velocity.csv"
+    path = state.roster_dir(node) / "velocity.csv"
     if not path.is_file():
         return 0, set()
     count, seen = 0, set()
@@ -95,11 +95,11 @@ def recent_turns(
     return count, seen
 
 
-def team_verdicts(
+def roster_verdicts(
     node: str, roster=None, config=None, *, now: float | None = None
 ) -> list[Verdict]:
     """One plain-English line per operator concern: is anything waiting on
-    the human, is the team runaway, is a member broken or resting with work
+    the human, is the roster runaway, is a member broken or resting with work
     queued, is the shared cell budget spent, is any queue backing up.
     Roster/config are optional; concerns that need them are skipped when they
     are unavailable."""
@@ -140,18 +140,18 @@ def team_verdicts(
         out.append(Verdict(OK, f"no runaway signs ({detail})"))
 
     if config is not None:
-        team_level = state.budget_level(
+        roster_level = state.budget_level(
             node, state.CELL_BUDGET_KEY,
             config.cell_budget_max, config.cell_budget_earn_per_hour, now=now,
         )
-        if team_level < 1.0:
+        if roster_level < 1.0:
             wait = state.budget_seconds_until(
                 node, state.CELL_BUDGET_KEY,
                 config.cell_budget_max, config.cell_budget_earn_per_hour, now=now,
             )
             out.append(Verdict(
                 WARN,
-                f"cell budget spent ({state.fmt_budget(team_level)}/{state.fmt_budget(config.cell_budget_max)}) "
+                f"cell budget spent ({state.fmt_budget(roster_level)}/{state.fmt_budget(config.cell_budget_max)}) "
                 f"— everyone rests, ready in ~{wait / 60:.0f} min",
                 "raise cell_budget_max/cell_budget_earn_per_hour to run faster",
             ))

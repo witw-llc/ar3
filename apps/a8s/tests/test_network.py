@@ -312,12 +312,12 @@ class TestReceiveEnvelope:
         root = tmp_path / "A"
         root.mkdir()
         save_registry({"A": {"root": str(root)}, "B": {"root": str(tmp_path / "B")}})
-        save_aliases({"team": ["B"]})
+        save_aliases({"ops": ["B"]})
         diagnostics = []
         network._REMOTE_DIAGNOSTIC_LAST.clear()
         monkeypatch.setattr(network, "out", diagnostics.append)
         receive_envelope(json.dumps({
-            "id": new_ulid(), "from": "X", "to": "team", "content": "secret", "files": [],
+            "id": new_ulid(), "from": "X", "to": "ops", "content": "secret", "files": [],
         }).encode(), [Participant("A", root)])
         assert len(diagnostics) == 1
         assert "alias resolved to zero local recipients" in diagnostics[0]
@@ -399,9 +399,9 @@ class TestReceiveEnvelope:
         # binding or the confirmation never reaches the node that sent.
         events = []
         monkeypatch.setattr(network.txlog, "log", lambda event, **fields: events.append((event, fields)))
-        save_namespaces({"crew": "A"})
-        save_namespace_options({"crew": {"opaque": True}})
-        envelope = build_delivery_receipt({"id": new_ulid(), "from": "crew"}, ["B"])
+        save_namespaces({"acme": "A"})
+        save_namespace_options({"acme": {"opaque": True}})
+        envelope = build_delivery_receipt({"id": new_ulid(), "from": "acme"}, ["B"])
         receive_envelope(json.dumps(envelope).encode(), two_local_agents)
         receipts = [fields for event, fields in events if event == "DELIVERY_RECEIPT"]
         assert [r["sender"] for r in receipts] == ["A"]
@@ -479,11 +479,11 @@ class TestReceiveEnvelope:
         a_root = tmp_path / "A"; a_root.mkdir()
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"A": {"root": str(a_root)}, "B": {"root": str(b_root)}})
-        save_aliases({"team": ["A", "B"]})
+        save_aliases({"ops": ["A", "B"]})
         agents = [Participant("A", a_root), Participant("B", b_root)]
         envelope = json.dumps({
-            "id": new_ulid(), "from": "REMOTE_X", "to": "team",
-            "content": "team msg", "files": [],
+            "id": new_ulid(), "from": "REMOTE_X", "to": "ops",
+            "content": "roster msg", "files": [],
         }).encode()
         receive_envelope(envelope, agents)
         # Both A and B got it (no sender-exclusion on inbound — sender lives

@@ -1,5 +1,5 @@
 {
-  "description": "r4t \u2014 Roster For Teams. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix> \u2014 external mail always enters at the roster leader. Roster in <root>/ROSTER.md; rig config out-of-repo at ~/.config/r4t/rigs.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.config/r4t team; with multiple teams, copy this file per node and append \"--node\", \"<prefix>\" to the IDLE invoke only (dispatch derives the node from --to and rejects --node).",
+  "description": "r4t \u2014 the roster. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix> \u2014 external mail always enters at the roster leader. Roster in <root>/ROSTER.md; rig config out-of-repo at ~/.config/r4t/rigs.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.config/r4t roster; with multiple rosters, copy this file per node and append \"--node\", \"<prefix>\" to the IDLE invoke only (dispatch derives the node from --to and rejects --node).",
   "invoke": [
     "python3",
     "$A8S_DIR/../r4t/r4t.py",
@@ -31,6 +31,6 @@
     ]
   },
   "prompts": {
-    "_comment": "Optional sparse overrides of r4t's built-in prompt text, by key (see apps/r4t/docs/org.md and plans/history/COMMS-SPEC.md §6). Substitution fields: {name}, {node}, {workplace}, {creator}, {thread}. Omit this whole object to use every default."
+    "_comment": "Optional sparse overrides of r4t's built-in prompt text, by key (see docs/r4t-org.md and plans/history/COMMS-SPEC.md §6). Substitution fields: {name}, {node}, {workplace}, {creator}, {thread}. Omit this whole object to use every default."
   }
 }

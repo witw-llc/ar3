@@ -134,9 +134,9 @@ class TestBuildCommand:
         # bound node's $RECIPIENT carries it verbatim and the node can
         # self-route internally.
         defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
-        msg = {"from": "GERRY", "to": "acme:team:phil", "content": "ping"}
+        msg = {"from": "GERRY", "to": "acme:ops:phil", "content": "ping"}
         argv = build_command(defn, msg, agent_root)
-        assert argv == ["claude", "-p", "GERRY tells acme:team:phil: ping"]
+        assert argv == ["claude", "-p", "GERRY tells acme:ops:phil: ping"]
 
     def test_missing_invoke_raises(self, agent_root):
         with pytest.raises(ValueError, match="invoke"):

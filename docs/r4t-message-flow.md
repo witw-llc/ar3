@@ -1,13 +1,13 @@
 # How a message flows
 
-The full life of a message through an r4t team, from the a8s wall to the
+The full life of a message through an r4t roster, from the a8s wall to the
 member's queue and back out. For governance rationale see
-[governance.md](governance.md); for the knob table see
-[rigs.md](rigs.md#governance-knobs).
+[r4t-governance.md](r4t-governance.md); for the knob table see
+[r4t-rigs.md](r4t-rigs.md#governance-knobs).
 
 ## The five steps
 
-1. `tell acme "..."` routes through a8s to the team node; the node's
+1. `tell acme "..."` routes through a8s to the roster node; the node's
    definition invokes `r4t dispatch`. **The topmost leader IS the garden
    from outside** — every external message enters at the top, no matter how
    it is addressed. A `node:member` sub-address from an outside sender is
@@ -15,14 +15,14 @@ member's queue and back out. For governance rationale see
    specific member); the leader is the one who decides what to relay inward.
    The lone exception is the roster human's own `Address:` — a reply from it
    is the human speaking, so it lands in the seat path and routes exactly
-   like a chat/seat send (see [operations.md](operations.md)).
+   like a chat/seat send (see [r4t-operations.md](r4t-operations.md)).
 2. r4t opens or continues a thread (a conversation label; a fresh thread
    opens for external mail) and ENQUEUES the message into the leader's
    durable queue — unconditionally. When the leader is runnable (both its
    spend bucket and the cell bucket hold ≥1, its breaker is closed, the
    throttle admits a start), ONE turn drains its whole queue: the prompt
    carries its persona, rolling history, and every waiting message at once.
-   Intra-team routing (below) is what delivers to a named member — from
+   Intra-roster routing (below) is what delivers to a named member — from
    *inside* the garden, addressing is honored.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so
    a member replies with the ordinary `tell` — unmodified. Inside the walls a
@@ -32,18 +32,18 @@ member's queue and back out. For governance rationale see
    a `class` (`human` deliberate · `auto` relay/nudge · `error` feedback). Each
    reply is attributed to the thread of the message it answers, the send quota
    applies, outbound messages land in the sender's history, and the message goes
-   straight onto the recipient member's queue (intra-team, no header, no
+   straight onto the recipient member's queue (intra-roster, no header, no
    round-trip) or is converted to an a8s envelope at the wall (external — the
    only place a wire header exists, carrying `class` in the envelope's `meta`).
-   Inside the team, agents address each other by bare first name
+   Inside the roster, agents address each other by bare first name
    (`tell gerry`) — the namespace prefix is the *outside* address of the
    walled garden, and roster agents never see it. Release canonicalizes
-   recipients: bare roster names become intra-team routes, human members
+   recipients: bare roster names become intra-roster routes, human members
    resolve to their real a8s address, and anything else (`chatroom`,
    external addresses) passes through untouched.
 4. Agents never wait for replies in a turn (actor doctrine): delegate, end
    the turn, get woken when replies arrive, answer the originator when
-   there is enough. `tell --sync` to teammates is prohibited by prompt and
+   there is enough. `tell --sync` to members is prohibited by prompt and
    pointless by design.
 5. Stdout fallback — `tell` always wins. A turn that staged even one
    envelope keeps its stdout as transcript. But a turn that exits 0,
@@ -53,7 +53,7 @@ member's queue and back out. For governance rationale see
    rig is above it: small local models reliably answer in prose and never
    run `tell`, and strong models fall into the same shape — a frontier
    Gemini model on the agy preset reasoned itself into prose-only replies
-   in a live org (see [harness-agy.md](harness-agy.md) for one incident the
+   in a live org (see [r4t-harness-agy.md](r4t-harness-agy.md) for one incident the
    fallback absorbed). Stdout-only turns participate without knowing the
    protocol exists; they are just downgraded to a single reply.
 
@@ -64,7 +64,7 @@ drops or dead-letters a deliverable message. Dead letters are for
 *undeliverable* mail only (unknown recipient, disabled member, a rig that
 will not resolve) plus a per-turn send-quota overflow: each becomes one JSON
 record (reason, count, from, to, thread, time) in
-`~/.config/r4t/teams/<node>/dead-letter/`. Duplicate collapse replaces pair
+`~/.config/r4t/rosters/<node>/dead-letter/`. Duplicate collapse replaces pair
 suppression: when the newest queued entry has the same sender and identical
 normalized body, the arrival collapses into it with a `repeats` count rather
 than adding noise. A turn drains the WHOLE queue at once (batch invoke): one

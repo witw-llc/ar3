@@ -50,7 +50,7 @@ old entry from default search.
 Store a binary content-addressed (SHA256, deduped). Prints the stored path.
 
 ### `distill <file|dir> [--dry-run]`
-Extract knowledge from raw files. See [distillation.md](distillation.md).
+Extract knowledge from raw files. See [k7e-distillation.md](k7e-distillation.md).
 
 ### `consolidate [--dry-run]`
 Find and merge duplicate nodes by title similarity.
@@ -79,4 +79,4 @@ Audit structural integrity; `--fix` repairs what it safely can.
 Show capabilities, the resolved LLM/embedding models, and recommendations.
 
 ### `config <key> [value]`
-Get/set configuration. See [configuration.md](configuration.md).
+Get/set configuration. See [k7e-configuration.md](k7e-configuration.md).

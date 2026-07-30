@@ -41,7 +41,7 @@ def _restore_tell_outbox_env():
 
 ROSTER_TEXT = textwrap.dedent(
     """\
-    # Team Roster
+    # Roster
 
     Preamble prose that is not a member block.
 

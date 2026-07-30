@@ -3,17 +3,17 @@
 Everything that lives in the out-of-repo rig config
 (`~/.config/r4t/rigs.json`, relocatable with `R4T_HOME`): presets, model
 selection, the settings surface, and the governance knob table. For the
-roster side see the [tutorial](tutorial.md); for why each governance layer
-exists see [governance.md](governance.md).
+roster side see the [tutorial](r4t-tutorial.md); for why each governance layer
+exists see [r4t-governance.md](r4t-governance.md).
 
 ## Presets
 
 Rig **names** are yours (`leader`, `member`, `reviewer`, …); **presets** are
-CLI templates aligned with [a8s definitions](../../a8s/definitions/):
+CLI templates aligned with [a8s definitions](../apps/a8s/definitions/):
 `claude`, `codex`, `cursor`, `opencode`, `copilot`, `agy`, plus the
 `ollama launch`-wrapped local variants (`opencode-ollama`, `claude-ollama`,
 `codex-ollama`, `copilot-ollama` — see
-[harness-ollama-launch.md](harness-ollama-launch.md)).
+[r4t-harness-ollama-launch.md](r4t-harness-ollama-launch.md)).
 
 ```bash
 r4t rig presets                       # list presets + invoke lines
@@ -142,7 +142,7 @@ value is never passed through, because agy would silently run its default.
 The `agy` preset runs **without** `--sandbox`. agy's sandbox confines the
 agent's child-process writes to the CWD, which blocks `tell` (its staging
 outbox lives outside the workplace repo) — the whole capability map and the
-2026-07-14 incident are in [harness-agy.md](harness-agy.md). Like every
+2026-07-14 incident are in [r4t-harness-agy.md](r4t-harness-agy.md). Like every
 other r4t preset, agy is trusted with normal filesystem permissions.
 
 ## Editing a rig's settings (`configure` / `set` / `get` / `unset`)
@@ -212,7 +212,7 @@ the heredoc teaching.
 
 It is **on by default** on `claude`, `codex`, `copilot` and `opencode` (and
 their `ollama launch` variants): their idioms are a flag, a `-c` override or a
-config file under the member's own state dir, so nothing lands in the team repo.
+config file under the member's own state dir, so nothing lands in the roster repo.
 `cursor` is **opt-in** — its only idiom writes `.cursor/mcp.json` into the
 working tree, and writing a file into your repo is a different consent level
 than passing a flag. `r4t rig set <rig> mcp off` is the escape hatch on any rig,
@@ -223,14 +223,14 @@ off silently and `rig set <rig> mcp on` errors there with a
 `(try: r4t rig swap <rig> ...)` hint rather than running turns whose tool never
 appears. Under an org boundary (`run_as` / `container`) r4t carries each
 harness's idiom across and fails the turn closed when it cannot — see
-[isolation](isolation.md#the-a8s_tell-tool-behind-the-boundary).
+[isolation](r4t-isolation.md#the-a8s_tell-tool-behind-the-boundary).
 
 ## Harness env knobs (`env`)
 
 A rig may carry static `NAME=value` pairs handed to its harness on every turn.
 **Use it frugally.** Every entry earns its place with a documented reason: this
 is the one rig key whose effect r4t cannot see, so a dumping ground here is a
-team whose behaviour nobody can explain from the config.
+roster whose behaviour nobody can explain from the config.
 
 ```bash
 r4t rig set brain env.ENABLE_PROMPT_CACHING_1H 1  # the 1-hour prompt-cache tier
@@ -258,7 +258,7 @@ per-turn `mcp` injection likewise wins any variable it sets (`OPENCODE_CONFIG`).
 Under an org boundary the map is named to the wrapper the same way the `mcp`
 idiom's env is — re-exported past sudoers `env_reset`, passed as `docker run -e`
 — so an isolated org's rig env still arrives (see
-[isolation](isolation.md)).
+[isolation](r4t-isolation.md)).
 
 ## The economics: budgets, not cuts
 
@@ -270,11 +270,11 @@ budget.
 
 The rig bucket is the quota answer. A rig maps to a real subscription (an
 Antigravity plan good for ~20 prompts an hour, a Claude seat), so its ceiling
-is set **on the rig** and is **machine-global**: it binds every r4t team on
+is set **on the rig** and is **machine-global**: it binds every r4t roster on
 the machine that shares the rig, so one subscription is safely shared across
 projects. Its bucket lives in `~/.config/r4t/rig-buckets.json` (outside any
-team) and every node charges it atomically. Budget refill IS the retry: an
-exhausted rig rests every member on it, on every team, and the held queues
+roster) and every node charges it atomically. Budget refill IS the retry: an
+exhausted rig rests every member on it, on every roster, and the held queues
 catch up when it refills — r4t is the retry system so a8s stays dumb delivery.
 
 A subscription can run dry mid-plan without any error: agy/claude/opencode all
@@ -288,13 +288,13 @@ transcript triggers it, never chrome-only output from a quiet-but-alive member.
 
 Per-rig keys go inside a rig block; the rest are top-level. Governance
 defaults apply with no extra configuration — a rig config with only rig
-invoke lines is a fully governed team. Rationale and prior art per layer:
-[governance.md](governance.md).
+invoke lines is a fully governed roster. Rationale and prior art per layer:
+[r4t-governance.md](r4t-governance.md).
 
 | Key | Default | Governs | Failure mode it stops |
 |---|---|---|---|
 | `budget_max` / `budget_earn_per_hour` (rig) | 8 / 4 | Per-member spend bucket. A turn costs 1 unit regardless of how many queued messages it consumes; empty = resting. Put frontier rigs on a low budget (slow, smart), local rigs on a high one (near-free) | Money burn; a fast rig outrunning its quota |
-| `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every team. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
+| `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every roster. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
@@ -303,8 +303,8 @@ invoke lines is a fully governed team. Rationale and prior art per layer:
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
-| `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Team-wide pile-ups |
+| `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Roster-wide pile-ups |
 | `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
 | `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
-| `log_retention_days` | 14 | Days of team transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
+| `log_retention_days` | 14 | Days of roster transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
 | `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |

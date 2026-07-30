@@ -254,7 +254,7 @@ class TestSharedDirAssertion:
 
 ROSTER = textwrap.dedent(
     """\
-    # Team
+    # Roster
 
     ### Gerry
     - **Rig:** leader
@@ -324,7 +324,7 @@ class TestRunAsProbeFailsClosed:
         env = {"TELL_OUTBOX_DIR": "/tmp/s", **Isolation(run_as="agent-x").to_env()}
         code, out, _dur, timed = run_harness(rig, "p", Path("/tmp"), env=env)
         assert code == 126 and not timed
-        assert "no passwordless sudo" in out and "docs/isolation.md" in out
+        assert "no passwordless sudo" in out and "docs/r4t-isolation.md" in out
 
 
 class TestOrgIsolationAppliesToEveryRig:
@@ -585,7 +585,7 @@ class TestMcpCrossesRunAs:
 
         assert code == 126 and not timed
         assert "mcp on" in out and "cannot read" in out and str(A8S_PY) in out
-        assert "docs/isolation.md" in out
+        assert "docs/r4t-isolation.md" in out
         assert not record.exists()  # the harness never ran taught-but-toolless
 
     def test_router_home_is_not_promised_to_the_server(self, tmp_path, fakebin):

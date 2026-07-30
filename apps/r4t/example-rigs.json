@@ -8,7 +8,7 @@
     "{workdir} is replaced with the member's absolute working directory, for a CLI that",
     "takes one as an argument (opencode: --dir {workdir}).",
     "Every key below is optional; the values shown for the governance knobs are the",
-    "defaults. See README.md for the knob table and docs/governance.md for why."
+    "defaults. See README.md for the knob table and docs/r4t-governance.md for why."
   ],
 
   "throttle": {
@@ -43,14 +43,14 @@
   },
 
   "agy": {
-    "_notes": "Antigravity rig — a real subscription (~20 prompts/hour). rig_budget_max/rig_budget_earn_per_hour bind that plan MACHINE-GLOBALLY: the bucket is shared by every team on this machine that uses `agy`, so one plan is safely shared across projects. Set both together; absent = no rig gate.",
+    "_notes": "Antigravity rig — a real subscription (~20 prompts/hour). rig_budget_max/rig_budget_earn_per_hour bind that plan MACHINE-GLOBALLY: the bucket is shared by every roster on this machine that uses `agy`, so one plan is safely shared across projects. Set both together; absent = no rig gate.",
     "invoke": ["agy", "-p", "{prompt}"],
     "timeout_seconds": 1200,
     "rig_budget_max": 20,
     "rig_budget_earn_per_hour": 20
   },
 
-  "_isolation_note": "OS-level isolation (run_as / container) is NOT a rig key — it is a per-ORG setting in r4t-org.json (one Unix user or image serves an org's whole roster, whatever rig runs a member). Behind the wall, choose the most-permissive preset. See docs/isolation.md.",
+  "_isolation_note": "OS-level isolation (run_as / container) is NOT a rig key — it is a per-ORG setting in r4t-org.json (one Unix user or image serves an org's whole roster, whatever rig runs a member). Behind the wall, choose the most-permissive preset. See docs/r4t-isolation.md.",
 
   "pins": {
     "_notes": "agent name -> rig. A pinned agent's rig comes from HERE, silently overriding the roster's Rig line — an in-repo roster edit can't upgrade a pinned agent.",

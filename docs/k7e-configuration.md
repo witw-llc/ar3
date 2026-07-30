@@ -27,7 +27,7 @@ k7e status                # what's active + recommendations
 | `decay_scale_days` | `K7E_DECAY_SCALE` | 365 | decay half-life; `<=0` disables decay |
 | `use_count_weight` | `K7E_USE_WEIGHT` | 0.2 | strength of use-count boost |
 
-See [retrieval.md](retrieval.md#tuning) for what the ranking knobs do.
+See [k7e-retrieval.md](k7e-retrieval.md#tuning) for what the ranking knobs do.
 
 ## LLM commands (stdin → stdout)
 

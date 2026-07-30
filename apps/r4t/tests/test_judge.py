@@ -79,7 +79,7 @@ def test_no_captures_refuses_cleanly(r4t_home, judge_config, judge_harness):
     assert "(try:" in err
     assert out == ""
     assert not list(calls.iterdir())
-    assert not (state.team_dir(NODE) / "judge").exists()
+    assert not (state.roster_dir(NODE) / "judge").exists()
 
 
 def test_findings_render_as_panel(r4t_home, judge_config, monkeypatch):
@@ -101,15 +101,15 @@ def test_findings_render_as_panel(r4t_home, judge_config, monkeypatch):
     assert "✗ 1 finding(s) across 1 mode(s)" in out
 
 
-def test_reports_persist_under_team_judge_dir(r4t_home, judge_config):
+def test_reports_persist_under_roster_judge_dir(r4t_home, judge_config):
     _seed_capture()
     code, out, _err = _run(judge_config)
     assert code == 0
-    home = state.team_dir(NODE) / "judge"
+    home = state.roster_dir(NODE) / "judge"
     reports = sorted(home.iterdir())
     assert [p.suffix for p in reports] == [".json", ".md"]
     assert str(reports[1]) in out
-    assert home.parent == state.team_dir(NODE)
+    assert home.parent == state.roster_dir(NODE)
     assert "agents" not in reports[0].parts[-3:]
 
 

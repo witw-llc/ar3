@@ -521,14 +521,14 @@ class TestRoutingIntegration:
             ensure_mailboxes(p)
         payload = agents["A"].root / "x.txt"
         payload.write_text("x")
-        _write_outbox("A", agents["A"].root, "devs", "team note", [], attachment_sources=[payload])
+        _write_outbox("A", agents["A"].root, "devs", "roster note", [], attachment_sources=[payload])
         route_outboxes(list(agents.values()), all_agents=list(agents.values()))
 
         rows = load_entries()
         assert len(rows) == 1
         assert rows[0]["to"] == "devs"
         assert sorted(rows[0]["recipients"]) == ["B", "C"]
-        assert rows[0]["content"] == "team note"
+        assert rows[0]["content"] == "roster note"
 
     def test_bob_convo_after_routed_thread(self, fake_home, tmp_path):
         from core import Participant

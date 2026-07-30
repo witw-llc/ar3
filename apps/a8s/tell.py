@@ -2,7 +2,7 @@
 
 Requires `TELL_OUTBOX_DIR` when set (a8s injects it on agent wake). If unset
 and `~/.a8s` is readable, `tell` may resolve a unique configured outbox from
-CWD — see `docs/filedrop.md`. `install-client` tell-only installs have
+CWD — see `docs/a8s-filedrop.md`. `install-client` tell-only installs have
 no registry and always need the env var.
 
 `~/.a8s` reachable and CWD inside a registered agent validates the recipient

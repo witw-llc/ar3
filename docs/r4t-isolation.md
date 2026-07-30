@@ -104,7 +104,7 @@ The message channel — the per-member staging dir that `TELL_OUTBOX_DIR` points
 at — is r4t's own state, not the operator's repo. r4t re-asserts it to
 `router:<agent-group>`, mode `2770` setgid, before every turn, so the agent
 writes envelopes into it and everything the agent creates stays group-owned and
-reachable by the router. Turn transcripts live under the router-owned team
+reachable by the router. Turn transcripts live under the router-owned roster
 directory and are written from the subprocess pipe, so the agent user cannot
 read, alter, or erase the audit trail.
 
@@ -171,7 +171,7 @@ deterministic name and lets `--rm` reap it.
 
 ## The `a8s_tell` tool behind the boundary
 
-The `mcp` knob ([rigs](rigs.md#the-a8s_tell-tool-mcp)) — on by default on most
+The `mcp` knob ([rigs](r4t-rigs.md#the-a8s_tell-tool-mcp)) — on by default on most
 presets — injects the a8s MCP server into every turn, and each harness takes it
 a different way:
 claude, codex and copilot read a flag, so it rides argv through both wrappers
@@ -212,7 +212,7 @@ change what runs* — not *it cannot phone out*.
 
 ## Whole-node containment (a deployment choice, not a feature)
 
-The org boundary wraps each member's turn. Because r4t anchors a team on a
+The org boundary wraps each member's turn. Because r4t anchors a roster on a
 directory and runs as ordinary machinery, an operator who wants a coarser wall
 can simply run the **entire node** — the r4t daemon, a8s, everything — under one
 Unix user or inside one container, as a deployment choice. Nothing in r4t needs
@@ -236,5 +236,5 @@ It doubles as a copy-pasteable provisioning checklist for a real deployment.
 
 Auto-provisioning users, sudoers, or workplace group bits; a forbidden-paths
 sweep of the agent user's home; GUI/desktop OAuth flows; supervising the router
-daemon itself. See [the security model](security.md) for what a repo edit can
+daemon itself. See [the security model](r4t-security.md) for what a repo edit can
 never change,.

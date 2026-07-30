@@ -105,7 +105,7 @@ class Trace:
 
 
 def _norm(node: str, addr: str) -> str:
-    """An address as the trace names it: intra-team `acme:phil` reads `phil`,
+    """An address as the trace names it: intra-roster `acme:phil` reads `phil`,
     everything else (outside agents, the `r4t:<node>` dispatcher voice) stays
     verbatim."""
     a = (addr or "").strip().lower()
@@ -118,14 +118,14 @@ def _scan_log(node: str, thread: str) -> tuple[list[Edge], list[Turn], list[str]
     turns: list[Turn] = []
     events: list[str] = []
     answered_by: str | None = None
-    # An intra-team send logs BOTH the recipient's QUEUED and the sender's
+    # An intra-roster send logs BOTH the recipient's QUEUED and the sender's
     # RELEASED-internal; a send to a human seat logs only the latter, and an
     # external one only RELEASED. Counting QUEUEDs per sender+recipient+hop lets
     # each RELEASED spend one — so every delivery becomes exactly one edge.
     delivered: dict[tuple[str, str, int], int] = {}
     turn: Turn | None = None
 
-    log_dir = state.team_dir(node) / "log"
+    log_dir = state.roster_dir(node) / "log"
     for path in sorted(log_dir.glob("*.md")) if log_dir.is_dir() else []:
         try:
             text = path.read_text(encoding="utf-8")
@@ -214,7 +214,7 @@ def _scan_log(node: str, thread: str) -> tuple[list[Edge], list[Turn], list[str]
 
 
 def _member_names(node: str) -> list[str]:
-    root = state.team_dir(node) / "agents"
+    root = state.roster_dir(node) / "agents"
     if not root.is_dir():
         return []
     return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
@@ -383,7 +383,7 @@ def _turn_rows(t: Trace) -> list[tuple[bool | None, str, str, str | None]]:
 def render(t: Trace) -> list[str]:
     out = [
         f"task: {t.thread}",
-        f"team: {t.node}  (state: {state.team_dir(t.node)})",
+        f"roster: {t.node}  (state: {state.roster_dir(t.node)})",
         "",
         "Thread",
         *_rows(_thread_rows(t)),
@@ -475,7 +475,7 @@ def run(node: str, thread_id: str, *, json_mode: bool = False) -> int:
     t = build(node, thread_id)
     if t.empty:
         print(
-            f"task trace: nothing recorded for thread {thread_id!r} on team {node}\n"
+            f"task trace: nothing recorded for thread {thread_id!r} on roster {node}\n"
             f"   (try: r4t task list --node {node})",
             file=sys.stderr,
         )

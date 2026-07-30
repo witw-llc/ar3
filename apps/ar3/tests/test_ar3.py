@@ -117,7 +117,7 @@ def test_a8s_panel_flags_an_unreadable_registry(homes):
 def test_r4t_panel_points_at_init_when_nothing_exists(homes):
     rows = ar3.r4t_rows()
     assert _row(rows, "rigs")[3] == "r4t init"
-    assert _row(rows, "teams")[3] == "r4t init"
+    assert _row(rows, "rosters")[3] == "r4t init"
 
 
 def test_r4t_panel_counts_only_rig_entries_not_governance_knobs(homes):
@@ -134,10 +134,10 @@ def test_r4t_panel_counts_only_rig_entries_not_governance_knobs(homes):
     assert hint is None
 
 
-def test_r4t_panel_lists_teams_under_the_home(homes):
+def test_r4t_panel_lists_rosters_under_the_home(homes):
     for node in ("alpha", "beta"):
-        (homes["r4t"] / "teams" / node).mkdir(parents=True)
-    assert _row(ar3.r4t_rows(), "teams")[:3] == (True, "teams", "2 team(s): alpha, beta")
+        (homes["r4t"] / "rosters" / node).mkdir(parents=True)
+    assert _row(ar3.r4t_rows(), "rosters")[:3] == (True, "rosters", "2 roster(s): alpha, beta")
 
 
 # ---------- k7e panel ----------

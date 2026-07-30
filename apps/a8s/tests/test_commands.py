@@ -1205,13 +1205,13 @@ class TestCmdTellNamespace:
         import json as _json
         sender_root = self._setup_sender(fake_home, tmp_path, monkeypatch)
         save_namespaces({"acme": "node"})
-        rc = cmd_tell(["ACME:Team:Phil", "hi"])
+        rc = cmd_tell(["ACME:Ops:Phil", "hi"])
         assert rc == 0
         outbox_files = list(outbox_dir(sender_root).iterdir())
         assert len(outbox_files) == 1
         msg = _json.loads(outbox_files[0].read_text())
         # The prefix canonicalizes like any name; the sub-address is verbatim.
-        assert msg["to"] == "acme:Team:Phil"
+        assert msg["to"] == "acme:Ops:Phil"
 
     def test_unknown_prefix_with_no_remotes_rejected(self, fake_home, tmp_path, monkeypatch, capsys):
         self._setup_sender(fake_home, tmp_path, monkeypatch)

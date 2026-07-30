@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from state import atomic_write_json, team_dir, utc_now
+from state import atomic_write_json, roster_dir, utc_now
 from ulid import new as new_ulid
 
 STATUS_OPEN = "open"
@@ -34,7 +34,7 @@ def new_thread_id() -> str:
 # ---------- ledger ----------
 
 def tasks_dir(node: str) -> Path:
-    return team_dir(node) / "tasks"
+    return roster_dir(node) / "tasks"
 
 
 def task_path(node: str, task_id: str) -> Path:

@@ -6,7 +6,7 @@ description: "Show whether The Ark is set up and working on this machine."
 # ar3
 
 The front door to The Ark: **a8s** (agent message router), **r4t**
-(roster for teams), **k7e** (knowledge engine).
+(the roster), **k7e** (knowledge engine).
 
 `ar3` orients and verifies. It reads state and probes prerequisites — it never
 changes anything, and it never runs another product's commands for you. When
@@ -34,10 +34,10 @@ a8s — agent message router  (~/.config/a8s)
   ✓ registry  3 agent(s), 1 alias(es), 0 namespace(s)
   ✗ router    no agent attached   (try: a8s start <agent>)
 
-r4t — roster for teams  (~/.config/r4t)
+r4t — the roster  (~/.config/r4t)
   ✓ cli    r4t -> /path/to/r4t
   ✓ rigs   2 rig(s): leader, worker
-  ✗ teams  none under ~/.config/r4t/teams   (try: r4t init)
+  ✗ rosters  none under ~/.config/r4t/rosters   (try: r4t init)
 
 k7e — knowledge engine  (~/.config/k7e)
   ✓ cli    k7e -> /path/to/k7e
@@ -69,6 +69,6 @@ one agent harness answering), 1 otherwise — so it can gate a setup script.
 ## What `ar3` is not
 
 `ar3` has exactly one subcommand. It does not wrap, alias, or pass through the
-products' own verbs: sending a message is still `tell`, running a team is still
+products' own verbs: sending a message is still `tell`, running a roster is still
 `r4t dispatch`, storing knowledge is still `k7e`. Those commands appear in
 `ar3` output only as hints pointing you at the tool that owns them.
