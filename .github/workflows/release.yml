@@ -1,0 +1,21 @@
+# Ships to the public mirror as .github/workflows/release.yml (the publish
+# job places .github-public/ into the snapshot as .github/). When the mirror
+# push lands a v* tag, this creates the GitHub Release with the repo's own
+# token — the deploy key that pushes the tag can only speak git.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub Release for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "The Ark $GITHUB_REF_NAME" \
+            --notes "$(printf 'One-line install:\n\n```sh\ncurl -fsSL https://raw.githubusercontent.com/%s/main/get.sh | sh\n```\n\nUpdates: re-run the same line, or `git -C ~/.ar3 pull`.' "$GITHUB_REPOSITORY")"
