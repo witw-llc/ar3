@@ -12,6 +12,8 @@ honors A8S_HOME).
     ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
     ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
     │                              sent this turn, released by dispatch afterwards
+    ├── agents/<name>/delivered/   per-turn bundles of inbound attachment copies
+    │                              for isolated turns (most recent 50 kept)
     ├── agents/<name>/mcp/         config the `mcp` knob hands the harness to read
     │                              (rig.py); readable behind an isolation boundary,
     │                              and the one dir a container mounts for it
@@ -752,6 +754,29 @@ def staged_envelopes(node: str, name: str) -> list[Path]:
     if not d.is_dir():
         return []
     return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
+def delivered_dir(node: str, name: str) -> Path:
+    return agent_dir(node, name) / "delivered"
+
+
+def list_delivered_bundles(node: str, name: str) -> list[Path]:
+    d = delivered_dir(node, name)
+    if not d.is_dir():
+        return []
+    return sorted(p for p in d.iterdir() if p.is_dir())
+
+
+def new_delivered_bundle(node: str, name: str) -> Path:
+    """Fresh per-turn bundle for inbound attachment copies (dispatch marshals
+    a8s ATTACHED FILE paths here when the org runs isolated, so the agent user
+    can read them). The time-sortable stamp names the bundle; retention rides
+    the same keep-most-recent policy as turn captures (TURN_RETENTION)."""
+    bundle = delivered_dir(node, name) / turn_capture_stamp()
+    bundle.mkdir(parents=True, exist_ok=True)
+    for stale in list_delivered_bundles(node, name)[:-TURN_RETENTION]:
+        shutil.rmtree(stale, ignore_errors=True)
+    return bundle
 
 
 # ---------- live turn output (a gemba attach tails this) ----------

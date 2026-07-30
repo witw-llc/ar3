@@ -16,7 +16,10 @@ import getpass
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+ATTACHED_FILE_PREFIX = "ATTACHED FILE: "  # twin of apps/a8s/definitions.py
 
 
 def _effective_user() -> str:
@@ -86,6 +89,34 @@ def _can_write_router_home() -> bool:
         return False
 
 
+def _delivered_checks(prompt: str) -> dict:
+    """The prompt's ATTACHED FILE line must point at a delivered copy the agent
+    can read but not write — dispatch marshals it across the boundary because
+    the a8s original sits in the router's sealed home."""
+    result = {
+        "delivered_path": "",
+        "delivered_readable": False,
+        "delivered_writable": False,
+    }
+    for line in prompt.splitlines():
+        if not line.startswith(ATTACHED_FILE_PREFIX):
+            continue
+        path = Path(line[len(ATTACHED_FILE_PREFIX):].strip())
+        result["delivered_path"] = str(path)
+        try:
+            result["delivered_readable"] = bool(path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+        try:
+            with path.open("a", encoding="utf-8") as f:
+                f.write("tamper")
+            result["delivered_writable"] = True
+        except OSError:
+            pass
+        break
+    return result
+
+
 def main() -> int:
     report = {
         "effective_user": _effective_user(),
@@ -93,6 +124,7 @@ def main() -> int:
         "can_read_router_home": _can_read_router_home(),
         "can_write_router_home": _can_write_router_home(),
         **_outbox_checks(),
+        **_delivered_checks(sys.argv[1] if len(sys.argv) > 1 else ""),
     }
     # cwd is the workplace (/work); dispatch cd'd here via the bootstrap's `cd "$2"`.
     Path("agent-results.json").write_text(

@@ -26,6 +26,11 @@ usermod -aG r4t-work agent
 usermod -aG agent router
 # The border: the agent must not be able to read the router's home.
 chmod 700 /home/router
+# An a8s-style attachment inside the sealed home — the delivered-bundle copy is
+# the only form the agent can read.
+echo "the sealed payload" > /home/router/briefing.txt
+chown router:router /home/router/briefing.txt
+chmod 600 /home/router/briefing.txt
 
 # --- scoped, passwordless sudo (NOT blanket NOPASSWD: ALL) ---------------------
 # router may act ONLY as agent, ONLY via the shapes r4t actually invokes: the
@@ -70,13 +75,14 @@ chown -R router:router /etc/r4t-org /etc/r4t-rigs.json
 chmod -R a+rX /opt/r4t   # the wrapped agent must be able to read member.py
 
 echo "== running a real org-level run_as dispatch turn (as the router user) =="
+MESSAGE=$'prove the boundary\nATTACHED FILE: /home/router/briefing.txt'
 sudo -u router env \
   R4T_HOME=/var/lib/r4t \
   PYTHONDONTWRITEBYTECODE=1 \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   python3 /opt/r4t/r4t.py dispatch \
     --root /etc/r4t-org \
-    --from boss --to acme:worker --message "prove the boundary" \
+    --from boss --to acme:worker --message "$MESSAGE" \
     --rig-config /etc/r4t-rigs.json --no-notify
 
 echo "== asserting invariants from the agent's own report =="
@@ -124,6 +130,18 @@ want(r["can_read_router_home"] is False,
      "the agent could read the router's home (border leak)")
 want(r["can_write_router_home"] is False,
      "the agent could write into the router's home (border leak)")
+
+# 6. the inbound attachment crossed as a delivered copy: rewritten out of the
+#    sealed home, readable by the agent, not writable (2750 read-side channel)
+want(bool(r["delivered_path"]),
+     "no ATTACHED FILE line reached the member (marshalling dropped it)")
+want(not r["delivered_path"].startswith("/home/router/"),
+     f'ATTACHED FILE still points into the sealed home '
+     f'({r["delivered_path"]!r}) — dispatch did not rewrite it')
+want(r["delivered_readable"] is True,
+     "the agent could not read the delivered attachment copy")
+want(r["delivered_writable"] is False,
+     "the agent could WRITE the delivered attachment copy (read-only channel leak)")
 
 if failures:
     print("\nISOLATION INVARIANTS VIOLATED:", file=sys.stderr)

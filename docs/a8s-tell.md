@@ -28,7 +28,7 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
    is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). `install-client`
    tell-only installs always need the env var.
 2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
-3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root.
+3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root. Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
 
 Envelope shape:
 

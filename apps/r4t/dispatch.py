@@ -68,6 +68,13 @@ from roster import Member, Roster, RosterError, load_roster
 
 DRAIN_MAX_PASSES = 20
 
+# Twin of ATTACHED_FILE_PREFIX in apps/a8s/definitions.py — the marker a8s
+# injects into a wake message for each delivered file. Importing it would drag
+# a8s's registry/core modules into dispatch (and collide with r4t's own flat
+# module names), so the string is pinned here; test_isolate.py asserts the
+# twins stay identical.
+ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
+
 # Default prompt text, overridable sparsely by key via the a8s node definition's
 # `prompts` object (#190). Substitution fields: {name}, {node}, {workplace},
 # {creator}, {thread}. Structural section headers stay in code (not doctrine).
@@ -654,6 +661,7 @@ def run_harness(
         env.update(rig.env)
 
     staging = (env or {}).get("TELL_OUTBOX_DIR", "")
+    delivered = (env or {}).get("R4T_DELIVERED_DIR", "")
     isolation = isolate.isolation_from_env(env)
 
     # The `mcp` knob: splice the a8s MCP server in with this harness's own
@@ -684,6 +692,13 @@ def run_harness(
             return 126, f"rig {rig.name!r} has mcp on but {mcp_error}", 0.0, False
         if staging:
             isolate.assert_writable_shared_dir(staging, isolate.agent_gid(isolation.run_as))
+        if delivered:
+            # The bundle AND its parent delivered/ dir, so the agent user can
+            # traverse to the copies — 2750, the read-only counterpart of the
+            # 2770 staging channel.
+            gid = isolate.agent_gid(isolation.run_as)
+            isolate.assert_readonly_shared_dir(Path(delivered).parent, gid)
+            isolate.assert_readonly_shared_dir(delivered, gid)
         argv = isolate.wrap_run_as(
             argv, isolation.run_as, staging, cwd, env_pass=boundary_env
         )
@@ -699,6 +714,7 @@ def run_harness(
             workplace=cwd,
             tell_outbox=staging,
             container_args=isolation.container_args,
+            delivered_dir=delivered or None,
             extra_env=boundary_env,
             extra_ro_dirs=mcp.mount_dirs,
         )
@@ -1413,6 +1429,58 @@ def _refound_turn(ctx: DispatchContext, member: Member, rig: Rig) -> bool:
     return not convo or bool(convo.get("retired"))
 
 
+def _marshal_attachments(
+    ctx: DispatchContext, member: Member, batch: list[dict]
+) -> Path | None:
+    """Copy a8s-attached files into a fresh delivered bundle for this member
+    and rewrite the batch's ATTACHED FILE lines to the copies. a8s hands paths
+    inside the router's own files dir — behind run_as/container that is another
+    user's sealed home — so the bundle (asserted 2750 by run_harness, mounted
+    read-only by the container wrapper) is the readable form. Returns the
+    bundle, or None when the batch carries no attachments; only called when the
+    org's isolation is active, so a bare org's prompts stay byte-identical.
+    A source that cannot be read is logged and its line left untouched — the
+    turn still runs and the member sees the original path."""
+    if not any(
+        line.startswith(ATTACHED_FILE_PREFIX)
+        for env_msg in batch
+        for line in str(env_msg.get("body", "")).splitlines()
+    ):
+        return None
+    bundle = state.new_delivered_bundle(ctx.node, member.name)
+    used: set[str] = set()
+    for env_msg in batch:
+        lines = str(env_msg.get("body", "")).splitlines()
+        rewritten = False
+        for i, line in enumerate(lines):
+            if not line.startswith(ATTACHED_FILE_PREFIX):
+                continue
+            src = Path(line[len(ATTACHED_FILE_PREFIX):].strip())
+            name = src.name
+            n = 1
+            while name in used:
+                name = f"{n}-{src.name}"
+                n += 1
+            dest = bundle / name
+            try:
+                shutil.copyfile(src, dest)
+                os.chmod(dest, 0o644)
+            except OSError as e:
+                state.append_log(
+                    ctx.node,
+                    f"r4t: ATTACH-SKIP {member.name.lower()} cannot copy {src} "
+                    f"into the delivered bundle ({e}); the original path rides "
+                    "the prompt and may be unreadable behind the boundary",
+                )
+                continue
+            used.add(name)
+            lines[i] = f"{ATTACHED_FILE_PREFIX}{dest}"
+            rewritten = True
+        if rewritten:
+            env_msg["body"] = "\n".join(lines)
+    return bundle
+
+
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -1461,12 +1529,15 @@ def _run_turn(
             "started": state.utc_now(),
         },
     )
+    delivered = _marshal_attachments(ctx, member, batch) if ctx.isolation.active else None
     prompt = build_prompt(ctx, roster, member, batch, rig, continues=continuing)
     if refound:
         prompt = ctx.prompt("refound_preamble") + "\n\n" + prompt
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
+    if delivered is not None:
+        env["R4T_DELIVERED_DIR"] = str(delivered)
     env["R4T_LIVE_LOG"] = str(state.reset_live_log(ctx.node, member.name))
     # Carried so run_harness can name a container's container deterministically
     # (r4t-<node>-<member>-<ts>) without widening the run_fn contract.

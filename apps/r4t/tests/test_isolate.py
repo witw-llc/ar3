@@ -23,7 +23,13 @@ import pytest
 
 import isolate
 import state
-from dispatch import DispatchContext, drain, handle_message, run_harness
+from dispatch import (
+    ATTACHED_FILE_PREFIX,
+    DispatchContext,
+    drain,
+    handle_message,
+    run_harness,
+)
 from isolate import Isolation
 from org import ORG_CONFIG_NAME, check_org, load_org
 from rig import (
@@ -837,3 +843,162 @@ class TestStatusRowRendering:
         out = capsys.readouterr().out
         assert rc == 0
         assert "isolation: [user:agent-x]" in out
+
+
+# ---------- inbound attachments cross the boundary (delivered bundles) ----------
+
+
+class TestAttachedFilePrefixTwin:
+    def test_matches_the_a8s_constant(self):
+        import ast
+        import re as _re
+
+        source = (A8S_PY.parent / "definitions.py").read_text(encoding="utf-8")
+        m = _re.search(r"^ATTACHED_FILE_PREFIX = (.+)$", source, _re.M)
+        assert m, "a8s no longer defines ATTACHED_FILE_PREFIX where the twin expects it"
+        assert ast.literal_eval(m.group(1)) == ATTACHED_FILE_PREFIX
+
+
+def _one_recorded_turn(ctx, body: str) -> tuple[str, dict]:
+    """Send one message to phil and drain with a recording run_fn — the prompt
+    and turn env exactly as the harness would receive them, no wrapper."""
+    calls: list[tuple[str, dict]] = []
+
+    def run_fn(rig, prompt, cwd, *, env=None, variant=0):
+        calls.append((prompt, dict(env or {})))
+        return 0, "ok", 0.1, False
+
+    handle_message(ctx, "acme:gerry", "acme:phil", body, drain_after=False)
+    drain(ctx, run_fn=run_fn)
+    assert len(calls) == 1
+    return calls[0]
+
+
+class TestAttachmentsMarshalAcrossTheBoundary:
+    """a8s's ATTACHED FILE paths point into the router's files dir — behind
+    run_as/container, another user's sealed home. An isolated turn gets copies
+    in the member's delivered bundle and a rewritten prompt; a bare org gets
+    the original bytes."""
+
+    def test_isolated_turn_copies_and_rewrites(self, iso_ctx_factory, tmp_path):
+        src = tmp_path / "router-files" / "report.txt"
+        src.parent.mkdir()
+        src.write_text("payload\n", encoding="utf-8")
+        ctx = iso_ctx_factory({"run_as": "agent-x"})
+
+        prompt, env = _one_recorded_turn(
+            ctx, f"see the report\n{ATTACHED_FILE_PREFIX}{src}"
+        )
+
+        bundle = Path(env["R4T_DELIVERED_DIR"])
+        assert bundle.parent == state.delivered_dir(NODE, "phil")
+        copy = bundle / "report.txt"
+        assert copy.read_text(encoding="utf-8") == "payload\n"
+        assert f"{ATTACHED_FILE_PREFIX}{copy}" in prompt
+        assert str(src) not in prompt
+
+    def test_same_basename_twice_stays_two_files(self, iso_ctx_factory, tmp_path):
+        a = tmp_path / "files-a" / "notes.txt"
+        b = tmp_path / "files-b" / "notes.txt"
+        for f, text in ((a, "first"), (b, "second")):
+            f.parent.mkdir()
+            f.write_text(text, encoding="utf-8")
+        ctx = iso_ctx_factory({"run_as": "agent-x"})
+
+        prompt, env = _one_recorded_turn(
+            ctx,
+            f"{ATTACHED_FILE_PREFIX}{a}\n{ATTACHED_FILE_PREFIX}{b}",
+        )
+
+        bundle = Path(env["R4T_DELIVERED_DIR"])
+        assert (bundle / "notes.txt").read_text(encoding="utf-8") == "first"
+        assert (bundle / "1-notes.txt").read_text(encoding="utf-8") == "second"
+        assert f"{ATTACHED_FILE_PREFIX}{bundle / '1-notes.txt'}" in prompt
+
+    def test_bare_org_passes_the_original_path_through(self, iso_ctx_factory, tmp_path):
+        src = tmp_path / "router-files" / "report.txt"
+        src.parent.mkdir()
+        src.write_text("payload\n", encoding="utf-8")
+        ctx = iso_ctx_factory(None)
+        line = f"{ATTACHED_FILE_PREFIX}{src}"
+
+        prompt, env = _one_recorded_turn(ctx, f"see the report\n{line}")
+
+        assert line in prompt  # untouched — no copy, no rewrite
+        assert "R4T_DELIVERED_DIR" not in env
+        assert not state.delivered_dir(NODE, "phil").exists()
+
+    def test_isolated_turn_without_attachments_makes_no_bundle(self, iso_ctx_factory):
+        ctx = iso_ctx_factory({"run_as": "agent-x"})
+
+        _prompt, env = _one_recorded_turn(ctx, "no files here")
+
+        assert "R4T_DELIVERED_DIR" not in env
+        assert not state.delivered_dir(NODE, "phil").exists()
+
+    def test_missing_source_is_logged_and_its_path_kept(self, iso_ctx_factory, tmp_path):
+        good = tmp_path / "router-files" / "good.txt"
+        good.parent.mkdir()
+        good.write_text("ok", encoding="utf-8")
+        gone = tmp_path / "router-files" / "gone.txt"
+        ctx = iso_ctx_factory({"run_as": "agent-x"})
+
+        prompt, env = _one_recorded_turn(
+            ctx,
+            f"{ATTACHED_FILE_PREFIX}{good}\n{ATTACHED_FILE_PREFIX}{gone}",
+        )
+
+        bundle = Path(env["R4T_DELIVERED_DIR"])
+        assert (bundle / "good.txt").is_file()  # the turn still runs
+        assert f"{ATTACHED_FILE_PREFIX}{gone}" in prompt  # original line kept
+        log = "\n".join(state.recent_log_lines(NODE))
+        assert "ATTACH-SKIP" in log and str(gone) in log
+
+
+class TestDeliveredDirCrossesTheWrappers:
+    def test_run_as_asserts_2750_on_bundle_and_parent(self, tmp_path, fakebin):
+        _recording_sudo(fakebin, tmp_path / "sudo.txt")
+        rig = _env_rig({})
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
+        bundle = tmp_path / "state" / "worker" / "delivered" / "20260101T000000000000Z"
+        bundle.mkdir(parents=True)
+        env["R4T_DELIVERED_DIR"] = str(bundle)
+
+        run_harness(rig, "P", workplace, env=env)
+
+        # Read-only counterpart of the 2770 staging channel; the parent rides
+        # along so the agent user can traverse to the bundle.
+        assert stat.S_IMODE(bundle.stat().st_mode) == 0o2750
+        assert stat.S_IMODE(bundle.parent.stat().st_mode) == 0o2750
+
+    def test_container_mounts_the_bundle_read_only(self, tmp_path, fakebin):
+        record = tmp_path / "docker.txt"
+        _recording_docker(fakebin, record)
+        rig = _env_rig({})
+        env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(container="img"))
+        bundle = tmp_path / "state" / "worker" / "delivered" / "20260101T000000000000Z"
+        bundle.mkdir(parents=True)
+        env["R4T_DELIVERED_DIR"] = str(bundle)
+
+        run_harness(rig, "P", workplace, env=env)
+
+        argv = _wrapped_argv(record)
+        mount = f"{bundle}:{bundle}:ro"
+        assert mount in argv
+        assert argv[argv.index(mount) - 1] == "-v"
+        assert argv.index(mount) < argv.index("img")
+
+
+class TestDeliveredRetention:
+    def test_bundles_prune_to_turn_retention(self, r4t_home):
+        d = state.delivered_dir(NODE, "phil")
+        for i in range(60):
+            (d / f"{i:04d}").mkdir(parents=True)
+
+        bundle = state.new_delivered_bundle(NODE, "phil")
+
+        bundles = state.list_delivered_bundles(NODE, "phil")
+        assert len(bundles) == state.TURN_RETENTION
+        assert bundle in bundles  # the fresh bundle always survives its own sweep
+        assert not (d / "0000").exists()  # oldest swept
+        assert (d / "0059").exists()  # newest predecessors kept

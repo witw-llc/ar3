@@ -108,6 +108,17 @@ reachable by the router. Turn transcripts live under the router-owned roster
 directory and are written from the subprocess pipe, so the agent user cannot
 read, alter, or erase the audit trail.
 
+Inbound attachments cross in the read direction. a8s injects `ATTACHED FILE:`
+paths that point into the router's own files dir — behind the boundary, another
+user's sealed home — so before an isolated turn r4t copies each attached file
+into a per-turn bundle under `agents/<member>/delivered/`, re-asserts the
+bundle to `router:<agent-group>` mode `2750` setgid (the read-only counterpart
+of the `2770` staging channel), and rewrites the prompt's paths to the copies.
+A container turn bind-mounts the bundle read-only. A source r4t cannot read is
+logged and its original line left in place; the turn still runs. Bundles follow
+turn-capture retention: the most recent 50 per member. Without isolation,
+prompts carry the a8s paths untouched.
+
 ### The wrapper
 
 ```

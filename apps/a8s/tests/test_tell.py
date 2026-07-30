@@ -489,6 +489,95 @@ def test_tell_rejects_missing_attachment(tmp_path):
     assert "not found" in res.stderr
 
 
+def _outbox_dirs(outbox: Path) -> list[Path]:
+    return [p for p in outbox.iterdir() if p.is_dir()]
+
+
+requires_unprivileged = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores file permission bits"
+)
+
+
+@requires_unprivileged
+def test_tell_staging_failure_removes_partial_bundle(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    good = tmp_path / "good.txt"
+    good.write_text("ok")
+    locked = tmp_path / "locked.bin"
+    locked.write_bytes(b"secret")
+    locked.chmod(0o000)
+    res = _run(
+        tmp_path, "bob", "--attach", str(good), "--attach", str(locked), "hi"
+    )
+    assert res.returncode == 1
+    assert "staging failed" in res.stderr
+    outbox = tmp_path / ".outbox"
+    assert list(outbox.glob("*.json")) == []
+    assert _outbox_dirs(outbox) == []
+
+
+@requires_unprivileged
+def test_tell_staging_failure_cleans_split_parts_dir(tmp_path, monkeypatch):
+    from core import TELL_FILE_MAX_ENV
+
+    (tmp_path / ".outbox").mkdir()
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * 2000)
+    locked = tmp_path / "locked.bin"
+    locked.write_bytes(b"y")
+    locked.chmod(0o000)
+    monkeypatch.setenv(TELL_FILE_MAX_ENV, "1000")
+    res = _run(
+        tmp_path,
+        "bob",
+        "--attach",
+        str(big),
+        "--attach",
+        str(locked),
+        "--split",
+        "hi",
+    )
+    assert res.returncode == 1
+    assert "staging failed" in res.stderr
+    outbox = tmp_path / ".outbox"
+    assert list(outbox.glob("*.json")) == []
+    assert _outbox_dirs(outbox) == []
+    assert list(outbox.glob(".*.parts")) == []
+
+
+def test_tell_unknown_recipient_with_attachment_leaves_clean_outbox(
+    fake_home, tmp_path, monkeypatch
+):
+    from registry import save_registry
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / ".outbox").mkdir()
+    save_registry({"SENDER": {"root": str(agent_root)}})
+    monkeypatch.chdir(agent_root)
+    payload = agent_root / "payload.txt"
+    payload.write_text("x")
+
+    res = _run_a8s(agent_root, "ghost", "--attach", str(payload), "hi")
+    assert res.returncode == 1
+    assert "no agent or alias named 'ghost'" in res.stderr
+    outbox = agent_root / ".outbox"
+    assert list(outbox.glob("*.json")) == []
+    assert _outbox_dirs(outbox) == []
+
+
+def test_tell_success_leaves_only_bundle_and_envelope(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    doc = tmp_path / "doc.txt"
+    doc.write_text("payload")
+    res = _run(tmp_path, "bob", "--attach", str(doc), "hi")
+    assert res.returncode == 0, res.stderr
+    outbox = tmp_path / ".outbox"
+    _name, msg = _read_outbox(outbox)
+    _assert_staged_files(outbox, msg, ["doc.txt"])
+    assert _outbox_dirs(outbox) == [outbox_bundle_dir(outbox, msg["id"])]
+
+
 def test_tell_stages_attach_from_cwd_when_outbox_via_tell_outbox_dir(tmp_path):
     outbox = tmp_path / "mailbox" / ".outbox"
     outbox.mkdir(parents=True)

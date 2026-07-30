@@ -592,25 +592,6 @@ def tell_main(argv: list[str]) -> int:
         _report_outbox_unavailable()
         return 1
 
-    msg_id = new_ulid()
-    split_dir = outbox / f".{msg_id}.parts"
-    try:
-        prepared, prep_rc = _prepare_attachment_entries(
-            files, split=split, work_dir=split_dir
-        )
-        if prep_rc != 0:
-            return prep_rc
-        try:
-            staged_files = (
-                stage_outbox_attachments(outbox, msg_id, prepared) if prepared else []
-            )
-        except OSError as e:
-            print(f"tell: attachment staging failed: {e}", file=sys.stderr)
-            return 1
-    finally:
-        if split_dir.is_dir():
-            shutil.rmtree(split_dir, ignore_errors=True)
-
     sender = _optional_sender()
     to = recipient
     kind: str | None = None
@@ -621,14 +602,40 @@ def tell_main(argv: list[str]) -> int:
         assert canonical is not None
         to = canonical
 
-    msg = write_outbox_envelope(
-        outbox,
-        to,
-        content,
-        staged_files,
-        from_name=sender[0] if sender is not None else None,
-        msg_id=msg_id,
-    )
+    msg_id = new_ulid()
+    split_dir = outbox / f".{msg_id}.parts"
+    try:
+        prepared, prep_rc = _prepare_attachment_entries(
+            files, split=split, work_dir=split_dir
+        )
+        if prep_rc != 0:
+            return prep_rc
+        committed = False
+        try:
+            try:
+                staged_files = (
+                    stage_outbox_attachments(outbox, msg_id, prepared)
+                    if prepared
+                    else []
+                )
+            except OSError as e:
+                print(f"tell: attachment staging failed: {e}", file=sys.stderr)
+                return 1
+            write_outbox_envelope(
+                outbox,
+                to,
+                content,
+                staged_files,
+                from_name=sender[0] if sender is not None else None,
+                msg_id=msg_id,
+            )
+            committed = True
+        finally:
+            if not committed:
+                shutil.rmtree(outbox_bundle_dir(outbox, msg_id), ignore_errors=True)
+    finally:
+        if split_dir.is_dir():
+            shutil.rmtree(split_dir, ignore_errors=True)
 
     preview = _preview(content)
     line = f"tell -> {to}: {preview}"
