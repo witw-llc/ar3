@@ -860,6 +860,59 @@ class TestContinuedTurnHistory:
         assert IN_HARNESS not in prompt
 
 
+class TestPromptStats:
+    """#39 — the wake's composition is measured where it is knowable: at build
+    time. Surfaces: a `r4t: PROMPT` day-log line and a `- prompt:` line in the
+    turn capture meta, both carrying the template path and per-section bytes."""
+
+    def test_sections_join_to_the_prompt_and_sizes_sum_to_total(self, ctx):
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.reinforce = "stay in your lane"
+        sections = dispatch.prompt_sections(ctx, roster, phil, [], Rig(name="t"))
+        prompt = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t"))
+        assert "\n".join(p for _l, parts in sections for p in parts) == prompt
+        stats = dispatch.prompt_stats(sections)
+        assert [label for label, _ in stats] == [
+            "intro", "persona", "history", "messages", "doctrine", "reinforce",
+        ]
+        assert (
+            sum(size for _, size in stats) + len(stats) - 1
+            == len(prompt.encode("utf-8"))
+        )
+
+    def test_refound_flag_prepends_the_preamble(self, ctx):
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        base = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t"))
+        refound = dispatch.build_prompt(
+            ctx, roster, phil, [], Rig(name="t"), refound=True
+        )
+        assert refound == REFOUND_PREAMBLE + "\n\n" + base
+
+    def test_turn_logs_the_prompt_line_and_capture_meta(self, ctx, fake_harness):
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
+        log = read_log()
+        assert "r4t: PROMPT phil founding " in log
+        line = next(l for l in log.splitlines() if "r4t: PROMPT phil" in l)
+        for label in ("intro", "persona", "history", "messages", "doctrine"):
+            assert f"{label} " in line
+        (capture,) = state.list_turn_captures(NODE, "phil")
+        text = capture.read_text(encoding="utf-8")
+        assert "- prompt: founding " in text and " bytes — intro " in text
+
+    def test_continue_and_refound_paths_are_named(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        log = read_log()
+        refound_line = next(
+            l for l in log.splitlines() if "r4t: PROMPT ana refound" in l
+        )
+        assert "preamble " in refound_line
+        assert "r4t: PROMPT ana continue " in log
+
+
 REINFORCE_LINE = "Reinforcement from your operator: stay in your lane"
 
 

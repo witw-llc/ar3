@@ -92,6 +92,7 @@ Full flow: [r4t-message-flow.md](r4t-message-flow.md).
 - [Message flow](r4t-message-flow.md) — threads, queues, the stdout fallback
 - [Operations](r4t-operations.md) — `status`, `logs`, `chat`, the human seat
 - [Org design](r4t-org.md) — cells and leads, `MISSION.md`, portable orgs
+- [Knowledge](r4t-knowledge.md) — a member's private k7e memory (experimental)
 - [Verification](r4t-verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge, `r4t task trace`
 - [Governance](r4t-governance.md) — why each layer exists, with prior art
 - [Security model](r4t-security.md) — what a repo edit can never change

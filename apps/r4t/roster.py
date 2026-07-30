@@ -89,6 +89,27 @@ def parse_flush(value: str) -> float:
     return seconds
 
 
+KNOWLEDGE_DEFAULT_BUDGET = 2048  # bytes — the field survey's floor; K0 argues it up
+KNOWLEDGE_RE = re.compile(r"^(\d+)\s*(k|kb)?$", re.IGNORECASE)
+
+
+def parse_knowledge(value: str) -> int:
+    """`Knowledge:` value -> inject budget in bytes. `on` takes the default
+    budget, `off` is 0, a bare size (`4k`, `4096`) sets it exactly."""
+    v = value.strip().lower()
+    if v in ("", "off", "no", "false"):
+        return 0
+    if v in ("on", "yes", "true"):
+        return KNOWLEDGE_DEFAULT_BUDGET
+    match = KNOWLEDGE_RE.match(v)
+    if not match:
+        raise ValueError(
+            f"Knowledge must be on, off, or a size like 4k (got {value!r})"
+        )
+    n = int(match.group(1))
+    return n * 1024 if match.group(2) else n
+
+
 class RosterError(Exception):
     pass
 
@@ -105,6 +126,7 @@ class Member:
     flush_seconds: float | None = None
     fallback: bool = True
     reinforce: str = ""
+    knowledge_bytes: int = 0
     cell: str = ""
     lead: str = ""
     workdir: str = ""
@@ -308,6 +330,12 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
             f"Fallback must be on or off, got {fb!r} (try: Fallback: off)"
         )
     m.reinforce = fields.get("reinforce", "")
+    kn = fields.get("knowledge", "")
+    if kn:
+        try:
+            m.knowledge_bytes = parse_knowledge(kn)
+        except ValueError as e:
+            m.errors.append(str(e))
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
     m.workdir = fields.get("workdir", "")

@@ -31,6 +31,23 @@ class TestRecall:
         assert engine.search("bridge isolates containers")[0]["title"] == "Docker Networks"
         assert engine.search("record replay macro")[0]["title"] == "Vim Macros"
 
+    def test_sentence_query_with_punctuation(self, store):
+        """A natural-language question must not return nothing: bare
+        punctuation is FTS5 syntax, so every raw attempt errors and only a
+        sanitized OR fallback can match."""
+        engine.store_entry(
+            "Project Foxglove launch codeword",
+            "The launch codeword for Project Foxglove is AMBER-KESTREL.",
+            tags=["ops"],
+        )
+        engine.store_entry("Docker Networks", "Bridge mode isolates containers", tags=["docker"])
+        results = engine.search(
+            "What is the launch codeword for Project Foxglove? State it in "
+            "one sentence. If you have no record of one, say so."
+        )
+        assert results
+        assert results[0]["title"] == "Project Foxglove launch codeword"
+
     def test_false_negative_rate(self, store):
         """Store 20 facts with unique content, query each. Zero misses."""
         facts = [(f"Fact-{i}", f"UniqueContent-{i}-Marker-{i*13}", [f"t{i%5}"]) for i in range(20)]

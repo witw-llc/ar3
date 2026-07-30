@@ -52,6 +52,7 @@ from datetime import datetime
 from pathlib import Path
 
 import isolate
+import knowledge
 import state
 import tasks
 from rig import (
@@ -512,7 +513,7 @@ def resolve_workdir(ctx: DispatchContext, member: Member) -> Path:
     return ctx.workplace / p
 
 
-def build_prompt(
+def prompt_sections(
     ctx: DispatchContext,
     roster: Roster,
     member: Member,
@@ -520,8 +521,14 @@ def build_prompt(
     rig: Rig,
     *,
     continues: bool = False,
-) -> str:
-    """`continues` means this turn runs inside the CLI's own conversation
+    refound: bool = False,
+) -> list[tuple[str, list[str]]]:
+    """The wake prompt as ordered, labeled sections — the composition is
+    knowable only here, at build time, so this is where its shape is exposed
+    (#39). Joining every section's parts with newlines yields the prompt
+    byte-for-byte; `prompt_stats` measures the same structure.
+
+    `continues` means this turn runs inside the CLI's own conversation
     (`Continue: on`, a rig that resumes, and not a refound) — the harness
     already carries the whole conversation, so embedding r4t's transcript of it
     would send the same context twice. A one-line note stands in its place so
@@ -532,6 +539,9 @@ def build_prompt(
     continue included — because on a small model the last thing read wins, and
     winning there is the field's whole job. Absent, the prompt is byte-identical
     to a roster without the field."""
+    preamble: list[tuple[str, list[str]]] = (
+        [("preamble", [ctx.prompt("refound_preamble"), ""])] if refound else []
+    )
     history = state.read_history(ctx.node, member.name)
     members = _member_lines(ctx, roster, member)
     message_lines: list[str] = []
@@ -557,22 +567,29 @@ def build_prompt(
         # instructions, no member list, no how-to-work doctrine. It gets who
         # it is, what has been said, and the new messages — its stdout IS the
         # reply (_stage_echo_reply).
-        parts = [
-            ctx.prompt("echo_intro", name=member.name, node=ctx.node),
-            "",
-            *_mission_section(ctx, roster, member),
-            "## Who you are (from the roster)",
-            member.persona or f"### {member.name}",
-            "",
-            "## Your conversation so far (messages you received and sent)",
-            history.strip() or "(no prior messages — this is your first recorded turn)",
-            "",
-            "## Messages since your last turn",
-            *(message_lines or ["(none)"]),
+        sections = preamble + [
+            ("intro", [ctx.prompt("echo_intro", name=member.name, node=ctx.node), ""]),
+            ("mission", _mission_section(ctx, roster, member)),
+            ("persona", [
+                "## Who you are (from the roster)",
+                member.persona or f"### {member.name}",
+                "",
+            ]),
+            ("history", [
+                "## Your conversation so far (messages you received and sent)",
+                history.strip() or "(no prior messages — this is your first recorded turn)",
+                "",
+            ]),
+            ("messages", [
+                "## Messages since your last turn",
+                *(message_lines or ["(none)"]),
+            ]),
         ]
         if member.reinforce:
-            parts += ["", ctx.prompt("reinforce", text=member.reinforce)]
-        return "\n".join(parts)
+            sections.append(
+                ("reinforce", ["", ctx.prompt("reinforce", text=member.reinforce)])
+            )
+        return [(label, parts) for label, parts in sections if parts]
     workdir = resolve_workdir(ctx, member)
     workdir_lines: list[str] = []
     if workdir.resolve() != ctx.workplace.resolve():
@@ -583,37 +600,88 @@ def build_prompt(
         ctx.prompt("history_in_harness") if continues
         else history.strip() or "(no prior messages — this is your first recorded turn)"
     )
-    parts = [
-        ctx.prompt(
-            "intro",
-            name=member.name,
-            node=ctx.node,
-            workplace=workdir.resolve(),
-        ),
-        *workdir_lines,
-        "",
-        *_mission_section(ctx, roster, member),
-        "## Who you are (from the roster)",
-        member.persona or f"### {member.name}",
-        "",
-        "## Your conversation so far (messages you received and sent)",
-        history_section,
-        "",
-        "## Messages since your last turn",
-        *(message_lines or ["(none)"]),
-        "## How to work",
-        ctx.prompt("work_batch"),
-        ctx.prompt("work_never_wait"),
-        ctx.prompt("work_tell_mcp" if rig.mcp_on else "work_tell"),
-        *(members or ["    - (none)"]),
-        ctx.prompt("work_direct"),
-        ctx.prompt("work_no_ack"),
-        ctx.prompt("work_body_only"),
-        ctx.prompt("work_commit"),
+    sections = preamble + [
+        ("intro", [
+            ctx.prompt(
+                "intro",
+                name=member.name,
+                node=ctx.node,
+                workplace=workdir.resolve(),
+            ),
+            *workdir_lines,
+            "",
+        ]),
+        ("mission", _mission_section(ctx, roster, member)),
+        ("persona", [
+            "## Who you are (from the roster)",
+            member.persona or f"### {member.name}",
+            "",
+        ]),
+        ("history", [
+            "## Your conversation so far (messages you received and sent)",
+            history_section,
+            "",
+        ]),
+        ("messages", [
+            "## Messages since your last turn",
+            *(message_lines or ["(none)"]),
+        ]),
+        ("doctrine", [
+            "## How to work",
+            ctx.prompt("work_batch"),
+            ctx.prompt("work_never_wait"),
+            ctx.prompt("work_tell_mcp" if rig.mcp_on else "work_tell"),
+            *(members or ["    - (none)"]),
+            ctx.prompt("work_direct"),
+            ctx.prompt("work_no_ack"),
+            ctx.prompt("work_body_only"),
+            ctx.prompt("work_commit"),
+        ]),
+        # Knowledge rides after the doctrine and before Reinforce, so the
+        # closing line keeps its last-read primacy. Echo members never get it
+        # (a reachability probe has no use for recall). Off (the default)
+        # keeps the prompt byte-identical.
+        ("knowledge", knowledge.knowledge_section(ctx, member, batch)),
     ]
     if member.reinforce:
-        parts += ["", ctx.prompt("reinforce", text=member.reinforce)]
-    return "\n".join(parts)
+        sections.append(
+            ("reinforce", ["", ctx.prompt("reinforce", text=member.reinforce)])
+        )
+    return [(label, parts) for label, parts in sections if parts]
+
+
+def build_prompt(
+    ctx: DispatchContext,
+    roster: Roster,
+    member: Member,
+    batch: list[dict],
+    rig: Rig,
+    *,
+    continues: bool = False,
+    refound: bool = False,
+) -> str:
+    """The joined form of `prompt_sections` — see there for the shape rules."""
+    return "\n".join(
+        p
+        for _label, parts in prompt_sections(
+            ctx, roster, member, batch, rig, continues=continues, refound=refound
+        )
+        for p in parts
+    )
+
+
+def prompt_stats(sections: list[tuple[str, list[str]]]) -> list[tuple[str, int]]:
+    """UTF-8 byte size per section, in prompt order. The single newline joining
+    adjacent sections is counted in the total (`len(prompt.encode())`), not in
+    any section — so total == sum(sizes) + len(sections) - 1."""
+    return [
+        (label, len("\n".join(parts).encode("utf-8")))
+        for label, parts in sections
+    ]
+
+
+def _kb(n: int) -> str:
+    return f"{n / 1000:.1f}k"
 
 
 def run_harness(
@@ -1381,6 +1449,7 @@ def _capture_turn(
     rig_name: str,
     prompt: str,
     output: str,
+    prompt_note: str = "",
 ) -> None:
     """Persist one turn's full assembled prompt and full raw harness output to
     agents/<member>/turns/. Wrapped so a write failure only warns — observability
@@ -1396,6 +1465,7 @@ def _capture_turn(
             f"- timed_out: {str(timed_out).lower()}",
             f"- rig: {rig_name}",
         ]
+        + ([f"- prompt: {prompt_note}"] if prompt_note else [])
     )
     content = (
         f"# turn {stamp} ({member.name})\n\n{meta}\n\n"
@@ -1540,9 +1610,20 @@ def _run_turn(
         },
     )
     delivered = _marshal_attachments(ctx, member, batch) if ctx.isolation.active else None
-    prompt = build_prompt(ctx, roster, member, batch, rig, continues=continuing)
-    if refound:
-        prompt = ctx.prompt("refound_preamble") + "\n\n" + prompt
+    sections = prompt_sections(
+        ctx, roster, member, batch, rig, continues=continuing, refound=refound
+    )
+    prompt = "\n".join(p for _label, parts in sections for p in parts)
+    if rig.echo:
+        prompt_path = "echo"
+    elif continuing:
+        prompt_path = "continue"
+    elif refound:
+        prompt_path = "refound"
+    else:
+        prompt_path = "founding"
+    stats = prompt_stats(sections)
+    prompt_total = len(prompt.encode("utf-8"))
 
     env = dict(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
@@ -1568,6 +1649,11 @@ def _run_turn(
         f"rig {rig.name}"
         + (f" variant {variant}" if rig.pool_size > 1 else "")
         + f")\n\n### Prompt\n\n{prompt}",
+    )
+    state.append_log(
+        ctx.node,
+        f"r4t: PROMPT {member.name.lower()} {prompt_path} {_kb(prompt_total)} — "
+        + " ".join(f"{label} {_kb(size)}" for label, size in stats),
     )
 
     workdir = resolve_workdir(ctx, member)
@@ -1615,6 +1701,8 @@ def _run_turn(
         rig_name=rig.name,
         prompt=prompt,
         output=output,
+        prompt_note=f"{prompt_path} {prompt_total} bytes — "
+        + ", ".join(f"{label} {size}" for label, size in stats),
     )
 
     failed = timed_out or exit_code != 0
@@ -2396,16 +2484,17 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
         return {
-            "quiet_nudged": [], "drained": 0, "flushed": [],
+            "quiet_nudged": [], "drained": 0, "flushed": [], "dreamed": [],
             "mission_review": {"fired": False}, "error": str(e),
         }
     nudged = _quiet_task_sweep(ctx, config, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
     flushed = _flush_sweep(ctx, config, roster, run_fn)
+    dreamed = knowledge.dream_sweep(ctx, roster)
     review = _mission_review(ctx, config, roster, drained, run_fn)
     if review.get("fired"):
         drained += drain_until_quiet(ctx, run_fn=run_fn)
     return {
         "quiet_nudged": nudged, "drained": drained, "flushed": flushed,
-        "mission_review": review,
+        "dreamed": dreamed, "mission_review": review,
     }

@@ -89,7 +89,12 @@ it is enqueued, and its turn output streaming as it comes out (teed to
 after the fact, every turn is also captured whole under
 `agents/<member>/turns/` — one markdown file per turn (prompt + raw output,
 successes and timeouts alike, most recent 50 kept), surfaced by
-`r4t logs --agent <member> --full`. Attaching is observation only — it never
+`r4t logs --agent <member> --full`. What each wake cost is measured at
+composition: every dispatched turn writes a `r4t: PROMPT <member> <path>
+<total> — <section> <bytes> …` line to the day log (path is founding, continue,
+refound, or echo) and the same breakdown onto the capture's `- prompt:` meta
+line, so a mission that rides every calendar reminder shows up as a number, not
+an archaeology dig. Attaching is observation only — it never
 sends to that member; the composer keeps talking to the seat's usual
 counterparties. `/detach` steps back out. Training wheels, not a replacement
 for autonomy — everything still flows through normal dispatch and governance.

@@ -1041,10 +1041,20 @@ def _search_bm25(conn, query, limit, include_superseded=False):
     expanded = query.replace("-", " ").replace("_", " ")
     queries_to_try = [query, expanded]
 
-    # OR fallback with stopwords removed
-    meaningful = [w for w in expanded.split() if w.lower() not in _STOPWORDS and len(w) > 1]
+    # OR fallback: alphanumeric terms only (punctuation is FTS5 syntax — a
+    # sentence query like `codeword?` errors every attempt otherwise), each
+    # quoted so reserved words stay terms, deduped, capped so an arbitrarily
+    # long caller query cannot balloon the MATCH expression.
+    seen = set()
+    meaningful = []
+    for w in re.findall(r"[A-Za-z0-9]+", expanded):
+        lw = w.lower()
+        if lw in _STOPWORDS or len(w) < 2 or lw in seen:
+            continue
+        seen.add(lw)
+        meaningful.append(w)
     if meaningful:
-        queries_to_try.append(" OR ".join(meaningful))
+        queries_to_try.append(" OR ".join(f'"{w}"' for w in meaningful[:40]))
 
     status_clause = "" if include_superseded else "AND nodes.status = 'active'"
     for q in queries_to_try:
@@ -1063,7 +1073,9 @@ def _search_bm25(conn, query, limit, include_superseded=False):
 
 
 def _search_metadata(conn, query, limit, include_superseded=False):
-    terms = [t for t in query.lower().split() if len(t) > 2]
+    # Same \w+ extraction as text_words below, so punctuation in the query
+    # ("codeword?") cannot mask a term that is plainly present.
+    terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 2]
     if not terms:
         return []
     status_clause = "" if include_superseded else "WHERE status = 'active'"
