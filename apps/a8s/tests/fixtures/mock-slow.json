@@ -1,0 +1,4 @@
+{
+  "description": "Test-only slow mock CLI — sleeps before echoing argv (see mock-slow-cli).",
+  "invoke": ["$A8S_DIR/tests/fixtures/mock-slow-cli", "FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE"]
+}

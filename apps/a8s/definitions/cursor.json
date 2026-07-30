@@ -1,0 +1,12 @@
+{
+  "description": "Cursor Agent CLI default — -p print mode for headless wakes, --trust + --force for unattended tool use, --continue resumes most recent session.",
+  "invoke": [
+    "agent",
+    "-p",
+    "--trust",
+    "--force",
+    "--approve-mcps",
+    "--continue",
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}

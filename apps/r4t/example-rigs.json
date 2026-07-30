@@ -1,0 +1,59 @@
+{
+  "_notes": [
+    "r4t rig config — copy to ~/.config/r4t/rigs.json and edit (or start from `r4t init`).",
+    "This file is the security boundary: it lives OUTSIDE the repo, and only rigs",
+    "defined here can run. A roster Harness naming a rig absent from this file fails",
+    "closed. Keys starting with _ are ignored everywhere.",
+    "{prompt} is replaced with the built prompt as a single argv element — never a shell.",
+    "{workdir} is replaced with the member's absolute working directory, for a CLI that",
+    "takes one as an argument (opencode: --dir {workdir}).",
+    "Every key below is optional; the values shown for the governance knobs are the",
+    "defaults. See README.md for the knob table and docs/governance.md for why."
+  ],
+
+  "throttle": {
+    "max_concurrent": 1,
+    "min_seconds_between_turn_starts": 15
+  },
+  "cell_budget_max": 16,
+  "cell_budget_earn_per_hour": 8,
+  "quiet_task_seconds": 1800,
+  "breaker_cap": 5,
+  "breaker_cooldown_seconds": 600,
+
+  "leader": {
+    "_notes": "Orchestrator rig — Cursor agent CLI. A frontier model on a low budget: high intelligence, few turns per hour, spends smart.",
+    "invoke": ["agent", "-p", "--yolo", "{prompt}"],
+    "timeout_seconds": 1800,
+    "budget_max": 8,
+    "budget_earn_per_hour": 4,
+    "max_sends_per_turn": 8
+  },
+
+  "junior-dev": {
+    "_notes": "Cheap worker rig — OpenCode with whatever model the repo's opencode.json picks. A local model runs almost freely, so a generous budget. invoke may also be a POOL (list of argvs) rotated round-robin per turn — agents never know which variant ran them.",
+    "invoke": [
+      ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
+      ["opencode", "run", "--auto", "--dir", "{workdir}", "--model", "ollama/gpt-oss:20b", "{prompt}"]
+    ],
+    "timeout_seconds": 900,
+    "budget_max": 40,
+    "budget_earn_per_hour": 30,
+    "max_sends_per_turn": 4
+  },
+
+  "agy": {
+    "_notes": "Antigravity rig — a real subscription (~20 prompts/hour). rig_budget_max/rig_budget_earn_per_hour bind that plan MACHINE-GLOBALLY: the bucket is shared by every team on this machine that uses `agy`, so one plan is safely shared across projects. Set both together; absent = no rig gate.",
+    "invoke": ["agy", "-p", "{prompt}"],
+    "timeout_seconds": 1200,
+    "rig_budget_max": 20,
+    "rig_budget_earn_per_hour": 20
+  },
+
+  "_isolation_note": "OS-level isolation (run_as / container) is NOT a rig key — it is a per-ORG setting in r4t-org.json (one Unix user or image serves an org's whole roster, whatever rig runs a member). Behind the wall, choose the most-permissive preset. See docs/isolation.md.",
+
+  "pins": {
+    "_notes": "agent name -> rig. A pinned agent's rig comes from HERE, silently overriding the roster's Rig line — an in-repo roster edit can't upgrade a pinned agent.",
+    "gerry": "leader"
+  }
+}

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Deterministic mock agent CLI used in pytest. Echoes every argv element on
+# its own line, prefixed with "MOCK-CLI:" so tests can grep for them.
+# Exits 0.
+for arg in "$@"; do
+    printf 'MOCK-CLI: %s\n' "$arg"
+done

@@ -1,0 +1,9 @@
+{
+  "description": "Antigravity (agy) default — skip-permissions for headless operation.",
+  "invoke": [
+    "agy",
+    "--dangerously-skip-permissions",
+    "--continue",
+    "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}

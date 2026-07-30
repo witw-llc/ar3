@@ -1,0 +1,194 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with
+code in this repository.
+
+## Repo shape
+
+This repo is **The Ark** — four apps that ship together, plus the guide that
+teaches them.
+
+- **Top level** — polyglot CLI shims (`ar3`, `a8s`, `tell`, `tells`, `r4t`,
+  `k7e`) plus their `.cmd`/`.ps1` siblings, `install.sh`, `VERSION`.
+  `install.sh` adds the repo dir to `$PATH` and links `docs/` as skills.
+- **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
+  letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
+  other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
+  and usage, [`apps/a8s/DEVELOPMENT.md`](apps/a8s/DEVELOPMENT.md) for hard
+  constraints and historical decisions.
+- **`apps/r4t/`** — Roster for teams. Rigs, dispatch, verdicts, isolation.
+  See [`apps/r4t/README.md`](apps/r4t/README.md) and `apps/r4t/docs/`.
+- **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
+  SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
+  See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
+- **`apps/ar3/`** — The front door. Reads suite state and probes prerequisites;
+  it never mutates anything and never wraps another product's verbs.
+- **`guide/`** — *The Ark Raising*, the chapter-by-chapter build-along.
+- **`docs/`** — top-level tool docs with YAML frontmatter, symlinked into
+  `~/.claude/skills/` and `~/.cursor/skills/` by `install.sh --skills`.
+- **`requirements/`** — dependency groups (`a8s-test.txt`, `r4t.txt`). Per-app
+  `tests/requirements.txt` files point here.
+
+The sibling layout under `apps/` is load-bearing: r4t resolves a8s at
+`apps/a8s/a8s.py` relative to its own file, and `apps/a8s/definitions/r4t.json`
+expands `$A8S_DIR/../r4t/r4t.py`. The shims live at the repo root because
+`apps/r4t/isolate.py` mounts the repo root into containers and puts it on
+`PATH` so `tell` resolves inside a turn. Do not reshuffle either.
+
+## Versioning — every merge bumps `VERSION`
+
+The repo carries a single suite semver in `VERSION`, and **every merge to `main`
+increments it**. CI fails any PR whose `VERSION` equals `main`'s: patch bump
+minimum, minor or major at the author's judgment per semver semantics. Merge and
+version bump are the same event, so `main`'s history doubles as the release
+ledger. Bump `VERSION` in the same PR as the change it describes.
+
+Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
+
+## Conventions
+
+### Shebangs
+
+All bash scripts use `#!/usr/bin/env bash` (not `#!/bin/bash`). macOS ships
+bash 3.2.57; users with Homebrew bash get a modern version this way. Don't
+introduce `#!/bin/bash`.
+
+### Polyglot bash + PowerShell scripts
+
+Cross-platform CLIs (`a8s`, `tell`) are polyglots — the same file is valid
+bash AND PowerShell. The bash side delegates to Python; the PowerShell side
+finds `python3`/`python`/`py` via `Get-Command`. The pattern uses
+`echo \`# <#` >/dev/null` as a no-op for bash that opens a PowerShell
+multi-line comment. `tell` is a thin shim around `a8s tell`; don't add new
+polyglots without reading an existing one first.
+
+Windows can't run the extensionless polyglot from `PATH`, so the important
+top-level commands also ship a sibling `.ps1` (PowerShell prefers it over the
+extensionless file) and a `.cmd` for `cmd.exe`. Both are thin: resolve the
+repo dir, find python, exec the entry-point `.py`, propagate the exit code.
+
+### Install hook
+
+`install.sh` is sourced from a shell rc. It adds the repo dir to `$PATH`. Pass
+`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` (when Claude
+Code is present) and `~/.cursor/skills/` for Cursor. That mechanism installs the
+user's own tool docs; a8s installs nothing into a project.
+
+Adding a new top-level CLI: write the shim, write `docs/<name>.md` with YAML
+frontmatter if it should be installable as a Claude skill.
+
+### Workflow
+
+**Issues + feature branches off `main`. No direct commits to `main`.** Every
+change goes through a PR. The user squash-merges fast. After a squash, rebase
+follow-up work onto fresh `main` rather than stacking — squash hashes don't
+match the original branch's commits and stacking causes conflicts.
+
+### Pre-v1 / scorch-the-earth
+
+The suite is explicitly pre-v1. **Do not write migration code.** When the schema
+changes, the user wipes `~/.config/a8s/` and re-derives state via `a8s discover`
++ `a8s add`. This applies to registry shape, mailbox layout, definition schema,
+and on-disk pid/log paths. The contract changes only when the user declares 1.0.
+
+### Commit style
+
+- Commits prefixed `feat(a8s)` / `fix(r4t)` / `refactor(k7e)` / `test(ar3)` /
+  `docs(guides)` per Conventional Commits.
+- Body explains the *why* and the design decision, not just the mechanical
+  *what*.
+- Co-author trailer for AI-assisted work:
+  `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`
+
+### Code style
+
+- Default to no comments. Names should explain what; comments are only for
+  *why* something non-obvious is done.
+- Avoid emojis in source unless asked.
+- Don't add abstractions that aren't being used today. Three similar lines is
+  fine; abstract on the fourth.
+- Don't add error handling for cases that can't happen. Trust internal
+  guarantees; validate at boundaries (CLI input, external APIs, filesystem).
+- Don't add backwards-compat hacks. See pre-v1 above.
+
+### SKILL.md YAML — quoted scalars only
+
+Harness YAML parsers differ: copilot rejects unquoted descriptions
+containing colons outright (skill dropped), and other parsers have their
+own strictness. Always quote `name:` and `description:` in skill
+frontmatter.
+
+### Docs voice
+
+Docs speak present truth. No "used to" / "previously" framing — git holds the
+history. Never the words honest/honestly. User-facing surfaces (CLI help, skill
+descriptions) get one short sentence with no internals; mechanics go in the
+README or the docstring.
+
+## Top-level scripts: `tell`
+
+`tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
+Implementation lives in `apps/a8s/tell.py`. Outbox resolution: `TELL_OUTBOX_DIR`
+when set (a8s injects it on wake); otherwise a unique configured outbox matched
+from CWD when `~/.config/a8s` is readable (desktop filedrop seats — see
+`apps/a8s/docs/filedrop.md`). When the registry is reachable and CWD is inside
+a registered agent, recipient validation, `from` stamping, and agent logging
+apply on top.
+
+The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
+which agent owns the enclosing root — the filesystem is the unforgeable
+identity.
+
+a8s plants no skill files in an agent's repo: `tell` reads `TELL_OUTBOX_DIR`
+from the environment a8s injects on wake. Top-level doc skills for the user's
+own harness come from `source <repo>/install.sh --skills`.
+
+## Common operations
+
+```bash
+# a8s tests (~640 tests)
+python3 -m pytest apps/a8s/tests/
+
+# r4t tests
+python3 -m pytest apps/r4t/tests/
+
+# k7e tests (~69 tests)
+cd apps/k7e && tests/run
+
+# ar3 tests
+python3 -m pytest apps/ar3/tests/
+
+# Suite status and prerequisite probes
+ar3
+ar3 doctor
+
+# Start fresh after a schema change (pre-v1 scorch-the-earth)
+rm -rf ~/.config/a8s/agents/ ~/.config/a8s/a8s.json
+a8s discover apps/a8s/tests/agents
+
+# Tail per-agent activity
+a8s logs CLAUDE GEMINI -f
+
+# Clear local inbox without invoking
+a8s drain my-agent
+
+# Flush MQTT-queued messages (connect, trash for N seconds, exit)
+a8s run my-agent --drain 5
+```
+
+## The resident agent: Ares
+
+Claude Code sessions in this repo operate the a8s seat named **Ares**
+(ar3 + s). Messages on the a8s network from this repo's assistant carry
+that name, and mail addressed to `Ares` reaches it. Session start for
+a8s work: read [the filedrop playbook](https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent)
+(the seat's operating manual) and arm a persistent inbox monitor so
+incoming tells get answered without the owner having to relay them.
+Operate the seat only — never other seats or router infrastructure.
+
+## Memory note
+
+The resident agent keeps a private memory outside this repo (personal
+preferences, ongoing project state, feedback rules). THIS file is the
+checked-in onboarding doc; keep it free of anything that would not
+belong in a released repo.

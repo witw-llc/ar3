@@ -1,0 +1,18 @@
+{
+  "A": {
+    "Q1": "yes", "Q7": "yes",
+    "Q2": "no", "Q8": "no",
+    "Q3": null, "Q9": null,
+    "Q4": null, "Q10": null,
+    "Q5": null, "Q11": null,
+    "Q6": null, "Q12": null
+  },
+  "B": {
+    "Q1": "yes", "Q7": "yes",
+    "Q2": "no", "Q8": "no",
+    "Q3": null, "Q9": null,
+    "Q4": null, "Q10": null,
+    "Q5": null, "Q11": null,
+    "Q6": null, "Q12": null
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "description": "Filedrop seat: file-proxy delivery. Messages land as JSON in <root>/.inbox; watch with `tells -f`. See docs/filedrop.md.",
+  "proxy": "file"
+}

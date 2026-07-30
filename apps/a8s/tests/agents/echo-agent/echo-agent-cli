@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+echo `# <#` >/dev/null
+
+# Polyglot bash + PowerShell wrapper. Defers to a sibling echo_agent.py so
+# the Python can grow without touching the shell scaffolding. Bash side
+# execs python3; PowerShell side resolves python3/python/py via Get-Command.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$HERE/echo_agent.py" "$@"
+
+#> > $null
+
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath) { $ScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath) { $ScriptPath = Join-Path (Get-Location) "echo-agent-cli" }
+
+$Here = Split-Path -Parent $ScriptPath
+$PyFile = Join-Path $Here "echo_agent.py"
+
+$Python = $null
+foreach ($cmd in @('python3', 'python', 'py')) {
+    $found = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($found) { $Python = $found.Source; break }
+}
+if (-not $Python) {
+    Write-Error "echo-agent-cli: python3 not found on PATH"
+    exit 127
+}
+
+& $Python $PyFile @args
+exit $LASTEXITCODE
+#>

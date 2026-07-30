@@ -1,0 +1,5 @@
+{
+  "description": "solo — a local agent: a harness CLI behind a8s",
+  "invoke": ["bash", "reply.sh", "$SENDER", "$MESSAGE"],
+  "max_wake_seconds": 600
+}

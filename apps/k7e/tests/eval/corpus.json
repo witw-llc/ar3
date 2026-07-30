@@ -1,0 +1,44 @@
+[
+  {"key": "ssh-local-fwd", "title": "SSH Local Port Forwarding", "content": "ssh -L 8080:target:80 bastion forwards your local port 8080 to target:80 through the bastion host. Use it to reach a remote service from your machine.", "tags": ["ssh", "networking"]},
+  {"key": "ssh-remote-fwd", "title": "SSH Remote Port Forwarding", "content": "ssh -R 9090:localhost:3000 server exposes your local port 3000 as port 9090 on the remote server. Use it to publish a local service outward.", "tags": ["ssh", "networking"]},
+  {"key": "ssh-proxyjump", "title": "SSH ProxyJump Bastion Hopping", "content": "ssh -J bastion target connects through a jump host in one step. ProxyJump is cleaner than nested ssh -W for bastion access.", "tags": ["ssh", "networking"]},
+  {"key": "ssh-key-auth", "title": "SSH Key Authentication", "content": "Generate a keypair with ssh-keygen -t ed25519 and copy the public key with ssh-copy-id. Passwordless login uses the private key in ~/.ssh.", "tags": ["ssh", "security"]},
+
+  {"key": "docker-port", "title": "Docker Port Mapping", "content": "docker run -p 8080:80 nginx maps host port 8080 to container port 80. The host port is on the left of the colon.", "tags": ["docker", "networking"]},
+  {"key": "docker-bridge", "title": "Docker Bridge Networking", "content": "The default bridge network isolates containers; use a user-defined bridge so containers resolve each other by name via embedded DNS.", "tags": ["docker", "networking"]},
+  {"key": "docker-layers", "title": "Docker Layer Caching", "content": "Order Dockerfile instructions from least to most frequently changing. Put dependency installs before copying source so the cache survives code edits.", "tags": ["docker", "performance"]},
+  {"key": "docker-volumes", "title": "Docker Named Volumes", "content": "docker run -v mydata:/var/lib/data persists data in a named volume that outlives the container. Bind mounts map a host directory instead.", "tags": ["docker", "storage"]},
+
+  {"key": "git-rebase", "title": "Git Rebase Workflow", "content": "Rebase a feature branch onto main with git rebase main to keep history linear before merging. Resolve conflicts per commit, then continue.", "tags": ["git"]},
+  {"key": "git-cherry-pick", "title": "Git Cherry Pick", "content": "git cherry-pick <sha> applies a single commit from another branch onto the current one. Useful for backporting one fix without merging everything.", "tags": ["git"]},
+  {"key": "git-bisect", "title": "Git Bisect Regression Hunt", "content": "git bisect start, mark a good and a bad commit, and git binary-searches to find the commit that introduced a regression.", "tags": ["git", "debugging"]},
+  {"key": "git-reflog", "title": "Git Reflog Recovery", "content": "git reflog lists every HEAD movement so you can recover commits lost after a bad reset or rebase by checking out the dangling sha.", "tags": ["git", "recovery"]},
+
+  {"key": "pg-vacuum", "title": "PostgreSQL VACUUM", "content": "VACUUM reclaims dead tuples left by updates and deletes. VACUUM ANALYZE also refreshes planner statistics for better query plans.", "tags": ["postgres", "database"]},
+  {"key": "pg-index", "title": "PostgreSQL Index Types", "content": "B-tree indexes serve equality and range queries; GIN indexes accelerate full-text and jsonb containment lookups. Create with CREATE INDEX.", "tags": ["postgres", "database"]},
+  {"key": "pg-explain", "title": "PostgreSQL EXPLAIN ANALYZE", "content": "EXPLAIN ANALYZE runs the query and shows actual row counts and timing per node, exposing sequential scans that should use an index.", "tags": ["postgres", "performance"]},
+  {"key": "pg-pool", "title": "PostgreSQL Connection Pooling", "content": "Use PgBouncer in transaction mode to multiplex many client connections onto a small pool, avoiding the per-connection memory cost of Postgres backends.", "tags": ["postgres", "performance"]},
+
+  {"key": "py-gil", "title": "Python GIL", "content": "The Global Interpreter Lock lets only one thread execute Python bytecode at a time, so CPU-bound threads do not run in parallel. Use multiprocessing for parallelism.", "tags": ["python", "concurrency"]},
+  {"key": "py-asyncio", "title": "Python Asyncio Event Loop", "content": "asyncio runs coroutines cooperatively on a single-threaded event loop. await yields control so I/O-bound tasks overlap without threads.", "tags": ["python", "concurrency"]},
+  {"key": "py-venv", "title": "Python Virtual Environments", "content": "python -m venv .venv creates an isolated environment; activate it and pip install dependencies without polluting the system interpreter.", "tags": ["python", "tooling"]},
+  {"key": "py-comprehension", "title": "Python List Comprehensions", "content": "A list comprehension like [x*x for x in items if x > 0] builds a list in one expression, faster and clearer than an append loop.", "tags": ["python"]},
+
+  {"key": "tmux-prefix", "title": "Tmux Prefix Key", "content": "The default tmux prefix is Ctrl-b. Many remap it to Ctrl-a in tmux.conf for easier reach before pane and window commands.", "tags": ["tmux", "terminal"]},
+  {"key": "vim-macros", "title": "Vim Macros", "content": "Record a macro with qa, perform edits, stop with q, then replay with @a. Prefix a count like 10@a to repeat it ten times.", "tags": ["vim", "terminal"]},
+
+  {"key": "net-tcp-udp", "title": "TCP vs UDP", "content": "TCP is connection-oriented with ordered, reliable delivery and retransmission. UDP is connectionless and unreliable but lower latency, good for streaming.", "tags": ["networking"]},
+  {"key": "net-dns-ttl", "title": "DNS TTL and Caching", "content": "A DNS record's TTL tells resolvers how long to cache it. Lower the TTL before a migration so clients pick up the new IP quickly.", "tags": ["networking", "dns"]},
+
+  {"key": "http-status", "title": "HTTP Status Codes", "content": "2xx means success, 3xx redirection, 4xx client error like 404 not found, and 5xx server error like 502 bad gateway.", "tags": ["http", "web"]},
+  {"key": "http-cors", "title": "HTTP CORS Preflight", "content": "Browsers send an OPTIONS preflight for cross-origin requests; the server must return Access-Control-Allow-Origin and allowed methods or the call is blocked.", "tags": ["http", "web", "security"]},
+
+  {"key": "redis-persist", "title": "Redis Persistence RDB AOF", "content": "Redis can persist with RDB snapshots or an append-only file. AOF replays writes on restart for better durability; RDB is faster to load.", "tags": ["redis", "database"]},
+  {"key": "redis-expire", "title": "Redis Key Expiration", "content": "Set a TTL on a key with EXPIRE key seconds or SET key val EX seconds. Expired keys are removed lazily and by a background sampler.", "tags": ["redis", "database"]},
+
+  {"key": "k8s-probe", "title": "Kubernetes Liveness and Readiness Probes", "content": "A liveness probe restarts an unhealthy container; a readiness probe gates traffic until the pod is ready. Configure httpGet path and period.", "tags": ["kubernetes"]},
+  {"key": "k8s-resources", "title": "Kubernetes Resource Requests and Limits", "content": "Requests reserve CPU and memory for scheduling; limits cap usage. Exceeding a memory limit triggers an OOMKill of the container.", "tags": ["kubernetes", "performance"]},
+
+  {"key": "make-phony", "title": "Makefile PHONY Targets", "content": "Declare .PHONY: clean test so make runs the recipe even when a file named clean exists, since the target is not a real file.", "tags": ["make", "tooling"]},
+  {"key": "bash-set-euo", "title": "Bash Strict Mode", "content": "set -euo pipefail makes a bash script exit on error, error on unset variables, and fail a pipeline if any stage fails.", "tags": ["bash", "tooling"]}
+]

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Like mock-cli but sleeps first so attached_loop tests can observe in-flight wakes.
+sleep "${MOCK_SLEEP:-1}"
+for arg in "$@"; do
+    printf 'MOCK-CLI: %s\n' "$arg"
+done

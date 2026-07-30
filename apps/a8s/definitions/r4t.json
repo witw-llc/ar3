@@ -1,0 +1,36 @@
+{
+  "description": "r4t \u2014 Roster For Teams. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix> \u2014 external mail always enters at the roster leader. Roster in <root>/ROSTER.md; rig config out-of-repo at ~/.config/r4t/rigs.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.config/r4t team; with multiple teams, copy this file per node and append \"--node\", \"<prefix>\" to the IDLE invoke only (dispatch derives the node from --to and rejects --node).",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../r4t/r4t.py",
+    "dispatch",
+    "--root",
+    ".",
+    "--definition",
+    "$DEFINITION_PATH",
+    "--from",
+    "$SENDER",
+    "--to",
+    "$RECIPIENT",
+    "--message",
+    "$MESSAGE",
+    "--meta",
+    "$META"
+  ],
+  "max_wake_seconds": 2700,
+  "idle": {
+    "timeout": 300,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "idle",
+      "--root",
+      ".",
+      "--definition",
+      "$DEFINITION_PATH"
+    ]
+  },
+  "prompts": {
+    "_comment": "Optional sparse overrides of r4t's built-in prompt text, by key (see apps/r4t/docs/org.md and plans/history/COMMS-SPEC.md §6). Substitution fields: {name}, {node}, {workplace}, {creator}, {thread}. Omit this whole object to use every default."
+  }
+}

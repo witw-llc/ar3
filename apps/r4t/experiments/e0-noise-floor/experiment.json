@@ -1,0 +1,37 @@
+{
+  "name": "e0-noise-floor",
+  "question": "How much do a local judge's yes/no verdicts wobble across repeats and paraphrased wording, with the task held identical?",
+  "class": "posthoc",
+  "arms": {
+    "A": "original question wording",
+    "B": "paraphrased question wording (same task)"
+  },
+  "roles": {
+    "judge": {"rig": "local", "pin": "qwen3.6"}
+  },
+  "trials_per_arm": 4,
+  "stopping_rule": null,
+  "box_seconds": 600,
+  "metrics": ["accuracy", "within_arm_consistency", "cross_arm_agreement"],
+  "predictions": [
+    {
+      "claim": "cross_arm_agreement >= 75% (paraphrase wording does not flip verdicts)",
+      "confidence": 0.7,
+      "check": {"metric": "cross_arm_agreement", "op": ">=", "value": 0.75}
+    },
+    {
+      "claim": "within_arm_consistency >= 75% per arm",
+      "confidence": 0.6,
+      "check": {"metric": "within_arm_consistency", "op": ">=", "value": 0.75, "scope": "each_arm"}
+    }
+  ],
+  "posthoc": {
+    "transcript": "fixtures/transcript.md",
+    "judge_prompt": "fixtures/judge-prompt.md",
+    "answers": "fixtures/answers.json",
+    "questions": {
+      "A": "arms/A/questions.json",
+      "B": "arms/B/questions.json"
+    }
+  }
+}

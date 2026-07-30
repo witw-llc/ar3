@@ -1,0 +1,8 @@
+{
+  "description": "Test batch invoke — message file paths trail the expanded batch.invoke argv.",
+  "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE|FROM:$SENDER|TO:$RECIPIENT|MSG:$MESSAGE"],
+  "batch": {
+    "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH|TO:$RECIPIENT"],
+    "limit": 5
+  }
+}

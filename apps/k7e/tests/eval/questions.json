@@ -1,0 +1,44 @@
+[
+  {"q": "tunnel so my laptop can open an internal web app that sits behind a gateway box", "expect": "ssh-local-fwd"},
+  {"q": "make a service running on my machine reachable from a box out on the internet", "expect": "ssh-remote-fwd"},
+  {"q": "hop through an intermediate gateway in one command to reach a private host", "expect": "ssh-proxyjump"},
+  {"q": "stop typing a password every time by using a generated keypair to log in", "expect": "ssh-key-auth"},
+
+  {"q": "make a service inside a container reachable from the host browser", "expect": "docker-port"},
+  {"q": "my containers cannot find each other by hostname on the same network", "expect": "docker-bridge"},
+  {"q": "stop my image rebuild from reinstalling everything when I only edit code", "expect": "docker-layers"},
+  {"q": "keep data around after I delete and recreate a container", "expect": "docker-volumes"},
+
+  {"q": "tidy up my branch into a straight line before opening a pull request", "expect": "git-rebase"},
+  {"q": "grab a single fix from another branch without merging all of it", "expect": "git-cherry-pick"},
+  {"q": "automatically narrow down which change introduced a bug", "expect": "git-bisect"},
+  {"q": "I wiped commits with a bad reset, how do I get them back", "expect": "git-reflog"},
+
+  {"q": "my table bloated after lots of deletes and the planner picks bad plans", "expect": "pg-vacuum"},
+  {"q": "speed up containment lookups on a jsonb column", "expect": "pg-index"},
+  {"q": "find out why one query is slow with real timings per step", "expect": "pg-explain"},
+  {"q": "too many app connections are exhausting database memory", "expect": "pg-pool"},
+
+  {"q": "my multithreaded number crunching is not getting faster on many cores", "expect": "py-gil"},
+  {"q": "handle thousands of network calls on one thread without blocking", "expect": "py-asyncio"},
+  {"q": "keep one project's packages from clashing with another", "expect": "py-venv"},
+  {"q": "transform and filter a sequence into a new collection in a single line", "expect": "py-comprehension"},
+
+  {"q": "remap the leader keystroke for my terminal multiplexer", "expect": "tmux-prefix"},
+  {"q": "capture a sequence of edits and run them again many times in my editor", "expect": "vim-macros"},
+
+  {"q": "pick a protocol with guaranteed in order delivery versus one tuned for speed", "expect": "net-tcp-udp"},
+  {"q": "make clients pick up a new server address fast during a cutover", "expect": "net-dns-ttl"},
+
+  {"q": "what category is a 404 or a 502 response", "expect": "http-status"},
+  {"q": "my javascript call to another domain is blocked before it even sends", "expect": "http-cors"},
+
+  {"q": "choose between snapshotting and a write log for surviving a redis restart", "expect": "redis-persist"},
+  {"q": "have a cached entry disappear on its own after some seconds", "expect": "redis-expire"},
+
+  {"q": "automatically reboot a stuck pod and hold traffic until it can serve", "expect": "k8s-probe"},
+  {"q": "my container keeps getting killed for using too much memory on the cluster", "expect": "k8s-resources"},
+
+  {"q": "force a build recipe to run even though a same named file is present", "expect": "make-phony"},
+  {"q": "make my shell script stop immediately when any command fails", "expect": "bash-set-euo"}
+]

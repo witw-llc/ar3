@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+echo `# <#` >/dev/null
+
+set -euo pipefail
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _dir="$(cd -P "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_self")" && pwd)"
+exec "$SCRIPT_DIR/a8s" tells "$@"
+#> > $null
+
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath) { $ScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath) { $ScriptPath = Join-Path (Get-Location) "tells" }
+if ($ScriptPath) {
+    $ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).ProviderPath
+}
+
+$ScriptDir = Split-Path -Parent $ScriptPath
+$A8sPath = Join-Path $ScriptDir "a8s"
+
+& $A8sPath tells @args
+exit $LASTEXITCODE
+#>

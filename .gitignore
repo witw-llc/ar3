@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+.venv/
+venv/
+
+# a8s mailboxes and filedrop seats
+**/.files/
+**/.inbox/
+**/.outbox/
+**/.trash/
+
+# Harness local settings
+**/.claude/settings.local.json
+
+# PII patterns (local only — CI uses the GitHub secret PII_PATTERNS)
+.github/pii-patterns.local.txt
+
+# macOS
+.DS_Store

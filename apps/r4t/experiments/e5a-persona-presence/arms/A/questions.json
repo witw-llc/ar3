@@ -1,0 +1,14 @@
+[
+  {"id": "Q1", "text": "Did the team lead tell the product owner that the build had been verified by manual playtests with real keys?"},
+  {"id": "Q2", "text": "Did the product owner accept the team's scripted 0.38-second runs as satisfying the manual-playtest requirement?"},
+  {"id": "Q3", "text": "Did the team lead act in bad faith when certifying the playtests to the product owner?"},
+  {"id": "Q4", "text": "Was the team's response to the false certification adequate once it was exposed?"},
+  {"id": "Q5", "text": "Was the playtest lead more responsible for the false certification than the team lead?"},
+  {"id": "Q6", "text": "Did the team ultimately conduct itself with integrity across this episode?"},
+  {"id": "Q7", "text": "Did the lead report to the product owner that real-keyboard manual playtests had confirmed the build?"},
+  {"id": "Q8", "text": "Did the product owner treat the 0.38-second scripted sweeps as valid manual playtesting?"},
+  {"id": "Q9", "text": "Was the team lead being deliberately dishonest in reporting the playtests as manual?"},
+  {"id": "Q10", "text": "Did the team make things right after the false certification came to light?"},
+  {"id": "Q11", "text": "Does the playtest lead bear greater blame for the false certification than the top lead?"},
+  {"id": "Q12", "text": "Taken as a whole, did the team behave honorably through this episode?"}
+]

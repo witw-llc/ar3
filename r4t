@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+echo `# <#` >/dev/null
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/apps/r4t/r4t.py" "$@"
+#> > $null
+
+$ScriptPath = $PSCommandPath
+if (-not $ScriptPath) { $ScriptPath = $MyInvocation.MyCommand.Path }
+if (-not $ScriptPath) { $ScriptPath = Join-Path (Get-Location) "r4t" }
+
+$ScriptDir = Split-Path -Parent $ScriptPath
+$R4tPath = Join-Path $ScriptDir "apps/r4t/r4t.py"
+
+$Python = Get-Command python3 -ErrorAction SilentlyContinue
+if ($Python) { & $Python.Source $R4tPath @args; exit $LASTEXITCODE }
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if ($Python) { & $Python.Source $R4tPath @args; exit $LASTEXITCODE }
+$Python = Get-Command py -ErrorAction SilentlyContinue
+if ($Python) { & $Python.Source -3 $R4tPath @args; exit $LASTEXITCODE }
+
+Write-Error "Could not find python3, python, or py on PATH."
+exit 127

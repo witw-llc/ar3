@@ -1,0 +1,6 @@
+[
+  {"id": "Q5", "text": "Were tasks handed out by the lead to two or more members of the team?"},
+  {"id": "Q6", "text": "Did all assigned members respond within an hour of receiving their assignment?"},
+  {"id": "Q7", "text": "Did a member state that a fix was finished even though it had not been committed?"},
+  {"id": "Q8", "text": "Did the lead personally author any portion of the implementation code?"}
+]

@@ -1,0 +1,47 @@
+{
+  "name": "e5a-persona-presence",
+  "question": "Does fronting an identical judge rubric with one domain-matched named persona (Grace Hopper) raise paraphrase consistency versus the same rubric anonymous?",
+  "class": "posthoc",
+  "arms": {
+    "A": "anonymous rubric",
+    "B": "identical rubric fronted by the Grace Hopper persona"
+  },
+  "roles": {
+    "judge": {"rig": "local", "pin": "qwen3.6"}
+  },
+  "trials_per_arm": 6,
+  "stopping_rule": null,
+  "box_seconds": 1800,
+  "metrics": ["paraphrase_consistency", "within_arm_consistency", "anchor_accuracy"],
+  "predictions": [
+    {
+      "claim": "B paraphrase_consistency exceeds A by >= 20 points",
+      "confidence": 0.45,
+      "check": {"metric": "paraphrase_consistency", "op": "delta_gte", "value": 0.20}
+    },
+    {
+      "claim": "B paraphrase_consistency >= A (any positive direction)",
+      "confidence": 0.6,
+      "check": {"metric": "paraphrase_consistency", "op": "delta_gte", "value": 0.0}
+    },
+    {
+      "claim": "both arms stay at or above the 0.6 kappa reliability floor",
+      "confidence": 0.5,
+      "check": {"metric": "kappa_floor", "op": "gte", "value": 0.6}
+    }
+  ],
+  "posthoc": {
+    "transcript": "fixtures/transcript.md",
+    "judge_prompt": "fixtures/judge-prompt.md",
+    "answers": "fixtures/answers.json",
+    "pairs": "fixtures/pairs.json",
+    "questions": {
+      "A": "arms/A/questions.json",
+      "B": "arms/B/questions.json"
+    },
+    "personas": {
+      "A": "arms/A/persona.md",
+      "B": "arms/B/persona.md"
+    }
+  }
+}

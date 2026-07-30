@@ -1,0 +1,10 @@
+{
+  "description": "Echo agent.",
+  "invoke": [
+    "./echo-agent-cli",
+    "$AGE",
+    "$SENDER",
+    "$RECIPIENT",
+    "$MESSAGE"
+  ]
+}

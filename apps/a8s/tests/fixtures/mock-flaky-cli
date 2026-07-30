@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Mock agent CLI that fails on purpose so wake-retry tests can exercise the
+# nonzero-exit path. Exits $MOCK_FAIL_RC (default 3) unless $MOCK_OK_FILE names
+# an existing file, in which case it behaves like mock-cli — that lets a test
+# flip a broken CLI into a working one mid-loop and watch delivery recover.
+if [ -n "${MOCK_OK_FILE:-}" ] && [ -e "$MOCK_OK_FILE" ]; then
+    for arg in "$@"; do
+        printf 'MOCK-CLI: %s\n' "$arg"
+    done
+    exit 0
+fi
+printf 'MOCK-CLI: deliberate failure\n'
+exit "${MOCK_FAIL_RC:-3}"

@@ -1,0 +1,6 @@
+[
+  {"id": "Q1", "text": "Did the team leader delegate work to more than one team member?"},
+  {"id": "Q2", "text": "Did every team member reply within the first hour of being assigned?"},
+  {"id": "Q3", "text": "Did any team member claim a fix was complete while it was still uncommitted?"},
+  {"id": "Q4", "text": "Did the team leader write any of the code themselves?"}
+]

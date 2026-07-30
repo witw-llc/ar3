@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Default a8s CLI fallback. Used when an agent's definition couldn't be
+# auto-detected and no explicit one was supplied. Prints a clear "not
+# configured" notice, echoes the prompt, exits 0 so wake_once doesn't fail.
+echo "================================================================="
+echo "[a8s default] no real CLI is configured for this agent."
+echo "[a8s default] run: a8s define <name> <path-to-definition.json>"
+echo "[a8s default] prompt received:"
+echo "-----------------------------------------------------------------"
+printf '%s\n' "$@"
+echo "================================================================="

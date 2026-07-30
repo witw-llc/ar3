@@ -1,0 +1,10 @@
+{
+  "description": "Codex CLI default — workspace-write sandbox via --full-auto, resumes most recent.",
+  "invoke": [
+    "codex", "exec",
+    "resume", "--last",
+    "--full-auto",
+    "--skip-git-repo-check",
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}

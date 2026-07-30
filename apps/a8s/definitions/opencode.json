@@ -1,0 +1,10 @@
+{
+  "description": "OpenCode default — BYO model via per-agent opencode.json. Resumes most recent session; --dangerously-skip-permissions for headless tool use.",
+  "invoke": [
+    "opencode",
+    "run",
+    "--continue",
+    "--dangerously-skip-permissions",
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}
