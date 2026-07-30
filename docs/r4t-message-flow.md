@@ -22,6 +22,10 @@ member's queue and back out. For governance rationale see
    spend bucket and the cell bucket hold ≥1, its breaker is closed, the
    throttle admits a start), ONE turn drains its whole queue: the prompt
    carries its persona, rolling history, and every waiting message at once.
+   A member's `- **Reinforce:** <short line>` roster field closes every one
+   of its wake prompts as an operator instruction — per-member lane-keeping
+   where `MISSION.md` is roster-wide intent (`r4t roster check` warns past
+   200 characters).
    Intra-roster routing (below) is what delivers to a named member — from
    *inside* the garden, addressing is honored.
 3. The harness's `$TELL_OUTBOX_DIR` points at a per-turn staging dir, so

@@ -147,6 +147,22 @@ class TestParsing:
         assert "Fallback must be on or off" in member.error
         assert "(try: Fallback: off)" in member.error
 
+    def test_reinforce_defaults_empty_when_absent(self):
+        assert parse("### A\n- **Rig:** r\n").find("a").reinforce == ""
+
+    def test_reinforce_value_kept_verbatim(self):
+        value = 'Never spend over $5 — answer "out of scope" and stop'
+        member = parse(f"### A\n- **Rig:** r\n- **Reinforce:** {value}\n").find("a")
+        assert member.reinforce == value
+        assert not member.errors
+
+    def test_reinforce_does_not_disturb_other_fields(self):
+        member = parse(
+            "### A\n- **Rig:** r\n- **Reinforce:** stay in your lane\n"
+        ).find("a")
+        assert member.rig == "r"
+        assert member.fallback is True
+
     def test_flush_field_disables_member(self):
         member = parse(
             "### A\n- **Rig:** r\n- **Continue:** on\n- **Flush:** 4h\n"

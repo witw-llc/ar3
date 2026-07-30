@@ -26,6 +26,15 @@ clean turn that releases nothing normally gets its cleaned stdout staged as
 one reply to the inbound sender. `Fallback: off` keeps such a member silent —
 SILENT logged, nothing staged. Any value other than on/off is a member error.
 
+`Reinforce:` is a short operator-authored line injected into every wake
+prompt for this member — founding, continue, echo, batch alike — late in the
+prompt where a small model reads it last. It is per-member prompt engineering
+distilled from watching that member misbehave ("stay in your lane"
+hammering), distinct from the mission (roster-wide intent) and from the
+persona (who the member is). The value is kept verbatim; `r4t roster check`
+warns past 200 characters, because a paragraph is a mission, not a
+reinforcement.
+
 AI is the default and carries no marker. The human seat is marked
 `- **Human:** yes` and is never dispatched; an optional
 `- **Address:** <a8s-name>` tells members how to reach them. A human with
@@ -95,6 +104,7 @@ class Member:
     continue_conversation: bool = False
     flush_seconds: float | None = None
     fallback: bool = True
+    reinforce: str = ""
     cell: str = ""
     lead: str = ""
     workdir: str = ""
@@ -297,6 +307,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
         m.errors.append(
             f"Fallback must be on or off, got {fb!r} (try: Fallback: off)"
         )
+    m.reinforce = fields.get("reinforce", "")
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
     m.workdir = fields.get("workdir", "")

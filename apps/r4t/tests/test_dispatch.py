@@ -860,6 +860,66 @@ class TestContinuedTurnHistory:
         assert IN_HARNESS not in prompt
 
 
+REINFORCE_LINE = "Reinforcement from your operator: stay in your lane"
+
+
+def set_reinforce(root, name, value="stay in your lane"):
+    path = root / "ROSTER.md"
+    text = path.read_text(encoding="utf-8")
+    assert f"### {name}\n" in text
+    path.write_text(
+        text.replace(f"### {name}\n", f"### {name}\n- **Reinforce:** {value}\n"),
+        encoding="utf-8",
+    )
+
+
+class TestReinforce:
+    def test_field_appends_one_closing_line(self, ctx):
+        # Same member, same roster text — only the field toggles, so the two
+        # prompts must differ by exactly the closing line (absent = byte-identical).
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        before = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t"))
+        assert "Reinforcement from your operator" not in before
+        phil.reinforce = "stay in your lane"
+        after = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t"))
+        assert after == before + "\n\n" + REINFORCE_LINE
+
+    def test_echo_prompt_closes_with_the_line(self, ctx):
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        before = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t", echo=True))
+        assert "Reinforcement from your operator" not in before
+        phil.reinforce = "stay in your lane"
+        after = dispatch.build_prompt(ctx, roster, phil, [], Rig(name="t", echo=True))
+        assert after == before + "\n\n" + REINFORCE_LINE
+
+    def test_founding_turn_carries_the_line(self, ctx, repo, fake_harness):
+        set_reinforce(repo, "Phil")
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
+        prompt = read_prompt(harness_calls(fake_harness)[0])
+        assert prompt.endswith(REINFORCE_LINE)
+
+    def test_continue_turn_still_carries_the_line(self, continue_ctx):
+        ctx, calls = continue_ctx
+        set_reinforce(ctx.root, "Ana")
+        run_one(ctx, "boss", "acme:ana", "first task")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        argv = continue_argvs(calls)[-1]
+        assert argv[-1] == "--continue"  # genuinely a continuation
+        assert argv[0].endswith(REINFORCE_LINE)
+
+    def test_only_the_tagged_member_gets_it(self, ctx, repo, fake_harness):
+        set_reinforce(repo, "Phil")
+        handle_message(ctx, "boss", "acme:gerry", "hello")
+        handle_message(ctx, "acme:gerry", "acme:phil", "hi")
+        gerry_prompt, phil_prompt = [
+            read_prompt(p) for p in harness_calls(fake_harness)
+        ]
+        assert "Reinforcement from your operator" not in gerry_prompt
+        assert phil_prompt.endswith(REINFORCE_LINE)
+
+
 class TestConversationRetirement:
     def test_rig_swap_retires_and_refounds(self, continue_ctx):
         # The recorded conversation lives on another CLI: retire it (no dump
@@ -2848,6 +2908,35 @@ class TestCli:
         out = capsys.readouterr().out
         assert rc == 0
         assert "MISSION.md" not in out
+        assert "OK" in out
+
+    def test_roster_check_warns_on_long_reinforce(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "longreinforce"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
+            f"- **Reinforce:** {'x' * 201}\n",
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0  # a warning does not fail the check
+        assert "Reinforce is 201 characters" in out
+        assert "a paragraph is a mission, not a reinforcement" in out
+        assert "1 warning(s)" in out
+
+    def test_roster_check_quiet_on_short_reinforce(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "shortreinforce"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
+            f"- **Reinforce:** {'x' * 200}\n",
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Reinforce" not in out
         assert "OK" in out
 
 

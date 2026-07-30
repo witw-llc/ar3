@@ -147,6 +147,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
         "This turn continues the session you are already in — your earlier "
         "messages and replies are above in it, so they are not repeated here."
     ),
+    "reinforce": "Reinforcement from your operator: {text}",
     "flush_dump": "Save your current state and progress to STATUS.md.",
     "refound_preamble": "Check your STATUS.md to refresh your memory.",
     "mission_review": (
@@ -525,7 +526,12 @@ def build_prompt(
     already carries the whole conversation, so embedding r4t's transcript of it
     would send the same context twice. A one-line note stands in its place so
     the missing section never reads as amnesia. Echo members always get the
-    transcript: they have no CLI conversation at all."""
+    transcript: they have no CLI conversation at all.
+
+    A member's `Reinforce:` line closes every variant of the prompt — echo and
+    continue included — because on a small model the last thing read wins, and
+    winning there is the field's whole job. Absent, the prompt is byte-identical
+    to a roster without the field."""
     history = state.read_history(ctx.node, member.name)
     members = _member_lines(ctx, roster, member)
     message_lines: list[str] = []
@@ -564,6 +570,8 @@ def build_prompt(
             "## Messages since your last turn",
             *(message_lines or ["(none)"]),
         ]
+        if member.reinforce:
+            parts += ["", ctx.prompt("reinforce", text=member.reinforce)]
         return "\n".join(parts)
     workdir = resolve_workdir(ctx, member)
     workdir_lines: list[str] = []
@@ -603,6 +611,8 @@ def build_prompt(
         ctx.prompt("work_body_only"),
         ctx.prompt("work_commit"),
     ]
+    if member.reinforce:
+        parts += ["", ctx.prompt("reinforce", text=member.reinforce)]
     return "\n".join(parts)
 
 

@@ -1525,6 +1525,14 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         )
         problems += 1
     warnings = 0
+    for m in roster.members:
+        if len(m.reinforce) > 200:
+            print(
+                f"warning: {m.name}: Reinforce is {len(m.reinforce)} characters — "
+                "a paragraph is a mission, not a reinforcement "
+                "(try: one line under 200)"
+            )
+            warnings += 1
     if config is not None:
         for message in continue_collisions(roster, config, org.workplace):
             print(f"warning: {message}")
