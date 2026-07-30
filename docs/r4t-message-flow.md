@@ -49,13 +49,17 @@ member's queue and back out. For governance rationale see
    envelope keeps its stdout as transcript. But a turn that exits 0,
    releases nothing, and printed a non-trivial answer gets its cleaned
    stdout — ANSI and harness chrome stripped — staged as one reply to the
-   inbound sender, riding every gate in step 3. No configuration, and no
+   inbound sender, riding every gate in step 3. On by default, and no
    rig is above it: small local models reliably answer in prose and never
    run `tell`, and strong models fall into the same shape — a frontier
    Gemini model on the agy preset reasoned itself into prose-only replies
    in a live org (see [r4t-harness-agy.md](r4t-harness-agy.md) for one incident the
    fallback absorbed). Stdout-only turns participate without knowing the
-   protocol exists; they are just downgraded to a single reply.
+   protocol exists; they are just downgraded to a single reply. A member
+   whose stray prose is noise rather than answers opts out with
+   `- **Fallback:** off` in the roster: its no-tell turns log `SILENT`
+   instead of staging a reply, and the blank-output quota detection is
+   untouched.
 
 ## The durable queue
 

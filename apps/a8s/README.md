@@ -298,6 +298,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](../../docs/a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](../r4t/README.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
+| `echo.json`     | Echo node — replies to the sender with the same message; attachments acknowledged by name. A reachability probe: one tell proves the whole path out and back. Bare name: `a8s add <name> <dir> echo`.                                               |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
 
 

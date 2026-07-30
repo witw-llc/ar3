@@ -21,6 +21,11 @@ it: the `r4t idle` sweep retires a conversation that has sat idle that long,
 dumping state to disk so the member refounds on the next real message. Any
 other value is a member error.
 
+`Fallback:` (default on) controls the stdout-reply fallback in dispatch: a
+clean turn that releases nothing normally gets its cleaned stdout staged as
+one reply to the inbound sender. `Fallback: off` keeps such a member silent —
+SILENT logged, nothing staged. Any value other than on/off is a member error.
+
 AI is the default and carries no marker. The human seat is marked
 `- **Human:** yes` and is never dispatched; an optional
 `- **Address:** <a8s-name>` tells members how to reach them. A human with
@@ -89,6 +94,7 @@ class Member:
     address: str | None = None
     continue_conversation: bool = False
     flush_seconds: float | None = None
+    fallback: bool = True
     cell: str = ""
     lead: str = ""
     workdir: str = ""
@@ -284,6 +290,13 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
             m.errors.append(str(e))
         else:
             m.continue_conversation = True
+    fb = fields.get("fallback", "")
+    if fb and _is_false(fb):
+        m.fallback = False
+    elif fb and not _is_true(fb):
+        m.errors.append(
+            f"Fallback must be on or off, got {fb!r} (try: Fallback: off)"
+        )
     m.cell = fields.get("cell", "")
     m.lead = fields.get("lead", "")
     m.workdir = fields.get("workdir", "")

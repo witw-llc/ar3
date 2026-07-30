@@ -127,6 +127,26 @@ class TestParsing:
         assert "Continue must be on, off, or an idle window" in member.error
         assert member.continue_conversation is False
 
+    def test_fallback_defaults_on_when_absent(self):
+        assert parse("### A\n- **Rig:** r\n").find("a").fallback is True
+
+    @pytest.mark.parametrize("value", ["on", "yes"])
+    def test_fallback_on(self, value):
+        member = parse(f"### A\n- **Rig:** r\n- **Fallback:** {value}\n").find("a")
+        assert member.fallback is True
+        assert not member.errors
+
+    @pytest.mark.parametrize("value", ["off", "no"])
+    def test_fallback_off(self, value):
+        member = parse(f"### A\n- **Rig:** r\n- **Fallback:** {value}\n").find("a")
+        assert member.fallback is False
+        assert not member.errors
+
+    def test_fallback_garbage_disables_member(self):
+        member = parse("### A\n- **Rig:** r\n- **Fallback:** maybe\n").find("a")
+        assert "Fallback must be on or off" in member.error
+        assert "(try: Fallback: off)" in member.error
+
     def test_flush_field_disables_member(self):
         member = parse(
             "### A\n- **Rig:** r\n- **Continue:** on\n- **Flush:** 4h\n"

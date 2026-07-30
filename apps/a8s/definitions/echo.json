@@ -1,10 +1,9 @@
 {
-  "description": "Echo agent.",
+  "description": "Echoes each message back to its sender — a reachability probe.",
   "invoke": [
-    "./echo-agent-cli",
-    "$AGE",
+    "python3",
+    "$A8S_DIR/echo_agent.py",
     "$SENDER",
-    "$RECIPIENT",
     "$MESSAGE"
   ]
 }

@@ -1574,9 +1574,19 @@ def _run_turn(
             # anything keeps its stdout as transcript — but a clean turn that
             # released nothing gets its cleaned stdout staged as ONE reply to
             # the newest message's sender, riding the normal release gates.
+            # `Fallback: off` in the roster mutes that staging for a member
+            # whose prose-only turns are noise, not answers; the quota signal
+            # below still fires — a blank is a blank on any member.
             reply = clean_transcript(output)
             if len(reply) > STDOUT_REPLY_MIN_CHARS and not reply_target:
                 _log_internal_only(ctx, member, rig, output)
+            elif len(reply) > STDOUT_REPLY_MIN_CHARS and not member.fallback:
+                state.append_log(
+                    ctx.node,
+                    f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 "
+                    f"with {len(reply)} bytes of stdout and no tell; the "
+                    "stdout fallback is off for this member, nothing staged",
+                )
             elif len(reply) > STDOUT_REPLY_MIN_CHARS:
                 msg_id = tasks.new_thread_id()
                 state.atomic_write_json(

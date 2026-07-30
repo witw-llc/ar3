@@ -81,7 +81,8 @@ budget rests while its queue holds, and refill is the retry, so the machine's
 one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it
-in production too. Full flow: [docs/r4t-message-flow.md](../../docs/r4t-message-flow.md).
+in production too (`- **Fallback:** off` in the roster mutes this per member).
+Full flow: [docs/r4t-message-flow.md](../../docs/r4t-message-flow.md).
 
 ## Learn more
 
