@@ -24,7 +24,6 @@ Surface (CLI):
   stop / kill / exit / ls     handler control
   tell / tells                send a message / wait for the next one
   mcp serve                   stdio MCP server: tell as a tool (a8s_tell)
-  install-client              install standalone tell to /usr/local
   logs <name>... [--tail N] [-f]   per-agent log readout (merge-sorted)
 
 `a8s` with no command prints help. There is no auto-discovery — agents must

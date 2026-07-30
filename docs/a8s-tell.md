@@ -14,8 +14,8 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 
 | Entry | Path |
 |-------|------|
-| Operator shim | `~/bin/tell` → `~/bin/a8s tell` |
-| System client | `sudo a8s install-client` → `/usr/local/bin/tell` + `/usr/local/lib/a8s/` |
+| Operator shim | `tell` at the repo root → `a8s tell` (or `source install.sh` / `get.sh`) |
+| System install | `AR3_SYSTEM=1` `get.sh` → `/usr/local/bin/tell` → `/usr/local/lib/ar3/tell` |
 | Implementation | `apps/a8s/tell.py` (`tell_main`) |
 | Router | `apps/a8s/mailbox.py` (`route_outboxes`) |
 | Receive-side | `apps/a8s/tells.py` (`tells_main`) — see below |
@@ -25,8 +25,8 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 0. **`tell --check`** — optional self-test: verifies the resolved outbox is writable (creates the path when missing). Optional recipient name validates registry routing. No envelope written.
 1. **`TELL_OUTBOX_DIR` or CWD filedrop** — tell writes to the env path when set;
    otherwise may resolve a unique configured outbox from CWD when the registry
-   is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). `install-client`
-   tell-only installs always need the env var.
+   is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). System installs for
+   agent users without a readable registry always need the env var.
 2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
 3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root. Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
 
@@ -104,15 +104,22 @@ is the receive-side complement of `tell`. It resolves the node the same way
 
 Non-destructive: it observes new arrivals without consuming them, so it never competes to remove `.inbox` files and each run waits from its own baseline. Partial writes (mid-delivery on a cross-mount move) are tolerated — an unreadable file is skipped and retried on the next poll. It only reports messages that land after it starts; anything already waiting is ignored.
 
-## install-client
+## System install
 
-`a8s install-client [dest]` copies this `apps/a8s` tree (minus `tests/`) to `/usr/local/lib/a8s/` by default and installs `/usr/local/bin/tell`:
+Machine-wide / agent-user installs go through the public install story — not an
+a8s verb. `AR3_SYSTEM=1` on `get.sh` clones into `AR3_DIR` (default
+`/usr/local/lib/ar3`) and symlinks the suite shims into `AR3_BIN` (default
+`/usr/local/bin`) instead of editing a shell rc:
 
 ```bash
-exec python3 "/usr/local/lib/a8s/a8s.py" tell "$@"
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh \
+  | sudo AR3_SYSTEM=1 sh
 ```
 
-That install has no `~/.a8s` access by design — always set `TELL_OUTBOX_DIR`.
+That puts `tell` on the shared PATH so `run_as` agent users resolve it without
+reading an operator home clone. Those seats still have no `~/.a8s` access —
+always set `TELL_OUTBOX_DIR` (r4t injects it across the boundary).
 
 ## Tests
 

@@ -155,7 +155,7 @@ def resolve_definition_arg(spec: str) -> Path:
     is a definition NAME and resolves only against bundled `definitions/`,
     then user-installed ``~/.a8s/definitions/``. The working directory is
     deliberately not consulted for it, so an unrelated same-named file next to
-    the caller (`~/bin/r4t`, the CLI shim) cannot shadow the definition.
+    the caller (the repo-root `r4t` shim) cannot shadow the definition.
     Anything else is a filesystem path first, with a bare `<name>.json`
     falling back to the same two definition dirs.
     """

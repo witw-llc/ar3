@@ -1,6 +1,6 @@
 # Chapter 1 — Hello, Agent
 
-**Teaches A — [a8s](../apps/a8s/README.md), the message router.**
+**Teaches A — [a8s](../docs/a8s.md), the message router.**
 
 ## 1. Capability
 
@@ -19,14 +19,16 @@ wait in the chapter.
 
 ## 3. Starting state
 
-- The bin repo cloned at `~/bin` and on your PATH:
+- The Ark installed and on your PATH:
 
 **Run**
 
 ```bash
-git clone <YOUR_FORK_OR_CLONE_URL> ~/bin
-source ~/bin/install.sh
+curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 ```
+
+  That clones the suite into `~/.ar3` and adds one `source` line to your
+  shell rc. Open a new shell (or re-source the rc) so `PATH` picks it up.
 
 - Python 3 installed (`python3 --version` answers).
 - One harness. **Pick your path** — the free path is the default, and every
@@ -48,7 +50,7 @@ Now type the suite's front door command:
 **Run**
 
 ```bash
-ark
+ar3
 ```
 
 You should see:
@@ -58,48 +60,48 @@ A R K
 8 4 7
 S T E
 
-The Ark Suite — a8s routes the messages, r4t governs the teams,
-k7e keeps what they learn. ark reads; each product owns its own verbs.
+The Ark — a8s routes the messages, r4t governs the roster,
+k7e keeps what they learn. ar3 reads; each product owns its own verbs.
 
 a8s — agent message router  (/home/you/.config/a8s)
-  ✓ cli       a8s -> /home/you/bin/a8s
+  ✓ cli       a8s -> /home/you/.ar3/a8s
   ✗ registry  no registry at /home/you/.config/a8s/a8s.json   (try: a8s discover <dir>)
 
-r4t — roster for teams  (/home/you/.config/r4t)
-  ✓ cli    r4t -> /home/you/bin/r4t
-  ✗ rigs   no rig config at /home/you/.config/r4t/rigs.json   (try: r4t init)
-  ✗ teams  none under /home/you/.config/r4t/teams   (try: r4t init)
+r4t — the roster  (/home/you/.config/r4t)
+  ✓ cli      r4t -> /home/you/.ar3/r4t
+  ✗ rigs     no rig config at /home/you/.config/r4t/rigs.json   (try: r4t init)
+  ✗ rosters  none under /home/you/.config/r4t/rosters   (try: r4t init)
 
 k7e — knowledge engine  (/home/you/.config/k7e)
-  ✓ cli    k7e -> /home/you/bin/k7e
+  ✓ cli    k7e -> /home/you/.ar3/k7e
   ✗ store  no store at /home/you/.config/k7e   (try: k7e init)
 
-next: ark doctor — probe the harnesses and tools the suite runs on
+next: ar3 doctor — probe the harnesses and tools the suite runs on
 ```
 
 Three CLIs found, nothing configured — the correct fresh-machine state.
-`ark` never changes anything; it reads and tells you which command owns the
+`ar3` never changes anything; it reads and tells you which command owns the
 next move. Take its suggestion:
 
 **Run**
 
 ```bash
-ark doctor
+ar3 doctor
 ```
 
 You should see:
 
 ```
-ark doctor — probes only; nothing here is installed, started, or changed
+ar3 doctor — probes only; nothing here is installed, started, or changed
 
 Harnesses
   ✓ claude    2.1.220 (Claude Code)  (/home/you/.local/bin/claude)
   ✓ agent     2026.07.23-e383d2b  (/home/you/.local/bin/agent)
-  ✓ codex     codex-cli 0.144.6  (/home/you/bin/codex)
-  ✓ copilot   GitHub Copilot CLI 1.0.75.  (/home/you/bin/copilot)
-  ✓ opencode  1.18.3  (/home/you/bin/opencode)
+  ✓ codex     codex-cli 0.144.6  (/home/you/.local/bin/codex)
+  ✓ copilot   GitHub Copilot CLI 1.0.75.  (/home/you/.local/bin/copilot)
+  ✓ opencode  1.18.3  (/home/you/.local/bin/opencode)
   ✓ agy       1.1.8  (/home/you/.local/bin/agy)
-  ✓ ollama    ollama version is 0.32.5  (/home/you/bin/ollama)
+  ✓ ollama    ollama version is 0.32.5  (/home/you/.local/bin/ollama)
 
 Services
   ✓ ollama serve  3 model(s): qwen3.6:latest, qwen3:1.7b, qwen3:0.6b
@@ -107,6 +109,8 @@ Services
 
 Tooling
   ✓ git  git version 2.50.1 (Apple Git-155)
+
+✓ core prerequisites satisfied  (10/10 probes green)
 ```
 
 Your panel will show ✗ for harnesses you haven't installed — that is fine.
@@ -195,7 +199,7 @@ You should see:
 
 ```
 added me -> /home/you/ark/me
-definition: /home/you/bin/apps/a8s/definitions/filedrop.json  (explicit)
+definition: /home/you/.ar3/apps/a8s/definitions/filedrop.json  (explicit)
 added solo -> /home/you/ark/solo
 definition: /home/you/ark/solo/solo.json  (explicit)
 NAME   STATUS    DEFINITION   ROOT
@@ -349,14 +353,14 @@ Ask the front door where the suite stands now:
 **Run**
 
 ```bash
-ark
+ar3
 ```
 
 You should see (a8s section):
 
 ```
 a8s — agent message router  (/home/you/.config/a8s)
-  ✓ cli       a8s -> /home/you/bin/a8s
+  ✓ cli       a8s -> /home/you/.ar3/a8s
   ✓ registry  2 agent(s), 0 alias(es), 0 namespace(s)
   ✓ router    attached: me, solo
 ```
@@ -420,7 +424,7 @@ persona — the lighthouse is one line away.
 
 Two pointers for later — nothing in this chapter needs them:
 
-- Messaging an agent on another machine: [a8s remotes](../apps/a8s/README.md#remotes-issue-63).
+- Messaging an agent on another machine: [a8s remotes](../docs/a8s.md#remotes-issue-63).
 - Reaching your agents by text message: [a8s-android](https://github.com/neilobremski/a8s-android).
 
 ## What you own

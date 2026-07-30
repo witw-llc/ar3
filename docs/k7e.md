@@ -57,12 +57,14 @@ k7e config llm_command 'your-stdin-stdout-cli'  # required for distill/recall/co
 k7e config summarize_command '...'              # optional recall override
 ```
 
-Full flags and every command: **[docs/k7e-cli.md](../../docs/k7e-cli.md)**.
+Full flags and every command: **[k7e-cli.md](k7e-cli.md)**.
 
 ## Install
 
+`k7e` is on `PATH` with the rest of The Ark — see the
+[install section](../README.md#install). From a clone, without installing:
+
 ```bash
-# From ~/bin, k7e is already on PATH via install.sh. Standalone:
 python3 apps/k7e/k7e.py status
 ```
 
@@ -85,16 +87,16 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
 
 | Doc | What's in it |
 |-----|--------------|
-| [docs/k7e-architecture.md](../../docs/k7e-architecture.md) | Storage model, entry format, schema, lifecycle |
-| [docs/k7e-retrieval.md](../../docs/k7e-retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
-| [docs/k7e-distillation.md](../../docs/k7e-distillation.md) | Extracting knowledge from raw experience |
-| [docs/k7e-configuration.md](../../docs/k7e-configuration.md) | Config keys, env, LLM/embedding backends |
-| [docs/k7e-cli.md](../../docs/k7e-cli.md) | Full command + flag reference |
+| [k7e-architecture.md](k7e-architecture.md) | Storage model, entry format, schema, lifecycle |
+| [k7e-retrieval.md](k7e-retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
+| [k7e-distillation.md](k7e-distillation.md) | Extracting knowledge from raw experience |
+| [k7e-configuration.md](k7e-configuration.md) | Config keys, env, LLM/embedding backends |
+| [k7e-cli.md](k7e-cli.md) | Full command + flag reference |
 
 ## Tests
 
 ```bash
-cd ~/bin/apps/k7e
+cd apps/k7e
 tests/run                 # deterministic suite (~15s)
 tests/run -m "not llm"    # skip live-LLM tests
 tests/run -k eval         # the Recall@K harness
@@ -111,6 +113,4 @@ harness/curator writes.
 ## Status
 
 Pre-v1. The on-disk format (markdown + frontmatter) is the stable contract; the
-derived index schema may change (just `reindex`). See
-[issue #145](https://github.com/neilobremski/bin/issues/145) for the retrieval
-roadmap.
+derived index schema may change (just `reindex`).

@@ -1,6 +1,6 @@
 # Chapter 3 — The Long Memory
 
-**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
+**Teaches R — [r4t](../docs/r4t.md), the roster.**
 
 ## 1. Capability
 
@@ -49,7 +49,7 @@ r4t roster check
 You should see:
 
 ```
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
@@ -390,9 +390,9 @@ after a longer one the flush has already banked what matters in
 `STATUS.md`, so the next message starts fresh without starting over. Set it
 late enough that normal working pauses don't cost Wren his short-term
 memory, early enough that he isn't dragging yesterday into today. On paid
-rigs a short window also keeps resumed context from billing at full length;
-the mechanics behind that live in
-[Prompt-Cache Economics](https://github.com/neilobremski/bin/wiki/Prompt-Cache-Economics).
+rigs a short window also keeps resumed context from billing at full length:
+providers discount a resumed prefix only while their cache is warm, and that
+window is minutes, not hours.
 
 ## 12. Commit point
 

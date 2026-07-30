@@ -2,7 +2,7 @@
 
 `tells` resolves the node from `TELL_OUTBOX_DIR` (like `tell`), snapshots the
 `.inbox` beside the outbox, then blocks up to `--timeout` for new envelopes.
-The end-to-end timeout path is exercised through the ~/bin/tells shim; the
+The end-to-end timeout path is exercised through the repo-root `tells` shim; the
 arrival paths inject messages from a background thread while `tells_main` polls.
 """
 from __future__ import annotations

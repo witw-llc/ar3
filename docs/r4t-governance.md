@@ -29,7 +29,7 @@ of them within days:
    goodbye without progressing the task," sometimes aware they are stuck
    but unable to break out. LLM self-awareness does not stop the loop;
    external enforcement does.
-2. **Ping-pong through a re-broadcaster.** A chat room (h4l) re-emits
+2. **Ping-pong through a re-broadcaster.** A chat-room node re-emits
    posts as fresh notifications, stripping any per-conversation metadata —
    so anything keyed on conversation state is defeated on every bounce. The
    defense has to be cost (budgets) and idempotent arrival (duplicate

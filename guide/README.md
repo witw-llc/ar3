@@ -11,10 +11,11 @@ on machinery you own. Each chapter builds one working thing — an agent that
 answers you, a governed roster, a memory that survives — on top of the
 previous chapter's state, and every chapter ends with something you can
 break, fix, and commit. The suite underneath is three tools:
-[a8s](../apps/a8s/README.md) routes the messages, [r4t](../apps/r4t/README.md)
-governs the roster, [k7e](../apps/k7e/README.md) keeps what it learns. Every
-chapter opens by naming which of the three it teaches, so the guide's spine
-is the build order itself.
+[a8s](../docs/a8s.md) routes the messages, [r4t](../docs/r4t.md)
+governs the roster, [k7e](../docs/k7e.md) keeps what it learns —
+with [ar3](../docs/ar3.md), the front door, reading where they all stand.
+Every chapter opens by naming which of the three it teaches, so the guide's
+spine is the build order itself.
 
 ## Chapters
 

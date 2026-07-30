@@ -10,10 +10,15 @@ differ, `CLAUDE.md` wins for Claude sessions.
 
 | App | One line | Start at |
 |---|---|---|
-| `apps/a8s/` | Filesystem message router — agents talk via `tell` | [`apps/a8s/README.md`](apps/a8s/README.md) |
-| `apps/r4t/` | Roster governance — budgets, queues, dispatch, isolation | [`apps/r4t/README.md`](apps/r4t/README.md) |
-| `apps/k7e/` | Knowledge engine — markdown + SQLite FTS5 | [`apps/k7e/README.md`](apps/k7e/README.md) |
+| `apps/a8s/` | Filesystem message router — agents talk via `tell` | [`docs/a8s.md`](docs/a8s.md) |
+| `apps/r4t/` | Roster governance — budgets, queues, dispatch, isolation | [`docs/r4t.md`](docs/r4t.md) |
+| `apps/k7e/` | Knowledge engine — markdown + SQLite FTS5 | [`docs/k7e.md`](docs/k7e.md) |
 | `apps/ar3/` | Front door — reads suite state, mutates nothing | [`docs/ar3.md`](docs/ar3.md) |
+
+Every doc lives flat under `docs/` — the apps carry code, not prose.
+`install.sh --skills` symlinks exactly the `docs/*.md` pages that open with
+YAML frontmatter; frontmatter is the skill gate, so a deep app page must
+never grow one.
 
 `guide/` is *The Ark Raising*, the user-facing build-along. It is a
 shipped artifact under its own license (CC BY-NC-ND 4.0 — see

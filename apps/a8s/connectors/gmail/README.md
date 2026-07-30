@@ -54,14 +54,14 @@ stdlib, and no dependency on the `gas` CLI.
    human — if it routes to your inbox, name it after yourself):
 
    ```
-   a8s add neil ~/bin/apps/a8s/connectors/gmail ~/.neil-gmail.json
-   a8s start neil
+   a8s add <name> <ark-repo>/apps/a8s/connectors/gmail ~/.<name>-gmail.json
+   a8s start <name>
    ```
 
 4. Smoke-test outbound:
 
    ```
-   tell neil "smoke test"
+   tell <name> "smoke test"
    ```
 
    An email arrives with subject = the agent enclosing your CWD and body

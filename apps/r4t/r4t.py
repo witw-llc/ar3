@@ -509,7 +509,7 @@ def cmd_default(_args: argparse.Namespace) -> int:
     ):
         print(f"  - {step}")
     print()
-    print("More: apps/r4t/README.md and `r4t <command> --help`")
+    print("More: docs/r4t.md and `r4t <command> --help`")
     return 0
 
 

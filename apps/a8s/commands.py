@@ -682,48 +682,6 @@ def cmd_discover(args: list[str]) -> int:
     return 0
 
 
-DEFAULT_CLIENT_BIN = Path("/usr/local/bin")
-DEFAULT_CLIENT_LIB = Path("/usr/local/lib/a8s")
-_A8S_SOURCE = Path(__file__).resolve().parent
-
-
-def _install_ignore(_dir: str, names: list[str]) -> set[str]:
-    skip = {"__pycache__", ".pytest_cache", "tests"}
-    return {n for n in names if n in skip or n.endswith(".pyc")}
-
-
-def _install_client_wrapper(bin_path: Path, a8s_entry: Path) -> None:
-    entry = a8s_entry.resolve()
-    wrapper = (
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        f'exec python3 "{entry}" tell "$@"\n'
-    )
-    bin_path.parent.mkdir(parents=True, exist_ok=True)
-    if bin_path.is_symlink() or bin_path.exists():
-        bin_path.unlink()
-    bin_path.write_text(wrapper, encoding="utf-8")
-    bin_path.chmod(0o755)
-
-
-def _chmod_install_tree(root: Path) -> None:
-    for dirpath, dirnames, filenames in os.walk(root):
-        Path(dirpath).chmod(0o755)
-        for name in filenames:
-            (Path(dirpath) / name).chmod(0o644)
-
-
-def _install_a8s_tree(lib_dir: Path) -> Path:
-    if lib_dir.exists():
-        shutil.rmtree(lib_dir)
-    shutil.copytree(_A8S_SOURCE, lib_dir, ignore=_install_ignore)
-    _chmod_install_tree(lib_dir)
-    entry = lib_dir / "a8s.py"
-    if not entry.is_file():
-        raise FileNotFoundError(f"missing {entry}")
-    return entry
-
-
 def cmd_mcp(args: list[str]) -> int:
     """`a8s mcp serve` — the stdio MCP server harnesses spawn as a child."""
     if args[:1] == ["serve"] and len(args) == 1:
@@ -732,81 +690,6 @@ def cmd_mcp(args: list[str]) -> int:
         return mcp_server.serve()
     print("usage: a8s mcp serve", file=sys.stderr)
     return 2
-
-
-def cmd_install_client(args: list[str]) -> int:
-    """Install a8s tree + tell wrapper to /usr/local for unprivileged agent users."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        prog="a8s install-client",
-        description=(
-            "Install a copy of apps/a8s for agent users. "
-            "Copies the a8s package to --lib-dir (excluding tests) "
-            "and writes a tell wrapper to --bin-dir/tell. Re-running overwrites "
-            "any previous install."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "examples:\n"
-            "  sudo a8s install-client\n"
-            "  sudo a8s install-client /opt/a8s\n"
-            "  a8s install-client --bin-dir /tmp/bin --lib-dir /tmp/lib/a8s\n"
-        ),
-    )
-    parser.add_argument(
-        "dest",
-        nargs="?",
-        type=Path,
-        help=f"install root (default: {DEFAULT_CLIENT_LIB})",
-    )
-    parser.add_argument(
-        "--bin-dir",
-        type=Path,
-        default=DEFAULT_CLIENT_BIN,
-        help=f"directory for tell wrapper (default: {DEFAULT_CLIENT_BIN})",
-    )
-    parser.add_argument(
-        "--lib-dir",
-        type=Path,
-        default=None,
-        help=f"install root (same as positional dest; default: {DEFAULT_CLIENT_LIB})",
-    )
-    try:
-        parsed = parser.parse_args(args)
-        if parsed.dest is not None and parsed.lib_dir is not None:
-            parser.error("dest argument conflicts with --lib-dir")
-    except SystemExit as e:
-        return int(e.code if e.code is not None else 0)
-
-    bin_dir = parsed.bin_dir.expanduser().resolve()
-    lib_dir = (parsed.dest or parsed.lib_dir or DEFAULT_CLIENT_LIB).expanduser().resolve()
-    system_install = (
-        str(bin_dir).startswith("/usr/local")
-        or str(lib_dir).startswith("/usr/local")
-    )
-    if system_install and os.geteuid() != 0:
-        print(
-            "a8s install-client: must run as root for /usr/local "
-            "(sudo a8s install-client)",
-            file=sys.stderr,
-        )
-        return 1
-
-    if not _A8S_SOURCE.is_dir():
-        print(f"a8s install-client: source missing: {_A8S_SOURCE}", file=sys.stderr)
-        return 1
-
-    try:
-        a8s_entry = _install_a8s_tree(lib_dir)
-        _install_client_wrapper(bin_dir / "tell", a8s_entry)
-    except OSError as e:
-        print(f"a8s install-client: {e}", file=sys.stderr)
-        return 1
-
-    print(f"installed tell -> {bin_dir / 'tell'}")
-    print(f"installed a8s -> {a8s_entry}")
-    return 0
 
 
 # ---------- alias commands ----------

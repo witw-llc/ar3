@@ -1,6 +1,6 @@
 # Chapter 2 — The Founding
 
-**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
+**Teaches R — [r4t](../docs/r4t.md), the roster.**
 
 ## 1. Capability
 
@@ -20,7 +20,7 @@ About 20 minutes. Nothing new to install.
 ## 3. Starting state
 
 - Chapter 1 complete: `solo` answers a `tell` from the seat at `~/ark/me`,
-  and `ark` shows the a8s section green.
+  and `ar3` shows the a8s section green.
 - The same harness chapter 1 used — `ollama` with `qwen3.6` on the free
   path, the Cursor agent CLI (`agent`) on the subscription path.
 
@@ -58,8 +58,8 @@ You should see:
 roster: wrote starter /home/you/ark/silo/ROSTER.md
 rig config: wrote starter /home/you/.config/r4t/rigs.json
 
-Register and start the team (a namespace prefix cannot share a
-name with its agent, so the node is registered as <team>-node):
+Register and start the roster (a namespace prefix cannot share a
+name with its agent, so the node is registered as <roster>-node):
 
   a8s add silo-node /home/you/ark/silo r4t
   a8s namespace silo silo-node
@@ -174,7 +174,7 @@ r4t roster check
 You should see:
 
 ```
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
@@ -194,7 +194,7 @@ You should see:
 
 ```
 added silo-node -> /home/you/ark/silo
-definition: /home/you/bin/apps/a8s/definitions/r4t.json  (explicit)
+definition: /home/you/.ar3/apps/a8s/definitions/r4t.json  (explicit)
 bound silo: -> silo-node
 started silo-node as PID 23851
 ```
@@ -233,7 +233,7 @@ model loads; later turns take seconds.
 
 ```bash
 cd ~/ark/silo
-r4t seat send --node silo "In one sentence: what is your job on this team?"
+r4t seat send --node silo "In one sentence: what is your job on this roster?"
 r4t seat inbox --node silo
 ```
 
@@ -246,7 +246,7 @@ You should see:
 
 ```
 ── from silo:wren (2026-07-29T04:55:04.121285Z)
-My job is to do the work and answer to the owner — handling everything from leadership to development as the sole member of the solo team.
+My job is to do the work and answer to the owner — handling everything from leadership to development as the sole member of the silo roster.
 ```
 
 Wren read its own roster block and answered in character. Now the proof
@@ -304,7 +304,7 @@ You should see:
 ```
 swapped rig 'silo' to ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama run qwen3.6 {prompt}
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 Wren: Wren has Continue: on but rig 'silo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap silo <preset>
 1 problem(s)
 ```
@@ -336,7 +336,7 @@ You should see:
 ```
 swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 
@@ -375,7 +375,7 @@ Health
   ✓ all 1 member(s) healthy
 
 Roster  (repo settings: /home/you/ark/silo/ROSTER.md)
-    You   Human  address=(none)   (try: add an **Address:** line so the team can reach them)
+    You   Human  address=(none)   (try: add an **Address:** line so the roster can reach them)
   ✓ Wren  rig=silo  budget=5.1/8  [leader]
 ```
 
@@ -411,7 +411,7 @@ r4t roster check
 You should see:
 
 ```
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```
 

@@ -3,7 +3,13 @@ echo `# <#` >/dev/null
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_self="${BASH_SOURCE[0]}"
+while [ -L "$_self" ]; do
+  _dir="$(cd -P "$(dirname "$_self")" && pwd)"
+  _self="$(readlink "$_self")"
+  [[ "$_self" != /* ]] && _self="$_dir/$_self"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_self")" && pwd)"
 exec python3 "$SCRIPT_DIR/apps/k7e/k7e.py" "$@"
 #> > $null
 

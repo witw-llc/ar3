@@ -1,4 +1,4 @@
-"""Tests for `tell` — invoked as a subprocess via the ~/bin/tell shim.
+"""Tests for `tell` — invoked as a subprocess via the repo-root `tell` shim.
 
 The shim delegates to `a8s tell`, which requires `TELL_OUTBOX_DIR` (a8s sets
 this on wake). Tests pass it explicitly when exercising tell directly.

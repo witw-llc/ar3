@@ -1,6 +1,6 @@
 # Chapter 4 — A Second Pair of Hands
 
-**Teaches R — [r4t](../apps/r4t/README.md), the roster.**
+**Teaches R — [r4t](../docs/r4t.md), the roster.**
 
 ## 1. Capability
 
@@ -91,7 +91,7 @@ added rig 'helper' (opencode-ollama) to /home/you/.config/r4t/rigs.json
 Reference it from ROSTER.md: `- **Rig:** helper`
 set helper echo = true in /home/you/.config/r4t/rigs.json
 unset silo echo in /home/you/.config/r4t/rigs.json
-You: note — Human without an Address (team cannot tell them)
+You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (3 member(s), leader Wren)
 ```
 
@@ -105,7 +105,7 @@ Give Wren a task that names Moss:
 **Run**
 
 ```bash
-r4t seat send --node silo "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorite and tell me."
+r4t seat send --node silo "Ask Moss for three name ideas for our roster mascot, an octopus. Pick your favorite and tell me."
 r4t seat inbox --node silo
 ```
 
@@ -123,8 +123,8 @@ the roster log (`r4t logs --node silo` shows these events; turn boundaries
 between them omitted here):
 
 ```
-r4t: QUEUED silo:you -> wren thread=01ABC... hop=0 "Ask Moss for three name ideas for our team mascot, an octopus. Pick your favorit" (depth 1)
-r4t: QUEUED silo:wren -> moss thread=01ABC... hop=1 "I need three name ideas for our team mascot — an octopus. Keep them punchy, memo" (depth 1)
+r4t: QUEUED silo:you -> wren thread=01ABC... hop=0 "Ask Moss for three name ideas for our roster mascot, an octopus. Pick your favo" (depth 1)
+r4t: QUEUED silo:wren -> moss thread=01ABC... hop=1 "I need three name ideas for our roster mascot — an octopus. Keep them punchy, m" (depth 1)
 r4t: ECHO-REPLY moss (rig helper) 232 bytes of cleaned stdout staged as the reply to silo:wren
 r4t: QUEUED silo:moss -> wren thread=01ABC... hop=2 "1. **Inkwell** — evokes the octopus "pen" while sounding sharp and professional " (depth 1)
 r4t: STDOUT-REPLY wren (rig silo) released nothing; 156 bytes of cleaned stdout staged as a reply to silo:moss
@@ -233,7 +233,7 @@ You should see (roster section):
 
 ```
 Roster  (repo settings: /home/you/ark/silo/ROSTER.md)
-    You  Human  address=(none)   (try: add an **Address:** line so the team can reach them)
+    You  Human  address=(none)   (try: add an **Address:** line so the roster can reach them)
   ✓ Wren  rig=silo  budget=5.2/8  [leader]
   ✓ Moss  rig=helper  budget=7/8
 ```
@@ -332,7 +332,7 @@ One full round trip through the leader, end to end:
 **Run**
 
 ```bash
-r4t seat send --node silo "In two or three full sentences: what has Moss contributed to this team so far?"
+r4t seat send --node silo "In two or three full sentences: what has Moss contributed to this roster so far?"
 r4t seat inbox --node silo
 ```
 
@@ -340,7 +340,7 @@ You should see:
 
 ```
 ── from silo:wren (2026-07-29T05:56:13.232267Z)
-Two things, both concrete: Moss drafted three octopus name options for our mascot (we landed on Inkwell), then committed ROSTER.md with Moss added to the team at `0a80bcf`. That's it — two small, done items.
+Two things, both concrete: Moss drafted three octopus name options for our mascot (we landed on Inkwell), then committed ROSTER.md with Moss added to the roster at `0a80bcf`. That's it — two small, done items.
 ```
 
 Wren knows what his helper has done. (That commit hash is real: the

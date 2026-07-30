@@ -68,9 +68,10 @@ infer the outbox without the env var (see below). Outside that root, set
    - CWD is inside that agent's registered root.
 3. **Exactly one** match → use it.
 4. **Several** matches → refuse; set `TELL_OUTBOX_DIR` (typical when CWD is `$HOME`).
-5. **None** / no registry (e.g. `install-client` tell-only) → refuse; set `TELL_OUTBOX_DIR`.
+5. **None** / no registry (e.g. system-installed tell with no readable `~/.a8s`) → refuse; set `TELL_OUTBOX_DIR`.
 
-`install-client` copies tell without a8s config access — env-only, by design.
+Agent-user / system installs put `tell` on a shared PATH without a8s config
+access — env-only, by design.
 
 ## Why `tells` not `convo -f`
 
@@ -85,6 +86,6 @@ For a filedrop loop you want inbound only.
 ## Related
 
 - Agent session playbook: [`https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent`](https://github.com/witw-llc/ar3-private/wiki/Playbook-a8s-Filedrop-Agent)
-- File-proxy mechanics: [README — File proxy](../apps/a8s/README.md#file-proxy)
+- File-proxy mechanics: [a8s.md — File proxy](a8s.md#file-proxy)
 - Tell internals: [a8s-tell.md](a8s-tell.md)
 - Operator skill (send-only, for deployed agents): [`skills/tell/SKILL.md`](../apps/a8s/skills/tell/SKILL.md)

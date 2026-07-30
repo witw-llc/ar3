@@ -20,8 +20,8 @@
   Save the report: `r4t sandbox --preset agy > report.md`
 
 ```bash
-python3 -m pytest apps/r4t/tests/     # from anywhere in ~/bin — the repo
-                                      # venv wrapper supplies pytest
+python3 -m pytest apps/r4t/tests/     # from the repo root — the repo venv
+                                      # wrapper supplies pytest
 ```
 
 ### Failure scenarios

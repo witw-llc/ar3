@@ -95,6 +95,21 @@ the agent be free inside the cell; let the cell be the wall.
    sudo chmod -R g+ws /path/to/workplace     # g+s so new files stay group-owned
    ```
 
+4. **Put `tell` on the agent user's PATH** when members send via the CLI (not
+   only via the `a8s_tell` MCP tool). A home clone under the operator is
+   invisible to `run_as` users — install the suite machine-wide instead:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh \
+  | sudo AR3_SYSTEM=1 sh
+```
+
+   That clones into `/usr/local/lib/ar3` and symlinks `tell` (and the other
+   suite shims) into `/usr/local/bin`. Override with `AR3_DIR` / `AR3_BIN`.
+   r4t still injects `TELL_OUTBOX_DIR` across the boundary; the agent has no
+   registry under its own home.
+
 r4t re-probes 2 and 3 before every turn (`sudo -n -u <user> true`, then a touch
 in the workplace as the agent user) and fails the turn if either regresses.
 

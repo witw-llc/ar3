@@ -9,22 +9,60 @@ runs another product's commands for you.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 ```
 
 That clones the suite into `~/.ar3` and adds one `source` line to your shell
 rc; re-running it updates in place, and so does `git pull`. Nothing installs
 into your projects. Without git on PATH the same line installs the latest
-release from a tarball, and re-running it updates to the newest release.
+release from a tarball, and re-running it updates to the newest release. When
+a re-run changes the tree and a8s has running nodes, it finishes with
+`~/.ar3/a8s update` so handlers re-exec the new code.
 
-With access to the development repo, `AR3_CHANNEL=beta` ahead of the same
-command installs the development tree instead of the latest release (git
-required); re-running pulls it forward.
+Pin a release with `AR3_VERSION=vX.Y.Z` ahead of the same command. With access
+to the development repo, `AR3_CHANNEL=beta` installs the development tree
+instead of the latest release (git required); re-running pulls it forward.
+
+Prefer to download, inspect, then run — the pipe-to-shell form cannot prove
+the bytes you read are the bytes that execute if a server distinguishes the
+two requests:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh -o get-ar3.sh
+less get-ar3.sh
+sh get-ar3.sh
+```
 
 Prefer it manual? Clone anywhere and `source install.sh` from your shell rc —
 the shims at the repo root — `ar3`, `a8s`, `tell`, `tells`, `r4t`, `k7e` — go
 on `PATH`. Either way, add `--skills` to the source line to link the tool docs
 under `docs/` into Claude Code and Cursor as agent skills.
+
+For machine-wide or `run_as` agent-user installs, skip the shell rc and put the
+shims on the shared PATH instead:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh \
+  | sudo AR3_SYSTEM=1 sh
+```
+
+That lands the suite in `/usr/local/lib/ar3` (override with `AR3_DIR`) and
+symlinks the shims into `/usr/local/bin` (override with `AR3_BIN`). Re-running
+updates in place. Agent users then resolve `tell` without reading an operator
+home clone.
+
+Headless and cron shells skip `.bashrc`, where the default install drops its
+source line. Use the absolute shim (`~/.ar3/ar3`, `~/.ar3/a8s`, …), source
+`install.sh` from `.profile`, or schedule the one-liner / local script:
+
+```cron
+0 3 * * * /bin/sh -c 'curl --proto "=https" --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh'
+# offline-tolerant once installed:
+# 0 3 * * * /bin/sh $HOME/.ar3/get.sh
+```
 
 The public [witw-llc/ar3](https://github.com/witw-llc/ar3) is the release
 mirror — one commit per release of the whole suite.
@@ -33,9 +71,12 @@ mirror — one commit per release of the whole suite.
 
 - **[The Ark Raising](guide/README.md)** — a chapter-by-chapter build-along
   that raises a roster of agents from nothing.
-- **[apps/a8s/README.md](apps/a8s/README.md)** — the message router.
-- **[apps/r4t/README.md](apps/r4t/README.md)** — rosters, rigs, dispatch.
-- **[apps/k7e/README.md](apps/k7e/README.md)** — the knowledge engine.
+- **[docs/ar3.md](docs/ar3.md)** — the front door.
+- **[docs/a8s.md](docs/a8s.md)** — the message router.
+- **[docs/r4t.md](docs/r4t.md)** — rosters, rigs, dispatch.
+- **[docs/k7e.md](docs/k7e.md)** — the knowledge engine.
+
+Every page is flat under [`docs/`](docs/) — one doc tree for the whole suite.
 
 ## Versioning
 

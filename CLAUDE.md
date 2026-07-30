@@ -13,21 +13,26 @@ teaches them.
   `install.sh` adds the repo dir to `$PATH` and links `docs/` as skills.
 - **`apps/a8s/`** — Agent Infinity System. Filesystem-based message router
   letting independent CLI agents (Claude, Gemini, Codex, scripts) talk to each
-  other via `tell`. See [`apps/a8s/README.md`](apps/a8s/README.md) for concept
-  and usage, [`apps/a8s/DEVELOPMENT.md`](apps/a8s/DEVELOPMENT.md) for hard
-  constraints and historical decisions.
+  other via `tell`. See [`docs/a8s.md`](docs/a8s.md) for concept and usage,
+  [`docs/a8s-development.md`](docs/a8s-development.md) for hard constraints and
+  historical decisions.
 - **`apps/r4t/`** — The roster. Rigs, dispatch, verdicts, isolation.
-  See [`apps/r4t/README.md`](apps/r4t/README.md) and the `docs/r4t-*.md` pages.
+  See [`docs/r4t.md`](docs/r4t.md) and the `docs/r4t-*.md` pages.
 - **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
   SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
-  See [`apps/k7e/README.md`](apps/k7e/README.md) for usage and architecture.
+  See [`docs/k7e.md`](docs/k7e.md) for usage and architecture.
 - **`apps/ar3/`** — The front door. Reads suite state and probes prerequisites;
-  it never mutates anything and never wraps another product's verbs.
+  it never mutates anything and never wraps another product's verbs. See
+  [`docs/ar3.md`](docs/ar3.md).
 - **`guide/`** — *The Ark Raising*, the chapter-by-chapter build-along.
-- **`docs/`** — the suite's doc tree. Tool docs with YAML frontmatter
-  (`ar3.md`, `tell.md`) are symlinked into `~/.claude/skills/` and
-  `~/.cursor/skills/` by `install.sh --skills`; app-prefixed pages
-  (`a8s-*.md`, `r4t-*.md`, `k7e-*.md`) are plain docs the installer skips.
+- **`docs/`** — the whole suite's doc tree, flat: every page a reader or an
+  agent needs lives here and nowhere else. `a8s.md` / `r4t.md` / `k7e.md` /
+  `ar3.md` are the per-app entry points; `<app>-*.md` pages go deeper.
+  **YAML frontmatter is the skill gate** — `install.sh --skills` symlinks
+  exactly those `docs/*.md` whose first line is `---` into
+  `~/.claude/skills/` and `~/.cursor/skills/`, and skips every other page.
+  Skill docs load into an agent's context, so keep them short; a deep app
+  page must not grow frontmatter.
 - **`requirements/`** — dependency groups (`a8s-test.txt`, `r4t.txt`). Per-app
   `tests/requirements.txt` files point here.
 
@@ -72,9 +77,10 @@ repo dir, find python, exec the entry-point `.py`, propagate the exit code.
 ### Install hook
 
 `install.sh` is sourced from a shell rc. It adds the repo dir to `$PATH`. Pass
-`--skills` to also symlink `docs/*.md` into `~/.claude/skills/` (when Claude
-Code is present) and `~/.cursor/skills/` for Cursor. That mechanism installs the
-user's own tool docs; a8s installs nothing into a project.
+`--skills` to also symlink the frontmatter-bearing `docs/*.md` into
+`~/.claude/skills/` (when Claude Code is present) and `~/.cursor/skills/` for
+Cursor. That mechanism installs the user's own tool docs; a8s installs nothing
+into a project.
 
 Adding a new top-level CLI: write the shim, write `docs/<name>.md` with YAML
 frontmatter if it should be installable as a Claude skill.
@@ -125,7 +131,7 @@ frontmatter.
 Docs speak present truth. No "used to" / "previously" framing — git holds the
 history. Never the words honest/honestly. User-facing surfaces (CLI help, skill
 descriptions) get one short sentence with no internals; mechanics go in the
-README or the docstring.
+app's `docs/` page or the docstring.
 
 ## Top-level scripts: `tell`
 
