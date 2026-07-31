@@ -19,6 +19,16 @@ wait in the chapter.
 
 ## 3. Starting state
 
+- No leftover `TELL_OUTBOX_DIR` from an earlier a8s seat on this machine —
+  `tell` checks it before anything else, so a stale value silently sends
+  your mail to that other seat's outbox instead of the one you build below:
+
+**Run**
+
+```bash
+unset TELL_OUTBOX_DIR
+```
+
 - The Ark installed and on your PATH:
 
 **Run**
@@ -228,14 +238,16 @@ started me as PID 8401
 
 Speak from your seat. `tell` figures out who you are from the directory you
 stand in, and `tells` watches your inbox for the window you give it — Ctrl+C
-as soon as the answer lands.
+as soon as the answer lands. Give this first wait a long window: solo's
+first wake pays for the model's cold start on top of the harness's own, and
+that can run past two minutes before a single word comes back.
 
 **Run**
 
 ```bash
 cd ~/ark/me
 tell solo "Read solo.json in your own directory and tell me in one sentence what it does."
-tells --timeout 120
+tells --timeout 300
 ```
 
 ## 6. Expected receipt
@@ -333,7 +345,7 @@ Attach a handler again:
 
 ```bash
 a8s start solo
-tells --timeout 120
+tells --timeout 300
 ```
 
 You should see:
@@ -388,7 +400,7 @@ No restart needed — the definition runs the script fresh on every wake:
 ```bash
 cd ~/ark/me
 tell solo "What are you watching over today?"
-tells --timeout 120
+tells --timeout 300
 ```
 
 You should see:

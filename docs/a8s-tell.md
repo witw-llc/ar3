@@ -22,13 +22,13 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 
 ## Send path (async)
 
-0. **`tell --check`** — optional self-test: verifies the resolved outbox is writable (creates the path when missing). Optional recipient name validates registry routing. No envelope written.
+0. **`tell --check`** — optional self-test: verifies the resolved outbox is writable (creates the path when missing). A recipient name validates registry routing when the resolved outbox is a registered one; on a staging outbox it reports `not checked` rather than guessing. No envelope written.
 1. **`TELL_OUTBOX_DIR` or CWD filedrop** — tell writes to the env path when set;
    otherwise may resolve a unique configured outbox from CWD when the registry
    is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). System installs for
    agent users without a readable registry always need the env var.
 2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
-3. Optionally read the a8s state root (default `~/.config/a8s`) to validate recipient and stamp `from` when CWD sits inside a registered agent root. Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
+3. Optionally read the a8s state root (default `~/.config/a8s`) to stamp `from` when CWD sits inside a registered agent root, and to validate the recipient — see [Who validates the recipient](#who-validates-the-recipient). Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
 
 Envelope shape:
 
@@ -84,6 +84,28 @@ Created when missing.
 When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
 
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
+
+## Who validates the recipient
+
+Recipient validation belongs to whoever routes the outbox, so `tell` asks one
+question: **is the resolved outbox a registered agent's own outbox?**
+
+- **Yes** — `tell` feeds the a8s router, and the registry is the authority on
+  who may be addressed. An unknown name fails at the terminal before anything
+  is staged (`no agent or alias named 'ghost'`), with the usual remote fallback
+  when remotes are configured.
+- **No** — `tell` is a staging writer for another router. r4t points a caged
+  roster member's `TELL_OUTBOX_DIR` at a per-turn staging dir it drains itself,
+  and roster members are not a8s agents, so `tell moss` must stage and let
+  `dispatch.release_staging` resolve the name against the roster. That consumer
+  canonicalizes bare roster names to intra-roster routes, dead-letters an
+  explicit `node:<nobody>` sub-address, logs `UNKNOWN-MEMBER` for a bare name
+  matching no member, and hands anything genuinely external to a8s — which
+  rejects an unknown recipient at ingest (`unknown recipient …; trashing`).
+
+`from` stamping does not follow this split: it still applies whenever CWD sits
+inside a registered agent root, and the router force-overwrites `from` from
+outbox ownership regardless — the filesystem is the unforgeable identity.
 
 ## `tells` (receive side)
 

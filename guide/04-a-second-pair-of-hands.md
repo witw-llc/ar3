@@ -87,7 +87,7 @@ You should see:
 
 ```
 added rig 'helper' (opencode-ollama) to /home/you/.config/r4t/rigs.json
-  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
+  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 Reference it from ROSTER.md: `- **Rig:** helper`
 set helper echo = true in /home/you/.config/r4t/rigs.json
 unset silo echo in /home/you/.config/r4t/rigs.json
@@ -99,6 +99,12 @@ From this turn on, Wren's prompt carries the messaging doctrine — the
 `tell` command, and a member list naming You and Moss.
 
 ## 5. Run it
+
+> On current releases, a `tell` a member sends from inside a registered
+> node validates its recipient against the a8s registry — which knows
+> agents, not roster members — so Wren's own `tell moss` may error with
+> `no agent or alias named 'Moss'` even though Moss is live. Tracked as
+> issue #85; the fix is in flight.
 
 Give Wren a task that names Moss:
 

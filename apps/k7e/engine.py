@@ -516,7 +516,7 @@ def rebuild_mocs():
             for nid, title, status in other:
                 content += f"* [[{nid}]] — {title} ({status})\n"
             content += "\n"
-        (MOCS_DIR / f"{tag}.md").write_text(content, encoding="utf-8")
+        (MOCS_DIR / _moc_filename(tag)).write_text(content, encoding="utf-8")
 
 
 def stats():
@@ -1146,17 +1146,35 @@ def _rrf_fuse(result_lists, limit):
     return [{"id": nid, "title": titles[nid], "score": round(score, 4)} for nid, score in ranked]
 
 
+_MOC_FILENAME_UNSAFE_RE = re.compile(r"[\\/]")
+
+
+def _moc_filename(tag):
+    """Map a tag to a filesystem-safe MOC filename. Tags travel through
+    frontmatter and MOC titles unchanged; only this derived filename is
+    sanitized, so `/`-bearing tags like `I/O` or `CI/CD` don't get read as
+    path structure by `Path`."""
+    return f"{_MOC_FILENAME_UNSAFE_RE.sub('_', tag)}.md"
+
+
 def _update_mocs(node_id, title, tags):
+    """Update the MOC file for each tag. The node file is the durable
+    artifact — a MOC write failure is logged and skipped rather than
+    raised, so it can't abort a batch or strand the caller with an
+    orphan node that already exists on disk."""
     for tag in tags:
-        moc_path = MOCS_DIR / f"{tag}.md"
+        moc_path = MOCS_DIR / _moc_filename(tag)
         entry = f"* [[{node_id}]] — {title}\n"
-        if moc_path.exists():
-            content = moc_path.read_text(encoding="utf-8")
-            if node_id not in content:
-                content = content.rstrip() + "\n" + entry
-                moc_path.write_text(content, encoding="utf-8")
-        else:
-            moc_path.write_text(f"# {tag}\n\n## Active\n{entry}", encoding="utf-8")
+        try:
+            if moc_path.exists():
+                content = moc_path.read_text(encoding="utf-8")
+                if node_id not in content:
+                    content = content.rstrip() + "\n" + entry
+                    moc_path.write_text(content, encoding="utf-8")
+            else:
+                moc_path.write_text(f"# {tag}\n\n## Active\n{entry}", encoding="utf-8")
+        except OSError as e:
+            print(f"Warning: failed to update MOC for tag {tag!r}: {e}", file=sys.stderr)
 
 
 def _parse_frontmatter(text):

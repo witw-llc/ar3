@@ -119,7 +119,7 @@ You should see:
 
 ```
 added rig 'silo' (opencode-ollama) to /home/you/.config/r4t/rigs.json
-  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
+  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 Reference it from ROSTER.md: `- **Rig:** silo`
 set silo echo = true in /home/you/.config/r4t/rigs.json
 ```
@@ -225,9 +225,14 @@ roster, and a roster can grow.
 ## 5. Run it
 
 You are the roster's Human, and r4t gives you a **seat**: send as
-yourself, and read what parks for you. `seat send` runs Wren's turn
-synchronously — the first turn takes a minute on the free path while the
-model loads; later turns take seconds.
+yourself, and read what parks for you. `seat send` queues Wren's turn and
+returns immediately — it does not wait for the reply. Poll the inbox (or
+just wait a beat and read it once) until something is there: the first turn
+takes a minute on the free path while the model loads, later ones take
+seconds. r4t also holds each rig to a cadence floor —
+`min_seconds_between_turn_starts`, 15s by default — so a send fired before
+the previous turn has started just queues behind it instead of running
+immediately.
 
 **Run**
 
@@ -250,7 +255,12 @@ My job is to do the work and answer to the owner — handling everything from le
 ```
 
 Wren read its own roster block and answered in character. Now the proof
-that `Continue: on` means what it says — plant a codeword in one turn:
+that `Continue: on` means what it says — plant a codeword in one turn. Let
+the reply above land before you send this one; three sends fired back to
+back can outrun Wren's spend budget on top of the cadence floor, and a
+reply of `queued — Wren is resting (member budget ...)` means exactly that —
+wait the minutes it names, or run `r4t clear --node silo` to drop the
+queue and retry (chapter 3 covers both in depth):
 
 **Run**
 
@@ -266,7 +276,8 @@ You should see:
 Codeword confirmed: TIDEPOOL.
 ```
 
-And ask for it back in a second, separate turn:
+Let that confirmation land, then ask for the codeword back in a second,
+separate turn:
 
 **Run**
 
@@ -335,7 +346,7 @@ You should see:
 
 ```
 swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
-  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
+  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
 ```

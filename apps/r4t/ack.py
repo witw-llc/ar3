@@ -21,17 +21,22 @@ the #59 experiments:
    `CLOSE_WITHOUT_RETRY` and dropped two of three batch messages; a parser that
    guessed at near-misses would have closed a thread on that. A malformed verb
    is logged and rejected, and the failure mode of every rejection is one extra
-   nudge — never a discarded answer. Prose that merely names the verb, and
-   anything inside a fenced code block, is not protocol at all: a member asked
-   to document the syntax must not close the thread it was asked on.
+   nudge — never a discarded answer. Prose that merely names the verb is not
+   protocol at all, and neither is a verb line inside a fenced code block: a
+   member asked to document the syntax must not close the thread it was asked
+   on. Fences exempt a line from PARSING only — every protocol-shaped line is
+   stripped from a delivered body wherever it sits, so no unbalanced fence can
+   ship the verb to someone else's parser.
 
 2. **Eligibility is an allow-list read off the ledger.** Only a
    machine-originated thread — a relay from another cluster's machinery, or one
-   the dispatcher itself opened — may end in silence. A thread a person or a
-   peer member opened is owed an answer whatever its wording, so no phrasing
-   can talk the gate into a close. Content disqualifiers (a direct question, a
-   direct assignment, an operational error) then ride on top as overrides: a
-   relay that still asks something stays ineligible.
+   the dispatcher itself opened — may end in silence. Both facts are recorded
+   on the ledger when the thread is opened, by the code that opens it, never
+   re-derived later from a sender string an outside caller can choose. A thread
+   a person or a peer member opened is owed an answer whatever its wording, so
+   no phrasing can talk the gate into a close. Content disqualifiers (a direct
+   question, a direct assignment, an operational error) then ride on top as
+   overrides: a relay that still asks something stays ineligible.
 
 3. **A close is committed only by the member that owes the creator.** Threads
    are shared down a delegation chain — an intra-roster tell inherits the
@@ -88,10 +93,11 @@ MALFORMED = "malformed"
 
 
 def _scan(output: str):
-    """(line, in_fence) for every line of a turn's output. A fenced block is
-    quotation, not protocol: a member showing the syntax it was asked about
-    must not thereby close the thread it was asked on. The fence delimiters
-    themselves are never protocol either."""
+    """(line, in_fence) for every line of a turn's output, for PARSING only —
+    stripping reads the raw lines. A fenced block is quotation, not protocol: a
+    member showing the syntax it was asked about must not thereby close the
+    thread it was asked on. The fence delimiters themselves are never protocol
+    either."""
     in_fence = False
     for line in output.splitlines():
         if _FENCE_RE.match(line):
@@ -129,10 +135,16 @@ def is_protocol_line(line: str) -> bool:
 def strip_proposals(output: str) -> str:
     """The turn's output with every protocol line removed — what the stdout
     fallback reads when a proposal was rejected and the member's prose still
-    has to reach someone."""
+    has to reach someone.
+
+    Stripping ignores fences on purpose, though parsing honors them. A fence is
+    a claim the model makes about its own output, and an unbalanced one is a
+    claim it got wrong: honoring it here would let `close_without_reply <thread>`
+    ride out in a delivered body, into the prompt of whichever member reads that
+    message next. Quotation that cannot be delivered intact costs one garbled
+    syntax example; a leaked verb line costs a thread nobody meant to close."""
     return "\n".join(
-        line for line, in_fence in _scan(output)
-        if in_fence or not is_protocol_line(line)
+        line for line in output.splitlines() if not is_protocol_line(line)
     )
 
 
@@ -168,22 +180,27 @@ def disqualifier(messages: list[dict]) -> str | None:
     return None
 
 
-def machine_originated(node: str, task: dict) -> bool:
-    """The allow-list, read off the ledger alone. A relay thread's originator is
-    another cluster's machinery (#167) and a thread the dispatcher itself opened
-    has no one waiting on prose — the #58 filedrop shape, where a reply is only
-    one more inbound somebody has to class. Every other thread was opened by a
-    person or by a peer member and is owed an answer, however it was worded."""
-    creator = str(task.get("creator", "")).strip().lower()
-    return bool(task.get("relay")) or creator == f"r4t:{node.lower()}"
+def machine_originated(task: dict) -> bool:
+    """The allow-list, read off two flags the ledger was born with. A relay
+    thread's originator is another cluster's machinery (#167) and a thread the
+    dispatcher itself opened has no one waiting on prose — the #58 filedrop
+    shape, where a reply is only one more inbound somebody has to class. Every
+    other thread was opened by a person or by a peer member and is owed an
+    answer, however it was worded.
+
+    Both flags are stamped at `ensure_task` time by the code that opens the
+    thread. Neither is re-derived from the creator string: `r4t dispatch --from`
+    takes any sender a caller cares to type, so a creator that merely LOOKS like
+    the dispatcher's voice proves nothing (#83)."""
+    return bool(task.get("relay")) or task.get("origin") == tasks.ORIGIN_DISPATCHER
 
 
-def derive_reason(node: str, task: dict) -> str:
+def derive_reason(task: dict) -> str:
     """The reason the task layer will stand behind — and, since only
     `REASON_AUTOMATED` is eligible, the classification the allow-list gates on.
     A thread that reads `informational_only` is one the ledger cannot vouch for
     as machine-originated, which is exactly what makes it ineligible."""
-    return REASON_AUTOMATED if machine_originated(node, task) else REASON_INFORMATIONAL
+    return REASON_AUTOMATED if machine_originated(task) else REASON_INFORMATIONAL
 
 
 def owes_creator(node: str, roster, task: dict, messages: list[dict]) -> bool:
@@ -191,9 +208,12 @@ def owes_creator(node: str, roster, task: dict, messages: list[dict]) -> bool:
     it received the thread's message from the creator itself, not from a member
     that forwarded it down the tree. Same predicate the answer-the-originator
     close uses (`dispatch._same_recipient`), so a chain that shares one thread
-    id still has exactly one member able to end it."""
+    id still has exactly one member able to end it.
+
+    No roster means the predicate cannot be evaluated, and an unevaluable safety
+    check denies: a close that never happens costs one nudge."""
     if roster is None:
-        return True
+        return False
     # Local import: dispatch imports this module, so the address-canonicalizing
     # predicate can only be borrowed at call time.
     from dispatch import _same_recipient
@@ -212,13 +232,14 @@ def _reject(ctx, member, thread: str, why: str) -> None:
     )
 
 
-def run(ctx, member, rig, batch: list[dict], output: str, roster=None) -> list[str]:
+def run(ctx, member, rig, batch: list[dict], output: str, roster) -> list[str]:
     """Harvest, validate and commit this turn's proposals. Returns the threads
     actually closed — empty whenever anything at all was off, which is the
     designed failure direction: a missed close costs one nudge, a wrong one
-    silently discards an answer someone is waiting for. `roster` is what makes
-    the commit per-obligation: without it every proposer counts as the member
-    that owes the creator."""
+    silently discards an answer someone is waiting for. `roster` is required
+    because it is what makes the commit per-obligation: a safety property that
+    can be switched off by omitting an argument is a safety property waiting to
+    be omitted."""
     if rig.echo:
         return []
     proposals, malformed = parse(output)
@@ -252,7 +273,7 @@ def run(ctx, member, rig, batch: list[dict], output: str, roster=None) -> list[s
         if task.get("status") != tasks.STATUS_OPEN or task.get("answered"):
             _reject(ctx, member, thread, "the thread is already closed")
             continue
-        reason = derive_reason(ctx.node, task)
+        reason = derive_reason(task)
         if reason != REASON_AUTOMATED:
             _reject(
                 ctx, member, thread,

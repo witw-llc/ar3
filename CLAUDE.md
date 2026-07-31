@@ -140,8 +140,12 @@ Implementation lives in `apps/a8s/tell.py`. Outbox resolution: `TELL_OUTBOX_DIR`
 when set (a8s injects it on wake); otherwise a unique configured outbox matched
 from CWD when `~/.config/a8s` is readable (desktop filedrop seats — see
 `docs/a8s-filedrop.md`). When the registry is reachable and CWD is inside
-a registered agent, recipient validation, `from` stamping, and agent logging
-apply on top.
+a registered agent, `from` stamping and agent logging apply on top. Recipient
+validation follows the *outbox* instead: it runs only when the resolved outbox
+is a registered agent's own outbox. Writing anywhere else makes `tell` a
+staging writer whose consumer owns routing — r4t points a caged roster member's
+`TELL_OUTBOX_DIR` at a per-turn staging dir, and roster members are not a8s
+agents.
 
 The router (`mailbox.py:_process_pending`) force-overwrites `from` based on
 which agent owns the enclosing root — the filesystem is the unforgeable

@@ -7,8 +7,11 @@ yields nothing. Real extraction behavior is covered in test_llm_distill.py (@llm
 Stub-LLM cases exercise response-shape handling without a live model."""
 import json
 
+import pytest
+
 import distill
 import engine
+import hygiene
 
 
 class TestDistillRequiresLLM:
@@ -86,3 +89,61 @@ class TestDistillContentType:
         assert "Redis default port" in titles
         assert "PostgreSQL default port" in titles
         assert "Malformed list content" not in titles
+
+
+class TestDistillSlashTags:
+    """A distilled entry tagged with a slash (#89, e.g. model-generated
+    "I/O", "CI/CD", "TCP/IP") must not crash mid-batch or leave the store
+    with a node that has no matching MOC."""
+
+    def _run_with_tag(self, tmp_path, monkeypatch, tag):
+        payload = [
+            {
+                "title": "Async disk reads",
+                "content": (
+                    "Async disk reads avoid blocking the event loop while "
+                    "waiting on the kernel to service a read request."
+                ),
+                "tags": [tag],
+            }
+        ]
+        wrapper = tmp_path / "fake-llm.py"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdin.read()\n"
+            f"print({json.dumps(payload)!r})\n"
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
+
+        source = tmp_path / "notes.md"
+        source.write_text(
+            "Notes from the reliability review. Async disk reads avoid "
+            "blocking the event loop while the kernel services a request. "
+            "Extra padding so the distill length gate opens for this entry.\n"
+        )
+
+        import cli
+        return cli.main(["distill", str(source)])
+
+    def test_slash_tag_distills_clean(self, store, tmp_path, monkeypatch):
+        exit_code = self._run_with_tag(tmp_path, monkeypatch, "I/O")
+        assert exit_code == 0
+
+        nodes = engine.list_nodes(status="active")
+        assert len(nodes) == 1
+        assert nodes[0]["tags"] == "I/O"
+
+        moc = engine.MOCS_DIR / "I_O.md"
+        assert moc.exists()
+        assert nodes[0]["id"] in moc.read_text()
+
+        assert hygiene.run_audit() == []
+
+    @pytest.mark.parametrize("tag", ["CI/CD", "TCP/IP"])
+    def test_other_slash_tags_distill_clean(self, store, tmp_path, monkeypatch, tag):
+        exit_code = self._run_with_tag(tmp_path, monkeypatch, tag)
+        assert exit_code == 0
+        assert (engine.MOCS_DIR / f"{tag.replace('/', '_')}.md").exists()
+        assert hygiene.run_audit() == []

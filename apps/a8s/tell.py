@@ -5,8 +5,12 @@ and `~/.a8s` is readable, `tell` may resolve a unique configured outbox from
 CWD — see `docs/a8s-filedrop.md`. System installs for agent users typically
 have no registry access and always need the env var.
 
-`~/.a8s` reachable and CWD inside a registered agent validates the recipient
-(with remote fallback), stamps `from`, and logs to the agent log.
+`~/.a8s` reachable and CWD inside a registered agent stamps `from` and logs to
+the agent log. Recipient validation is narrower: it runs only when the resolved
+outbox is some registered agent's own outbox. Any other outbox makes tell a
+staging writer for another router (r4t points a caged member's
+`TELL_OUTBOX_DIR` at a per-turn staging dir), and that router resolves the
+recipient against its own roster.
 
 Attachments: any path tell can read is copied into `.outbox/<msg_id>/` before
 the envelope is written. The JSON `files` array carries basename only (no
@@ -487,6 +491,39 @@ def _optional_sender() -> tuple[str, dict] | None:
         return None
 
 
+def _outbox_is_registered(outbox: Path) -> bool:
+    """True when `outbox` is some registered agent's own outbox.
+
+    Recipient validation belongs to whoever routes the outbox. Writing into a
+    registered a8s outbox, tell feeds the a8s router, so the registry is the
+    authority on who may be addressed. Writing anywhere else, tell is a staging
+    writer for another router — r4t points a caged member's `TELL_OUTBOX_DIR` at
+    a per-turn staging dir it drains itself — and that router resolves the
+    recipient against its own roster. Roster members are not a8s agents, so
+    validating them here would reject every intra-roster delegation.
+    """
+    from registry import participants_from_registry
+
+    try:
+        for p in participants_from_registry():
+            try:
+                registered = p.outbox_path().resolve()
+            except (OSError, RuntimeError):
+                continue
+            try:
+                if os.path.samefile(registered, outbox):
+                    return True
+            except OSError:
+                # Registered outbox (or the resolved outbox) doesn't exist yet
+                # on disk — samefile can't stat it, so fall back to the path
+                # comparison it would otherwise replace.
+                if registered == outbox:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]:
     from network import configured_remote_ids
     from registry import load_aliases, load_namespaces, resolve_name, split_namespace_address
@@ -528,6 +565,16 @@ def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]
     return 0, canonical, kind
 
 
+def _registry_readable() -> bool:
+    from registry import participants_from_registry
+
+    try:
+        participants_from_registry()
+        return True
+    except OSError:
+        return False
+
+
 def run_check(recipient: str | None) -> int:
     outbox = find_outbox()
     if outbox is None:
@@ -537,19 +584,32 @@ def run_check(recipient: str | None) -> int:
     lines = ["tell: ok", f"  outbox: {outbox}"]
 
     if recipient is not None:
-        rc, canonical, kind = _validate_recipient(recipient)
-        if rc != 0:
-            return rc
-        assert canonical is not None
-        if kind == "alias":
-            lines.append(f"  recipient {recipient!r}: ok (alias -> {canonical})")
-        elif kind == "namespace":
-            from registry import resolve_name
-
-            _, members = resolve_name(recipient)
-            lines.append(f"  recipient {recipient!r}: ok (namespace -> {members[0]})")
+        if not _outbox_is_registered(outbox):
+            if not _registry_readable():
+                lines.append(
+                    f"  recipient {recipient!r}: not checked (no readable registry)"
+                )
+            else:
+                lines.append(
+                    f"  recipient {recipient!r}: not checked "
+                    "(staging outbox — its consumer resolves recipients)"
+                )
         else:
-            lines.append(f"  recipient {recipient!r}: ok")
+            rc, canonical, kind = _validate_recipient(recipient)
+            if rc != 0:
+                return rc
+            assert canonical is not None
+            if kind == "alias":
+                lines.append(f"  recipient {recipient!r}: ok (alias -> {canonical})")
+            elif kind == "namespace":
+                from registry import resolve_name
+
+                _, members = resolve_name(recipient)
+                lines.append(
+                    f"  recipient {recipient!r}: ok (namespace -> {members[0]})"
+                )
+            else:
+                lines.append(f"  recipient {recipient!r}: ok")
 
     for line in lines:
         print(line)
@@ -595,7 +655,7 @@ def tell_main(argv: list[str]) -> int:
     sender = _optional_sender()
     to = recipient
     kind: str | None = None
-    if sender is not None:
+    if _outbox_is_registered(outbox):
         rc, canonical, kind = _validate_recipient(recipient)
         if rc != 0:
             return rc

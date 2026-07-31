@@ -23,6 +23,16 @@ About 20 minutes, most of it waiting on turns.
 
 ## 3. Starting state
 
+- No live `silo` roster because chapter 5's escape hatch skipped 02–04 (k7e
+  alone needs no roster)? Don't rebuild by hand: `r4t init` gets you the repo
+  and prints the `a8s add`/`namespace`/`start` lines chapter 2 runs, then
+  [templates/06-roster-memory/](templates/06-roster-memory/) is the one-shot
+  rest — its `ROSTER.md` already carries `Knowledge: on`, `rig-setup.sh` adds
+  both rigs, and `seed-store.sh` seeds Wren's store and points it at chapter
+  5's bridge (build that first from
+  [templates/05-k7e-bridge/](templates/05-k7e-bridge/) if it isn't there
+  either). No `STATUS.md` needed — the first turn below just refounds instead
+  of continuing.
 - Chapter 4 complete: roster `silo` with Wren (leader, `Continue: 15m`) and
   Moss (helper, echo), both answering at the seat.
 - Chapter 5 complete: `~/ark/bin/ask`, the stdin→stdout bridge, executable and
@@ -207,9 +217,12 @@ You should see:
 - prompt: continue 3318 bytes — intro 739, persona 324, history 198, messages 152, doctrine 1232, knowledge 668
 ```
 
-Wakes that cost about 2.6 KB, and then the last one — the wake that knew the
-answer — carrying one new field, `knowledge 668`, for 3318 bytes total. That
-is the entire price of the capability, per turn, in bytes. The same breakdown
+Your own numbers will differ — history length tracks how much of chapters
+2–4 you actually ran before reaching this one, so the field to look for is
+`knowledge`, not the totals around it. Wakes that cost about 2.6 KB, and
+then the last one — the wake that knew the answer — carrying one new field,
+`knowledge 668`, for 3318 bytes total. That is the entire price of the
+capability, per turn, in bytes. The same breakdown
 goes to the day log live (`r4t: PROMPT wren continue 3.3k — … knowledge
 0.7k`), so a store that quietly bloats into every prompt shows up as a number
 instead of an archaeology dig.
@@ -260,10 +273,10 @@ mocs
 nodes
 ```
 
-Chapter 5's bridge was configured in *your* store, at `~/.config/k7e`. This is
-a different store, with no bridge configured — no `config.json` on disk yet —
-never told about a model. Two details in that log line are the design
-working:
+Chapter 5's bridge was configured in *your* store, at `~/.config/k7e`
+(`K7E_HOME`). This is a different store, with no bridge configured — no
+`config.json` on disk yet — never told about a model. Two details in that
+log line are the design working:
 
 - **`5 capture(s) wait`** — the captures are not consumed, not marked, not
   lost. A watermark file (`.dreamed`) advances only after a successful pass,
@@ -391,7 +404,10 @@ r4t seat inbox --node silo
 r4t logs --node silo --agent wren --full | grep "^- prompt:" | tail -1
 ```
 
-You should see:
+You should see (or, as often, `(no unread messages)` — a one-line ask is the
+sub-80-character shape terminal chrome cleans, the same fumble chapter 4
+walks through; nothing failed either way, and the `knowledge N` field on the
+prompt line below is the actual check for this section):
 
 ```
 ── from silo:wren (2026-07-31T18:13:43.793861Z)
@@ -425,11 +441,11 @@ git add ROSTER.md
 git commit -q -m "silo roster: Wren remembers — Knowledge on"
 ```
 
-Wren's store lives under `~/.config/r4t/`, outside the repo, host-side — it
-never crosses into an isolated turn, and cloning this repo onto another
-machine brings the roster without bringing anyone's memory. If a member's
-accumulated knowledge is worth keeping, back it up where it lives, with
-chapter 5's trick:
+Wren's store lives under `~/.config/r4t/` (`R4T_HOME`), outside the repo,
+host-side — it never crosses into an isolated turn, and cloning this repo
+onto another machine brings the roster without bringing anyone's memory. If
+a member's accumulated knowledge is worth keeping, back it up where it
+lives, with chapter 5's trick:
 
 **Run**
 

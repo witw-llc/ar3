@@ -44,7 +44,12 @@ member's queue and back out. For governance rationale see
    walled garden, and roster agents never see it. Release canonicalizes
    recipients: bare roster names become intra-roster routes, human members
    resolve to their real a8s address, and anything else (`chatroom`,
-   external addresses) passes through untouched.
+   external addresses) passes through untouched. Release *is* the recipient
+   authority — `tell` writing into a staging dir validates nothing, because
+   roster members are not a8s agents. A bare name matching no member is logged
+   `UNKNOWN-MEMBER` before it rides the egress path, an explicit
+   `<node>:<nobody>` sub-address dead-letters, and a truly external name is
+   a8s's to reject.
 4. Agents never wait for replies in a turn (actor doctrine): delegate, end
    the turn, get woken when replies arrive, answer the originator when
    there is enough. `tell --sync` to members is prohibited by prompt and

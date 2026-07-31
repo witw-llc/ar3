@@ -566,6 +566,135 @@ def test_tell_unknown_recipient_with_attachment_leaves_clean_outbox(
     assert _outbox_dirs(outbox) == []
 
 
+def test_tell_registered_outbox_validates_recipient(fake_home, tmp_path, monkeypatch):
+    """The plain a8s send path: writing into a registered outbox, tell feeds the
+    a8s router, so the registry is the authority on who may be addressed."""
+    from registry import save_registry
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / ".outbox").mkdir()
+    save_registry({"SENDER": {"root": str(agent_root)}})
+    monkeypatch.chdir(agent_root)
+
+    res = _run_a8s(agent_root, "ghost", "hi")
+    assert res.returncode == 1
+    assert "no agent or alias named 'ghost'" in res.stderr
+    assert list((agent_root / ".outbox").glob("*.json")) == []
+
+
+def test_tell_case_variant_outbox_spelling_still_validates(
+    fake_home, tmp_path, monkeypatch
+):
+    """On a case-insensitive filesystem (APFS default, NTFS), a differently
+    cased spelling of an agent's own registered outbox is the same physical
+    directory the a8s router ingests from — `_outbox_is_registered` must
+    compare physical identity, not resolved-Path string equality, or a
+    re-cased TELL_OUTBOX_DIR dodges registry validation entirely."""
+    from registry import save_registry
+
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    real_outbox = agent_root / ".outbox"
+    real_outbox.mkdir()
+
+    probe = real_outbox / "case-probe.tmp"
+    probe.write_text("x", encoding="utf-8")
+    is_case_insensitive = (real_outbox / "CASE-PROBE.TMP").is_file()
+    probe.unlink()
+    if not is_case_insensitive:
+        pytest.skip("filesystem is case-sensitive")
+
+    save_registry({"SENDER": {"root": str(agent_root)}})
+    monkeypatch.chdir(agent_root)
+
+    variant = agent_root / ".OUTBOX"
+    res = _run_a8s(agent_root, "ghost", "hi", env={"TELL_OUTBOX_DIR": str(variant)})
+    assert res.returncode == 1, (
+        "a case-variant spelling of the agent's own registered outbox "
+        "skipped registry validation"
+    )
+    assert "no agent or alias named 'ghost'" in res.stderr
+    assert list(real_outbox.glob("*.json")) == []
+
+
+def test_tell_staging_outbox_skips_registry_validation(
+    fake_home, tmp_path, monkeypatch
+):
+    """A caged roster member: r4t points TELL_OUTBOX_DIR at a per-turn staging
+    dir, and the member's workplace sits inside the registered node's root. The
+    recipient is a roster member, not an a8s agent, so tell must stage it and
+    leave resolution to the consumer that drains the staging dir."""
+    from registry import save_registry
+
+    agent_root = tmp_path / "node"
+    workplace = agent_root / "workplace"
+    workplace.mkdir(parents=True)
+    (agent_root / ".outbox").mkdir()
+    save_registry({"NODE": {"root": str(agent_root)}})
+    staging = tmp_path / "r4t-state" / "agents" / "roy" / "staging"
+    staging.mkdir(parents=True)
+    monkeypatch.chdir(workplace)
+
+    res = _run_a8s(workplace, "moss", "over to you", env={"TELL_OUTBOX_DIR": str(staging)})
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(staging)
+    assert msg["to"] == "moss"
+    # `from` stamping is unchanged — the router force-overwrites it anyway.
+    assert msg["from"] == "NODE"
+    assert list((agent_root / ".outbox").glob("*.json")) == []
+
+
+def test_tell_check_defers_recipient_on_staging_outbox(
+    fake_home, tmp_path, monkeypatch
+):
+    from registry import save_registry
+
+    agent_root = tmp_path / "node"
+    agent_root.mkdir()
+    (agent_root / ".outbox").mkdir()
+    save_registry({"NODE": {"root": str(agent_root)}})
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.chdir(agent_root)
+
+    res = _run_a8s(agent_root, "--check", "moss", env={"TELL_OUTBOX_DIR": str(staging)})
+    assert res.returncode == 0, res.stderr
+    assert (
+        "recipient 'moss': not checked "
+        "(staging outbox — its consumer resolves recipients)"
+    ) in res.stdout
+    assert list(staging.glob("*.json")) == []
+
+
+def test_tell_check_reports_unreadable_registry(fake_home, tmp_path, monkeypatch, capsys):
+    """A staging outbox prints the same 'not checked' whether the registry is
+    reachable-but-empty or unreadable — distinguish the two so an operator
+    with a broken registry gets a different signal than one whose outbox is
+    legitimately unregistered.
+
+    In-process rather than via the subprocess harness: making the whole
+    `.a8s` directory unreadable (the only way to make `registry_path().is_file()`
+    raise) also breaks the CLI's unrelated settings load before `tell --check`
+    ever runs, so `participants_from_registry` is patched to raise directly.
+    """
+    import tell as tell_mod
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(staging))
+    monkeypatch.setattr(
+        "registry.participants_from_registry",
+        lambda: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    rc = tell_mod.run_check("moss")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "recipient 'moss': not checked (no readable registry)" in out
+    assert list(staging.glob("*.json")) == []
+
+
 def test_tell_success_leaves_only_bundle_and_envelope(tmp_path):
     (tmp_path / ".outbox").mkdir()
     doc = tmp_path / "doc.txt"

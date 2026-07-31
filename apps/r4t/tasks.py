@@ -19,6 +19,13 @@ A `relay` thread was opened by machine-classed external mail (`meta.class`
 someone waiting on an answer. It carries a label like any other thread; what it
 does not carry is owed attention, so the quiet sweep leaves it alone.
 
+`origin` records WHO opened the thread in the one form that cannot be forged:
+the dispatcher stamps `dispatcher` when it is the one opening, and nothing
+else ever writes the field. `creator` is whatever `from` the ingress carried
+and `r4t dispatch --from` accepts any string, so the two facts the ack
+allow-list stands on (`relay`, `origin`) are recorded at birth by the code that
+knows them rather than pattern-matched out of a name afterwards (#83).
+
 The thread id + hop travel as structured fields on the r4t-message
 (`dispatch.py`), never as a text header — there is no serialize/parse step
 inside the walls. Hop counts are stamped for telemetry (and the tree) but
@@ -28,11 +35,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from state import atomic_write_json, roster_dir, utc_now
+from state import append_log, atomic_write_json, roster_dir, utc_now
 from ulid import new as new_ulid
 
 STATUS_OPEN = "open"
 STATUS_CLOSED = "closed"
+
+ORIGIN_DISPATCHER = "dispatcher"
 
 
 def new_thread_id() -> str:
@@ -67,7 +76,9 @@ def save_task(node: str, task: dict) -> None:
     atomic_write_json(task_path(node, task["id"]), task)
 
 
-def new_task(task_id: str, creator: str, *, relay: bool = False) -> dict:
+def new_task(
+    task_id: str, creator: str, *, relay: bool = False, dispatcher: bool = False
+) -> dict:
     now = utc_now()
     return {
         "id": task_id,
@@ -77,13 +88,26 @@ def new_task(task_id: str, creator: str, *, relay: bool = False) -> dict:
         "status": STATUS_OPEN,
         "answered": False,
         "relay": relay,
+        "origin": ORIGIN_DISPATCHER if dispatcher else "",
     }
 
 
-def ensure_task(node: str, task_id: str, creator: str, *, relay: bool = False) -> dict:
+def ensure_task(
+    node: str,
+    task_id: str,
+    creator: str,
+    *,
+    relay: bool = False,
+    dispatcher: bool = False,
+) -> dict:
+    """The ledger for a thread, opened if this is the thread's first message.
+    `dispatcher` is passed only by dispatch's own voice — it says r4t opened
+    this thread, and it is set at birth or never: a nudge riding an owner's
+    thread must not inherit it, which is exactly why the flag is stamped here
+    and not computed later."""
     task = load_task(node, task_id)
     if task is None:
-        task = new_task(task_id, creator, relay=relay)
+        task = new_task(task_id, creator, relay=relay, dispatcher=dispatcher)
         save_task(node, task)
     elif task.get("status") == STATUS_CLOSED and task.get("ack"):
         # An ack is never prospective: it ends the obligations the thread was
@@ -91,12 +115,22 @@ def ensure_task(node: str, task_id: str, creator: str, *, relay: bool = False) -
         # ack-closed thread therefore reopens the ledger, or the sweep would be
         # blind to that message forever. A thread closed by a real answer is
         # left alone — `close_task` keeps its meaning.
+        spent = task.pop("ack")
         task["status"] = STATUS_OPEN
         task["answered"] = False
         task.setdefault("ack_notes", []).append(
-            {**task.pop("ack"), "superseded_at": utc_now()}
+            {**spent, "superseded_at": utc_now()}
         )
         save_task(node, task)
+        # The close is a fact in the day log; so is its undoing. Without this
+        # line the log's last word on a thread a member closed and then wrote
+        # to again in the same turn is `ACK`, which is no longer true (#83).
+        append_log(
+            node,
+            f"r4t: ACK-REOPENED thread={task_id} new traffic from {creator} "
+            f"supersedes {spent.get('member', '?')}'s close — the obligation "
+            "is open again",
+        )
     return task
 
 

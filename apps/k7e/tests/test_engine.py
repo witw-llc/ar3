@@ -179,6 +179,60 @@ class TestMOCs:
         assert "K7E-000-00001" in content
         assert "K7E-000-00002" in content
 
+    @pytest.mark.parametrize("tag", ["I/O", "CI/CD", "TCP/IP"])
+    def test_slash_tag_stores_clean(self, store, tag):
+        """A slash-bearing tag must not crash the MOC write (#89):
+        Path would otherwise read the slash as a directory separator and
+        raise FileNotFoundError for a nonexistent subdirectory."""
+        node_id = engine.store_entry("Title", "content", tags=[tag])
+        moc = engine.MOCS_DIR / f"{tag.replace('/', '_')}.md"
+        assert moc.exists()
+        assert node_id in moc.read_text()
+
+    def test_slash_tag_frontmatter_keeps_original_text(self, store):
+        """Only the MOC filename is sanitized — the tag text in the node's
+        frontmatter and in the MOC body must stay exactly as given."""
+        node_id = engine.store_entry("Title", "content", tags=["I/O"])
+        node_text = engine._node_path(node_id).read_text()
+        assert "tags: [I/O]" in node_text
+        moc = engine.MOCS_DIR / "I_O.md"
+        assert "# I/O" in moc.read_text()
+
+    def test_slash_tag_passes_check(self, store):
+        import hygiene
+        engine.store_entry("Title", "content", tags=["I/O"])
+        assert hygiene.run_audit() == []
+
+    def test_slash_tag_rebuild_mocs(self, store):
+        engine.store_entry("A", "a", tags=["CI/CD"])
+        engine.rebuild_mocs()
+        moc = engine.MOCS_DIR / "CI_CD.md"
+        assert moc.exists()
+        assert "K7E-000-00001" in moc.read_text()
+
+    def test_ordinary_tags_unchanged(self, store):
+        """Pre-existing tag styles (plain words, hyphens, dots) map to the
+        same filename as before — the sanitizer only touches path-hostile
+        characters."""
+        for tag in ["redis", "gpu-scheduling", "v1.2", "under_score"]:
+            engine.store_entry("Title", f"content about {tag}", tags=[tag])
+            assert (engine.MOCS_DIR / f"{tag}.md").exists()
+
+    def test_moc_write_failure_does_not_abort_store(self, store, monkeypatch):
+        """A MOC write failure is logged, not raised — the node file is
+        already the durable artifact, so a MOC hiccup must not strand the
+        caller mid-batch (#89)."""
+        original_write_text = Path.write_text
+
+        def failing_write_text(self, *args, **kwargs):
+            if self.parent == engine.MOCS_DIR:
+                raise OSError("simulated MOC write failure")
+            return original_write_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", failing_write_text)
+        node_id = engine.store_entry("Title", "content", tags=["anytag"])
+        assert engine._node_path(node_id).exists()
+
 
 class TestStats:
     def test_returns_counts(self, store):

@@ -58,10 +58,19 @@ def deliver(ctx, body, *, klass="auto", sender="filedrop", run_fn):
 
 def dispatcher_message(ctx, body="The nightly dump ran; nothing needs doing."):
     """A thread in r4t's own voice — machine-originated like a relay, but NOT
-    relay-flagged, so the quiet sweep does see it."""
+    relay-flagged, so the quiet sweep does see it. `dispatcher=True` is the
+    dispatcher stamping its own ledger; ingress has no way to pass it."""
     return dispatch._ingest(
         ctx, f"r4t:{NODE}", f"{NODE}:gerry", body, klass="auto", internal=True,
+        dispatcher=True,
     )
+
+
+def member_and_rig(ctx, name="gerry", roster=None):
+    roster = roster or load_roster(ctx.roster_path)
+    member = roster.find(name)
+    rig, _err, _pinned = dispatch.load_rig_config(ctx.config_path).rig_for(member)
+    return roster, member, rig
 
 
 def sweep_nudges(ctx):
@@ -171,8 +180,18 @@ class TestStripProposals:
         text = "Close_without_reply ends an obligation with no message at all."
         assert ack.strip_proposals(text) == text
 
-    def test_fenced_lines_survive(self):
+    def test_a_fenced_protocol_line_is_stripped_too(self):
+        # Parsing honors the fence (nothing closes); stripping does not, so the
+        # verb line cannot ride out in a body no matter how it is wrapped.
         text = f"The syntax:\n```\n{ack.VERB} {THREAD}\n```"
+        assert ack.strip_proposals(text) == "The syntax:\n```\n```"
+
+    def test_an_unbalanced_fence_cannot_shelter_a_protocol_line(self):
+        text = f"the log tail:\n```\nrows=412 ok\n{ack.VERB} {THREAD}\n"
+        assert ack.VERB not in ack.strip_proposals(text)
+
+    def test_fenced_prose_survives(self):
+        text = "example:\n```\nr4t task list\n```"
         assert ack.strip_proposals(text) == text
 
 
@@ -205,34 +224,42 @@ class TestDisqualifiers:
 
 
 class TestAllowList:
-    """Eligibility is structural: it reads the ledger, never the wording."""
+    """Eligibility is structural: it reads flags the ledger was born with,
+    never the wording of the messages and never the creator's name."""
 
     def test_relay_thread_is_machine_originated(self):
-        assert ack.machine_originated(NODE, {"relay": True, "creator": "peer"})
+        assert ack.machine_originated({"relay": True, "creator": "peer"})
 
-    def test_dispatcher_thread_is_machine_originated(self):
-        assert ack.machine_originated(NODE, {"creator": f"r4t:{NODE}"})
+    def test_dispatcher_origin_is_machine_originated(self):
+        assert ack.machine_originated(
+            {"creator": f"r4t:{NODE}", "origin": tasks.ORIGIN_DISPATCHER}
+        )
+
+    def test_a_creator_that_merely_looks_like_the_dispatcher_is_not(self):
+        # `r4t dispatch --from` takes any string. Without the flag the ledger
+        # stamped at open time, the name proves nothing (#83).
+        assert not ack.machine_originated({"creator": f"r4t:{NODE}"})
 
     def test_a_human_thread_is_not(self):
-        assert not ack.machine_originated(NODE, {"creator": "boss"})
+        assert not ack.machine_originated({"creator": "boss"})
 
     def test_a_peer_members_thread_is_not(self):
-        assert not ack.machine_originated(NODE, {"creator": f"{NODE}:gerry"})
+        assert not ack.machine_originated({"creator": f"{NODE}:gerry"})
 
 
 class TestDerivedReason:
     def test_relay_thread_reads_automated(self):
-        assert ack.derive_reason(NODE, {"relay": True, "creator": "peer"}) == (
+        assert ack.derive_reason({"relay": True, "creator": "peer"}) == (
             ack.REASON_AUTOMATED
         )
 
-    def test_dispatcher_thread_reads_automated(self):
-        assert ack.derive_reason(NODE, {"creator": f"r4t:{NODE}"}) == (
+    def test_dispatcher_origin_reads_automated(self):
+        assert ack.derive_reason({"origin": tasks.ORIGIN_DISPATCHER}) == (
             ack.REASON_AUTOMATED
         )
 
     def test_everything_else_reads_informational(self):
-        assert ack.derive_reason(NODE, {"creator": "boss"}) == ack.REASON_INFORMATIONAL
+        assert ack.derive_reason({"creator": "boss"}) == ack.REASON_INFORMATIONAL
 
 
 class TestDoctrineBullet:
@@ -391,12 +418,11 @@ class TestRejection:
     def test_a_second_proposal_for_a_closed_thread_is_refused(self, ctx, r4t_home):
         deliver(ctx, FYI, run_fn=proposing())
         (task,) = tasks.list_tasks(NODE)
-        member = load_roster(ctx.roster_path).find("gerry")
-        rig, _e, _p = dispatch.load_rig_config(ctx.config_path).rig_for(member)
+        roster, member, rig = member_and_rig(ctx)
         closed = ack.run(
             ctx, member, rig,
             [{"thread": task["id"], "body": FYI, "class": "auto"}],
-            f"{ack.VERB} {task['id']}",
+            f"{ack.VERB} {task['id']}", roster,
         )
         assert closed == []
         assert "the thread is already closed" in read_log()
@@ -429,10 +455,104 @@ class TestRejection:
         assert "not-machine-originated" in read_log()
 
     def test_echo_member_never_proposes(self, ctx, r4t_home):
-        member = load_roster(ctx.roster_path).find("gerry")
-        rig, _e, _p = dispatch.load_rig_config(ctx.config_path).rig_for(member)
+        roster, member, rig = member_and_rig(ctx)
         echo = replace(rig, echo=True)
-        assert ack.run(ctx, member, echo, [], f"{ack.VERB} {THREAD}") == []
+        assert ack.run(ctx, member, echo, [], f"{ack.VERB} {THREAD}", roster) == []
+
+
+class TestRequiredRoster:
+    """The per-obligation guard is not opt-in: `ack.run` cannot be called
+    without the roster it needs to evaluate `owes_creator`, and the predicate
+    itself denies rather than waves through if it ever sees None."""
+
+    def test_run_without_a_roster_is_a_type_error(self, ctx, r4t_home):
+        _roster, member, rig = member_and_rig(ctx)
+        with pytest.raises(TypeError):
+            ack.run(ctx, member, rig, [], f"{ack.VERB} {THREAD}")
+
+    def test_owes_creator_denies_without_a_roster(self):
+        assert not ack.owes_creator(
+            NODE, None, {"creator": "boss"}, [{"from": "boss"}]
+        )
+
+    def test_a_member_that_does_not_owe_the_creator_only_notes(self, ctx, r4t_home):
+        # The probe that made the kwarg a footgun: phil proposing a close on a
+        # thread gerry owes. With the roster in hand the ledger stays open.
+        handle_message(ctx, "peer", NODE, "Nightly export finished.", klass="auto",
+                       drain_after=False)
+        (task,) = tasks.list_tasks(NODE)
+        roster, member, rig = member_and_rig(ctx, "phil")
+        closed = ack.run(
+            ctx, member, rig,
+            [{"thread": task["id"], "from": f"{NODE}:gerry", "body": "fyi",
+              "class": "auto"}],
+            f"{ack.VERB} {task['id']}", roster,
+        )
+        assert closed == []
+        assert tasks.load_task(NODE, task["id"])["status"] == tasks.STATUS_OPEN
+        assert "ACK-NOTED" in read_log()
+
+    def test_a_creator_that_left_the_roster_still_binds_the_obligation(
+        self, ctx, repo, r4t_home
+    ):
+        # An unknown creator name canonicalizes to itself, so deleting phil from
+        # ROSTER.md does not hand phil's thread to whoever proposes next.
+        handle_message(ctx, "peer", NODE, "Nightly export finished.", klass="auto",
+                       drain_after=False)
+        (task,) = tasks.list_tasks(NODE)
+        task["creator"] = f"{NODE}:phil"
+        tasks.save_task(NODE, task)
+        (repo / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n", encoding="utf-8"
+        )
+        roster, member, rig = member_and_rig(ctx)
+        batch = [{"thread": task["id"], "from": "peer", "body": "fyi",
+                  "class": "auto"}]
+        assert ack.run(
+            ctx, member, rig, batch, f"{ack.VERB} {task['id']}", roster
+        ) == []
+        batch[0]["from"] = f"{NODE}:phil"
+        assert ack.run(
+            ctx, member, rig, batch, f"{ack.VERB} {task['id']}", roster
+        ) == [task["id"]]
+
+
+class TestOriginTrust:
+    """`r4t dispatch --from` takes any sender string, so the allow-list must not
+    read 'the dispatcher opened this' out of one."""
+
+    def test_a_sender_named_like_the_dispatcher_gets_no_allow_list(
+        self, ctx, repo, r4t_home
+    ):
+        handle_message(ctx, f"r4t:{NODE}", NODE, "Rotate the export key tonight.",
+                       klass="human", drain_after=False)
+        drain(ctx, run_fn=proposing())
+        (task,) = tasks.list_tasks(NODE)
+        assert task["creator"] == f"r4t:{NODE}"       # the name was accepted
+        assert task["origin"] == ""                   # the claim was not
+        assert task["status"] == tasks.STATUS_OPEN
+        assert "ack" not in task
+        assert "not-machine-originated" in read_log()
+        assert outbox_envelopes(repo) == []
+        assert sweep_nudges(ctx) == [task["id"]]      # still chased, as it should be
+
+    def test_the_dispatchers_own_thread_carries_the_flag(self, ctx, r4t_home):
+        dispatcher_message(ctx)
+        (task,) = tasks.list_tasks(NODE)
+        assert task["origin"] == tasks.ORIGIN_DISPATCHER
+
+    def test_a_nudge_does_not_stamp_the_thread_it_rides(self, ctx, r4t_home,
+                                                        fake_harness):
+        # The sweep speaks in r4t's voice on the OWNER's thread. The flag is
+        # stamped at open time only, so the backstop cannot make its own target
+        # closeable.
+        handle_message(ctx, "boss", NODE, "Please confirm the rotation plan.",
+                       klass="human", drain_after=False)
+        drain(ctx, run_fn=quiet)
+        (task,) = tasks.list_tasks(NODE)
+        assert sweep_nudges(ctx) == [task["id"]]
+        (task,) = tasks.list_tasks(NODE)
+        assert task["origin"] == ""
 
 
 class TestSharedThreads:
@@ -539,7 +659,33 @@ class TestProtocolProse:
         assert "ack" not in task
         assert "r4t: ACK thread=" not in read_log()
         (envelope,) = outbox_envelopes(repo)
-        assert ack.VERB in envelope["content"]     # the quoted syntax survives
+        # The prose reaches the asker; the verb line does not ride along, fenced
+        # or not — a delivered body is somebody else's prompt.
+        assert "one line of its own" in envelope["content"]
+        assert ack.VERB not in envelope["content"]
+
+    def test_an_unbalanced_fence_cannot_ship_the_verb_in_a_body(
+        self, ctx, repo, r4t_home
+    ):
+        # The probe: a member pastes a log tail, forgets the closing fence, and
+        # the rest of the turn reads as quotation. Parsing skips it (nothing
+        # closes) and stripping does not (nothing leaks).
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            thread = PROMPT_THREAD_RE.search(prompt).group(1)
+            return 0, (
+                "The export landed in drops/2026-07 on the primary host, "
+                "here is the tail of the log:\n"
+                "```\n"
+                "rows=412 ok\n"
+                f"{ack.VERB} {thread}\n"
+            ), 1.0, False
+
+        handle_message(ctx, "boss", NODE, "Where did last night's export land?",
+                       klass="human", drain_after=False)
+        drain(ctx, run_fn=run)
+        (envelope,) = outbox_envelopes(repo)
+        assert ack.VERB not in envelope["content"]
+        assert "rows=412 ok" in envelope["content"]
 
 
 class TestPerObligationQuiet:
@@ -616,8 +762,44 @@ class TestReopen:
         assert task["answered"] is False
         assert "ack" not in task
         assert [n["member"] for n in task["ack_notes"]] == ["gerry"]
+        log = read_log()
+        assert f"r4t: ACK thread={task['id']}" in log
+        assert f"r4t: ACK-REOPENED thread={task['id']}" in log
         time.sleep(0.01)
         assert sweep_nudges(ctx) == [task["id"]]
+
+    def test_a_same_turn_delegation_reopens_and_says_so(self, ctx, repo, r4t_home):
+        # The close commits before staging is released, and a staged intra-roster
+        # tell inherits the batch's thread — so a turn that closes T and also
+        # delegates on T undoes its own ack. Safe (the obligation stays open),
+        # but the day log has to say both things happened (#83).
+        handle_message(ctx, "peer", NODE, "Nightly export finished, 412 rows.",
+                       klass="auto", drain_after=False)
+        (task,) = tasks.list_tasks(NODE)
+        thread = task["id"]
+
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            if env["R4T_MEMBER"].lower() == "gerry":
+                outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
+                msg_id = new_ulid()
+                (outbox / f"{msg_id}.json").write_text(
+                    json.dumps({"id": msg_id, "to": "phil",
+                                "content": "Filing this export note with you.",
+                                "files": []}),
+                    encoding="utf-8",
+                )
+                return 0, f"{ack.VERB} {thread}", 1.0, False
+            return 0, "noted", 1.0, False
+
+        drain(ctx, run_fn=run)
+        (task,) = tasks.list_tasks(NODE)
+        log = read_log()
+        assert f"r4t: ACK thread={thread}" in log
+        assert f"r4t: ACK-REOPENED thread={thread}" in log
+        assert "supersedes gerry's close" in log
+        assert task["status"] == tasks.STATUS_OPEN
+        assert "ack" not in task
+        assert task["ack_notes"][0]["superseded_at"]
 
     def test_a_thread_closed_by_a_real_answer_stays_closed(self, ctx, repo, r4t_home):
         handle_message(ctx, "boss", NODE, "Where did the export land?",

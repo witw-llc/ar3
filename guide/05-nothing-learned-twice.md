@@ -27,9 +27,10 @@ thinking.
   agent CLI (`agent`), logged in.
 
 The `k7e` panel in `ar3` has been ✗ since chapter 1 and stays ✗ until the
-first thing is written: there is no create step, and the store appears under
-`~/.config/k7e` the moment you store an entry — chapter 1's panel hints
-`(try: k7e init)`, but that verb does not exist (issue #78 tracks the hint).
+first thing is written: there is no create step, and the store appears
+under `~/.config/k7e` (`K7E_HOME`) the moment you store an entry — chapter
+1's panel hints `(try: k7e init)`, but that verb does not exist (issue #78
+tracks the hint).
 
 ## 4. The change
 
@@ -258,7 +259,11 @@ You should see:
 Your titles will differ, and the dry run's list differs from the real run's on
 the same file — the extractor is a model, not a parser. Candidates are also
 diffed against what the store already holds before anything is written, so
-distilling the same notes twice mostly stores nothing. Now ask a question the
+distilling the same notes twice mostly stores nothing. On current releases a
+model-chosen tag containing a slash (`I/O` is the common one) can crash the
+MOC write partway through a batch — issue #89, fix in flight — so a real run
+can store fewer entries than the dry run promised; §8 below covers what
+`k7e check` says when that happens. Now ask a question the
 way you would ask a person:
 
 **Run**
@@ -366,7 +371,9 @@ Clean.
 Five files, and `k7e check` — which audits the markdown, not the database —
 calls the store sound. Both readings are true at once: the knowledge is
 intact, and the cache every read went through is empty. That gap is the whole
-design in one screen.
+design in one screen. If §6's slash-tag crash hit your run, `k7e check`
+reports missing MOCs here instead of `Clean.` — the entries are still whole,
+only the tag/MOC bookkeeping is off.
 
 ## 9. Fix
 

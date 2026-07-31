@@ -42,9 +42,9 @@ def run_audit(fix=False):
         for ref in re.findall(r"assets/([a-f0-9]{2}/[a-f0-9]+\.[a-z0-9]+)", text):
             referenced_assets.add(ref)
 
-    moc_tags = {m.stem for m in mocs}
+    moc_filenames = {m.name for m in mocs}
     for tag in tag_to_nodes:
-        if tag not in moc_tags:
+        if engine._moc_filename(tag) not in moc_filenames:
             issues.append(f"[Tag: {tag}] No MOC file exists")
             if fix:
                 first_node_id = tag_to_nodes[tag][0]

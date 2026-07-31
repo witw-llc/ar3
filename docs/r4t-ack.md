@@ -54,14 +54,18 @@ after the thread is the member's stated reason and is kept as color only.
   an attempt only when a thread-shaped token follows it, so
   `Close_without_reply ends an obligation...` in a sentence is prose: nothing
   closes, nothing is logged, and the sentence reaches whoever asked. Lines
-  inside a fenced code block are quotation and are skipped entirely — a member
+  inside a fenced code block are quotation and are not parsed at all — a member
   asked to document the syntax must not close the thread it was asked on.
 - **Protocol lines never become message bodies.** Whether the proposal is
-  accepted or rejected, its line is stripped from the prose the
-  [stdout fallback](r4t-message-flow.md) stages. That stripping is the
-  fallback's; the `echo` rig ships its raw transcript as always, because echo
-  is a diagnostics rig whose whole job is showing exactly what a harness
-  printed.
+  accepted, rejected, or fenced off as quotation, the line is stripped from the
+  prose the [stdout fallback](r4t-message-flow.md) stages. Stripping ignores
+  fences on purpose, though parsing honors them: a fence is a claim the model
+  makes about its own output, and an unbalanced one is that claim gone wrong —
+  it would otherwise let `close_without_reply <thread>` ride out in a body that
+  becomes the next member's prompt. A syntax example loses its verb line on the
+  way out; nothing loses a thread. That stripping is the fallback's; the `echo`
+  rig ships its raw transcript as always, because echo is a diagnostics rig
+  whose whole job is showing exactly what a harness printed.
 
 ## Eligibility is an allow-list
 
@@ -71,7 +75,20 @@ when it is structurally machine-originated:
 
 - a **relay** thread — machine-classed external mail, another cluster's
   machinery or a filedrop node (#167, #58);
-- a thread the **dispatcher** opened — creator `r4t:<node>`, r4t's own voice.
+- a thread the **dispatcher** opened — r4t's own voice, `origin: dispatcher`
+  on the ledger.
+
+Both are flags the ledger is born with, stamped by the code that opens the
+thread: `relay` from the wire's `meta.class`, `origin` by the dispatcher itself.
+Neither is re-derived afterwards from the creator's name — `r4t dispatch --from`
+accepts any sender string, so a creator that merely reads like `r4t:<node>` gets
+nothing (#83).
+
+A relay thread is the sender's own declaration: **`meta.class: auto` is how a
+sender opts its threads into silent closure** — it is machinery saying "do not
+reply to me", and it is the sender, not the recipient, who says it. Owner mail
+carries `class: human` and can never be closed in silence, whatever it says or
+however a member reads it.
 
 Nobody is waiting on prose in either case, and a reply would only be one more
 inbound that peer has to class and answer. Every other thread was opened by a
@@ -105,6 +122,11 @@ the ledger stays open, and the sweep keeps chasing the member that actually
 owes the creator. Nothing about that member's own turn is suppressed either —
 its stdout fallback still runs, because it did not close anything.
 
+The check is not optional machinery: the commit path cannot be called without
+the roster it reads, and the predicate denies rather than waves through if it is
+ever handed nothing. A safety property that can be disabled by leaving out an
+argument is a safety property waiting to be left out.
+
 ## The reason is the layer's own
 
 Stated reasons were about 72% accurate even on closes that were otherwise
@@ -129,10 +151,18 @@ thread's timeline.
 
 A close ends the obligations the thread was carrying — not the ones it has not
 carried yet. A new inbound on an ack-closed thread therefore **reopens** the
-ledger: status back to open, the spent `ack` record moved into `ack_notes`, and
-the sweep can see the thread again. Without that, one silent close would blind
-the backstop to everything that thread ever carries afterwards. A thread closed
-by a real answer stays closed; only an ack-closed one reopens.
+ledger: status back to open, the spent `ack` record moved into `ack_notes`,
+`ACK-REOPENED` in the log, and the sweep can see the thread again. Without that,
+one silent close would blind the backstop to everything that thread ever carries
+afterwards. A thread closed by a real answer stays closed; only an ack-closed
+one reopens.
+
+The tightest case is one turn: a member closes thread T and, in the same turn,
+delegates to a peer on T — an intra-roster tell inherits the inbound thread, and
+staging is released after the close commits. The obligation ends up open, which
+is the safe direction, and both events are logged: the `ACK` that committed and
+the `ACK-REOPENED` that undid it. The log never leaves a close standing that did
+not stick.
 
 ## The knob
 
@@ -154,6 +184,7 @@ disables the member with a roster error.
 r4t: ACK thread=01K3Q… gerry reason=automated_notification (closed without a reply)
 r4t: ACK-QUIET gerry (rig leader) closed 1 thread(s) without replying; its 340 bytes of stdout stay transcript
 r4t: ACK-NOTED thread=01K3Q… phil proposed a close on a thread it does not owe boss — noted, the obligation stays open
+r4t: ACK-REOPENED thread=01K3Q… new traffic from acme:phil supersedes gerry's close — the obligation is open again
 r4t: ACK-REJECT gerry thread=01K3Q… not-machine-originated: opened by boss — only a relay or a thread r4t opened may close without a reply
 r4t: ACK-REJECT phil thread=01K3Q… content-override: the thread carries a direct question — it is owed an answer
 r4t: ACK-REJECT phil malformed proposal 'CLOSE_WITHOUT_RETRY 01K3Q…' — the verb must be echoed exactly as close_without_reply <thread>

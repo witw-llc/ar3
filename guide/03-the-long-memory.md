@@ -121,7 +121,7 @@ turn capture instead of landing in someone's inbox. Look at what Wren wrote:
 **Run**
 
 ```bash
-cat STATUS.md
+cat agents/wren/STATUS.md
 ```
 
 You should see:
@@ -143,11 +143,10 @@ Session initialized. Stored codeword and supply cache location.
 ```
 
 Wren chose that structure himself — the dump prompt names the file, not the
-format. (Where the file lands depends on the harness: OpenCode anchors
-relative paths at the repo root, so on the free path it appears at
-`~/ark/silo/STATUS.md`; a harness that stays in Wren's `Workdir:` writes
-`agents/wren/STATUS.md` instead. Either way it is inside the roster repo,
-which matters at the commit point.)
+format. It lands under Wren's `Workdir:` — `agents/wren/STATUS.md` — because
+r4t's prompt tells every harness to write under its advertised working
+directory rather than trust a bare relative one. That is still inside the
+roster repo, which matters at the commit point.
 
 The conversation is retired and the message history is out of the prompt
 path. Ask for the fact back:
@@ -238,7 +237,7 @@ You should see:
 
 ```
 swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
-  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir . {prompt}
+  invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 ── from silo:wren (2026-07-29T05:27:48.329830Z)
 Codeword: TIDEPOOL — Cache: grid square K-19
 ```
@@ -262,7 +261,7 @@ delete the state file, then send the recall:
 
 ```bash
 r4t flush --node silo wren
-rm STATUS.md
+rm agents/wren/STATUS.md
 r4t seat send --node silo "What was the codeword?"
 r4t seat inbox --node silo
 ```
@@ -321,7 +320,7 @@ flush:
 ```bash
 r4t seat send --node silo "The codeword is TIDEPOOL and the supply cache is at grid square K-19."
 r4t flush --node silo wren
-head -8 STATUS.md
+head -8 agents/wren/STATUS.md
 ```
 
 You should see:
@@ -404,7 +403,7 @@ machine died right now:
 
 ```bash
 cd ~/ark/silo
-git add ROSTER.md STATUS.md
+git add ROSTER.md agents/wren/STATUS.md
 git commit -q -m "silo: Wren's first memory dump"
 ```
 

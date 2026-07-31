@@ -2461,6 +2461,7 @@ class TestEgressSetting:
         monkeypatch.setenv("CHATTY_BODY", "the org speaks")
         assert run_one(ctx, "boss", "acme:vic", "report out") == 1  # vic is top leader
         assert [e["to"] for e in outbox_envelopes(ctx.root)] == ["outsider"]
+        assert "UNKNOWN-MEMBER" not in read_log()  # sanctioned egress, not a typo
 
     def test_egress_off_top_leader_dead_letters(
         self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
@@ -2482,6 +2483,43 @@ class TestEgressSetting:
         assert outbox_envelopes(ctx.root) == []
         assert state.queue_depth(NODE, "vic") == 1  # redirected up to the top leader
         assert "EGRESS-REDIRECT" in read_log()
+
+    def test_bare_unknown_name_is_named_in_the_log(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        """`tell` inside the cage validates no recipient — this loop is the
+        router. A misaddressed member must not vanish into the egress redirect
+        without the log saying which name matched nothing."""
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)
+        monkeypatch.setenv("CHATTY_TO", "beaa")
+        monkeypatch.setenv("CHATTY_BODY", "cell-mate take a look")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        log = read_log()
+        assert "UNKNOWN-MEMBER acme:ann -> beaa names no roster member" in log
+        assert "Bea" in log  # the dispatchable names are listed
+
+    def test_known_member_is_not_flagged_unknown(
+        self, r4t_home, tmp_path, chatty_config, tells, monkeypatch
+    ):
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)
+        monkeypatch.setenv("CHATTY_TO", "Bea")
+        monkeypatch.setenv("CHATTY_BODY", "cell-mate take a look")
+        assert run_one(ctx, "acme:vic", "acme:ann", "work the design") == 1
+        assert state.queue_depth(NODE, "bea") == 1
+        assert "UNKNOWN-MEMBER" not in read_log()
+
+    def test_top_leader_bare_external_is_not_flagged_unknown(
+        self, r4t_home, tmp_path, repo, chatty_config, tells, monkeypatch
+    ):
+        """The top leader is the garden's sanctioned voice for external mail —
+        a bare recipient on that path is normal egress, not a misaddressed
+        delegation. The guard must not tag it UNKNOWN-MEMBER."""
+        ctx = _tree_ctx(tmp_path, chatty_config, tells)
+        monkeypatch.setenv("CHATTY_TO", "outsider")
+        monkeypatch.setenv("CHATTY_BODY", "the org speaks")
+        assert run_one(ctx, "boss", "acme:vic", "report out") == 1  # vic is top leader
+        assert [e["to"] for e in outbox_envelopes(ctx.root)] == ["outsider"]
+        assert "UNKNOWN-MEMBER" not in read_log()
 
 
 class TestPromptOverrides:

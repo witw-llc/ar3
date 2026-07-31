@@ -942,6 +942,7 @@ def _ingest(
     config: RigConfig | None = None,
     files: list[dict] | None = None,
     bundle: Path | None = None,
+    dispatcher: bool = False,
 ) -> str:
     """Resolve the recipient and enqueue a structured r4t-message. Humans park
     in the seat; undeliverable mail dead-letters with an audit record; a
@@ -956,7 +957,11 @@ def _ingest(
     every outside message enters at the top regardless of any sub-address and
     opens a fresh thread. The lone exception is the roster human's own
     `Address:` — their doorbell reply is the human speaking, re-stamped to the
-    seat so it routes and closes threads exactly like a chat/seat send."""
+    seat so it routes and closes threads exactly like a chat/seat send.
+
+    `dispatcher` says r4t itself is opening this thread — the sweeps' own voice,
+    and the ledger's trust anchor for that fact. Ingress never sets it, so no
+    `--from` string can claim it (#83)."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
@@ -1043,7 +1048,8 @@ def _ingest(
         thread = tasks.new_thread_id()
         hop = 0
     tasks.ensure_task(
-        ctx.node, thread, sender, relay=not internal and klass == "auto"
+        ctx.node, thread, sender, relay=not internal and klass == "auto",
+        dispatcher=dispatcher,
     )
 
     state.enqueue(
@@ -1241,6 +1247,7 @@ def release_staging(
         else None
     )
     top_leader = roster.leader()
+    is_top = top_leader is not None and member.name.lower() == top_leader.name.lower()
 
     released = 0
     violations = 0
@@ -1274,6 +1281,22 @@ def release_staging(
             )
             continue
 
+        # `tell` inside the cage writes staging and validates nothing — this
+        # loop is the router. A bare name (no `node:` prefix) that matched no
+        # roster member is a misaddressed delegation far more often than a real
+        # outside agent, and the egress gate below would swallow it into the
+        # lead's queue without a word. Name it in the log; routing is unchanged,
+        # and a genuinely external recipient is still rejected by a8s. The top
+        # leader's bare external recipient is the garden's sanctioned voice, not
+        # a typo — exclude it so legitimate egress isn't tagged anomalous.
+        if not is_top and not _is_internal(ctx.node, to) and ":" not in to:
+            names = ", ".join(_dispatchable_names(roster)) or "(none)"
+            state.append_log(
+                ctx.node,
+                f"r4t: UNKNOWN-MEMBER {sender_addr} -> {to} names no roster "
+                f"member; routing as external (members: {names})",
+            )
+
         # Egress gate (#183): the org presents as a single a8s node, and only
         # the topmost leader may originate external mail. A non-top member's
         # external tell redirects to the top leader (the garden's voice),
@@ -1282,7 +1305,6 @@ def release_staging(
         # note; a non-top member's still redirects up.
         redirected_to_top = False
         if not _is_internal(ctx.node, to) and top_leader is not None:
-            is_top = member.name.lower() == top_leader.name.lower()
             if is_top and not ctx.egress:
                 path.unlink(missing_ok=True)
                 violations += 1
@@ -2202,7 +2224,7 @@ def _quiet_task_sweep(
         _ingest(
             ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}", body,
             klass="auto", internal=True, thread=thread_id, hop=0,
-            roster=roster, config=config,
+            roster=roster, config=config, dispatcher=True,
         )
         tasks.save_task(ctx.node, task)  # bump updated_at; won't re-fire until quiet again
         state.append_log(
