@@ -1,4 +1,6 @@
 """Tests for k7e recall (RAG) and _call_llm helper."""
+import json
+
 import engine
 
 
@@ -71,6 +73,34 @@ class TestCallLlm:
         monkeypatch.setenv("K7E_LLM_COMMAND", str(script))
         result = engine._call_llm("test", purpose="summarize", timeout=1)
         assert result is None
+
+    def test_strips_ansi_cursor_control_from_output(self, store, monkeypatch, tmp_path):
+        """ollama run word-wraps at 80 columns even when piped, splicing cursor-
+        control sequences (e.g. \\x1b[1D\\x1b[K) mid-token into stdout (#77)."""
+        script = tmp_path / "ansi.sh"
+        script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '[{\"title\": \"Fo\\x1b[1D\\x1b[Koo\", \"content\": \"bar\"}]'\n"
+        )
+        script.chmod(0o755)
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(script))
+        result = engine._call_llm("test", purpose="summarize")
+        assert "\x1b" not in result
+        assert json.loads(result) == [{"title": "Fooo", "content": "bar"}]
+
+    def test_strips_csi_tilde_sequence(self):
+        """ESC[3~ (e.g. Delete key) has a non-alpha final byte; the old
+        alpha-only final-byte class left a raw ESC behind."""
+        assert engine._strip_ansi("a\x1b[3~b") == "ab"
+
+    def test_strips_osc_title_terminated_by_bel(self):
+        """OSC (ESC]) title-setting sequences terminate with BEL, not a CSI
+        final byte, and must be consumed in full."""
+        assert engine._strip_ansi("\x1b]0;window title\x07prompt$ ") == "prompt$ "
+
+    def test_strips_osc_title_terminated_by_st(self):
+        """OSC sequences may also terminate with ST (ESC \\) instead of BEL."""
+        assert engine._strip_ansi("\x1b]0;window title\x1b\\prompt$ ") == "prompt$ "
 
 
 class TestDecomposeQueries:

@@ -42,6 +42,11 @@ from rig import (
 )
 from roster import Member
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="run_as/container isolation requires a POSIX host",
+)
+
 NODE = "acme"
 
 

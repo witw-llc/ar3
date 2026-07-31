@@ -6,6 +6,14 @@ be attributed to the exchange it answers, so the originator can be tracked
 its originator hearing back can wake the leader. It never gates delivery:
 every inbound message enqueues regardless of a thread's status.
 
+A thread has two terminal dispositions, and both live here: `close_task` (the
+originator got a substantive reply) and `close_without_reply` (the member
+deliberately answered with silence — see `ack.py` and docs/r4t-ack.md). Either
+way the quiet sweep stops seeing the thread, which is the whole point: an open
+thread otherwise cannot tell deliberate silence from a dropped ball. An ack is
+never prospective, so a new inbound on an ack-closed thread reopens the ledger
+(`ensure_task`); a thread closed by a real answer stays closed.
+
 A `relay` thread was opened by machine-classed external mail (`meta.class`
 `auto` on the wire, #167) — an originator that is another cluster's relay, not
 someone waiting on an answer. It carries a label like any other thread; what it
@@ -77,6 +85,18 @@ def ensure_task(node: str, task_id: str, creator: str, *, relay: bool = False) -
     if task is None:
         task = new_task(task_id, creator, relay=relay)
         save_task(node, task)
+    elif task.get("status") == STATUS_CLOSED and task.get("ack"):
+        # An ack is never prospective: it ends the obligations the thread was
+        # carrying, not the ones it has not carried yet. A new inbound on an
+        # ack-closed thread therefore reopens the ledger, or the sweep would be
+        # blind to that message forever. A thread closed by a real answer is
+        # left alone — `close_task` keeps its meaning.
+        task["status"] = STATUS_OPEN
+        task["answered"] = False
+        task.setdefault("ack_notes", []).append(
+            {**task.pop("ack"), "superseded_at": utc_now()}
+        )
+        save_task(node, task)
     return task
 
 
@@ -87,6 +107,43 @@ def close_task(node: str, task_id: str) -> None:
         return
     task["status"] = STATUS_CLOSED
     task["answered"] = True
+    save_task(node, task)
+
+
+def close_without_reply(
+    node: str, task_id: str, *, member: str, reason: str, stated: str = ""
+) -> None:
+    """Mark a thread closed because its member deliberately said nothing —
+    the terminal disposition of `ack.py`. `reason` is the task layer's own,
+    re-derived from the ledger; `stated` is whatever the model claimed and is
+    kept as color, never read back as a fact."""
+    task = load_task(node, task_id)
+    if task is None or task.get("status") == STATUS_CLOSED:
+        return
+    task["status"] = STATUS_CLOSED
+    task["answered"] = True
+    task["ack"] = {
+        "member": member,
+        "reason": reason,
+        "stated": stated,
+        "at": utc_now(),
+    }
+    save_task(node, task)
+
+
+def note_ack(
+    node: str, task_id: str, *, member: str, reason: str, stated: str = ""
+) -> None:
+    """Record a valid close proposal from a member that does NOT owe this
+    thread's creator — the delegation-chain case, where one thread id is shared
+    by every hop. The obligation stays open: only the member the creator is
+    waiting on can end it."""
+    task = load_task(node, task_id)
+    if task is None:
+        return
+    task.setdefault("ack_notes", []).append(
+        {"member": member, "reason": reason, "stated": stated, "at": utc_now()}
+    )
     save_task(node, task)
 
 

@@ -1061,6 +1061,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     configured_remote_ids = [r.id for r in started_remotes]
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
     async_wake = not single_pass
+    # Round-robin wake start across attached-loop iterations so a busy early
+    # agent cannot starve siblings on the same handler (issue #20). Scoped to
+    # async_wake only — `a8s step` (single_pass) stays index-0 ordered.
+    wake_rr = 0
     try:
         while True:
             if _STOP_EVENT.is_set() and not _wake_in_flight():
@@ -1141,7 +1145,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         if is_file_proxy(definition):
                             _dispatch_agent(p, definition, async_wake=False)
                     if not _wake_in_flight():
-                        for p, definition in defined:
+                        n = len(defined)
+                        start = (wake_rr % n) if async_wake and n else 0
+                        for i in range(n):
+                            p, definition = defined[(start + i) % n]
                             if _wake_in_flight():
                                 break
                             if is_file_proxy(definition):
@@ -1164,6 +1171,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                     p.name, pause_seconds(definition)
                                 ):
                                     break
+                        if async_wake and n:
+                            wake_rr += 1
                 if (
                     not _STOP_EVENT.is_set()
                     and drain_seconds == 0

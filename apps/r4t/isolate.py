@@ -20,14 +20,20 @@ from __future__ import annotations
 
 import json
 import os
-import pwd
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+if sys.platform != "win32":
+    import pwd
+else:
+    pwd = None  # type: ignore[assignment]
+
 PROBE_TIMEOUT_SECONDS = 10
+_POSIX_HOST_REQUIRED = "run_as/container isolation requires a POSIX host"
 
 # The org's isolation choice rides to run_harness through the turn env (like
 # R4T_NODE/R4T_MEMBER), so the run_fn contract stays (rig, prompt, cwd, env,
@@ -55,6 +61,11 @@ _CONTAINER_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 
 class IsolationError(Exception):
     pass
+
+
+def _require_posix_isolation() -> None:
+    if sys.platform == "win32":
+        raise IsolationError(_POSIX_HOST_REQUIRED)
 
 
 @dataclass
@@ -128,6 +139,7 @@ def wrap_run_as(
     """Wrap one harness argv in `sudo -u <user>`. `env_pass` names the extra
     environment the harness itself needs across the boundary — anything not
     listed is gone, because sudoers `env_reset` keeps nothing."""
+    _require_posix_isolation()
     pairs = [f"{k}={v}" for k, v in (env_pass or {}).items()]
     return [
         "sudo", "-u", user, "bash", "--login", "-c",
@@ -147,6 +159,8 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
     passwordless sudo grant to `user`, and a workplace writable by `user`.
     Returns None when both pass, else an action-first error carrying the fix.
     Never provisions anything."""
+    if sys.platform == "win32":
+        return _POSIX_HOST_REQUIRED
     try:
         grant = _run_probe(["sudo", "-n", "-u", user, "true"])
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -190,6 +204,8 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
     than no tool at all, so this fails the turn instead of degrading it."""
     if not paths:
         return None
+    if sys.platform == "win32":
+        return _POSIX_HOST_REQUIRED
     args = [str(p) for p in paths]
     try:
         probe = _run_probe([
@@ -212,6 +228,7 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
 def agent_gid(user: str) -> int | None:
     """The agent user's primary gid, for group-owning the shared dirs. None if
     the user is unknown (the sudo probe reports that failure first)."""
+    _require_posix_isolation()
     try:
         return pwd.getpwnam(user).pw_gid
     except KeyError:
@@ -224,6 +241,7 @@ def assert_writable_shared_dir(path: str | Path, gid: int | None) -> None:
     everything the agent creates stays group-owned. Idempotent; called before
     every turn, not just at setup — re-assertion is what made the precedent
     robust against drift."""
+    _require_posix_isolation()
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     if gid is not None:
@@ -234,6 +252,7 @@ def assert_writable_shared_dir(path: str | Path, gid: int | None) -> None:
 def assert_readonly_shared_dir(path: str | Path, gid: int | None) -> None:
     """Re-assert a dir the agent may only READ (delivered files): router-owned,
     agent's group, mode 2750 setgid, no group write bit."""
+    _require_posix_isolation()
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     if gid is not None:
@@ -278,6 +297,7 @@ def build_container_argv(
     org's container_args verbatim, then the image and the harness argv. r4t
     never builds, pulls, or inspects the image — a missing image is an ordinary
     turn failure."""
+    _require_posix_isolation()
     client = Path(client_dir) if client_dir is not None else a8s_client_dir()
     cmd = [
         "docker", "run", "--rm", "--name", name,

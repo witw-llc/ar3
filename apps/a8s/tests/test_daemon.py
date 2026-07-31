@@ -1181,3 +1181,142 @@ class TestSharedHandlerStarvation:
 
         assert saw_in_flight
         assert "exec:" not in _read_log("B")
+
+
+class TestSharedHandlerWakeFairness:
+    """Issue #20 — shared-handler wake start rotates across attached-loop
+    iterations so a busy early agent cannot starve siblings. `a8s step`
+    (single_pass) stays index-0 ordered."""
+
+    def _queue(self, name: str, content: str) -> None:
+        from ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        (inbox_dir(name) / f"{msg_id}.json").write_text(
+            json.dumps({
+                "id": msg_id,
+                "date": "2026-04-29T12:00:00Z",
+                "from": "Y",
+                "to": name,
+                "content": content,
+                "files": [],
+            })
+        )
+
+    def _register(self, tmp_path, fixtures_dir, names: tuple[str, ...]) -> dict[str, Participant]:
+        reg = {}
+        agents = {}
+        for name in names:
+            root = tmp_path / name.lower()
+            root.mkdir()
+            reg[name] = {
+                "root": str(root),
+                "definition": str(fixtures_dir / "mock.json"),
+            }
+            agents[name] = Participant(name, root)
+        save_registry(reg)
+        for p in agents.values():
+            ensure_mailboxes(p)
+        return agents
+
+    def test_busy_early_agent_does_not_starve_sibling(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+        from mailbox import peek_inbox_messages
+
+        agents = self._register(tmp_path, fixtures_dir, ("A", "B", "C"))
+        queue = self._queue
+        queue("A", "busy-0")
+        queue("C", "for-late-sibling")
+
+        woke: list[str] = []
+        orig = daemon_mod.wake_once
+
+        def track_wake(p, msg_path, *, async_wake=False):
+            woke.append(p.name)
+            return orig(p, msg_path, async_wake=async_wake)
+
+        monkeypatch.setattr(daemon_mod, "wake_once", track_wake)
+
+        wait_calls = 0
+        # Without rotation A claims every free slot forever. With round-robin
+        # start, C must appear in `woke` within len(handled) free-slot turns.
+        max_waits = 200
+
+        def keep_a_busy_stop_when_c_wakes(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            if not peek_inbox_messages(agents["A"], 1):
+                queue("A", f"busy-{wait_calls}")
+            if "C" in woke or wait_calls >= max_waits:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", keep_a_busy_stop_when_c_wakes)
+        attached_loop(["A", "B", "C"], 0.01, single_pass=False)
+
+        assert "C" in woke
+        # C is index 2; after A's first wake the start offset is 1, so the
+        # next free slot tries B (empty) then C — at most a handful of A
+        # wakes before C, never an unbounded run of A-only.
+        assert woke.index("C") <= 3
+
+    def test_step_wakes_in_handler_index_order(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        self._register(tmp_path, fixtures_dir, ("A", "B", "C"))
+        for name in ("A", "B", "C"):
+            self._queue(name, f"for-{name}")
+
+        woke: list[str] = []
+        orig = daemon_mod.wake_once
+
+        def track(p, msg_path, *, async_wake=False):
+            woke.append(p.name)
+            return orig(p, msg_path, async_wake=async_wake)
+
+        monkeypatch.setattr(daemon_mod, "wake_once", track)
+        rc = attached_loop(["A", "B", "C"], 0.1, single_pass=True)
+        assert rc == 0
+        assert woke == ["A", "B", "C"]
+
+    def test_attached_loop_rotates_wake_start_across_iterations(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+        from mailbox import peek_inbox_messages
+
+        agents = self._register(tmp_path, fixtures_dir, ("A", "B"))
+        queue = self._queue
+        queue("A", "a0")
+        queue("B", "b0")
+
+        woke: list[str] = []
+        orig = daemon_mod.wake_once
+
+        def track_wake(p, msg_path, *, async_wake=False):
+            woke.append(p.name)
+            return orig(p, msg_path, async_wake=async_wake)
+
+        monkeypatch.setattr(daemon_mod, "wake_once", track_wake)
+
+        wait_calls = 0
+
+        def refill_and_stop(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            for name, p in agents.items():
+                if not peek_inbox_messages(p, 1):
+                    queue(name, f"more-{name}-{wait_calls}")
+            if len(woke) >= 4 or wait_calls >= 200:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", refill_and_stop)
+        attached_loop(["A", "B"], 0.01, single_pass=False)
+
+        assert len(woke) >= 4
+        assert woke[:4] == ["A", "B", "A", "B"]

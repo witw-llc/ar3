@@ -74,7 +74,7 @@ r4t — the roster  (/home/you/.config/r4t)
 
 k7e — knowledge engine  (/home/you/.config/k7e)
   ✓ cli    k7e -> /home/you/.ar3/k7e
-  ✗ store  no store at /home/you/.config/k7e   (try: k7e init)
+  ✗ store  no store at /home/you/.config/k7e   (try: k7e store <title>)
 
 next: ar3 doctor — probe the harnesses and tools the suite runs on
 ```

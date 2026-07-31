@@ -357,15 +357,19 @@ def search(query, limit=5, json_output=False, include_superseded=False, rerank=N
     meta_results = _search_metadata(conn, query, pool * 3, include_superseded)
     embed_results = _search_embeddings(conn, query, pool * 3, include_superseded)
 
-    fused = _rrf_fuse([bm25_results, meta_results, embed_results], pool)
+    tracks = [bm25_results, meta_results, embed_results]
+    fused = _rrf_fuse(tracks, pool)
     conn.close()
 
     # Filter out noise: require minimum RRF score.
     # rank-0 in one track = 1/(60+1) ≈ 0.0164
     # rank-0 in two tracks = 2/(60+1) ≈ 0.0328
     # We accept rank-0 single-track hits (0.0164) but reject lower.
-    min_score = 1.0 / (RRF_K + 1) - 0.001  # ~0.0154
-    fused = [r for r in fused if r["score"] >= min_score]
+    # With only one track live the fused score is a pure rank ladder, so the
+    # floor would truncate at rank 5 instead of separating signal from noise.
+    if sum(1 for t in tracks if t) > 1:
+        min_score = 1.0 / (RRF_K + 1) - 0.001  # ~0.0154
+        fused = [r for r in fused if r["score"] >= min_score]
 
     # Apply confidence, recency decay, and use-count boost as score multipliers.
     if fused:
@@ -541,6 +545,22 @@ def stats():
 
 # --- LLM ---
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:"
+    r"\[[0-9;?]*[ -/]*[@-~]"          # CSI: ESC[ params intermediates final
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: ESC] ... BEL or ST (ESC \)
+    r"|[P_^][^\x1b]*\x1b\\"            # DCS/APC/PM: ESC P/_/^ ... ST (ESC \)
+    r"|[@-Z\\-_]"                      # remaining single-char C1-style escapes
+    r")"
+)
+
+
+def _strip_ansi(text):
+    """Strip ANSI/CSI escape sequences (e.g. terminal-wrapping CLIs like
+    `ollama run` splice cursor-control codes into piped stdout)."""
+    return _ANSI_ESCAPE_RE.sub("", text)
+
+
 def _call_llm(prompt, purpose="summarize", timeout=120):
     """Invoke the configured stdin→stdout CLI for an LLM purpose."""
     import config
@@ -558,7 +578,7 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
             cwd=str(config._k7e_home()),
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+            return _strip_ansi(result.stdout).strip()
         if result.returncode != 0:
             print(f"  [llm:{purpose}] exit {result.returncode}", file=sys.stderr)
             if result.stderr.strip():

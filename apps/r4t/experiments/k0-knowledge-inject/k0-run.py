@@ -14,7 +14,8 @@ fixtures/fake-mem.py, which answers by grepping its own prompt: B passing and
 A failing under --fake validates the chassis with zero LLM calls.
 
 Usage:
-  python3 k0-run.py [--trials 6] [--model qwen3:1.7b] [--budget on] [--fake]
+  python3 k0-run.py [--trials 6] [--model qwen3:1.7b] [--preset claude]
+                    [--task memory|control] [--budget on] [--fake]
                     [--ledger PATH]
 """
 from __future__ import annotations
@@ -36,6 +37,7 @@ import dispatch
 import knowledge
 import state
 from dispatch import DispatchContext, drain, handle_message, run_harness
+from rig import build_preset_invoke
 
 NODE = "k0"
 MEMBER = "mem"
@@ -48,6 +50,11 @@ PROBE = (
     "What is the launch codeword for Project Foxglove? State it in one "
     "sentence. If you have no record of one, say so."
 )
+# The no-memory control (K1): a task the store cannot help with, asked in the
+# same environment (store seeded, inject firing in arm B). Measures whether an
+# irrelevant Knowledge block costs accuracy or latency — the distraction side.
+CONTROL_PROBE = "What is 17 + 25? Reply with just the number."
+CONTROL_ANSWER = "42"
 
 
 def roster_text(arm: str, budget: str) -> str:
@@ -117,8 +124,10 @@ def run_trial(arm: str, trial: int, rng: random.Random, args) -> dict:
         )
         if args.fake:
             invoke = [sys.executable, str(HERE / "fixtures" / "fake-mem.py"), "{prompt}"]
+        elif args.preset:
+            invoke = build_preset_invoke(args.preset, model=args.model or None)
         else:
-            invoke = ["ollama", "run", args.model, "{prompt}"]
+            invoke = ["ollama", "run", args.model or "qwen3:1.7b", "{prompt}"]
         config_path = tmp_path / "rigs.json"
         config_path.write_text(
             json.dumps(rig_config(invoke), indent=2), encoding="utf-8"
@@ -133,8 +142,10 @@ def run_trial(arm: str, trial: int, rng: random.Random, args) -> dict:
             config_path=config_path,
             tell_fn=lambda agent, body: replies.append((agent, body)),
         )
+        probe = CONTROL_PROBE if args.task == "control" else PROBE
+        target = CONTROL_ANSWER if args.task == "control" else codeword
         started = time.monotonic()
-        handle_message(ctx, "seat", f"{NODE}:{MEMBER}", PROBE, drain_after=False)
+        handle_message(ctx, "seat", f"{NODE}:{MEMBER}", probe, drain_after=False)
         turns = drain(ctx, run_fn=run_harness)
         wall = time.monotonic() - started
 
@@ -163,12 +174,16 @@ def run_trial(arm: str, trial: int, rng: random.Random, args) -> dict:
         return {
             "arm": arm,
             "trial": trial,
+            "task": args.task,
+            "budget": args.budget,
+            "preset": args.preset or "",
             "codeword": codeword,
-            "success": codeword.lower() in answered.lower(),
+            "success": target.lower() in answered.lower(),
             "turns": turns,
             "wall_seconds": round(wall, 1),
             "knowledge_injected": knowledge_injected,
             "codeword_in_prompt": codeword_in_prompt,
+            "codeword_stated": codeword.lower() in answered.lower(),
             "prompt_line": prompt_line.strip(),
             "replies": [body[:200] for _a, body in replies],
         }
@@ -177,7 +192,10 @@ def run_trial(arm: str, trial: int, rng: random.Random, args) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--trials", type=int, default=6, help="trials per arm")
-    ap.add_argument("--model", default="qwen3:1.7b", help="ollama model for the member")
+    ap.add_argument("--model", default="", help="model: ollama name, or --preset's --model")
+    ap.add_argument("--preset", default="", help="r4t rig preset (claude, codex, agy, cursor, ...)")
+    ap.add_argument("--task", default="memory", choices=["memory", "control"],
+                    help="memory = codeword recall; control = no-memory task (distraction cost)")
     ap.add_argument("--budget", default="on", help="arm B Knowledge: value (on, 4k, ...)")
     ap.add_argument("--fake", action="store_true", help="chassis check, no LLM")
     ap.add_argument("--seed", type=int, default=4242)
@@ -194,7 +212,9 @@ def main() -> int:
     ledger.parent.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    mode = "fake" if args.fake else args.model
+    mode = "fake" if args.fake else (args.preset or args.model or "qwen3:1.7b")
+    if args.model and args.preset:
+        mode = f"{args.preset}:{args.model}"
 
     rows = []
     try:
@@ -223,8 +243,13 @@ def main() -> int:
         arm_rows = [r for r in rows if r["arm"] == arm]
         hits = sum(r["success"] for r in arm_rows)
         print(f"arm {arm} ({mode}): {hits}/{len(arm_rows)}")
+    # A leak is the codeword reaching an arm-A member, never task success:
+    # on --task control success is correct arithmetic, which both arms should
+    # get right.
     leaks = [
-        r for r in rows if r["arm"] == "A" and (r["codeword_in_prompt"] or r["success"])
+        r
+        for r in rows
+        if r["arm"] == "A" and (r["codeword_in_prompt"] or r["codeword_stated"])
     ]
     if leaks:
         print(f"WARNING: arm A leak — {len(leaks)} trial(s) saw the codeword")

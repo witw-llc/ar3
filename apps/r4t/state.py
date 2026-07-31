@@ -41,16 +41,21 @@ subprocesses themselves.
 """
 from __future__ import annotations
 
-import fcntl
 import itertools
 import json
 import os
 import re
 import shutil
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from ulid import new as new_ulid
 
@@ -1024,17 +1029,34 @@ def rig_buckets_path() -> Path:
 @contextmanager
 def _rig_bucket_locked():
     """Serialize the machine-global rig-bucket read-modify-write across every
-    charging node AND thread. fcntl.flock is the right primitive here: it blocks
-    until the lock is free, works across processes and threads (each open() gets
-    its own file description), and is released automatically if a holder dies —
-    no stale-lock reclaim to race against. POSIX-only, like the rest of r4t."""
+    charging node AND thread. Advisory flock (POSIX) / msvcrt.locking (Windows)
+    blocks until free, works across processes and threads (each open() gets its
+    own file description), and releases when the holder dies with the fd —
+    no stale-lock reclaim to race against. Turn locks stay O_EXCL PID files."""
     path = r4t_home() / ".rig-buckets.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if sys.platform == "win32":
+            while True:
+                try:
+                    if os.fstat(fd).st_size == 0:
+                        os.write(fd, b"\0")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
+        if sys.platform == "win32":
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
         os.close(fd)
 
 

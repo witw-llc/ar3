@@ -142,9 +142,9 @@ def test_r4t_panel_lists_rosters_under_the_home(homes):
 
 # ---------- k7e panel ----------
 
-def test_k7e_panel_asks_for_init_without_a_store(homes):
+def test_k7e_panel_hints_the_store_is_created_on_first_write(homes):
     rows = ar3.k7e_rows()
-    assert _row(rows, "store")[3] == "k7e init"
+    assert _row(rows, "store")[3] == "k7e store <title>"
     assert not [r for r in rows if r[1] == "index"]
 
 

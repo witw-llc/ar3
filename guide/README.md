@@ -25,7 +25,9 @@ spine is the build order itself.
 | 02 | [The Founding](02-the-founding.md) | r4t | solo joins a roster and becomes Wren: budgets, a queue, a persistent conversation, your seat. |
 | 03 | [The Long Memory](03-the-long-memory.md) | r4t | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
 | 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | r4t | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |
-| 05+ | *(coming)* | k7e | Knowledge that outlives a roster, more seats, cells, and missions. |
+| 05 | [Nothing Learned Twice](05-nothing-learned-twice.md) | k7e | A knowledge store of your own: flat markdown, FTS5 search, distilled notes, a rebuildable index. |
+| 06 | [The Dreaming](06-the-dreaming.md) | r4t + k7e | Wren gets a private memory: knowledge injected on every wake, distilled back from his own turns when the node is idle. |
+| 07+ | *(coming)* | r4t | Cells and missions — the roster grows a tree, and a `MISSION.md` it reviews itself against. |
 
 Each chapter costs about twenty minutes of your attention and hands back
 something you keep using afterwards.

@@ -136,6 +136,14 @@ an open thread whose originator is unanswered sees no activity for
 state — NOT to force-finish the work. The human, or the leader, decides what
 "done" means; r4t only makes sure the originator is not left in silence.
 
+The sweep only makes sense because a thread has a way to end without a
+message. A member closes a machine-originated obligation that asks nothing of
+it with `close_without_reply` — validated by the task layer against the ledger,
+never by the model ([r4t-ack.md](r4t-ack.md)) — so an open quiet thread means a
+dropped ball rather than a member exercising judgment the machinery cannot
+hear. A thread a person opened is never closable that way, so the sweep's own
+nudge can never be waved off.
+
 A thread opened by relayed mail — an inbound the sending cluster marked
 `meta.class: auto` (see [r4t-message-flow.md](r4t-message-flow.md#class-across-the-wall))
 — is skipped. Its originator is another cluster's machinery, so a status report

@@ -24,7 +24,7 @@ from engine import (
     supersede,
 )
 from distill import distill, consolidate
-from hygiene import run_audit
+from hygiene import run_audit, index_disagreement
 
 
 COMMANDS: list[tuple[str, str, str]] = [
@@ -300,7 +300,10 @@ def main(argv=None):
                 print(f"  {i}")
             print(f"\n{len(issues)} issue(s).")
         else:
-            print("Clean.")
+            print("Markdown clean.")
+        disagreement = index_disagreement()
+        if disagreement:
+            print(f"Index: {disagreement}")
 
     elif args.command == "list":
         nodes = list_nodes(status=args.status, tag=args.tag)

@@ -28,6 +28,12 @@ structured fields, per-turn send quota, then either the node's real outbox
 recipient member's queue (intra-roster, no header, no round-trip). A reply is
 attributed to the thread of the message it answers.
 
+A turn can also end an obligation by sending nothing at all: it proposes
+`close_without_reply <thread>` in its output and `ack.py` validates eligibility
+before the ledger moves. That runs ahead of every reply path here, because a
+thread the member deliberately closed must not then be answered by the stdout
+fallback.
+
 Requeueing note: a8s treats exit 0 as the only delivery ack and redelivers the
 envelope (with backoff) when a wake exits nonzero. `handle_message` therefore
 acks early — it enqueues durably, then returns 0 whatever the turn does — so a
@@ -51,6 +57,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import ack
 import isolate
 import knowledge
 import state
@@ -133,6 +140,22 @@ PROMPT_DEFAULTS: dict[str, str] = {
     "work_no_ack": (
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine."
+    ),
+    # Offered only to a member whose `Ack:` is on. Disqualifiers are phrased as
+    # OVERRIDES rather than positive triggers: every false close the #59
+    # experiments produced came from an obligation hidden under informational
+    # framing. The task layer allows a close only on a machine-originated
+    # thread, so the bullet says so — a proposal on any other thread is
+    # rejected and costs a nudge.
+    "work_close_without_reply": (
+        "- An automated notification that asks nothing of you gets closed, not "
+        "answered: print a line of its own reading exactly\n"
+        "        close_without_reply <thread>\n"
+        "    using that message's thread id from its header above, and send "
+        "nothing. Only machine-sent mail can be closed this way — a person or "
+        "a member is owed an answer. An assignment is still an assignment when "
+        "it is framed as an FYI, and a question is still a question — answer "
+        "those with a message instead."
     ),
     "work_body_only": (
         "- Your tell's body is the only thing the recipient sees — anything you "
@@ -634,6 +657,7 @@ def prompt_sections(
             *(members or ["    - (none)"]),
             ctx.prompt("work_direct"),
             ctx.prompt("work_no_ack"),
+            *([ctx.prompt("work_close_without_reply")] if member.ack else []),
             ctx.prompt("work_body_only"),
             ctx.prompt("work_commit"),
         ]),
@@ -849,10 +873,13 @@ def run_harness(
         # then `--rm` reaps it.
         if kill_container_name:
             isolate.kill_container(kill_container_name)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except OSError:
+        if os.name != "posix":
             proc.kill()
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                proc.kill()
         proc.wait()
     reader.join()
     duration = time.monotonic() - start
@@ -1561,6 +1588,16 @@ def _marshal_attachments(
     return bundle
 
 
+def _reply_thread(batch: list[dict], reply_target: str) -> str:
+    """The thread the stdout fallback would answer on — the newest message from
+    the reply target. Which obligation the fallback belongs to is what makes
+    ack suppression per-obligation instead of per-turn."""
+    for env_msg in reversed(batch):
+        if str(env_msg.get("from", "")) == reply_target:
+            return str(env_msg.get("thread", ""))
+    return ""
+
+
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -1735,8 +1772,25 @@ def _run_turn(
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
                 max_bytes=rig.history_max_bytes,
             )
+        # Propose -> validate -> commit, ahead of every reply path: a thread
+        # this turn deliberately closed must not then be answered by the
+        # stdout fallback, which exists to rescue members that do not know the
+        # protocol — and this one just spoke it. The suppression is per
+        # obligation, not per turn: it applies only when the thread the
+        # fallback would answer on is one of the threads just closed, so a
+        # batch that closed an FYI and answered a different thread in prose
+        # still delivers that answer.
+        closed = ack.run(ctx, member, rig, batch, output, roster=roster)
+        quiet = bool(closed) and _reply_thread(batch, reply_target) in closed
         if rig.echo:
             _stage_echo_reply(ctx, member, rig, reply_target, output)
+        elif quiet and not state.staged_envelopes(ctx.node, member.name):
+            state.append_log(
+                ctx.node,
+                f"r4t: ACK-QUIET {member.name.lower()} (rig {rig.name}) closed "
+                f"{len(closed)} thread(s) without replying; its "
+                f"{len(output.strip())} bytes of stdout stay transcript",
+            )
         elif not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
             # of running `tell`. `tell` always wins — a turn that staged
@@ -1746,7 +1800,10 @@ def _run_turn(
             # `Fallback: off` in the roster mutes that staging for a member
             # whose prose-only turns are noise, not answers; the quota signal
             # below still fires — a blank is a blank on any member.
-            reply = clean_transcript(output)
+            # A rejected proposal leaves its protocol line in the transcript;
+            # the member's prose still deserves to reach whoever asked, the
+            # line it fumbled does not.
+            reply = clean_transcript(ack.strip_proposals(output))
             if len(reply) > STDOUT_REPLY_MIN_CHARS and not reply_target:
                 _log_internal_only(ctx, member, rig, output)
             elif len(reply) > STDOUT_REPLY_MIN_CHARS and not member.fallback:

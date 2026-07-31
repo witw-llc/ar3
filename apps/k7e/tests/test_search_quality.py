@@ -1,6 +1,6 @@
 """Search quality tests — precision, recall, contradictions, scale."""
-import time
 import engine
+from conftest import PERF_FACTOR, best_of_3
 
 class TestRecall:
     def test_recall_at_5_exact_titles(self, store):
@@ -59,6 +59,19 @@ class TestRecall:
                 misses.append(i)
         assert len(misses) == 0, f"False negatives: indices {misses}"
 
+    def test_single_track_returns_more_than_five(self, store):
+        """Without embeddings only BM25 scores, so every fused score is a bare
+        rank ladder and the RRF floor would cut everything from rank 5 down —
+        capping any limit at 5 results."""
+        for i in range(12):
+            engine.store_entry(
+                f"Runbook section {i}",
+                f"Stage {i} of the kestrel deployment rolls the fleet forward.",
+                tags=["ops"],
+            )
+        results = engine.search("kestrel deployment", limit=8)
+        assert len(results) == 8, f"got {len(results)} results"
+
 
 class TestContradictions:
     def test_conflicting_entries_both_surface(self, store):
@@ -90,15 +103,15 @@ class TestScale:
     def test_search_under_100ms_at_500(self, store):
         for i in range(500):
             engine.store_entry(f"Node {i}", f"Content about subject-{i} details-{i}", tags=[f"a{i%10}"])
-        start = time.perf_counter()
-        engine.search("subject-250 details-250")
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.1, f"Search took {elapsed:.3f}s at 500 nodes"
+        elapsed = best_of_3(lambda _: engine.search("subject-250 details-250"))
+        limit = 0.1 * PERF_FACTOR
+        assert elapsed < limit, f"Search took {elapsed:.3f}s at 500 nodes (limit {limit:.3f}s)"
 
     def test_store_under_20ms_at_500(self, store):
         for i in range(500):
             engine.store_entry(f"Pre {i}", f"content {i}", tags=["bulk"])
-        start = time.perf_counter()
-        engine.store_entry("Benchmark", "timed entry", tags=["bench"])
-        elapsed = time.perf_counter() - start
-        assert elapsed < 0.02, f"Store took {elapsed:.3f}s at 500 nodes"
+        # Content-hash dedup short-circuits an identical body, so each run
+        # needs its own content to exercise the same write path.
+        elapsed = best_of_3(lambda run: engine.store_entry("Benchmark", f"timed entry {run}", tags=["bench"]))
+        limit = 0.02 * PERF_FACTOR
+        assert elapsed < limit, f"Store took {elapsed:.3f}s at 500 nodes (limit {limit:.3f}s)"

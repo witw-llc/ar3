@@ -62,13 +62,13 @@ infer the outbox without the env var (see below). Outside that root, set
 `tell` / `tells` pick an outbox in this order:
 
 1. **`TELL_OUTBOX_DIR`** if set (deployed agents; also the unambiguous desktop choice).
-2. Else, if `~/.a8s` is readable, match **configured** agent outboxes against CWD:
+2. Else, if the a8s state root (default `~/.config/a8s`) is readable, match **configured** agent outboxes against CWD:
    - CWD *is* the outbox, or
    - CWD *contains* the outbox, or
    - CWD is inside that agent's registered root.
 3. **Exactly one** match → use it.
 4. **Several** matches → refuse; set `TELL_OUTBOX_DIR` (typical when CWD is `$HOME`).
-5. **None** / no registry (e.g. system-installed tell with no readable `~/.a8s`) → refuse; set `TELL_OUTBOX_DIR`.
+5. **None** / no registry (e.g. system-installed tell without a reachable registry) → refuse; set `TELL_OUTBOX_DIR`.
 
 Agent-user / system installs put `tell` on a shared PATH without a8s config
 access — env-only, by design.

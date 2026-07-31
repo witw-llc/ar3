@@ -469,14 +469,43 @@ def _parse_llm_response(text):
         return []
     try:
         items = json.loads(match.group())
+        if not isinstance(items, list):
+            return []
         valid = []
         for item in items:
-            if isinstance(item, dict) and "title" in item and "content" in item:
-                valid.append({
-                    "title": item["title"],
-                    "content": item["content"],
-                    "tags": item.get("tags", []),
-                })
+            if not isinstance(item, dict) or "title" not in item or "content" not in item:
+                continue
+            title = item["title"]
+            content = item["content"]
+            tags = item.get("tags", [])
+            if not isinstance(title, str):
+                print(
+                    f"  [distill] skipping candidate: title is {type(title).__name__}, expected string",
+                    file=sys.stderr,
+                )
+                continue
+            if not isinstance(content, str):
+                print(
+                    f"  [distill] skipping candidate {title!r}: "
+                    f"content is {type(content).__name__}, expected string",
+                    file=sys.stderr,
+                )
+                continue
+            if tags is None:
+                tags = []
+            elif isinstance(tags, str):
+                tags = [tags]
+            elif not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+                print(
+                    f"  [distill] skipping candidate {title!r}: tags must be a list of strings",
+                    file=sys.stderr,
+                )
+                continue
+            valid.append({
+                "title": title,
+                "content": content,
+                "tags": tags,
+            })
         return valid
     except (json.JSONDecodeError, TypeError):
         return []

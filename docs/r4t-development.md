@@ -76,7 +76,8 @@ roster:
 ## Layout
 
 `r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging
-release, quiet-thread sweep, mission-review) · `tasks.py` (thread ledger) · `state.py`
+release, quiet-thread sweep, mission-review) · `tasks.py` (thread ledger) ·
+`ack.py` (`close_without_reply` — parse, validate, commit) · `state.py`
 (all on-disk state under `$R4T_HOME`) · `rig.py` (rig config, presets,
 model resolution) · `roster.py` · `org.py` (org dirs + settings) ·
 `check.py` (verification sweep) · `judge.py` (post-hoc MAST judge) ·

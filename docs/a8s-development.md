@@ -31,7 +31,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **Absolute attachment paths in wake prompts.** Delivered messages append `ATTACHED FILE: <absolute-path>` lines (not bare `FILE:`). Path comes from definition `files_dir` (default `.files` under agent root) plus `<msg_id>/<filename>`.
 - **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `<files_dir>/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
 - **Definition `outbox_dir`.** Optional; defaults to `.outbox` under agent root. Absolute paths allowed. Harness ingests from the resolved path; wakes inject `TELL_OUTBOX_DIR` into the invoke subprocess so tell writes there without the agent seeing the outbox in its workspace.
-- **Tell outbox resolution.** `TELL_OUTBOX_DIR` when set (a8s injects it on wake). Else a unique configured outbox matched from CWD when the a8s state root is readable (see [a8s-filedrop.md](a8s-filedrop.md)). System / agent-user installs without a readable registry need the env. No blind CWD tree-walk for a random `.outbox`.
+- **Tell outbox resolution.** `TELL_OUTBOX_DIR` when set (a8s injects it on wake). Else a unique configured outbox matched from CWD when the a8s state root (default `~/.config/a8s`) is readable (see [a8s-filedrop.md](a8s-filedrop.md)). System / agent-user installs without a readable registry need the env. No blind CWD tree-walk for a random `.outbox`.
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.
@@ -71,7 +71,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
 ## What didn't work
 
 - Synchronous `a8s prompt` — raced with the loop. Queue into inbox instead.
-- Mailboxes inside agent dirs — Gemini surfaced them to the model. Moved to `~/.a8s/agents/`.
+- Mailboxes inside agent dirs — Gemini surfaced them to the model. Moved to `agents/` under the a8s state root.
 - Headless tool-use without auto-approval — hangs silently. Always pass the flag.
 - Singleton daemon — replaced with per-agent handlers.
 - `says` broadcast verb — LLMs couldn't pick tell vs says consistently.

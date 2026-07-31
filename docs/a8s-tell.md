@@ -28,7 +28,7 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
    is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). System installs for
    agent users without a readable registry always need the env var.
 2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
-3. Optionally read `~/.a8s` (or `A8S_HOME`) to validate recipient and stamp `from` when CWD sits inside a registered agent root. Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
+3. Optionally read the a8s state root (default `~/.config/a8s`) to validate recipient and stamp `from` when CWD sits inside a registered agent root. Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
 
 Envelope shape:
 
@@ -60,7 +60,7 @@ On disk alongside the JSON:
 
 `from` is omitted when registry is unreachable; the router **force-overwrites** `from` based on which agent owns the outbox directory. When a namespace is bound to that agent, mail leaving the namespace presents as the bare prefix (`acme`) and mail inside it keeps `acme:<sub-sender>`.
 
-4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `~/.a8s/agents/<SENDER>/pending/`.
+4. **Ingest** — move `<msg_id>.json` and `<outbox>/<msg_id>/` together into `agents/<SENDER>/pending/` under the a8s state root.
 5. **Route** — copy pending bundle bytes into each recipient's `<files_dir>/<msg_id>/` (default `.files`). Inbox JSON keeps filename-only `files`. Wake `$MESSAGE` appends absolute `ATTACHED FILE:` lines.
 
 ## `TELL_OUTBOX_DIR`
@@ -70,7 +70,7 @@ The outbox path tell writes to.
 **Priority:**
 
 1. `TELL_OUTBOX_DIR` when set (required for deployed agents — a8s injects it on wake).
-2. Else a unique configured outbox matched from CWD when `~/.a8s` is readable
+2. Else a unique configured outbox matched from CWD when the a8s state root is readable
    (desktop / filedrop seats — see [a8s-filedrop.md](a8s-filedrop.md)).
 3. Else fail.
 
@@ -118,7 +118,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 That puts `tell` on the shared PATH so `run_as` agent users resolve it without
-reading an operator home clone. Those seats still have no `~/.a8s` access —
+reading an operator home clone. Those seats still have no registry access —
 always set `TELL_OUTBOX_DIR` (r4t injects it across the boundary).
 
 ## Tests

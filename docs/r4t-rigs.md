@@ -201,7 +201,9 @@ log); the same rule holds the `STDOUT-REPLY` fallback on non-echo rigs. A batch
 mixing r4t's prompt with a real message still replies to the real sender.
 On non-echo rigs, `- **Fallback:** off` on a roster member (default on) mutes
 the `STDOUT-REPLY` fallback for that member: its prose-only turns log `SILENT`
-instead of staging a reply.
+instead of staging a reply. `- **Ack:** off` (also default on) is the separate
+knob for the opposite move — revoking the member's `close_without_reply`
+([r4t-ack.md](r4t-ack.md)), which ends an obligation with no message at all.
 
 ## The `a8s_tell` tool (`mcp`)
 

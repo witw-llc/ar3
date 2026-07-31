@@ -5,7 +5,7 @@ member's queue and back out. For governance rationale see
 [r4t-governance.md](r4t-governance.md); for the knob table see
 [r4t-rigs.md](r4t-rigs.md#governance-knobs).
 
-## The five steps
+## The six steps
 
 1. `tell acme "..."` routes through a8s to the roster node; the node's
    definition invokes `r4t dispatch`. **The topmost leader IS the garden
@@ -64,6 +64,18 @@ member's queue and back out. For governance rationale see
    `- **Fallback:** off` in the roster: its no-tell turns log `SILENT`
    instead of staging a reply, and the blank-output quota detection is
    untouched.
+6. Closing without a reply — an automated notification that asks nothing of
+   the member is closed rather than answered. The member prints
+   `close_without_reply <thread>` on a line of its own; the task layer
+   validates eligibility (the verb echoed exactly, a thread this turn
+   actually holds, a machine-originated thread by the ledger, no direct
+   question or assignment on it, and this member the one its creator is
+   waiting on) and only then closes the ledger with a reason it derived
+   itself. Zero egress: nothing is staged and nothing crosses the wall. The
+   fallback is suppressed for that obligation only (`ACK-QUIET`), so a turn
+   that closes one thread and answers another still delivers the answer. Per
+   member, `- **Ack:** off` revokes the verb. Mechanics, the allow-list and
+   the overrides: [r4t-ack.md](r4t-ack.md).
 
 ## The durable queue
 

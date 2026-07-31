@@ -26,6 +26,12 @@ clean turn that releases nothing normally gets its cleaned stdout staged as
 one reply to the inbound sender. `Fallback: off` keeps such a member silent —
 SILENT logged, nothing staged. Any value other than on/off is a member error.
 
+`Ack:` (default on) controls whether the member may close an obligation
+without sending anything — the `close_without_reply` verb in the how-to-work
+doctrine (docs/r4t-ack.md). `Ack: off` drops the bullet from the member's
+prompt and rejects any proposal it emits anyway. Any other value is a member
+error.
+
 `Reinforce:` is a short operator-authored line injected into every wake
 prompt for this member — founding, continue, echo, batch alike — late in the
 prompt where a small model reads it last. It is per-member prompt engineering
@@ -125,6 +131,7 @@ class Member:
     continue_conversation: bool = False
     flush_seconds: float | None = None
     fallback: bool = True
+    ack: bool = True
     reinforce: str = ""
     knowledge_bytes: int = 0
     cell: str = ""
@@ -329,6 +336,11 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
         m.errors.append(
             f"Fallback must be on or off, got {fb!r} (try: Fallback: off)"
         )
+    ak = fields.get("ack", "")
+    if ak and _is_false(ak):
+        m.ack = False
+    elif ak and not _is_true(ak):
+        m.errors.append(f"Ack must be on or off, got {ak!r} (try: Ack: off)")
     m.reinforce = fields.get("reinforce", "")
     kn = fields.get("knowledge", "")
     if kn:

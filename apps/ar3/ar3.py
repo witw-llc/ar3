@@ -234,7 +234,7 @@ def k7e_rows() -> list[Row]:
     rows = [_cli_row("k7e")]
     nodes = home / "nodes"
     if not nodes.is_dir():
-        rows.append((False, "store", f"no store at {home}", "k7e init"))
+        rows.append((False, "store", f"no store at {home}", "k7e store <title>"))
         return rows
     entries = sum(1 for p in nodes.rglob("*.md"))
     rows.append((True, "store", f"{entries} entr(ies) under {nodes}", None))

@@ -66,3 +66,18 @@ def run_audit(fix=False):
                 asset.unlink()
 
     return issues
+
+
+def index_disagreement():
+    """Compare on-disk node count to the SQLite-indexed count. Markdown files
+    are the store's source of truth; the index is a derived, rebuildable
+    cache that can go stale or missing without touching a single node file.
+    Returns a message describing the gap, or None when they agree."""
+    engine.init()
+    store_count = sum(1 for _ in engine._all_node_files())
+    conn = engine._connect()
+    indexed_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    conn.close()
+    if store_count == indexed_count:
+        return None
+    return f"{store_count} entr(ies), {indexed_count} indexed — run k7e reindex"

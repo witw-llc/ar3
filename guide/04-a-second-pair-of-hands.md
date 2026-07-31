@@ -385,3 +385,6 @@ git commit -q -m "silo roster: Moss joins — helper rig, echo lifted from Wren"
 
 Copy-paste templates for this chapter's final state live in
 [templates/04-two-member/](templates/04-two-member/).
+
+Chapter 5 gives you something a second pair of hands cannot: a memory that
+outlives the conversation.

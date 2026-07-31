@@ -35,7 +35,7 @@ flowchart LR
         outbox[".outbox/<br/><i>agent writes here</i>"]
     end
 
-    subgraph H["~/.a8s/  <i>(a8s-managed state)</i>"]
+    subgraph H["~/.config/a8s/  <i>(a8s state root)</i>"]
         direction TB
         reg["a8s.json<br/><i>registry — agents + aliases + namespaces</i>"]
         slog["log.txt<br/><i>process-scoped supervisor log</i>"]
@@ -60,9 +60,9 @@ flowchart LR
 
 Three concepts:
 
-- **Registry** (`~/.a8s/a8s.json`) — the list of agents, aliases, and namespace prefixes. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
-- **Handlers** — a process that holds the attachment for one or more agents. Pid file at `~/.a8s/agents/<NAME>/pid`. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
-- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `~/.a8s/agents/<RECIPIENT>/inbox/` for CLI agents (wake from there). **Filedrop** nodes (`definitions/filedrop.json`) instead receive into `<root>/.inbox/` with no CLI wake — see [docs/a8s-filedrop.md](a8s-filedrop.md).
+- **Registry** (`a8s.json` under the a8s state root) — the list of agents, aliases, and namespace prefixes. Agents have a name, a directory, and a *definition* (a JSON file describing how to wake them). Optional `safe_dirs` remains in the schema but is unused for attachment routing: tell stages files into `<root>/.files/` and envelopes reference filename only.
+- **Handlers** — a process that holds the attachment for one or more agents. Pid file at `agents/<NAME>/pid` under the a8s state root. One agent is handled by exactly one process at a time, but one process can handle many agents (typically by attaching to an alias).
+- **Mailboxes** — agents write to `<agent-root>/.outbox/`; routing copies into `agents/<RECIPIENT>/inbox/` under the a8s state root for CLI agents (wake from there). **Filedrop** nodes (`definitions/filedrop.json`) instead receive into `<root>/.inbox/` with no CLI wake — see [docs/a8s-filedrop.md](a8s-filedrop.md).
 
 The router doesn't trust the sender. The `from` field is force-overwritten to the actual enclosing agent at routing time. An agent can't impersonate another by hand-writing JSON.
 
@@ -123,9 +123,9 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s add <name> <dir> [<def>] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`). |
-| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `~/.a8s/agents/<NAME>/` and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
+| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
-| `a8s definitions` / `a8s defs` | Manage user-installed templates in `~/.a8s/definitions/` (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
+| `a8s definitions` / `a8s defs` | Manage user-installed templates in `definitions/` under the a8s state root (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
 | `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv (not OS env). Used-but-unset fails wake. |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
 | `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
@@ -236,7 +236,7 @@ any prefixes pointing at it.
 |---|---|
 | `a8s config` | List settings with effective values and source (`settings.json`, `env`, or default). |
 | `a8s config get <key>` | Print one setting. |
-| `a8s config set <key> <value>` | Persist to `~/.a8s/settings.json`. |
+| `a8s config set <key> <value>` | Persist to `settings.json` under the a8s state root. |
 | `a8s config unset <key>` | Remove key from settings.json; fall back to env then default. |
 
 Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_MAX_ROWS`, `A8S_LOOP_INTERVAL`). `a8s config` with no arguments lists every knob — machine-wide, per-agent definition, registry, network, env, and constants — even read-only ones.
@@ -265,7 +265,7 @@ File payloads (`FILE:`) are local-only in v1 — the sender's path doesn't exist
 
 ### Per-agent take-over
 
-`start`/`run`/`step` against an agent that's already attached to another live process performs a **per-agent** hand-off. The new caller drops a `detach-request` file under `~/.a8s/agents/<NAME>/`; the existing handler reads it at the top of its next iteration and releases just that one agent — its other handled agents keep running. Then the new caller atomically claims the pid file. There is never an orphan: at every moment, an agent is either attached to exactly one live process or it isn't running at all.
+`start`/`run`/`step` against an agent that's already attached to another live process performs a **per-agent** hand-off. The new caller drops a `detach-request` file under `agents/<NAME>/` in the a8s state root; the existing handler reads it at the top of its next iteration and releases just that one agent — its other handled agents keep running. Then the new caller atomically claims the pid file. There is never an orphan: at every moment, an agent is either attached to exactly one live process or it isn't running at all.
 
 Concretely: P1 is `a8s start devs` (handling `[CLAUDE, GEMINI, FOO]`). You run `a8s run CLAUDE` in another window. CLAUDE moves to your foreground process; P1 keeps handling `[GEMINI, FOO]`. If you then `a8s run GEMINI` in a third window, GEMINI moves there; P1 keeps `[FOO]`. If P1's last agent gets pulled out, P1 exits cleanly with nothing left to handle.
 
@@ -354,7 +354,7 @@ A shared definition can then use `"--model", "$MODEL"`; each node supplies its o
 
 Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare name (`filedrop`, `claude`, or a user template from `a8s defs add`). The file isn't moved or copied into the agent root; the registry stores the resolved path.
 
-Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies into `~/.a8s/definitions/mine.json`). Basename must not collide with a repo built-in. `a8s defs ls` lists both; `a8s defs rm <name>` removes user installs only.
+Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies into `definitions/mine.json` under the a8s state root). Basename must not collide with a repo built-in. `a8s defs ls` lists both; `a8s defs rm <name>` removes user installs only.
 
 ### max_wake_seconds (optional)
 
@@ -366,7 +366,7 @@ While a wake subprocess is running, the handler keeps looping: it still routes e
 
 A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.timeout` seconds without any wake activity. Update mechanics:
 
-- `~/.a8s/agents/<NAME>/last-active` (ISO timestamp) is touched at every wake start, every wake end, and at the end of every idle invoke.
+- `agents/<NAME>/last-active` under the a8s state root (ISO timestamp) is touched at every wake start, every wake end, and at the end of every idle invoke.
 - After draining the inbox each iteration, `attached_loop` checks each handled agent: if `now - last_active >= timeout`, run `idle.invoke` via the same wake subprocess machinery that real wakes use.
 - A wake subprocess in flight blocks starting another wake or idle invoke for that handler process; outbox routing still runs each iteration.
 - `timeout: 0` (or negative / non-numeric) disables idle.
@@ -393,14 +393,14 @@ Agents that can process multiple tells in one subprocess can declare a `batch` b
 - `batch.invoke` — argv template with the same substitutions as `invoke` / `idle.invoke`.
 - `batch.limit` — max messages per batch wake; defaults to **5**.
 - One waiting message still uses normal `invoke` (unchanged).
-- Paths point at the trashed inbox JSON files (under `~/.a8s/agents/<NAME>/trash/`), appended after the expanded `batch.invoke` argv.
+- Paths point at the trashed inbox JSON files (under `agents/<NAME>/trash/` in the a8s state root), appended after the expanded `batch.invoke` argv.
 - Batch argv expansion matches idle: `$RECIPIENT` is the agent's own name; `$SENDER` / `$MESSAGE` / `$TIMESTAMP` / `$AGE` are empty.
 
-Debounce mechanics: on the first inbox message, a8s stamps `~/.a8s/agents/<NAME>/inbox-waiting-since` and skips waking until `pause` seconds elapse. Each loop iteration re-routes outboxes, so messages that arrive during the wait window join the inbox before the wake decision. The stamp clears when the inbox drains or a wake fires.
+Debounce mechanics: on the first inbox message, a8s stamps `agents/<NAME>/inbox-waiting-since` under the a8s state root and skips waking until `pause` seconds elapse. Each loop iteration re-routes outboxes, so messages that arrive during the wait window join the inbox before the wake decision. The stamp clears when the inbox drains or a wake fires.
 
 ### Delivery ack and retry
 
-**Exit 0 is the only ack.** A wake that exits nonzero, gets killed for exceeding `max_wake_seconds`, fails to spawn, or aborts on an unset var puts its envelopes back in the agent's inbox and waits before trying again — 30s, then 2m, then 10m. After the 4th failed attempt the envelopes stay in trash as dead letters, logged in the agent log and recorded as `DROPPED` in `transactions.tsv`, so one poison message can't wedge the inbox shut. The backoff is per agent (`~/.a8s/agents/<NAME>/wake-retry`) and survives handler restarts, so a broken CLI backs off instead of burning a wake per loop iteration.
+**Exit 0 is the only ack.** A wake that exits nonzero, gets killed for exceeding `max_wake_seconds`, fails to spawn, or aborts on an unset var puts its envelopes back in the agent's inbox and waits before trying again — 30s, then 2m, then 10m. After the 4th failed attempt the envelopes stay in trash as dead letters, logged in the agent log and recorded as `DROPPED` in `transactions.tsv`, so one poison message can't wedge the inbox shut. The backoff is per agent (`agents/<NAME>/wake-retry` under the a8s state root) and survives handler restarts, so a broken CLI backs off instead of burning a wake per loop iteration.
 
 Delivery is therefore at-least-once: **a wake command must tolerate seeing the same envelope twice.** The cheap way to guarantee that is to ack early — record the message durably, exit 0, and do the slow work afterwards. Reserve nonzero exits for "I did not receive this."
 
@@ -410,10 +410,10 @@ The default definitions follow the opacity rule — `$SENDER tells $RECIPIENT: $
 
 ## State on disk
 
-The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s` if it exists, else `~/.a8s` if it exists (legacy), else create/use `~/.config/a8s`. Set `A8S_HOME` to relocate the whole tree (tests, sandboxes). Everything below is relative to that root.
+When `A8S_HOME` is set it is the a8s state root, whatever else exists on disk. Unset, the root is `~/.config/a8s` if that directory exists, `~/.a8s` if that one does (legacy), and otherwise `~/.config/a8s`, created fresh — everything below is relative to that root.
 
 ```
-~/.config/a8s/                (or ~/.a8s legacy, or wherever A8S_HOME points)
+~/.config/a8s/                (or wherever A8S_HOME points)
 ├── a8s.json                  registry: { agents: {...}, aliases: {...}, namespaces: {...} }
 ├── settings.json             operator settings (`a8s config`; env fills gaps)
 ├── network.json              remotes / services (non-secret)
@@ -440,10 +440,10 @@ The state root resolves as follows when `A8S_HOME` is unset: use `~/.config/a8s`
 
 <agent-root>/
 └── .outbox/                  agent writes here; a8s renames out — never
-                              read-modify-writes — to <a8s-home>/agents/<NAME>/pending/
+                              read-modify-writes — to ~/.config/a8s/agents/<NAME>/pending/
 ```
 
-The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under `~/.a8s/` where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in `~/.a8s/`.
+The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under the a8s state root where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in the a8s state root.
 
 `from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity. A namespace binding can change what the identity *presents as* (`--opaque`), never whose it is: see [Namespaces](#namespaces).
 
@@ -502,12 +502,12 @@ a8s add my-email /mnt/gdrive/my-email/ my-filedrop.json
 apps/a8s/
 ├── a8s.py            entry shim (~30 lines)
 ├── core.py           paths, logging, Participant, helpers, MARKER_FILES
-├── registry.py       ~/.a8s/a8s.json I/O + alias/namespace resolution + sender_from_cwd
+├── registry.py       a8s.json I/O + alias/namespace resolution + sender_from_cwd
 ├── mailbox.py        ensure_mailboxes, route_outboxes (ingest+process), queue helpers
 ├── definitions.py    invoke* verbs, prompt formatting, definition loading
 ├── daemon.py         wake subprocess, pid attachment, signal handling
 ├── ulid.py           pure-stdlib ULID generator/parser (message IDs)
-├── network.py        ~/.a8s/network.json + publish_with_backoff + receive loop
+├── network.py        network.json + publish_with_backoff + receive loop
 ├── transports/       Transport ABC + per-kind implementations
 │   ├── __init__.py   abstract publish/subscribe/start/stop interface
 │   └── mqtt.py       MQTT transport (paho-mqtt impl; persistent session, QoS 1)
@@ -532,7 +532,7 @@ apps/a8s/
 python3 -m pytest apps/a8s/tests/
 ```
 
-Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp dir, so they never touch the real `~/.a8s/`. The daemon tests run real subprocesses against `tests/fixtures/mock-cli` (a deterministic bash script that echoes its argv) so wake_once's argv expansion and routing fan-out can be asserted on the per-agent log.
+Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp dir, so they never touch the real a8s state root. The daemon tests run real subprocesses against `tests/fixtures/mock-cli` (a deterministic bash script that echoes its argv) so wake_once's argv expansion and routing fan-out can be asserted on the per-agent log.
 
 ## Troubleshooting
 
@@ -623,4 +623,4 @@ Beyond what's filed: human participants via SMS/email connectors; synchronous `t
 
 ## Pre-v1 / scorch-the-earth note
 
-a8s has not reached v1. Surface, storage layout, and definition schemas change between phases without migration paths. Existing `~/.a8s/` state may need to be wiped and re-derived through `a8s discover` + `a8s add` after a breaking change. Once the design settles into v1, that contract changes.
+a8s has not reached v1. Surface, storage layout, and definition schemas change between phases without migration paths. Existing state under the a8s state root may need to be wiped and re-derived through `a8s discover` + `a8s add` after a breaking change. Once the design settles into v1, that contract changes.
