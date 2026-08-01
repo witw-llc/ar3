@@ -19,8 +19,9 @@ k7e status                # what's active + recommendations
 | `distill_command` | `K7E_DISTILL_COMMAND` | *(fallback)* | knowledge extraction |
 | `compile_command` | `K7E_COMPILE_COMMAND` | *(fallback)* | tag synthesis |
 | `rerank_command` | `K7E_RERANK_COMMAND` | *(fallback)* | search/recall reranking |
-| `embeddings` | `K7E_EMBEDDINGS` | `ollama` | `ollama` or `none` |
+| `embeddings` | `K7E_EMBEDDINGS` | `ollama` | `ollama`, or `none`/`off` to disable the semantic track |
 | `embed_model` | `EMBED_MODEL` | `nomic-embed-text` | embedding model |
+| `embed_query_timeout` | `K7E_EMBED_QUERY_TIMEOUT` | 2.0 | seconds a *search* waits on the query embedding |
 | `ollama_url` | `OLLAMA_URL` | `http://localhost:11434` | ollama endpoint (embeddings) |
 | `rerank` | `K7E_RERANK` | off | LLM rerank in `search` by default |
 | `decay_offset_days` | `K7E_DECAY_OFFSET` | 30 | flat (no-decay) window |
@@ -55,8 +56,18 @@ Semantic search uses ollama's `/api/embed` separately from LLM commands:
 ollama pull nomic-embed-text
 ```
 
-Without it (or with `embeddings none`), k7e runs FTS5-only — still effective for
-keyword recall.
+That is the whole setup. With ollama and the model present, the semantic track
+is live; without them (or with `embeddings none`), k7e runs FTS5-only — still
+effective for keyword recall.
+
+The two sides of the track cost differently, so they get different budgets:
+
+- **Entries** are queued at write time and embedded in batches by
+  `k7e embed-pending`. Nobody waits on that path, so it uses the full 10s
+  per-call timeout, and an unreachable ollama simply leaves the queue for later.
+- **Queries** are embedded inline by `search`, on `embed_query_timeout`
+  (2s by default). A caller with a tighter budget lowers it; when the call
+  misses, the search returns FTS5 results rather than nothing.
 
 ## What needs what
 

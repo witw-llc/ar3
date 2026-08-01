@@ -15,8 +15,20 @@ Hybrid search (BM25 + metadata + semantic), fused and ranked.
 --include-superseded   include retired entries
 ```
 
-### `get <id>`
-Print a full entry. Counts as a "use" (bumps ranking signals).
+When the semantic track runs, search prints `embed <N>ms` to **stderr** — the
+query-embedding cost alone, so a caller on a latency budget can price it. The
+line gains `(semantic track unavailable)` when ollama did not answer in time and
+FTS5 carried the search by itself. stdout is untouched either way.
+
+### `get <id> [--no-track]`
+Print a full entry. Counts as a "use" (bumps ranking signals) unless
+`--no-track` is given — for a caller that reads an entry only to size it
+before deciding whether to use it (r4t's knowledge packer), and wants
+`touch` to be the thing that actually counts as a recall.
+
+### `touch <id> [<id> ...]`
+Bump the usage ranking signal (`use_count`, `last_used_at`) for one or more
+entries without reading them — the other half of `get --no-track`.
 
 ### `recall <text> [--limit N]`
 RAG: retrieve relevant entries for a topic or pasted conversation and synthesize
@@ -64,8 +76,12 @@ Synthesize active entries for a tag into a `compiled` reference page (LLM).
 Rebuild `.index.db` from the markdown files. `--embeddings` recomputes vectors.
 Resets the `use_count`/`last_used_at` ranking signals (by design).
 
-### `embed-pending`
-Process queued embeddings.
+### `embed-pending [--json]`
+Embed the backlog: every entry queued by `store`/`append`/`distill` gets its
+vector. `--json` reports `{"embedded": N, "pending": M, "seconds": S}` — a
+non-zero `pending` means ollama did not answer and those entries wait for the
+next run. Run it where latency is free (r4t drives it from idle dreaming), never
+on a path someone is waiting on.
 
 ### `rebuild-mocs`
 Regenerate all Maps of Content from entry tags.

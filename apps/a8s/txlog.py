@@ -31,6 +31,7 @@ Event = Literal[
     "FILE_DELIVERED",
     "FILE_UPLOAD_FAILED",
     "PUBLISHED",
+    "DISCARDED",
     "DROPPED",
     "PROXY_DELIVERED",
 ]

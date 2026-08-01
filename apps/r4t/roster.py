@@ -21,10 +21,10 @@ it: the `r4t idle` sweep retires a conversation that has sat idle that long,
 dumping state to disk so the member refounds on the next real message. Any
 other value is a member error.
 
-`Fallback:` (default on) controls the stdout-reply fallback in dispatch: a
-clean turn that releases nothing normally gets its cleaned stdout staged as
-one reply to the inbound sender. `Fallback: off` keeps such a member silent —
-SILENT logged, nothing staged. Any value other than on/off is a member error.
+`ProseReply:` (default on) controls whether a clean turn that produces prose
+but never addresses anyone with `tell` gets that prose staged as one reply to
+the inbound sender. `ProseReply: off` keeps such a member silent — SILENT
+logged, nothing staged. Any value other than on/off is a member error.
 
 `Ack:` (default on) controls whether the member may close an obligation
 without sending anything — the `close_without_reply` verb in the how-to-work
@@ -61,6 +61,27 @@ No harness is obliged to treat it as the project root, though:
 opencode-family rigs also advertise the enclosing git root to the model as a
 "workspace root". A workdir nested in a repo can therefore still attract writes
 to the repo root (issue #273; see docs/r4t-rigs.md).
+
+An optional `- **Knowledge:** on` (default off) gives the member a private
+k7e store (docs/r4t-knowledge.md). The grammar, in ascending specificity:
+`on` (defaults), a T-shirt size (`small`/`medium`/`large` — the primary
+grammar, mapped to bytes by `KNOWLEDGE_SIZES` below), an exact byte count
+(`4k`/`4096` — the escape hatch), a rig name (a distill-rig override at the
+default budget), or `<size> <rig>` (both). Sizes are a closed set; any other
+single token is taken as a rig name — `parse_knowledge` only checks its
+shape, never whether it names a configured rig, because roster parsing has
+no rig config to check against; `r4t roster check` and dream-time resolution
+own that validation. The inject budget itself is always BYTES, never tokens.
+
+An optional `- **Framing:** ...` (default absent) overrides the cautionary
+line under the `## Knowledge` header for this member — `default` (or absent)
+keeps the built-in wording, `off` drops the line entirely (the header and
+entries still render), and a double-quoted string is custom wording taken
+verbatim (docs/r4t-knowledge.md). Quotes are mandatory for custom text:
+without them there is no way to tell the keyword `off` apart from an
+operator's own sentence that happens to start with the word off. A rig entry
+in rigs.json may carry the same three forms as its own default (rig.py); an
+explicit member line always wins over the rig's.
 """
 from __future__ import annotations
 
@@ -95,25 +116,122 @@ def parse_flush(value: str) -> float:
     return seconds
 
 
-KNOWLEDGE_DEFAULT_BUDGET = 2048  # bytes — the field survey's floor; K0 argues it up
-KNOWLEDGE_RE = re.compile(r"^(\d+)\s*(k|kb)?$", re.IGNORECASE)
+# T-shirt sizes -> bytes. r4t owns this mapping (not any one rig or preset) so
+# a roster written today stays meaningful as the industry's usable context
+# grows: move `large` here and every roster using it moves with it, no roster
+# edits. `small` is 4096 (k-budget-packing, #12/#52): at the rank-proportional
+# packer (knowledge.py), 4096 covers 26/48 LongMemEval questions against 14/48
+# for the old 2048 greedy-whole default, without the flat-cap regression that
+# dropped single-session-assistant coverage. `medium`/`large` are unmoved by
+# that experiment; `large` is currently unreachable in practice because
+# SEARCH_LIMIT caps the retrieved pool well under 32768 (tracked separately).
+KNOWLEDGE_SIZES: dict[str, int] = {
+    "small": 4096,
+    "medium": 8192,
+    "large": 32768,
+}
+KNOWLEDGE_DEFAULT_BUDGET = KNOWLEDGE_SIZES["small"]  # global floor for rigs with no tier
+KNOWLEDGE_SIZE_RE = re.compile(r"^(\d+)\s*(k|kb)?$", re.IGNORECASE)
 
 
-def parse_knowledge(value: str) -> int:
-    """`Knowledge:` value -> inject budget in bytes. `on` takes the default
-    budget, `off` is 0, a bare size (`4k`, `4096`) sets it exactly."""
-    v = value.strip().lower()
-    if v in ("", "off", "no", "false"):
-        return 0
-    if v in ("on", "yes", "true"):
-        return KNOWLEDGE_DEFAULT_BUDGET
-    match = KNOWLEDGE_RE.match(v)
+@dataclass
+class KnowledgeSpec:
+    """One member's parsed `Knowledge:` line, or `None` from `parse_knowledge`
+    for off. `size_bytes=None` means no explicit size was given — the
+    effective inject budget resolves later against the member's rig's
+    knowledge tier (rig.py), which needs config this module never loads.
+    `distill_rig=None` means dreaming uses the member's own turn rig."""
+
+    size_bytes: int | None = None
+    distill_rig: str | None = None
+
+
+def _knowledge_size_bytes(token: str) -> int | None:
+    """`token`'s byte value if it is size-shaped (a T-shirt word or a bare
+    byte count like `4k`/`4096`), else None — meaning it must be a rig name."""
+    low = token.lower()
+    if low in KNOWLEDGE_SIZES:
+        return KNOWLEDGE_SIZES[low]
+    match = KNOWLEDGE_SIZE_RE.match(token)
     if not match:
-        raise ValueError(
-            f"Knowledge must be on, off, or a size like 4k (got {value!r})"
-        )
+        return None
     n = int(match.group(1))
     return n * 1024 if match.group(2) else n
+
+
+_KNOWLEDGE_GRAMMAR_HINT = (
+    "Knowledge must be on, off, a T-shirt size (small/medium/large), an "
+    "exact byte count like 4k/4096, a rig name, or `<size> <rig>`"
+)
+
+
+def parse_knowledge(value: str) -> KnowledgeSpec | None:
+    """`Knowledge:` value -> a KnowledgeSpec, or None for off.
+
+    Sizes are the closed set (T-shirts + numeric); any other single token is
+    read as a rig name — its SHAPE is checked here (`RIG_RE`), never whether
+    it names a configured rig (see the module docstring)."""
+    v = value.strip()
+    low = v.lower()
+    if low in ("", "off", "no", "false"):
+        return None
+    if low in ("on", "yes", "true"):
+        return KnowledgeSpec()
+    tokens = v.split()
+    if len(tokens) > 2:
+        raise ValueError(f"{_KNOWLEDGE_GRAMMAR_HINT} (got {value!r})")
+    size_bytes: int | None = None
+    rig_name: str | None = None
+    for tok in tokens:
+        tok_bytes = _knowledge_size_bytes(tok)
+        if tok_bytes is not None:
+            if size_bytes is not None:
+                raise ValueError(f"Knowledge names two sizes (got {value!r})")
+            size_bytes = tok_bytes
+        elif RIG_RE.match(tok):
+            if rig_name is not None:
+                raise ValueError(f"Knowledge names two rigs (got {value!r})")
+            rig_name = tok.lower()
+        else:
+            raise ValueError(f"{_KNOWLEDGE_GRAMMAR_HINT} (got {value!r})")
+    return KnowledgeSpec(size_bytes=size_bytes, distill_rig=rig_name)
+
+
+@dataclass
+class FramingSpec:
+    """One resolved `Framing:` choice — a member's roster line or a rig's
+    config default (#62). `off` drops the framing line entirely under the
+    `## Knowledge` header (the header and entries still render); `text=None`
+    with `off=False` picks the built-in line; `text` set is custom wording
+    taken verbatim."""
+
+    off: bool = False
+    text: str | None = None
+
+
+_FRAMING_GRAMMAR_HINT = (
+    "Framing must be default, off, or a double-quoted custom string"
+)
+
+
+def parse_framing(value: str, *, quoted: bool = True) -> FramingSpec:
+    """`Framing:` value -> a FramingSpec. `default` (or empty) is the
+    built-in framing line, `off` drops it. Custom text: a roster line
+    requires double quotes so the `off`/`default` keywords stay
+    distinguishable from an operator's own sentence (`quoted=True`, the
+    default); a rigs.json value is already a JSON string with no such
+    ambiguity, so `quoted=False` (rig.py) accepts any other text verbatim."""
+    v = value.strip()
+    low = v.lower()
+    if low in ("", "default"):
+        return FramingSpec()
+    if low == "off":
+        return FramingSpec(off=True)
+    if not quoted:
+        return FramingSpec(text=v)
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return FramingSpec(text=v[1:-1])
+    raise ValueError(f"{_FRAMING_GRAMMAR_HINT} (got {value!r})")
 
 
 class RosterError(Exception):
@@ -130,10 +248,13 @@ class Member:
     address: str | None = None
     continue_conversation: bool = False
     flush_seconds: float | None = None
-    fallback: bool = True
+    prose_reply: bool = True
     ack: bool = True
     reinforce: str = ""
-    knowledge_bytes: int = 0
+    knowledge_on: bool = False
+    knowledge_bytes: int | None = None
+    knowledge_distill_rig: str | None = None
+    framing: FramingSpec | None = None
     cell: str = ""
     lead: str = ""
     workdir: str = ""
@@ -329,12 +450,17 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
             m.errors.append(str(e))
         else:
             m.continue_conversation = True
-    fb = fields.get("fallback", "")
-    if fb and _is_false(fb):
-        m.fallback = False
-    elif fb and not _is_true(fb):
+    if "fallback" in fields:
         m.errors.append(
-            f"Fallback must be on or off, got {fb!r} (try: Fallback: off)"
+            "Fallback: is gone — the knob is now ProseReply: "
+            "(try: ProseReply: off)"
+        )
+    pr = fields.get("prosereply", "")
+    if pr and _is_false(pr):
+        m.prose_reply = False
+    elif pr and not _is_true(pr):
+        m.errors.append(
+            f"ProseReply must be on or off, got {pr!r} (try: ProseReply: off)"
         )
     ak = fields.get("ack", "")
     if ak and _is_false(ak):
@@ -345,7 +471,18 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     kn = fields.get("knowledge", "")
     if kn:
         try:
-            m.knowledge_bytes = parse_knowledge(kn)
+            spec = parse_knowledge(kn)
+        except ValueError as e:
+            m.errors.append(str(e))
+        else:
+            if spec is not None:
+                m.knowledge_on = True
+                m.knowledge_bytes = spec.size_bytes
+                m.knowledge_distill_rig = spec.distill_rig
+    fr = fields.get("framing", "")
+    if fr:
+        try:
+            m.framing = parse_framing(fr)
         except ValueError as e:
             m.errors.append(str(e))
     m.cell = fields.get("cell", "")

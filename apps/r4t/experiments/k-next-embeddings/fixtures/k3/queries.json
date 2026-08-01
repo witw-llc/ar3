@@ -1,0 +1,182 @@
+[
+  {
+    "round": 0,
+    "condition": "easy",
+    "gold_key": "ark-cache-collision",
+    "query": "Why do the worker pool and nightly aggregation routine collide when writing to /var/lib/ark-cache?"
+  },
+  {
+    "round": 0,
+    "condition": "hard",
+    "gold_key": "ark-cache-collision",
+    "query": "why do the batch jobs trample each other's scratch space"
+  },
+  {
+    "round": 0,
+    "condition": "hard-neutral",
+    "gold_key": "ark-cache-collision",
+    "query": "why do two late-night programs keep wiping out results produced by an unconnected task"
+  },
+  {
+    "round": 1,
+    "condition": "easy",
+    "gold_key": "deploy-freeze-window",
+    "query": "When is the Friday deploy freeze window and why was it decided?"
+  },
+  {
+    "round": 1,
+    "condition": "hard",
+    "gold_key": "deploy-freeze-window",
+    "query": "why can't we ship changes right before the weekend shift swap"
+  },
+  {
+    "round": 1,
+    "condition": "hard-neutral",
+    "gold_key": "deploy-freeze-window",
+    "query": "why is there a quiet period before the crew trades duty at week's end"
+  },
+  {
+    "round": 2,
+    "condition": "easy",
+    "gold_key": "redis-eviction-policy",
+    "query": "What eviction policy does the Redis session cache use and why was maxmemory increased?"
+  },
+  {
+    "round": 2,
+    "condition": "hard",
+    "gold_key": "redis-eviction-policy",
+    "query": "why did logged-in users get booted during the big sale traffic surge"
+  },
+  {
+    "round": 2,
+    "condition": "hard-neutral",
+    "gold_key": "redis-eviction-policy",
+    "query": "why were shoppers randomly signed out during the peak holiday rush"
+  },
+  {
+    "round": 3,
+    "condition": "easy",
+    "gold_key": "oncall-role-priya",
+    "query": "Who owns the payments-gateway service and handles card-decline spikes?"
+  },
+  {
+    "round": 3,
+    "condition": "hard",
+    "gold_key": "oncall-role-priya",
+    "query": "who do I page when checkout starts rejecting cards in bulk"
+  },
+  {
+    "round": 3,
+    "condition": "hard-neutral",
+    "gold_key": "oncall-role-priya",
+    "query": "whose name goes on the alert when the store stops taking money at the register"
+  },
+  {
+    "round": 4,
+    "condition": "easy",
+    "gold_key": "cert-rotation-incident",
+    "query": "Why did the wildcard TLS cert for *.svc.ark expire without renewing?"
+  },
+  {
+    "round": 4,
+    "condition": "hard",
+    "gold_key": "cert-rotation-incident",
+    "query": "why did every internal service start throwing handshake errors overnight"
+  },
+  {
+    "round": 4,
+    "condition": "hard-neutral",
+    "gold_key": "cert-rotation-incident",
+    "query": "why did every guarded connection abruptly refuse to shake hands one weekend"
+  },
+  {
+    "round": 5,
+    "condition": "easy",
+    "gold_key": "queue-backpressure-decision",
+    "query": "What happens when the ingest queue exceeds 50k messages deep?"
+  },
+  {
+    "round": 5,
+    "condition": "hard",
+    "gold_key": "queue-backpressure-decision",
+    "query": "why do publishers start getting refused when things back up badly"
+  },
+  {
+    "round": 5,
+    "condition": "hard-neutral",
+    "gold_key": "queue-backpressure-decision",
+    "query": "why does a sender get turned away once the backlog grows past a certain point"
+  },
+  {
+    "round": 6,
+    "condition": "easy",
+    "gold_key": "db-migration-role-marcus",
+    "query": "Who signs off on schema migrations touching the orders tables?"
+  },
+  {
+    "round": 6,
+    "condition": "hard",
+    "gold_key": "db-migration-role-marcus",
+    "query": "whose approval do I need before altering the purchase records structure"
+  },
+  {
+    "round": 6,
+    "condition": "hard-neutral",
+    "gold_key": "db-migration-role-marcus",
+    "query": "whose blessing is required before reshaping how transactions get saved"
+  },
+  {
+    "round": 7,
+    "condition": "easy",
+    "gold_key": "flaky-test-quarantine",
+    "query": "What is the policy for quarantining flaky tests that fail intermittently?"
+  },
+  {
+    "round": 7,
+    "condition": "hard",
+    "gold_key": "flaky-test-quarantine",
+    "query": "why did that test stop gating merges and start only running overnight"
+  },
+  {
+    "round": 7,
+    "condition": "hard-neutral",
+    "gold_key": "flaky-test-quarantine",
+    "query": "why did one check stop holding up submissions and move to a once-a-day run"
+  },
+  {
+    "round": 8,
+    "condition": "easy",
+    "gold_key": "staging-seed-config",
+    "query": "When does staging reseed its database and how is PII handled?"
+  },
+  {
+    "round": 8,
+    "condition": "hard",
+    "gold_key": "staging-seed-config",
+    "query": "how does the test environment get its Monday-morning data refresh without leaking real customer info"
+  },
+  {
+    "round": 8,
+    "condition": "hard-neutral",
+    "gold_key": "staging-seed-config",
+    "query": "how does the rehearsal system get fresh sample records without exposing anyone's identity"
+  },
+  {
+    "round": 9,
+    "condition": "easy",
+    "gold_key": "api-gateway-timeout-config",
+    "query": "Why was the API gateway timeout raised from 10 seconds to 30 seconds?"
+  },
+  {
+    "round": 9,
+    "condition": "hard",
+    "gold_key": "api-gateway-timeout-config",
+    "query": "why did we loosen the request deadline after that sluggish tally kept triggering retry storms"
+  },
+  {
+    "round": 9,
+    "condition": "hard-neutral",
+    "gold_key": "api-gateway-timeout-config",
+    "query": "why did the front door start giving callers extra patience after one sluggish tally began piling up duplicate attempts"
+  }
+]

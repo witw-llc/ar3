@@ -216,6 +216,71 @@ def test_roster_check_flags_a_bad_org_config(r4t_home, tmp_path, fake_harness, c
     assert "org:" in out and "does not exist" in out
 
 
+KNOWLEDGE_ROSTER = """\
+# Roster
+
+### Gerry
+- **Rig:** leader
+- **Role:** Lead
+- **Leader:** yes
+
+### Phil
+- **Rig:** junior-dev
+- **Role:** Developer
+- **Knowledge:** on
+"""
+
+
+def _rig_config_with_preset(tmp_path, fake_harness, preset):
+    script, _out = fake_harness
+    invoke = [sys.executable, str(script), "{prompt}"]
+    config = {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "leader": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
+        "junior-dev": {
+            "invoke": invoke, "timeout_seconds": 30, "budget_max": 100, "preset": preset,
+        },
+        "pins": {"gerry": "leader"},
+    }
+    path = tmp_path / "rigs.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def test_roster_check_warns_on_a_below_floor_knowledge_rig(r4t_home, tmp_path, fake_harness, capsys):
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(KNOWLEDGE_ROSTER, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "ollama")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "warning: Phil: Knowledge is on with rig 'junior-dev'" in out
+    assert "bytes, not tokens" in out
+
+
+def test_roster_check_does_not_warn_above_the_floor(r4t_home, tmp_path, fake_harness, capsys):
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(KNOWLEDGE_ROSTER, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "claude")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Knowledge" not in out
+
+
+def test_roster_check_flags_an_unresolvable_distill_rig(r4t_home, tmp_path, fake_harness, capsys):
+    roster_text = KNOWLEDGE_ROSTER.replace("- **Knowledge:** on", "- **Knowledge:** ghost")
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(roster_text, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "claude")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Phil: Knowledge distill rig 'ghost' not found" in out
+
+
 def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):
     # The A/B case: two org dirs (same repo) run as two a8s nodes; roster state is
     # per-node, so nothing collides.

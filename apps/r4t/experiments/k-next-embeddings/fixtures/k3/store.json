@@ -1,0 +1,281 @@
+[
+  {
+    "key": "ark-cache-collision",
+    "title": "Worker pool and nightly aggregator collide on /var/lib/ark-cache",
+    "tags": [
+      "incident",
+      "storage"
+    ],
+    "content": "The worker pool and the nightly aggregation routine share the /var/lib/ark-cache temp directory. When both write to it at once, one process's files get overwritten mid-write by the second writer, corrupting partial output. Fix: give the aggregation routine its own subdirectory under ark-cache."
+  },
+  {
+    "key": "deploy-freeze-window",
+    "title": "Friday afternoon deploy freeze around on-call handoff",
+    "tags": [
+      "decision",
+      "process"
+    ],
+    "content": "The team decided to freeze production deploys between 2pm and 4pm on Fridays. On-call handoff happens at 3pm and a bad deploy during the transition has caused two incidents where neither the outgoing nor incoming responder caught the regression in time."
+  },
+  {
+    "key": "redis-eviction-policy",
+    "title": "Redis session cache eviction policy raised after Black Friday",
+    "tags": [
+      "config",
+      "incident"
+    ],
+    "content": "The Redis session cache runs allkeys-lru with maxmemory set to 2gb. During the Black Friday demand spike the cache hit its ceiling and started evicting active sessions faster than patrons could reload, so maxmemory was raised to 6gb."
+  },
+  {
+    "key": "oncall-role-priya",
+    "title": "Priya Anand owns the payments-gateway service",
+    "tags": [
+      "role",
+      "payments"
+    ],
+    "content": "Priya Anand owns the payments-gateway service and is the primary escalation contact for card-decline spikes. Reach her directly for anything affecting purchase authorization rates."
+  },
+  {
+    "key": "cert-rotation-incident",
+    "title": "Wildcard TLS cert expired after renewal cron pointed at old ACME endpoint",
+    "tags": [
+      "incident",
+      "security"
+    ],
+    "content": "The wildcard TLS cert for *.svc.ark expired silently on a Sunday because the renewal cron job was still pointed at the old ACME staging endpoint after the January migration, so it kept issuing certs nobody trusted."
+  },
+  {
+    "key": "queue-backpressure-decision",
+    "title": "Ingest queue now caps at 50k depth instead of growing unbounded",
+    "tags": [
+      "decision",
+      "reliability"
+    ],
+    "content": "The ingest queue now rejects new messages past 50k depth instead of growing unbounded. A producer bug once queued 4 million messages and the consumer ran out of memory trying to catch up."
+  },
+  {
+    "key": "db-migration-role-marcus",
+    "title": "Marcus Webb signs off on orders schema migrations",
+    "tags": [
+      "role",
+      "database"
+    ],
+    "content": "Marcus Webb is the database administrator of record for the orders schema. Any migration touching the orders tables needs his sign-off before merge, no exceptions."
+  },
+  {
+    "key": "flaky-test-quarantine",
+    "title": "Flaky tests auto-quarantine into the nightly-only suite",
+    "tags": [
+      "decision",
+      "testing"
+    ],
+    "content": "Tests that fail intermittently three times in a rolling week get auto-quarantined into the nightly-only suite instead of blocking every pull request."
+  },
+  {
+    "key": "staging-seed-config",
+    "title": "Staging reseeds weekly from a scrubbed prod snapshot",
+    "tags": [
+      "config",
+      "data"
+    ],
+    "content": "Staging reseeds its database from a scrubbed production snapshot at the start of each work week, 5am. PII fields are hashed by the scrub-staging.py script before load."
+  },
+  {
+    "key": "api-gateway-timeout-config",
+    "title": "Edge API gateway timeout raised from 10s to 30s",
+    "tags": [
+      "config",
+      "incident"
+    ],
+    "content": "The edge API gateway timeout was raised from 10 seconds to 30 seconds after the reporting endpoint's slow COUNT(*) query started tripping client retries and doubling load."
+  },
+  {
+    "key": "nginx-keepalive-tuning",
+    "title": "Nginx upstream keepalive tuning",
+    "tags": [
+      "config",
+      "networking"
+    ],
+    "content": "Upstream keepalive connections to the app servers are capped at 64 per worker. Raising this cut TCP handshake overhead noticeably under sustained load."
+  },
+  {
+    "key": "postgres-autovacuum-decision",
+    "title": "Postgres autovacuum threshold lowered on hot tables",
+    "tags": [
+      "decision",
+      "database"
+    ],
+    "content": "Autovacuum scale factor on the events table was lowered from the default so it triggers more often; bloat was outpacing the default schedule on that table specifically."
+  },
+  {
+    "key": "grafana-retention-config",
+    "title": "Grafana dashboard metric retention set to 13 months",
+    "tags": [
+      "config",
+      "observability"
+    ],
+    "content": "Metric retention in the monitoring stack is set to 13 months so year-over-year dashboards always have a trailing comparison point available."
+  },
+  {
+    "key": "jamie-cole-ci-runners",
+    "title": "Jamie Cole owns the CI runner fleet",
+    "tags": [
+      "role",
+      "ci"
+    ],
+    "content": "Jamie Cole maintains the self-hosted CI runner fleet, including capacity planning and image updates. Escalate runner outages to her directly."
+  },
+  {
+    "key": "s3-public-bucket-incident",
+    "title": "S3 bucket policy briefly made objects public",
+    "tags": [
+      "incident",
+      "security"
+    ],
+    "content": "A bucket policy change accidentally made a private reports bucket publicly readable for about 40 minutes before it was caught and reverted."
+  },
+  {
+    "key": "log-rotation-config",
+    "title": "Log rotation compresses at 7 days, deletes at 90",
+    "tags": [
+      "config",
+      "ops"
+    ],
+    "content": "Application logs compress after 7 days and are deleted after 90 days across all hosts, managed by the shared logrotate config."
+  },
+  {
+    "key": "feature-flag-defaults-decision",
+    "title": "Feature flags default off in staging, on in prod behind allowlist",
+    "tags": [
+      "decision",
+      "process"
+    ],
+    "content": "New feature flags default to off in staging and on in production gated by an allowlist, so staging stays a clean baseline for regression testing."
+  },
+  {
+    "key": "data-eng-oncall-role",
+    "title": "Data engineering on-call rotates weekly",
+    "tags": [
+      "role",
+      "data"
+    ],
+    "content": "The data engineering on-call rotation is weekly, with handoff notes posted in the #data-oncall channel every Monday morning."
+  },
+  {
+    "key": "kafka-rebalance-incident",
+    "title": "Kafka consumer group loop-rebalanced after partition count change",
+    "tags": [
+      "incident",
+      "messaging"
+    ],
+    "content": "A consumer group entered a rebalance loop after the topic's partition count was changed without a matching consumer restart, stalling processing for twenty minutes."
+  },
+  {
+    "key": "rate-limiter-config",
+    "title": "Rate limiter allows 100 requests per minute per API key",
+    "tags": [
+      "config",
+      "api"
+    ],
+    "content": "The public API rate limiter allows 100 requests per minute per API key and returns 429 with a Retry-After header once exceeded."
+  },
+  {
+    "key": "blameless-postmortem-decision",
+    "title": "Postmortems are blameless and published within 5 business days",
+    "tags": [
+      "decision",
+      "process"
+    ],
+    "content": "Incident postmortems are blameless by policy and must be published internally within 5 business days of the incident closing."
+  },
+  {
+    "key": "dana-ruiz-security-review-role",
+    "title": "Dana Ruiz reviews new third-party integrations",
+    "tags": [
+      "role",
+      "security"
+    ],
+    "content": "Security review for any new third-party integration routes through Dana Ruiz before the integration can touch production credentials."
+  },
+  {
+    "key": "dst-cron-duplicate-incident",
+    "title": "Cron job double-fired after a daylight saving time change",
+    "tags": [
+      "incident",
+      "scheduling"
+    ],
+    "content": "A nightly report cron job fired twice after a daylight saving time transition shifted the host clock, duplicating a report sent to finance."
+  },
+  {
+    "key": "session-cookie-config",
+    "title": "Session cookies set SameSite=Strict with 12 hour expiry",
+    "tags": [
+      "config",
+      "security"
+    ],
+    "content": "Session cookies are issued with SameSite=Strict and a 12 hour expiry, requiring re-authentication for any session left idle overnight."
+  },
+  {
+    "key": "structured-logging-decision",
+    "title": "New services must emit structured JSON logs",
+    "tags": [
+      "decision",
+      "observability"
+    ],
+    "content": "New services are required to emit structured JSON logs; plain text log output is rejected in code review as of this quarter."
+  },
+  {
+    "key": "lb-healthcheck-flap-incident",
+    "title": "Load balancer health check flapped during a GC pause",
+    "tags": [
+      "incident",
+      "infrastructure"
+    ],
+    "content": "A load balancer marked one node unhealthy and flapped it in and out of rotation during a long garbage collection pause on that node."
+  },
+  {
+    "key": "tomas-reyes-release-role",
+    "title": "Tomas Reyes manages mobile app release cuts",
+    "tags": [
+      "role",
+      "mobile"
+    ],
+    "content": "Tomas Reyes is the release manager for the mobile app and cuts a new build every other Tuesday from the release branch."
+  },
+  {
+    "key": "cdn-cache-ttl-config",
+    "title": "CDN cache TTL for static assets is 1 year",
+    "tags": [
+      "config",
+      "cdn"
+    ],
+    "content": "Static assets are served with a 1 year CDN cache TTL and content-hashed filenames, so cache invalidation happens by filename change rather than purge."
+  },
+  {
+    "key": "backup-restore-test-decision",
+    "title": "Database backups are validated by full restore quarterly",
+    "tags": [
+      "decision",
+      "database"
+    ],
+    "content": "Database backups are validated by performing a full restore once a quarter rather than trusting checksum verification alone."
+  },
+  {
+    "key": "leaked-key-rotation-incident",
+    "title": "Leaked API key in a public gist triggered full rotation",
+    "tags": [
+      "incident",
+      "security"
+    ],
+    "content": "An API key committed to a public gist by accident triggered a full credential rotation across every service that used the shared key."
+  },
+  {
+    "key": "message-bus-retry-config",
+    "title": "Message bus retries failed deliveries 3 times before dead-lettering",
+    "tags": [
+      "config",
+      "messaging"
+    ],
+    "content": "The message bus retries a failed delivery 3 times with exponential backoff before moving the message to the dead letter queue."
+  }
+]

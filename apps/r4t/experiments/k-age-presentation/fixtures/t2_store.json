@@ -1,0 +1,77 @@
+{
+  "_comment": "T2 stale-alone. KG-00003 (target, 90d) is the only entry in the store about on-call ownership -- no fresher entry contradicts or updates it. 9 unrelated filler notes hold the store at 10 entries and never mention on-call ownership, so the model has nothing to triangulate against except the age presentation on the stamp itself. Dates are absolute and fixed against presentation.json's current_date (2026-07-31).",
+  "mission_line": "Mission: You are Ops, the platform cell's assistant. Answer teammates' questions accurately using what you know.",
+  "task_question": "Who owns the on-call rotation right now? Answer in 1-2 sentences.",
+  "entries": [
+    {
+      "id": "KG-00001",
+      "date": "2026-07-27",
+      "title": "Deploy pipeline schedule",
+      "content": "The deploy pipeline runs nightly at 02:00 UTC from the release branch.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00002",
+      "date": "2026-07-22",
+      "title": "Vendor invoice approval path",
+      "content": "Invoices under 500 go straight to accounting; anything larger needs the cell lead's sign-off first, logged in the shared tracker.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00003",
+      "date": "2026-05-02",
+      "title": "On-call rotation ownership",
+      "content": "The on-call rotation owner is Priya.",
+      "kind": "target"
+    },
+    {
+      "id": "KG-00004",
+      "date": "2026-07-15",
+      "title": "Feature flag rollout convention",
+      "content": "New flags default to 1% internal-only, then 10/50/100 over a week; skip stages only with the cell lead's written go-ahead.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00005",
+      "date": "2026-07-06",
+      "title": "Secrets rotation cadence",
+      "content": "Service credentials rotate every 90 days via the vault pipeline; a manual rotation is logged in the security channel same day.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00006",
+      "date": "2026-07-29",
+      "title": "Standup cadence for the platform cell",
+      "content": "Standups moved to 09:30 UTC after the London hire; the Friday slot is written notes only, no call.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00007",
+      "date": "2026-06-28",
+      "title": "Build cache flakiness on the arm runners",
+      "content": "The arm64 CI runners occasionally serve a stale build cache; a re-run with CACHE_BUST=1 clears it. Filed upstream, no fix yet.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00008",
+      "date": "2026-06-14",
+      "title": "Docs style ruling",
+      "content": "Docs speak present truth -- no 'previously' framing, history lives in git. User-facing surfaces get one short sentence with no internals.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00009",
+      "date": "2026-06-01",
+      "title": "Incident postmortem template location",
+      "content": "Postmortems live in the incidents repo under templates/postmortem.md; fill every section before the retro, even the N/A ones.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00010",
+      "date": "2026-05-17",
+      "title": "Staging database refresh procedure",
+      "content": "Staging refreshes from the Sunday snapshot; never refresh mid-week because the analytics backfill reads staging directly.",
+      "kind": "filler"
+    }
+  ]
+}

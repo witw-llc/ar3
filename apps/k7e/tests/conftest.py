@@ -1,6 +1,8 @@
 """Shared fixtures for K7E tests."""
 
+import hashlib
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -43,3 +45,32 @@ def store(tmp_path, monkeypatch):
     engine.reset(tmp_path)
     engine.init()
     return tmp_path
+
+
+EMBED_DIM = 256
+
+
+def fake_vector(text):
+    """Hashed bag of words. Two texts that share vocabulary point the same way,
+    which is all the semantic track needs to be exercised deterministically."""
+    vec = [0.0] * EMBED_DIM
+    for word in re.findall(r"[a-z0-9]+", text.lower()):
+        vec[int(hashlib.sha1(word.encode()).hexdigest(), 16) % EMBED_DIM] += 1.0
+    return vec
+
+
+@pytest.fixture
+def fake_embeddings(monkeypatch):
+    """A live semantic track with no ollama behind it. Yields the call log —
+    (text, timeout) per embed — so a test can assert what got embedded and on
+    whose budget."""
+    calls = []
+
+    import engine
+
+    def embed(text, timeout=engine.EMBED_TIMEOUT):
+        calls.append((text, timeout))
+        return fake_vector(text)
+
+    monkeypatch.setattr(engine, "embed_text", embed)
+    return calls

@@ -1146,6 +1146,81 @@ class TestRemotePublishHook:
         trashed = list(trash_dir("A").iterdir())
         assert any("stubborn" in f.read_text() for f in trashed)
 
+    def test_backoff_exhaustion_records_discard_and_keeps_attachment(self, two_agents):
+        # A discard is the end of a message's life: it must leave a DISCARDED
+        # breadcrumb naming the last failure, and it must park the attachment
+        # bytes in trash rather than delete them (#93).
+        from txlog import read_events
+
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+
+        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
+            return list(succeeded_so_far)
+
+        svc = _StubStorage("svc")
+        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        msg_id = out_path.stem
+        for _ in range(MAX_ATTEMPTS + 1):
+            route_outboxes(
+                [a, b],
+                all_agents=[a, b],
+                publish_remotes=always_fails,
+                configured_remote_ids=["hub"],
+                services=[svc],
+            )
+            for f in pending_dir("A").iterdir():
+                if f.name.endswith(".retry"):
+                    side = json.loads(f.read_text())
+                    side["next_attempt"] = ""
+                    f.write_text(json.dumps(side))
+        assert list(pending_dir("A").iterdir()) == []
+        discarded = [e for e in read_events(msg_id) if e["event"] == "DISCARDED"]
+        assert len(discarded) == 1
+        assert discarded[0]["from"] == "A"
+        assert discarded[0]["to"] == "GHOST"
+        assert discarded[0]["files"] == "doc.txt"
+        assert "backoff exhausted" in discarded[0]["detail"]
+        assert "hub" in discarded[0]["detail"]
+        # Envelope and attachment bytes both survive in trash.
+        assert json.loads((trash_dir("A") / f"{msg_id}.json").read_text())["content"] == "see attached"
+        assert (trash_dir("A") / msg_id / "doc.txt").read_text() == "payload bytes"
+
+    def test_malformed_next_attempt_does_not_poison_the_pass(self, two_agents):
+        # An operator-edited sidecar carrying a non-string `next_attempt` used
+        # to raise out of the backoff gate and abort the whole pass (#93).
+        a, b = two_agents
+
+        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
+            return list(succeeded_so_far)
+
+        first = _write_outbox("A", a.root, "B", "first", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=always_fails,
+            configured_remote_ids=["hub"],
+        )
+        sidecar_path = retry_sidecar_path(pending_dir("A") / first.name)
+        side = json.loads(sidecar_path.read_text())
+        assert side["attempts"] == 1
+        side["next_attempt"] = 1774000000.5
+        sidecar_path.write_text(json.dumps(side))
+
+        _write_outbox("A", a.root, "B", "second", [])
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=always_fails,
+            configured_remote_ids=["hub"],
+        )
+        # Unparseable means due now — the message was attempted, not skipped.
+        assert json.loads(sidecar_path.read_text())["attempts"] == 2
+        # And the pass carried on: the message behind it still delivered.
+        bodies = {json.loads(f.read_text())["content"] for f in inbox_dir("B").iterdir()}
+        assert bodies == {"first", "second"}
+
     def test_file_payloads_skip_remote_publish(self, two_agents):
         # v1 limitation: messages with FILE: payloads stay local-only.
         # The publish hook must not be called; the sidecar should treat all
@@ -1311,6 +1386,41 @@ class TestStorageUpload:
         urls = published[0]["files"][0]["storage"]
         assert any(u.startswith("stub://good/") for u in urls)
         assert any(u.startswith("stub://flaky/") for u in urls)
+
+    def test_store_failure_reaches_txlog_and_sidecar(self, two_agents):
+        # A failing store used to be a per-agent WARN and nothing else, so a
+        # blocked upload host left zero trace for `a8s trace` (#93).
+        from txlog import read_events
+
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            return list(succeeded_so_far) + ["hub"]
+
+        flaky = _StubStorage("flaky", fail_n=1)
+        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        msg_id = out_path.stem
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[flaky],
+        )
+        failed = [e for e in read_events(msg_id) if e["event"] == "FILE_UPLOAD_FAILED"]
+        assert len(failed) == 1
+        assert failed[0]["from"] == "A"
+        assert failed[0]["to"] == "GHOST"
+        assert failed[0]["files"] == "doc.txt"
+        assert "flaky" in failed[0]["detail"]
+        assert "attempt 1" in failed[0]["detail"]
+        # The reason also lands on the retry record so a later discard can
+        # name what killed the send.
+        pending_files = [f for f in pending_dir("A").iterdir() if f.name.endswith(".json")]
+        side = json.loads(retry_sidecar_path(pending_files[0]).read_text())
+        assert "flaky" in side["last_error"]
 
     def test_no_services_keeps_v1_skip(self, two_agents):
         # Already covered by `test_file_payloads_skip_remote_publish`, but

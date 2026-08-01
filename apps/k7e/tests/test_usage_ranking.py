@@ -82,6 +82,66 @@ class TestWhatCountsAsUse:
         assert use_count(miss) == 0
 
 
+class TestNoTrackGetAndTouch:
+    """`get --no-track` (engine) and `touch` (#12/#52): a caller that reads
+    an entry only to size it, not because the model will see it, should be
+    able to fetch without inflating the ranking signal — and bump that
+    signal later, without a re-read, for whatever it actually keeps."""
+
+    def test_untracked_get_is_the_default(self, store):
+        nid = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        engine.get(nid, track_usage=False)
+        assert use_count(nid) == 0
+
+    def test_bump_usage_counts_without_reading(self, store):
+        nid = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        engine._bump_usage([nid])
+        assert use_count(nid) == 1
+        assert last_used_at(nid) is not None
+
+    def test_bump_usage_counts_every_call(self, store):
+        nid = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        for expected in (1, 2, 3):
+            engine._bump_usage([nid])
+            assert use_count(nid) == expected
+
+    def test_cli_get_no_track_does_not_count(self, store, tmp_path):
+        nid = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        env = os.environ.copy()
+        env["K7E_HOME"] = str(tmp_path)
+        r = subprocess.run(
+            [sys.executable, K7E_PY, "get", nid, "--no-track"],
+            env=env, capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert use_count(nid) == 0
+
+    def test_cli_touch_counts_without_printing_content(self, store, tmp_path):
+        nid = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        env = os.environ.copy()
+        env["K7E_HOME"] = str(tmp_path)
+        r = subprocess.run(
+            [sys.executable, K7E_PY, "touch", nid],
+            env=env, capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert "Redis listens" not in r.stdout
+        assert use_count(nid) == 1
+
+    def test_cli_touch_accepts_multiple_ids(self, store, tmp_path):
+        a = engine.store_entry("Redis Port", "Redis listens on 6379", tags=["redis"])
+        b = engine.store_entry("Vim Macros", "Record with qa, replay with @a", tags=["vim"])
+        env = os.environ.copy()
+        env["K7E_HOME"] = str(tmp_path)
+        r = subprocess.run(
+            [sys.executable, K7E_PY, "touch", a, b],
+            env=env, capture_output=True, text=True,
+        )
+        assert r.returncode == 0
+        assert use_count(a) == 1
+        assert use_count(b) == 1
+
+
 class TestUseBoost:
     def test_zero_count_is_identity(self):
         assert engine._use_boost(0, 0.2) == 1.0

@@ -50,6 +50,7 @@ k7e consolidate [--dry-run]                    # merge duplicates
 k7e compile networking [--dry-run]             # synthesize a tag into a page
 
 # Maintain / inspect
+k7e embed-pending [--json]                      # give queued entries their vectors
 k7e reindex [--embeddings]                      # rebuild index from markdown
 k7e check [--fix]                               # audit integrity
 k7e status                                      # capabilities + LLM commands
@@ -77,6 +78,12 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
   `.index.db` is a derived cache — delete it and `k7e reindex` rebuilds.
 - **Search** fuses BM25 + metadata + embeddings (RRF), then weights by
   confidence, recency decay, and use-count, with an optional LLM reranker.
+- **The semantic track rides ollama when it answers.** Storing an entry only
+  *queues* it for a vector; `k7e embed-pending` embeds the backlog whenever the
+  caller has time to spare. A search embeds the query and nothing else, on a
+  two-second budget — when ollama is absent or slow, the query is the only cost
+  and the search falls back to FTS5. Nothing to configure either way; set
+  `embeddings` to `none` to turn the track off outright.
 - **Recall** is RAG: retrieve + synthesize an answer (reranker on by default).
 - **Distill** extracts knowledge from raw files (LLM), dedupes, and stores only
   genuine deltas. Requires `distill_command` or `llm_command`.

@@ -66,7 +66,7 @@ member's queue and back out. For governance rationale see
    fallback absorbed). Stdout-only turns participate without knowing the
    protocol exists; they are just downgraded to a single reply. A member
    whose stray prose is noise rather than answers opts out with
-   `- **Fallback:** off` in the roster: its no-tell turns log `SILENT`
+   `- **ProseReply:** off` in the roster: its no-tell turns log `SILENT`
    instead of staging a reply, and the blank-output quota detection is
    untouched.
 6. Closing without a reply — an automated notification that asks nothing of

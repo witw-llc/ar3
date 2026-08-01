@@ -665,7 +665,7 @@ def prompt_sections(
         # closing line keeps its last-read primacy. Echo members never get it
         # (a reachability probe has no use for recall). Off (the default)
         # keeps the prompt byte-identical.
-        ("knowledge", knowledge.knowledge_section(ctx, member, batch)),
+        ("knowledge", knowledge.knowledge_section(ctx, member, batch, rig)),
     ]
     if member.reinforce:
         sections.append(
@@ -1819,7 +1819,7 @@ def _run_turn(
             # anything keeps its stdout as transcript — but a clean turn that
             # released nothing gets its cleaned stdout staged as ONE reply to
             # the newest message's sender, riding the normal release gates.
-            # `Fallback: off` in the roster mutes that staging for a member
+            # `ProseReply: off` in the roster mutes that staging for a member
             # whose prose-only turns are noise, not answers; the quota signal
             # below still fires — a blank is a blank on any member.
             # A rejected proposal leaves its protocol line in the transcript;
@@ -1828,7 +1828,7 @@ def _run_turn(
             reply = clean_transcript(ack.strip_proposals(output))
             if len(reply) > STDOUT_REPLY_MIN_CHARS and not reply_target:
                 _log_internal_only(ctx, member, rig, output)
-            elif len(reply) > STDOUT_REPLY_MIN_CHARS and not member.fallback:
+            elif len(reply) > STDOUT_REPLY_MIN_CHARS and not member.prose_reply:
                 state.append_log(
                     ctx.node,
                     f"r4t: SILENT {member.name.lower()} (rig {rig.name}) exit 0 "
@@ -2569,7 +2569,7 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     nudged = _quiet_task_sweep(ctx, config, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
     flushed = _flush_sweep(ctx, config, roster, run_fn)
-    dreamed = knowledge.dream_sweep(ctx, roster)
+    dreamed = knowledge.dream_sweep(ctx, roster, config)
     review = _mission_review(ctx, config, roster, drained, run_fn)
     if review.get("fired"):
         drained += drain_until_quiet(ctx, run_fn=run_fn)

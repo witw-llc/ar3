@@ -1,0 +1,77 @@
+{
+  "_comment": "T1 update-conflict. KG-00003 (old_target, 36d) asserts deploys go out weekly on Fridays from main; KG-00006 (new_target, 2d) asserts the current truth -- nightly at 2am from the release branch. 8 unrelated filler notes hold the store at 10 entries and never mention deploys, so the only conflicting subject in the store is the target pair. Dates are absolute and fixed against presentation.json's current_date (2026-07-31) -- ages recompute the same on every run, no wall clock involved.",
+  "mission_line": "Mission: You are Ops, the platform cell's assistant. Answer teammates' questions accurately using what you know.",
+  "task_question": "How do deploys work for this cell right now? Answer in 2-3 sentences.",
+  "entries": [
+    {
+      "id": "KG-00001",
+      "date": "2026-07-28",
+      "title": "Standup cadence for the platform cell",
+      "content": "Standups moved to 09:30 UTC after the London hire; the Friday slot is written notes only, no call.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00002",
+      "date": "2026-07-25",
+      "title": "Vendor invoice approval path",
+      "content": "Invoices under 500 go straight to accounting; anything larger needs the cell lead's sign-off first, logged in the shared tracker.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00003",
+      "date": "2026-06-25",
+      "title": "Deploy cadence and branch policy",
+      "content": "Deploys go out weekly on Fridays from the main branch.",
+      "kind": "old_target"
+    },
+    {
+      "id": "KG-00004",
+      "date": "2026-07-17",
+      "title": "Feature flag rollout convention",
+      "content": "New flags default to 1% internal-only, then 10/50/100 over a week; skip stages only with the cell lead's written go-ahead.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00005",
+      "date": "2026-07-10",
+      "title": "Incident postmortem template location",
+      "content": "Postmortems live in the incidents repo under templates/postmortem.md; fill every section before the retro, even the N/A ones.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00006",
+      "date": "2026-07-29",
+      "title": "Deploy pipeline schedule change",
+      "content": "Deploys run nightly at 2am from the release branch.",
+      "kind": "new_target"
+    },
+    {
+      "id": "KG-00007",
+      "date": "2026-07-03",
+      "title": "Build cache flakiness on the arm runners",
+      "content": "The arm64 CI runners occasionally serve a stale build cache; a re-run with CACHE_BUST=1 clears it. Filed upstream, no fix yet.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00008",
+      "date": "2026-06-21",
+      "title": "Secrets rotation cadence",
+      "content": "Service credentials rotate every 90 days via the vault pipeline; a manual rotation is logged in the security channel same day.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00009",
+      "date": "2026-06-03",
+      "title": "Docs style ruling",
+      "content": "Docs speak present truth -- no 'previously' framing, history lives in git. User-facing surfaces get one short sentence with no internals.",
+      "kind": "filler"
+    },
+    {
+      "id": "KG-00010",
+      "date": "2026-05-22",
+      "title": "Staging database refresh procedure",
+      "content": "Staging refreshes from the Sunday snapshot; never refresh mid-week because the analytics backfill reads staging directly.",
+      "kind": "filler"
+    }
+  ]
+}

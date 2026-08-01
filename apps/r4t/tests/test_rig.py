@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
+import rig as rig_module
 from rig import (
+    Rig,
     CONFIGURABLE_RIG_KEYS,
     DEFAULT_BUDGET_EARN_PER_HOUR,
     DEFAULT_ECHO_MAX_CHARS,
@@ -18,6 +21,9 @@ from rig import (
     DEFAULT_CELL_BUDGET_MAX,
     DEFAULT_TIMEOUT_SECONDS,
     HARNESS_PRESETS,
+    KNOWLEDGE_TIER_HIGH,
+    KNOWLEDGE_TIER_LOW,
+    KNOWLEDGE_TIER_MID,
     RigError,
     add_preset_rig,
     apply_mcp,
@@ -27,18 +33,28 @@ from rig import (
     default_config_payload,
     format_preset_invoke,
     fuzzy_match_model,
+    is_below_knowledge_floor,
+    knowledge_tier_bytes,
     load_rig_config,
     mcp_presets,
     preset_names,
     remove_rig,
     resolve_agy_model,
+    resolve_framing,
+    resolve_knowledge_bytes,
     rig_setting,
     rig_settings,
     set_rig_value,
     swap_preset_rig,
     unset_rig_value,
 )
-from roster import Member, parse_roster
+from roster import (
+    KNOWLEDGE_DEFAULT_BUDGET,
+    KNOWLEDGE_SIZES,
+    FramingSpec,
+    Member,
+    parse_roster,
+)
 from r4t import main as r4t_main
 
 
@@ -1809,3 +1825,208 @@ class TestRigEnvMap:
         ) == 1
         err = capsys.readouterr().err
         assert err.startswith("R4T_NODE belongs to the turn") and "(try:" in err
+
+
+class TestKnowledgeTiers:
+    """The rig-tier defaults for the Knowledge inject budget (#52) — a
+    harness-class table separate from `text_tier`, since a fast small-effort
+    agy model and a big-context codex/claude model earn different tiers."""
+
+    def test_every_preset_lands_in_exactly_one_tier(self):
+        tiered = KNOWLEDGE_TIER_LOW | KNOWLEDGE_TIER_MID | KNOWLEDGE_TIER_HIGH
+        assert tiered <= set(preset_names())
+        assert (
+            len(KNOWLEDGE_TIER_LOW) + len(KNOWLEDGE_TIER_MID) + len(KNOWLEDGE_TIER_HIGH)
+            == len(tiered)
+        )
+
+    def test_tier_bytes_are_anchored_on_knowledge_sizes(self):
+        assert knowledge_tier_bytes("claude") == KNOWLEDGE_SIZES["large"]
+        assert knowledge_tier_bytes("codex") == KNOWLEDGE_SIZES["large"]
+        assert knowledge_tier_bytes("agy") == KNOWLEDGE_SIZES["medium"]
+        assert knowledge_tier_bytes("cursor") == KNOWLEDGE_SIZES["medium"]
+        assert knowledge_tier_bytes("opencode") == KNOWLEDGE_SIZES["small"]
+        assert knowledge_tier_bytes("ollama") == KNOWLEDGE_SIZES["small"]
+        assert knowledge_tier_bytes("opencode-ollama") == KNOWLEDGE_SIZES["small"]
+
+    def test_unknown_or_absent_preset_gets_the_global_floor(self):
+        assert knowledge_tier_bytes(None) == KNOWLEDGE_DEFAULT_BUDGET
+        assert knowledge_tier_bytes("some-custom-cli") == KNOWLEDGE_DEFAULT_BUDGET
+        assert KNOWLEDGE_DEFAULT_BUDGET == KNOWLEDGE_SIZES["small"]
+
+    def test_floor_flags_only_the_low_tier(self):
+        assert is_below_knowledge_floor("ollama") is True
+        assert is_below_knowledge_floor("opencode") is True
+        assert is_below_knowledge_floor("claude-ollama") is True
+        assert is_below_knowledge_floor("agy") is False
+        assert is_below_knowledge_floor("cursor") is False
+        assert is_below_knowledge_floor("claude") is False
+        assert is_below_knowledge_floor(None) is False
+
+
+class TestResolveKnowledgeBytes:
+    """Resolution order for the effective inject budget: member explicit size
+    > rig-tier default > global default. `rig` here is always the member's
+    OWN turn rig — inject rides the harness that wakes the member."""
+
+    def test_off_is_zero_whatever_the_rig(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["claude", "{prompt}"], "preset": "claude"},
+        }))
+        m = Member(name="Wren", rig="big")
+        assert resolve_knowledge_bytes(m, config.rigs["big"]) == 0
+
+    def test_member_explicit_size_wins_over_rig_tier(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["claude", "{prompt}"], "preset": "claude"},
+        }))
+        m = Member(name="Wren", rig="big", knowledge_on=True, knowledge_bytes=999)
+        assert resolve_knowledge_bytes(m, config.rigs["big"]) == 999
+
+    def test_bare_on_takes_the_rig_tier_default(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["ollama", "run", "{prompt}"], "preset": "ollama"},
+        }))
+        m = Member(name="Wren", rig="local", knowledge_on=True)
+        assert resolve_knowledge_bytes(m, config.rigs["local"]) == KNOWLEDGE_SIZES["small"]
+
+    def test_no_rig_falls_back_to_the_global_default(self):
+        m = Member(name="Wren", rig="ghost", knowledge_on=True)
+        assert resolve_knowledge_bytes(m, None) == KNOWLEDGE_DEFAULT_BUDGET
+
+
+class TestFramingRigDefault:
+    """The rig-level `framing` key (#62): same three forms as the roster
+    line (roster.parse_framing), parsed unquoted here since a rigs.json
+    string is already delimited — no "off"/"default" collision to guard."""
+
+    def test_absent_is_none(self, tmp_path):
+        path = write_config(tmp_path, {"big": {"invoke": ["claude", "{prompt}"]}})
+        assert load_rig_config(path).rigs["big"].framing is None
+
+    def test_off_and_default_parse(self, tmp_path):
+        path = write_config(tmp_path, {
+            "off-rig": {"invoke": ["x", "{prompt}"], "framing": "off"},
+            "def-rig": {"invoke": ["x", "{prompt}"], "framing": "default"},
+        })
+        rigs = load_rig_config(path).rigs
+        assert rigs["off-rig"].framing == FramingSpec(off=True)
+        assert rigs["def-rig"].framing == FramingSpec()
+
+    def test_custom_text_needs_no_quotes(self, tmp_path):
+        path = write_config(tmp_path, {
+            "custom": {"invoke": ["x", "{prompt}"], "framing": "background only, verify"},
+        })
+        rig = load_rig_config(path).rigs["custom"]
+        assert rig.framing == FramingSpec(text="background only, verify")
+
+    def test_non_string_is_an_error(self, tmp_path):
+        path = write_config(tmp_path, {"bad": {"invoke": ["x", "{prompt}"], "framing": 5}})
+        rig = load_rig_config(path).rigs["bad"]
+        assert "framing: expected a string, got 5" in rig.error
+
+
+class TestResolveFraming:
+    """Resolution order for the effective Framing spec: member explicit
+    line > rig config default > the built-in (unset FramingSpec)."""
+
+    def test_member_explicit_wins_over_rig_default(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["claude", "{prompt}"], "framing": "off"},
+        }))
+        m = Member(name="Wren", rig="big", framing=FramingSpec(text="mine"))
+        assert resolve_framing(m, config.rigs["big"]) == FramingSpec(text="mine")
+
+    def test_rig_default_applies_when_member_silent(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["claude", "{prompt}"], "framing": "off"},
+        }))
+        m = Member(name="Wren", rig="big")
+        assert resolve_framing(m, config.rigs["big"]) == FramingSpec(off=True)
+
+    def test_no_rig_falls_back_to_built_in(self):
+        m = Member(name="Wren", rig="ghost")
+        assert resolve_framing(m, None) == FramingSpec()
+
+    def test_rig_with_no_explicit_default_falls_back_to_built_in(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "big": {"invoke": ["claude", "{prompt}"]},
+        }))
+        m = Member(name="Wren", rig="big")
+        assert resolve_framing(m, config.rigs["big"]) == FramingSpec()
+
+
+class TestDistillCommand:
+    """`Rig.distill_command` turns a rig's own invoke into the stdin->stdout
+    shell command k7e's `K7E_DISTILL_COMMAND` expects (#52). k7e pipes the
+    prompt to the command's stdin with no shell of its own, and not every
+    harness reads stdin as its prompt (agy prints usage instead), so a
+    `{prompt}` token becomes `"$(cat)"` under an `sh -c` wrapper — the prompt
+    lands in the invoke's own argument position."""
+
+    def inner(self, cmd):
+        parts = shlex.split(cmd)
+        assert parts[:2] == ["sh", "-c"] and len(parts) == 3
+        return parts[2]
+
+    def test_prompt_token_becomes_cat_substitution(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["ollama", "run", "qwen3:1.7b", "{prompt}"], "preset": "ollama"},
+        }))
+        cmd = config.rigs["local"].distill_command(tmp_path)
+        assert self.inner(cmd) == 'ollama run qwen3:1.7b "$(cat)"'
+
+    def test_embedded_prompt_token_concatenates(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "flag": {"invoke": ["mycli", "--prompt={prompt}"]},
+        }))
+        cmd = config.rigs["flag"].distill_command(tmp_path)
+        assert self.inner(cmd) == 'mycli --prompt="$(cat)"'
+
+    def test_fills_the_workdir_placeholder(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "code": {
+                "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
+                "preset": "opencode",
+            },
+        }))
+        home = tmp_path / "store"
+        cmd = config.rigs["code"].distill_command(home)
+        assert self.inner(cmd) == f'opencode run --auto --dir {home} "$(cat)"'
+
+    def test_quotes_argv_tokens_that_need_it(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["my cli", "{prompt}"]},
+        }))
+        cmd = config.rigs["local"].distill_command(tmp_path)
+        assert self.inner(cmd) == '\'my cli\' "$(cat)"'
+
+    def test_empty_rig_returns_none(self):
+        assert Rig(name="empty").distill_command(Path(".")) is None
+
+    def test_agy_resolves_the_live_model_before_bridging(self, tmp_path, monkeypatch):
+        config = load_rig_config(write_config(tmp_path, {
+            "brain": {
+                "invoke": ["agy", "--model", "{model}", "--print", "{prompt}"],
+                "preset": "agy", "model": "flash", "model_resolver": "agy-live",
+            },
+        }))
+        monkeypatch.setattr(
+            rig_module, "resolve_agy_model", lambda query, **k: "Gemini 3.6 Flash Low"
+        )
+        cmd = config.rigs["brain"].distill_command(tmp_path)
+        assert self.inner(cmd) == "agy --model 'Gemini 3.6 Flash Low' --print \"$(cat)\""
+
+    def test_agy_unresolved_model_returns_none(self, tmp_path, monkeypatch):
+        config = load_rig_config(write_config(tmp_path, {
+            "brain": {
+                "invoke": ["agy", "--model", "{model}", "--print", "{prompt}"],
+                "preset": "agy", "model": "nope", "model_resolver": "agy-live",
+            },
+        }))
+
+        def boom(*a, **k):
+            raise RigError("no match")
+
+        monkeypatch.setattr(rig_module, "resolve_agy_model", boom)
+        assert config.rigs["brain"].distill_command(tmp_path) is None

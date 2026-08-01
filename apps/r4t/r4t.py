@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import knowledge
 import state
 import tasks
 import verdict
@@ -40,6 +41,7 @@ from rig import (
     default_config_path,
     default_config_payload,
     format_preset_invoke,
+    is_below_knowledge_floor,
     load_rig_config,
     preset_names,
     remove_rig,
@@ -1525,6 +1527,27 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         )
         problems += 1
     warnings = 0
+    if config is not None:
+        for m in roster.members:
+            if m.is_human or m.errors or not m.knowledge_on:
+                continue
+            if m.knowledge_distill_rig:
+                distill_rig, distill_err = knowledge.resolve_distill_rig(m, config)
+                if distill_rig is None:
+                    print(f"{m.name}: {distill_err}")
+                    problems += 1
+                    continue
+            else:
+                distill_rig, _err, _pinned = config.rig_for(m)
+            if distill_rig is not None and is_below_knowledge_floor(distill_rig.preset):
+                print(
+                    f"warning: {m.name}: Knowledge is on with rig "
+                    f"{distill_rig.name!r} — a small-model class that smooths "
+                    "specifics out of distilled notes; consider a distill-rig "
+                    "override, and note budgets are bytes, not tokens "
+                    "(see docs/r4t-knowledge.md)"
+                )
+                warnings += 1
     for m in roster.members:
         if len(m.reinforce) > 200:
             print(

@@ -55,6 +55,14 @@ def _load_config_val(key, default):
 
 RRF_K = 60
 
+EMBEDDINGS_OFF = {"off", "none", "false", "0", "no"}
+EMBED_TIMEOUT = 10.0        # backlog embedding, driven from idle passes
+QUERY_EMBED_TIMEOUT = 2.0   # read path: a wake must not wait on a sick ollama
+
+# Wall time of the last query embedding, for callers that price a retrieval.
+LAST_QUERY_EMBED_MS = None
+LAST_QUERY_EMBED_OK = False
+
 # Recency decay + use-count ranking (see issue #145, workstream 1).
 # Defaults tuned for dev-knowledge churn (tighter than the article's 5yr).
 DECAY_OFFSET_DAYS = 30.0   # flat zone: facts younger than this don't decay
@@ -76,6 +84,13 @@ def _decay_config():
         _num_config("decay_scale_days", DECAY_SCALE_DAYS),
         _num_config("use_count_weight", USE_COUNT_WEIGHT),
     )
+
+
+def _embeddings_enabled():
+    """The semantic track rides ollama when it answers. Setting `embeddings`
+    to an off value turns the track off outright — no queueing, no query
+    embedding, FTS5 alone."""
+    return str(_load_config_val("embeddings", "ollama")).strip().lower() not in EMBEDDINGS_OFF
 
 
 def _rerank_enabled():
@@ -869,7 +884,7 @@ def store_asset(source_path):
 
 # --- Embedding ---
 
-def embed_text(text):
+def embed_text(text, timeout=EMBED_TIMEOUT):
     try:
         data = json.dumps({"model": _embed_model(), "input": text}).encode()
         req = urllib.request.Request(
@@ -877,7 +892,7 @@ def embed_text(text):
             data=data,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
             embeddings = result.get("embeddings", [])
             if embeddings:
@@ -987,18 +1002,30 @@ def _index_node(node_id, title, aliases, tags, content, now, content_hash=None, 
     )
 
     # Queue embedding for async processing instead of blocking
-    conn.execute(
-        "INSERT OR REPLACE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
-        (node_id, now)
-    )
+    if _embeddings_enabled():
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
+            (node_id, now)
+        )
 
     conn.commit()
     conn.close()
 
 
+def pending_embedding_count():
+    """How many entries are waiting for a vector."""
+    init()
+    conn = _connect()
+    count = conn.execute("SELECT COUNT(*) FROM pending_embeddings").fetchone()[0]
+    conn.close()
+    return count
+
+
 def process_pending_embeddings():
     """Process queued embeddings. Returns count of embeddings generated."""
     init()
+    if not _embeddings_enabled():
+        return 0
     conn = _connect()
     pending = conn.execute(
         "SELECT node_id, queued_at FROM pending_embeddings"
@@ -1114,7 +1141,18 @@ def _search_metadata(conn, query, limit, include_superseded=False):
 
 
 def _search_embeddings(conn, query, limit, include_superseded=False):
-    query_vec = embed_text(query)
+    global LAST_QUERY_EMBED_MS, LAST_QUERY_EMBED_OK
+    LAST_QUERY_EMBED_MS = None
+    LAST_QUERY_EMBED_OK = False
+    if not _embeddings_enabled():
+        return []
+    # The read path embeds the query and nothing else — entry vectors are the
+    # backlog's job. The short timeout is what keeps a sick ollama from
+    # stalling a caller that is waiting on the search.
+    start = time.perf_counter()
+    query_vec = embed_text(query, timeout=_num_config("embed_query_timeout", QUERY_EMBED_TIMEOUT))
+    LAST_QUERY_EMBED_MS = round((time.perf_counter() - start) * 1000)
+    LAST_QUERY_EMBED_OK = bool(query_vec)
     if not query_vec:
         return []
     count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]

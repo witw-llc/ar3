@@ -4,11 +4,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import config
+import engine
 from engine import (
     init,
+    pending_embedding_count,
     get,
     list_nodes,
     recall,
@@ -29,7 +32,8 @@ from hygiene import run_audit, index_disagreement
 
 COMMANDS: list[tuple[str, str, str]] = [
     ("search",      "<query> [--limit N] [--json] [--ids]", "Hybrid search (BM25 + semantic + metadata)."),
-    ("get",         "<id>",                            "Read a full knowledge entry."),
+    ("get",         "<id> [--no-track]",               "Read a full knowledge entry."),
+    ("touch",       "<id> [<id> ...]",                 "Bump the usage ranking signal without reading."),
     ("supersede",   "<old_id> <new_id>",               "Mark an entry as superseded by a newer one."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
@@ -39,7 +43,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
     ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
-    ("embed-pending", "",                              "Process queued embeddings."),
+    ("embed-pending", "[--json]",                      "Embed the queued backlog (ollama)."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
     ("stats",       "[--json]",                        "Show knowledge store statistics."),
     ("check",       "[--fix]",                         "Audit structural integrity."),
@@ -75,6 +79,11 @@ def main(argv=None):
     # get
     p = sub.add_parser("get", help="Read entry")
     p.add_argument("id", help="Entry ID (e.g., KG-00001)")
+    p.add_argument("--no-track", action="store_true", help="Don't bump the usage ranking signal")
+
+    # touch
+    p = sub.add_parser("touch", help="Bump usage ranking signal without reading")
+    p.add_argument("ids", nargs="+", help="Entry ID(s)")
 
     # supersede
     p = sub.add_parser("supersede", help="Mark an entry as superseded by a newer one")
@@ -122,7 +131,8 @@ def main(argv=None):
     p.add_argument("--embeddings", action="store_true")
 
     # embed-pending
-    sub.add_parser("embed-pending", help="Process queued embeddings")
+    p = sub.add_parser("embed-pending", help="Embed the queued backlog")
+    p.add_argument("--json", action="store_true")
 
     # rebuild-mocs
     sub.add_parser("rebuild-mocs", help="Rebuild MOCs from tags")
@@ -165,6 +175,11 @@ def main(argv=None):
             include_superseded=args.include_superseded,
             rerank=True if args.rerank else None,
         )
+        # What the semantic track cost this query, so a caller on a latency
+        # budget (r4t's wake inject) can price it without timing the whole CLI.
+        if engine.LAST_QUERY_EMBED_MS is not None:
+            unavailable = "" if engine.LAST_QUERY_EMBED_OK else " (semantic track unavailable)"
+            print(f"embed {engine.LAST_QUERY_EMBED_MS}ms{unavailable}", file=sys.stderr)
         if args.ids:
             for r in results:
                 print(r['id'])
@@ -178,10 +193,14 @@ def main(argv=None):
 
     elif args.command == "get":
         try:
-            print(get(args.id, track_usage=True))
+            print(get(args.id, track_usage=not args.no_track))
         except FileNotFoundError as e:
             print(str(e), file=sys.stderr)
             return 1
+
+    elif args.command == "touch":
+        engine._bump_usage(args.ids)
+        print(f"Touched {len(args.ids)} entr{'y' if len(args.ids) == 1 else 'ies'}")
 
     elif args.command == "supersede":
         try:
@@ -276,8 +295,18 @@ def main(argv=None):
         print("Reindex complete.")
 
     elif args.command == "embed-pending":
+        start = time.perf_counter()
         count = process_pending_embeddings()
-        print(f"Processed {count} pending embedding(s).")
+        seconds = round(time.perf_counter() - start, 3)
+        remaining = pending_embedding_count()
+        if args.json:
+            print(json.dumps(
+                {"embedded": count, "pending": remaining, "seconds": seconds}
+            ))
+        else:
+            print(f"Embedded {count} entr{'y' if count == 1 else 'ies'} in {seconds}s.")
+            if remaining:
+                print(f"{remaining} still queued — embeddings unavailable.")
 
     elif args.command == "rebuild-mocs":
         rebuild_mocs()

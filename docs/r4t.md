@@ -81,7 +81,7 @@ budget rests while its queue holds, and refill is the retry, so the machine's
 one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it
-in production too (`- **Fallback:** off` in the roster mutes this per member).
+in production too (`- **ProseReply:** off` in the roster mutes this per member).
 An automated notification that needs no answer gets closed instead of
 answered, so a quiet thread means a dropped ball rather than a judgment call
 ([r4t-ack.md](r4t-ack.md)).

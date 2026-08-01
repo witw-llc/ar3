@@ -1,0 +1,252 @@
+[
+  {
+    "question_id": "07741c44",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "08f4fc43",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "099778bb",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "09ba9854",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "0ddfec37_abs",
+    "question_type": "knowledge-update",
+    "stratum": "abstention"
+  },
+  {
+    "question_id": "1568498a",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "1a8a66a6",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "1cea1afa",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "2133c1b5",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "26bdc477",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "38146c39",
+    "question_type": "single-session-preference",
+    "stratum": "single-session-preference"
+  },
+  {
+    "question_id": "3e321797",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "3fdac837",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "46a3abf7",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "4dfccbf8",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "4fd1909e",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "5c40ec5b",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "618f13b2",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "6456829e_abs",
+    "question_type": "multi-session",
+    "stratum": "abstention"
+  },
+  {
+    "question_id": "6613b389",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "6aeb4375",
+    "question_type": "knowledge-update",
+    "stratum": "knowledge-update"
+  },
+  {
+    "question_id": "6aeb4375_abs",
+    "question_type": "knowledge-update",
+    "stratum": "abstention"
+  },
+  {
+    "question_id": "6b7dfb22",
+    "question_type": "single-session-preference",
+    "stratum": "single-session-preference"
+  },
+  {
+    "question_id": "6f9b354f",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "81507db6",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "8a137a7f",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "8b9d4367",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "8c18457d",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "982b5123",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "9d25d4e0",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "a3332713",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "a89d7624",
+    "question_type": "single-session-preference",
+    "stratum": "single-session-preference"
+  },
+  {
+    "question_id": "ac031881",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "b29f3365",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "b3c15d39",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "c5e8278d",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "c7cf7dfd",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "cc6d1ec1",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "ccb36322",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "d3ab962e",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "d596882b",
+    "question_type": "single-session-assistant",
+    "stratum": "single-session-assistant"
+  },
+  {
+    "question_id": "e56a43b9",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "faba32e5",
+    "question_type": "single-session-user",
+    "stratum": "single-session-user"
+  },
+  {
+    "question_id": "gpt4_0b2f1d21",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "gpt4_2487a7cb",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "gpt4_7ddcf75f",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "gpt4_7fce9456",
+    "question_type": "multi-session",
+    "stratum": "multi-session"
+  },
+  {
+    "question_id": "gpt4_8e165409",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "gpt4_a2d1d1f6",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  },
+  {
+    "question_id": "gpt4_f420262d",
+    "question_type": "temporal-reasoning",
+    "stratum": "temporal-reasoning"
+  }
+]

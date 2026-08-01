@@ -1424,19 +1424,19 @@ class TestStdoutFallback:
         assert sent == []
 
 
-def set_fallback(repo, name="Gerry", value="off"):
+def set_prose_reply(repo, name="Gerry", value="off"):
     path = repo / "ROSTER.md"
     text = path.read_text(encoding="utf-8")
     assert f"### {name}\n" in text
     path.write_text(
-        text.replace(f"### {name}\n", f"### {name}\n- **Fallback:** {value}\n"),
+        text.replace(f"### {name}\n", f"### {name}\n- **ProseReply:** {value}\n"),
         encoding="utf-8",
     )
 
 
-class TestFallbackKnob:
+class TestProseReplyKnob:
     def test_off_mutes_the_stdout_reply(self, ctx, repo, r4t_home):
-        set_fallback(repo)
+        set_prose_reply(repo)
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
         assert outbox_envelopes(repo) == []
         text = read_log()
@@ -1445,7 +1445,7 @@ class TestFallbackKnob:
         assert "STDOUT-REPLY" not in text
 
     def test_explicit_on_keeps_the_stdout_reply(self, ctx, repo, r4t_home):
-        set_fallback(repo, value="on")
+        set_prose_reply(repo, value="on")
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
         envelopes = outbox_envelopes(repo)
         assert [e["to"] for e in envelopes] == ["boss"]
@@ -1462,7 +1462,7 @@ class TestFallbackKnob:
             )
             return 0, ANSWER, 1.0, False
 
-        set_fallback(repo)
+        set_prose_reply(repo)
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=tell_and_chatter)
         envelopes = outbox_envelopes(repo)
         assert [e["to"] for e in envelopes] == ["outsider"]
@@ -1471,7 +1471,7 @@ class TestFallbackKnob:
     def test_off_still_fires_quota_suspect_and_drains(
         self, repo, fake_harness, tells, tmp_path, r4t_home
     ):
-        set_fallback(repo, "Phil")
+        set_prose_reply(repo, "Phil")
         ctx = rig_budget_ctx(repo, tmp_path, tells, rig_max=10)
 
         def blank(rig, prompt, cwd, *, env=None, variant=0):
@@ -1482,9 +1482,9 @@ class TestFallbackKnob:
         log = read_log()
         assert "QUOTA-SUSPECT phil" in log and "bucket drained" in log
 
-    def test_echo_rig_wins_over_fallback_off(self, ctx, repo, r4t_home):
+    def test_echo_rig_wins_over_prose_reply_off(self, ctx, repo, r4t_home):
         set_echo(ctx.config_path)
-        set_fallback(repo)
+        set_prose_reply(repo)
         handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
         envelopes = outbox_envelopes(repo)
         assert [e["to"] for e in envelopes] == ["boss"]
@@ -1493,7 +1493,7 @@ class TestFallbackKnob:
     def test_off_internal_only_batch_keeps_its_own_silent_line(
         self, ctx, repo, r4t_home
     ):
-        set_fallback(repo)
+        set_prose_reply(repo)
         enqueue_internal(ctx, "gerry")
         assert drain(ctx, run_fn=stdout_only) == 1
         text = read_log()
@@ -2867,7 +2867,7 @@ class TestCli:
         assert rc == 0
         assert "OK" in capsys.readouterr().out
 
-    def test_roster_check_says_nothing_about_fallback_when_absent(
+    def test_roster_check_says_nothing_about_prose_reply_when_absent(
         self, r4t_home, tmp_path, rig_config, capsys
     ):
         root = tmp_path / "plain-roster"
@@ -2878,21 +2878,37 @@ class TestCli:
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         out = capsys.readouterr().out
         assert rc == 0
-        assert "fallback" not in out.lower()
+        assert "prosereply" not in out.lower()
 
-    def test_roster_check_rejects_junk_fallback(self, r4t_home, tmp_path, rig_config, capsys):
-        root = tmp_path / "junkfallback"
+    def test_roster_check_rejects_junk_prose_reply(self, r4t_home, tmp_path, rig_config, capsys):
+        root = tmp_path / "junkprosereply"
         root.mkdir()
         (root / "ROSTER.md").write_text(
             "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
-            "- **Fallback:** maybe\n",
+            "- **ProseReply:** maybe\n",
             encoding="utf-8",
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         out = capsys.readouterr().out
         assert rc == 1
-        assert "Fallback must be on or off" in out
-        assert "(try: Fallback: off)" in out
+        assert "ProseReply must be on or off" in out
+        assert "(try: ProseReply: off)" in out
+
+    def test_roster_check_rejects_legacy_fallback_field(
+        self, r4t_home, tmp_path, rig_config, capsys
+    ):
+        root = tmp_path / "legacyfallback"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
+            "- **Fallback:** off\n",
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Fallback: is gone" in out
+        assert "(try: ProseReply: off)" in out
 
     def test_roster_check_missing_leader(self, r4t_home, tmp_path, rig_config, capsys):
         root = tmp_path / "leaderless"

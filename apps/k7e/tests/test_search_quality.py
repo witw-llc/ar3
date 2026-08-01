@@ -72,6 +72,42 @@ class TestRecall:
         results = engine.search("kestrel deployment", limit=8)
         assert len(results) == 8, f"got {len(results)} results"
 
+    def test_two_track_fusion_keeps_the_limit(self, store, fake_embeddings):
+        """With BM25 and the semantic track both live, a hit both tracks agree
+        on scores 2/(60+rank+1) — clear of the floor well past rank 5, so the
+        floor bounds noise instead of the result count."""
+        for i in range(12):
+            engine.store_entry(
+                f"Runbook section {i}",
+                f"Stage {i} of the kestrel deployment rolls the fleet forward.",
+                tags=["ops"],
+            )
+        engine.process_pending_embeddings()
+        results = engine.search("kestrel deployment", limit=8)
+        assert len(results) == 8, f"got {len(results)} results"
+
+    def test_two_track_floor_still_cuts_the_single_track_tail(self, store, fake_embeddings):
+        """The floor earns its keep once both tracks are live: an entry only one
+        track ranks, and ranks late, falls under it while the fused dozen stay."""
+        for i in range(12):
+            engine.store_entry(
+                f"Runbook section {i}",
+                f"Stage {i} of the kestrel deployment rolls the fleet forward.",
+                tags=["ops"],
+            )
+        engine.store_entry(
+            "Catering note",
+            "Menu for the kestrel deployment week barbecue: salad bar, "
+            "napkins, plates, cutlery, seating chart, parking passes, and "
+            "assorted unrelated catering logistics chatter.",
+            tags=["ops"],
+        )
+        engine.process_pending_embeddings()
+        results = engine.search("kestrel deployment", limit=20)
+        titles = [r["title"] for r in results]
+        assert len(titles) == 12, titles
+        assert not any(t.startswith("Catering") for t in titles), titles
+
 
 class TestContradictions:
     def test_conflicting_entries_both_surface(self, store):

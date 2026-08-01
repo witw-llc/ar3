@@ -15,8 +15,9 @@ Config format:
   "distill_command": null,              # knowledge extraction
   "compile_command": null,              # tag synthesis
   "rerank_command": null,               # search/recall reranking
-  "embeddings": "ollama",
+  "embeddings": "ollama",               # "off" disables the semantic track
   "embed_model": "nomic-embed-text",
+  "embed_query_timeout": 2.0,           # read-path budget, seconds
   "ollama_url": "http://localhost:11434",
   "rerank": false,
   "decay_offset_days": 30,
@@ -89,6 +90,7 @@ def get(key, default=None):
         "rerank_command": "K7E_RERANK_COMMAND",
         "embeddings": "K7E_EMBEDDINGS",
         "embed_model": "EMBED_MODEL",
+        "embed_query_timeout": "K7E_EMBED_QUERY_TIMEOUT",
         "ollama_url": "OLLAMA_URL",
         "decay_offset_days": "K7E_DECAY_OFFSET",
         "decay_scale_days": "K7E_DECAY_SCALE",
@@ -185,8 +187,13 @@ def status():
         else:
             lines.append(f"  LLM {purpose}: unavailable")
 
+    import engine  # the off-vocabulary is the engine's; status only reports it
+
     embed_status = providers.get("embeddings:ollama", {})
-    if embed_status.get("available"):
+    disabled = str(get("embeddings", "ollama")).strip().lower() in engine.EMBEDDINGS_OFF
+    if disabled:
+        lines.append("  Embeddings: off (embeddings = off)")
+    elif embed_status.get("available"):
         if embed_status.get("has_embed_model"):
             lines.append(f"  Embeddings: ollama ({embed_status['embed_model']}) ✓")
         else:
@@ -198,8 +205,9 @@ def status():
         lines.append("    → Install: curl -fsSL https://ollama.com/install.sh | sh")
         lines.append(f"    → Then: ollama pull {get('embed_model', 'nomic-embed-text')}")
 
+    semantic = not disabled and embed_status.get("available") and embed_status.get("has_embed_model")
     lines.append("  Search: FTS5 (keyword) ✓")
-    if embed_status.get("available") and embed_status.get("has_embed_model"):
+    if semantic:
         lines.append("  Search: Semantic (embeddings) ✓")
     else:
         lines.append("  Search: Semantic (embeddings) ✗ — FTS5-only mode")
@@ -208,7 +216,9 @@ def status():
     missing = []
     if not (fallback and str(fallback).strip()):
         missing.append("Set llm_command (stdin→stdout CLI) for distill/recall/compile")
-    if not embed_status.get("has_embed_model"):
+    if disabled:
+        missing.append("Set `embeddings` to ollama to use the semantic track")
+    elif not embed_status.get("has_embed_model"):
         missing.append(f"Run `ollama pull {get('embed_model', 'nomic-embed-text')}` for semantic search")
     if missing:
         lines.append("  Recommendations:")

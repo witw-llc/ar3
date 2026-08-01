@@ -26,6 +26,14 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _no_ollama(monkeypatch):
+    """Member stores drive k7e as a subprocess, which reaches for ollama when
+    one answers. Point every test at a dead port so the suite measures r4t and
+    not whichever models the developer happens to be running."""
+    monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
+
+
+@pytest.fixture(autouse=True)
 def _restore_tell_outbox_env():
     """r4t's seat/chat CLIs set TELL_OUTBOX_DIR in os.environ (so child `tell`
     processes inherit it). Running a CLI in-process would otherwise leak that

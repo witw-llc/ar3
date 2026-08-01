@@ -319,13 +319,21 @@ def _drop_sidecar(pending_file: Path) -> None:
 
 
 def _trash_pending(sender: Participant, pending_file: Path) -> None:
-    bad = unique_path(trash_dir(sender.name) / pending_file.name)
+    """Retire a dead pending message into the agent's trash — envelope and
+    attachment bundle both. Attachment bytes are the sender's only copy once
+    ingest has moved them out of the outbox, so a failed delivery parks them
+    for recovery instead of destroying them."""
+    trash = trash_dir(sender.name)
+    trash.mkdir(parents=True, exist_ok=True)
+    bad = unique_path(trash / pending_file.name)
     try:
         pending_file.rename(bad)
     except OSError:
         pass
     msg_id = _msg_id_from_pending_json(pending_file.name)
-    _remove_dir(pending_bundle_dir(sender.name, msg_id))
+    bundle = pending_bundle_dir(sender.name, msg_id)
+    if bundle.is_dir():
+        _move_dir(bundle, unique_path(trash / msg_id))
 
 
 def _finalize_pending(sender: Participant, pending_file: Path) -> None:
@@ -338,12 +346,36 @@ def _finalize_pending(sender: Participant, pending_file: Path) -> None:
     _remove_dir(pending_bundle_dir(sender.name, msg_id))
 
 
-def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> None:
+def _schedule_retry(
+    pending_file: Path,
+    sidecar: dict,
+    sender: Participant,
+    *,
+    msg_id: str,
+    recipient: str,
+    files: list[str],
+    reason: str,
+) -> None:
     """Increment attempts and either set the next-attempt time per
-    BACKOFF_SCHEDULE or trash the message if the schedule is exhausted."""
+    BACKOFF_SCHEDULE or trash the message if the schedule is exhausted.
+
+    Exhaustion is the end of a message's life, so it is recorded where a
+    sender can find it after the fact: the agent log, and a `DISCARDED` row
+    naming the last failure so `a8s trace <ULID>` explains the death."""
     sidecar["attempts"] += 1
     if sidecar["attempts"] > MAX_ATTEMPTS:
-        out_agent(sender.name, f"discarded {pending_file.name} after backoff exhausted")
+        out_agent(
+            sender.name,
+            f"discarded {pending_file.name} after backoff exhausted: {reason}",
+        )
+        txlog.log(
+            "DISCARDED",
+            msg_id=msg_id,
+            sender=sender.name,
+            recipient=recipient,
+            files=files or None,
+            detail=f"backoff exhausted after {MAX_ATTEMPTS} attempts; last failure: {reason}",
+        )
         _trash_pending(sender, pending_file)
         _drop_sidecar(pending_file)
         return
@@ -355,6 +387,26 @@ def _schedule_retry(pending_file: Path, sidecar: dict, sender: Participant) -> N
 
 def _resolve_file_source(sender_name: str, msg_id: str, entry: dict) -> Path | None:
     return _resolve_pending_attachment(sender_name, msg_id, entry)
+
+
+def _record_upload_failure(
+    msg: dict, sender: Participant, sidecar: dict, filename: str, detail: str
+) -> None:
+    """One attachment-upload failure, on all three surfaces: the agent log for
+    a tailing operator, a `FILE_UPLOAD_FAILED` row so `a8s trace` sees it, and
+    the sidecar so an eventual discard can name what kept killing the send.
+    Fires once per attempt per service — the attempt number is in the detail,
+    so a repeated network fault reads as a sequence rather than a duplicate."""
+    out_agent(sender.name, f"FILE: upload failed for {filename!r}: {detail}; will retry")
+    txlog.log(
+        "FILE_UPLOAD_FAILED",
+        msg_id=msg.get("id", ""),
+        sender=sender.name,
+        recipient=str(msg.get("to") or "").strip(),
+        files=[filename],
+        detail=detail,
+    )
+    sidecar["last_error"] = detail
 
 
 def _upload_files_for_remote(
@@ -395,35 +447,26 @@ def _upload_files_for_remote(
             else (None, "missing message id")
         )
         if src is None and any(s.id not in per_file for s in services):
-            out_agent(
-                sender.name,
-                f"FILE: cannot read source for upload (filename={filename!r}): {src_reason}; will retry",
-            )
-            txlog.log(
-                "FILE_UPLOAD_FAILED",
-                msg_id=msg.get("id", ""),
-                sender=sender.name,
-                files=[filename],
-                detail=src_reason,
-            )
+            _record_upload_failure(msg, sender, sidecar, filename, src_reason)
             all_done = False
             continue
+        attempt = sidecar.get("attempts", 0) + 1
         for service in services:
             if service.id in per_file:
                 continue
             try:
                 url = service.store(src)  # type: ignore[arg-type]
             except StorageError as e:
-                out_agent(
-                    sender.name,
-                    f"WARN storage {service.id} upload failed for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
+                _record_upload_failure(
+                    msg, sender, sidecar, filename,
+                    f"storage {service.id} upload failed (attempt {attempt}): {e}",
                 )
                 all_done = False
                 continue
             except Exception as e:
-                out_agent(
-                    sender.name,
-                    f"WARN storage {service.id} upload raised for {filename!r} (attempt {sidecar['attempts'] + 1}): {e}",
+                _record_upload_failure(
+                    msg, sender, sidecar, filename,
+                    f"storage {service.id} upload raised (attempt {attempt}): {e}",
                 )
                 all_done = False
                 continue
@@ -431,6 +474,7 @@ def _upload_files_for_remote(
 
     if not all_done:
         return False
+    sidecar.pop("last_error", None)
 
     # Every file is covered by every service — rewrite to the wire shape.
     new_files: list[dict] = []
@@ -551,14 +595,21 @@ def _process_pending(
     )
     for f in files:
         sidecar = _load_or_init_sidecar(f)
-        # Backoff gate.
-        if sidecar["next_attempt"]:
+        # Backoff gate. A sidecar is operator-editable, so `next_attempt` is a
+        # boundary: anything unparseable — wrong type included — means due now,
+        # never an exception that would abort the whole pass and strand every
+        # message behind this one, inbound proxy delivery included.
+        raw_next_attempt = sidecar["next_attempt"]
+        if raw_next_attempt:
             try:
-                next_dt = datetime.fromisoformat(sidecar["next_attempt"].replace("Z", "+00:00"))
+                next_dt = datetime.fromisoformat(str(raw_next_attempt).replace("Z", "+00:00"))
                 if now < next_dt:
                     continue
-            except ValueError:
-                pass  # corrupt timestamp — fall through and try
+            except (TypeError, ValueError):
+                out_agent(
+                    sender.name,
+                    f"unparseable next_attempt {raw_next_attempt!r} in {f.name} sidecar; treating as due",
+                )
         try:
             with f.open("r", encoding="utf-8") as fp:
                 msg = json.load(fp)
@@ -736,7 +787,17 @@ def _process_pending(
             _finalize_pending(sender, f)
             continue
         # Still pending — schedule a retry with backoff.
-        _schedule_retry(f, sidecar, sender)
+        if remaining_remotes:
+            stalled = f"remotes did not accept: {', '.join(remaining_remotes)}"
+        else:
+            stalled = "local delivery incomplete"
+        _schedule_retry(
+            f, sidecar, sender,
+            msg_id=msg.get("id", ""),
+            recipient=recipient_name,
+            files=msg_files,
+            reason=sidecar.get("last_error") or stalled,
+        )
     return routed
 
 

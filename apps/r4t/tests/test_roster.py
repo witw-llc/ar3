@@ -127,25 +127,31 @@ class TestParsing:
         assert "Continue must be on, off, or an idle window" in member.error
         assert member.continue_conversation is False
 
-    def test_fallback_defaults_on_when_absent(self):
-        assert parse("### A\n- **Rig:** r\n").find("a").fallback is True
+    def test_prose_reply_defaults_on_when_absent(self):
+        assert parse("### A\n- **Rig:** r\n").find("a").prose_reply is True
 
     @pytest.mark.parametrize("value", ["on", "yes"])
-    def test_fallback_on(self, value):
-        member = parse(f"### A\n- **Rig:** r\n- **Fallback:** {value}\n").find("a")
-        assert member.fallback is True
+    def test_prose_reply_on(self, value):
+        member = parse(f"### A\n- **Rig:** r\n- **ProseReply:** {value}\n").find("a")
+        assert member.prose_reply is True
         assert not member.errors
 
     @pytest.mark.parametrize("value", ["off", "no"])
-    def test_fallback_off(self, value):
-        member = parse(f"### A\n- **Rig:** r\n- **Fallback:** {value}\n").find("a")
-        assert member.fallback is False
+    def test_prose_reply_off(self, value):
+        member = parse(f"### A\n- **Rig:** r\n- **ProseReply:** {value}\n").find("a")
+        assert member.prose_reply is False
         assert not member.errors
 
-    def test_fallback_garbage_disables_member(self):
-        member = parse("### A\n- **Rig:** r\n- **Fallback:** maybe\n").find("a")
-        assert "Fallback must be on or off" in member.error
-        assert "(try: Fallback: off)" in member.error
+    def test_prose_reply_garbage_disables_member(self):
+        member = parse("### A\n- **Rig:** r\n- **ProseReply:** maybe\n").find("a")
+        assert "ProseReply must be on or off" in member.error
+        assert "(try: ProseReply: off)" in member.error
+
+    def test_legacy_fallback_field_disables_member(self):
+        member = parse("### A\n- **Rig:** r\n- **Fallback:** off\n").find("a")
+        assert "Fallback: is gone" in member.error
+        assert "(try: ProseReply: off)" in member.error
+        assert member.prose_reply is True
 
     def test_ack_defaults_on_when_absent(self):
         assert parse("### A\n- **Rig:** r\n").find("a").ack is True
@@ -170,7 +176,7 @@ class TestParsing:
     def test_ack_does_not_disturb_other_fields(self):
         member = parse("### A\n- **Rig:** r\n- **Ack:** off\n").find("a")
         assert member.rig == "r"
-        assert member.fallback is True
+        assert member.prose_reply is True
 
     def test_reinforce_defaults_empty_when_absent(self):
         assert parse("### A\n- **Rig:** r\n").find("a").reinforce == ""
@@ -186,7 +192,7 @@ class TestParsing:
             "### A\n- **Rig:** r\n- **Reinforce:** stay in your lane\n"
         ).find("a")
         assert member.rig == "r"
-        assert member.fallback is True
+        assert member.prose_reply is True
 
     def test_flush_field_disables_member(self):
         member = parse(

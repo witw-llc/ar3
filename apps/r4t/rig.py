@@ -58,6 +58,13 @@ its own conversation instead of starting from a cold prompt. A rig with no
 preset, or one whose preset has no `continue_argv`, cannot continue; a roster
 member asking for it fails closed (see `RigConfig.rig_for`).
 
+`framing` (#62) — this rig's default for the cautionary line under a member's
+`## Knowledge` section: `"default"` (or absent) is the built-in wording,
+`"off"` drops the line, any other string is custom wording taken verbatim (no
+quote marks needed — the JSON string already delimits it). A member's own
+`Framing:` roster line always wins over this default; see
+docs/r4t-knowledge.md.
+
 OS-level isolation (`run_as` / `container`) is NOT a rig key — it is a
 per-org decision (rigs are machine-global and shared across orgs, so one Unix
 user or image serves an org's whole roster). It lives in `r4t-org.json`; see
@@ -70,6 +77,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -77,7 +85,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from isolate import Isolation
-from roster import Member, Roster
+from roster import (
+    KNOWLEDGE_DEFAULT_BUDGET,
+    KNOWLEDGE_SIZES,
+    FramingSpec,
+    Member,
+    Roster,
+    parse_framing,
+)
 from state import atomic_write_json, r4t_home
 
 PROMPT_PLACEHOLDER = "{prompt}"
@@ -387,6 +402,69 @@ def text_defaults(preset: str | None) -> dict[str, int]:
     """The text-knob defaults for `preset` (small when absent/unknown)."""
     tier = HARNESS_PRESETS.get((preset or "").strip().lower(), {}).get("text_tier")
     return TEXT_TIERS.get(tier or "small", TEXT_TIERS["small"])
+
+
+# Knowledge inject-budget tiers by harness class (#52, the K2 campaign):
+# local/opencode-class members write smaller, smoothed-over notes at a given
+# byte budget, so they default lower; codex/claude default highest. This is
+# NOT `text_tier` — agy is a big-context harness but a fast small-effort model
+# in K2's measurements, so it sits in the middle here with cursor rather than
+# with codex/claude. Anchored on `roster.KNOWLEDGE_SIZES`, so a `large` move
+# there moves these defaults too.
+KNOWLEDGE_TIER_LOW = frozenset({
+    "opencode", "ollama", "opencode-ollama",
+    "claude-ollama", "codex-ollama", "copilot-ollama",
+})
+KNOWLEDGE_TIER_MID = frozenset({"agy", "cursor", "copilot"})
+KNOWLEDGE_TIER_HIGH = frozenset({"codex", "claude"})
+
+
+def knowledge_tier_bytes(preset: str | None) -> int:
+    """The Knowledge inject budget (bytes) a bare `on`/`<rig>` line earns from
+    `preset`'s harness class. An unknown or absent preset (custom rig) gets
+    the global floor, same as `text_defaults`' small tier."""
+    p = (preset or "").strip().lower()
+    if p in KNOWLEDGE_TIER_HIGH:
+        return KNOWLEDGE_SIZES["large"]
+    if p in KNOWLEDGE_TIER_MID:
+        return KNOWLEDGE_SIZES["medium"]
+    if p in KNOWLEDGE_TIER_LOW:
+        return KNOWLEDGE_SIZES["small"]
+    return KNOWLEDGE_DEFAULT_BUDGET
+
+
+def is_below_knowledge_floor(preset: str | None) -> bool:
+    """True for a harness class the K2 campaign measured smoothing over
+    specifics rather than keeping them — `r4t roster check`'s courtesy
+    warning, never a gate (models improve; a floor here would age badly)."""
+    return (preset or "").strip().lower() in KNOWLEDGE_TIER_LOW
+
+
+def resolve_knowledge_bytes(member: Member, rig: "Rig | None") -> int:
+    """The effective Knowledge inject budget in bytes: the member's explicit
+    size wins, else `rig`'s harness tier, else the global default when no rig
+    resolved. 0 when Knowledge is off. `rig` is always the member's own turn
+    rig — inject happens on the harness that wakes the member, independent of
+    any `Knowledge:` distill-rig override (that only steers dreaming)."""
+    if not member.knowledge_on:
+        return 0
+    if member.knowledge_bytes is not None:
+        return member.knowledge_bytes
+    return knowledge_tier_bytes(rig.preset if rig is not None else None)
+
+
+def resolve_framing(member: Member, rig: "Rig | None") -> FramingSpec:
+    """The effective `Framing:` choice for a member's Knowledge section (#62):
+    the member's own roster line wins when present, else the rig's own
+    config default, else the built-in framing (an unset FramingSpec —
+    off=False, text=None)."""
+    if member.framing is not None:
+        return member.framing
+    if rig is not None and rig.framing is not None:
+        return rig.framing
+    return FramingSpec()
+
+
 DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_ECHO_MAX_CHARS = 1500
@@ -435,6 +513,7 @@ class Rig:
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
     mcp: bool | None = None
     env: dict[str, str] = field(default_factory=dict)
+    framing: FramingSpec | None = None
     error: str | None = None
 
     @property
@@ -524,6 +603,33 @@ class Rig:
             at = argv.index(anchor) + 1 if anchor else len(argv)
             argv[at:at] = self.continue_argv
         return argv
+
+    def distill_command(self, workdir: str | Path) -> str | None:
+        """A stdin->stdout shell command line for k7e's `K7E_DISTILL_COMMAND`
+        (#52), built from this rig's own invoke. k7e pipes the prompt to the
+        command's stdin with no shell of its own, and not every harness reads
+        stdin as its prompt (agy prints usage instead), so `{prompt}` becomes
+        `"$(cat)"` inside an `sh -c` wrapper — the prompt lands in the exact
+        argument position the invoke defines, whatever the harness. None when
+        the rig has nothing to run, or an agy-class model can't be resolved
+        right now."""
+        pool = self.pool()
+        if not pool:
+            return None
+        argv = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in pool[0]]
+        if self.model_resolver == "agy-live":
+            try:
+                resolved = resolve_agy_model(self.model or "")
+            except RigError:
+                return None
+            argv = [resolved if a == "{model}" else a for a in argv]
+        inner = " ".join(
+            '"$(cat)"'.join(
+                shlex.quote(p) if p else "" for p in a.split(PROMPT_PLACEHOLDER)
+            )
+            for a in argv
+        )
+        return f"sh -c {shlex.quote(inner)}"
 
 
 @dataclass
@@ -1608,6 +1714,17 @@ def _parse_rig(name: str, raw: object) -> Rig:
     if err:
         problems.append(f"echo_max_chars: {err}")
     rig.echo_max_chars = int(echo_max)
+
+    # A rig-level Framing default (#62): same three forms as the roster line
+    # (roster.parse_framing), but unquoted — the value is already a JSON
+    # string, so there is no "off"/"default" keyword collision to guard
+    # against with quote marks.
+    raw_framing = raw.get("framing")
+    if raw_framing is not None:
+        if not isinstance(raw_framing, str):
+            problems.append(f"framing: expected a string, got {raw_framing!r}")
+        else:
+            rig.framing = parse_framing(raw_framing, quoted=False)
 
     # A hand-edited `mcp: true` on a preset with no per-invocation idiom fails
     # the rig closed rather than running turns that quietly have no tool.

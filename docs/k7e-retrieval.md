@@ -26,7 +26,11 @@ query
 - **Metadata** — exact-ish matches against title, aliases, and tags.
 - **Embeddings** — semantic similarity via ollama vectors. Optional; linear
   scan, automatically skipped past ~10k nodes (k7e is single-user scale, not a
-  vector-DB).
+  vector-DB). The read path embeds **the query only**, on a 2s budget
+  (`embed_query_timeout`); entry vectors come from the queue that
+  `k7e embed-pending` drains offline. An ollama that does not answer costs the
+  query embedding and nothing else — the track drops out and the other two
+  carry the search.
 
 All three filter to `status='active'` unless `include_superseded` is set.
 
@@ -35,6 +39,14 @@ All three filter to `status='active'` unless `include_superseded` is set.
 The three ranked lists are merged with Reciprocal Rank Fusion — robust to the
 fact that BM25 scores and cosine similarities aren't on the same scale. Search
 over-fetches (`limit × 3`) so later stages have a real pool to work with.
+
+A minimum fused score then drops noise, but only when **more than one track
+returned anything**. With two tracks live, a hit both agree on scores
+`2/(60+rank+1)` and clears the floor far past rank 5, so what the floor removes
+is the single-track tail — a hit one track ranked late and the other never saw.
+With one track live the fused score is a bare rank ladder, where the same floor
+would truncate at rank 5 instead of separating signal from noise, so it is not
+applied.
 
 ### 3. Score multipliers
 
