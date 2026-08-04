@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from commands import cmd_transactions
 from core import transactions_path
 from txlog import (
     TransactionLogError,
@@ -14,6 +15,7 @@ from txlog import (
     log,
     prune_transactions,
     read_events,
+    read_recent,
 )
 
 
@@ -294,3 +296,136 @@ class TestLogIntegrationWithRoute:
         assert len(routed) >= 1
         assert routed[0][3] == "A"
         assert routed[0][4] == "B"
+
+
+class TestReadRecent:
+    def _seed(self):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob", detail="one")
+        log("PUBLISHED", msg_id="01A", sender="Alice", recipient="Bob", remote="r1")
+        log("DROPPED", msg_id="01B", sender="Carol", recipient="Bob", detail="two")
+        log("DISCARDED", msg_id="01C", sender="Alice", recipient="Dave", detail="three")
+
+    def test_returns_chronological_with_seq(self, fake_home):
+        self._seed()
+        rows = read_recent()
+        assert [e["event"] for _s, e in rows] == [
+            "ROUTED",
+            "PUBLISHED",
+            "DROPPED",
+            "DISCARDED",
+        ]
+        assert [s for s, _e in rows] == sorted(s for s, _e in rows)
+
+    def test_limit_keeps_the_newest(self, fake_home):
+        self._seed()
+        rows = read_recent(limit=2)
+        assert [e["event"] for _s, e in rows] == ["DROPPED", "DISCARDED"]
+
+    def test_filters_by_event_case_insensitively(self, fake_home):
+        self._seed()
+        rows = read_recent(events=["dropped", "DISCARDED"])
+        assert [e["msg_id"] for _s, e in rows] == ["01B", "01C"]
+
+    def test_filters_by_sender_and_recipient(self, fake_home):
+        self._seed()
+        assert len(read_recent(senders=["alice"])) == 3
+        assert len(read_recent(recipients=["dave"])) == 1
+        assert len(read_recent(senders=["alice"], recipients=["bob"])) == 2
+
+    def test_filters_by_msg_id(self, fake_home):
+        self._seed()
+        assert [e["event"] for _s, e in read_recent(msg_id="01A")] == [
+            "ROUTED",
+            "PUBLISHED",
+        ]
+
+    def test_after_seq_returns_everything_newer_ignoring_limit(self, fake_home):
+        self._seed()
+        rows = read_recent(limit=1)
+        cursor = rows[-1][0]
+        log("ROUTED", msg_id="01D", sender="Alice", recipient="Bob")
+        log("ROUTED", msg_id="01E", sender="Alice", recipient="Bob")
+        fresh = read_recent(limit=1, after_seq=cursor)
+        assert [e["msg_id"] for _s, e in fresh] == ["01D", "01E"]
+
+    def test_after_seq_respects_filters(self, fake_home):
+        self._seed()
+        cursor = read_recent(limit=1)[-1][0]
+        log("ROUTED", msg_id="01D", sender="Zed", recipient="Bob")
+        log("DROPPED", msg_id="01E", sender="Alice", recipient="Bob")
+        fresh = read_recent(after_seq=cursor, senders=["alice"])
+        assert [e["msg_id"] for _s, e in fresh] == ["01E"]
+
+    def test_missing_store_is_empty(self, fake_home):
+        assert read_recent() == []
+
+
+class TestCmdTransactions:
+    def test_prints_recent_rows(self, fake_home, capsys):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob", detail="hello")
+        assert cmd_transactions([]) == 0
+        out = capsys.readouterr().out
+        assert "ROUTED" in out
+        assert "01A" in out
+        assert "from=Alice" in out
+        assert "to=Bob" in out
+        assert "detail=hello" in out
+
+    def test_event_filter(self, fake_home, capsys):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        log("DISCARDED", msg_id="01B", sender="Alice", recipient="Bob")
+        assert cmd_transactions(["--event", "discarded"]) == 0
+        out = capsys.readouterr().out
+        assert "01B" in out
+        assert "01A" not in out
+
+    def test_rejects_unknown_event(self, fake_home, capsys):
+        assert cmd_transactions(["--event", "NOPE"]) == 2
+        assert "unknown event" in capsys.readouterr().err
+
+    def test_rejects_non_positive_limit(self, fake_home, capsys):
+        assert cmd_transactions(["--limit", "0"]) == 2
+        assert "--limit must be a positive integer" in capsys.readouterr().err
+
+    def test_empty_store_reports_and_exits_one(self, fake_home, capsys):
+        assert cmd_transactions([]) == 1
+        assert "no transaction events" in capsys.readouterr().err
+
+    def test_empty_filter_says_no_match(self, fake_home, capsys):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        assert cmd_transactions(["--from", "nobody"]) == 1
+        assert "no matching transaction events" in capsys.readouterr().err
+
+    def test_msg_filter_uppercases(self, fake_home, capsys):
+        log("ROUTED", msg_id="01ABC", sender="Alice", recipient="Bob")
+        assert cmd_transactions(["--msg", "01abc"]) == 0
+        assert "01ABC" in capsys.readouterr().out
+
+    def test_follow_starts_after_the_backlog(self, fake_home, capsys, monkeypatch):
+        log("ROUTED", msg_id="01OLD", sender="Alice", recipient="Bob")
+        calls = {"n": 0}
+
+        def fake_sleep(_interval):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                log("ROUTED", msg_id="01NEW", sender="Alice", recipient="Bob")
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("time.sleep", fake_sleep)
+        assert cmd_transactions(["-f"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("01OLD") == 1
+        assert out.count("01NEW") == 1
+
+    def test_follow_on_empty_filter_does_not_replay_history(
+        self, fake_home, capsys, monkeypatch
+    ):
+        log("ROUTED", msg_id="01OLD", sender="Alice", recipient="Bob")
+
+        def fake_sleep(_interval):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("time.sleep", fake_sleep)
+        assert cmd_transactions(["-f", "--event", "DISCARDED"]) == 0
+        assert "01OLD" not in capsys.readouterr().out

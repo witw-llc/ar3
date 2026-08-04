@@ -28,12 +28,6 @@ structured fields, per-turn send quota, then either the node's real outbox
 recipient member's queue (intra-roster, no header, no round-trip). A reply is
 attributed to the thread of the message it answers.
 
-A turn can also end an obligation by sending nothing at all: it proposes
-`close_without_reply <thread>` in its output and `ack.py` validates eligibility
-before the ledger moves. That runs ahead of every reply path here, because a
-thread the member deliberately closed must not then be answered by the stdout
-fallback.
-
 Requeueing note: a8s treats exit 0 as the only delivery ack and redelivers the
 envelope (with backoff) when a wake exits nonzero. `handle_message` therefore
 acks early — it enqueues durably, then returns 0 whatever the turn does — so a
@@ -51,13 +45,13 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-import ack
 import isolate
 import knowledge
 import state
@@ -140,22 +134,6 @@ PROMPT_DEFAULTS: dict[str, str] = {
     "work_no_ack": (
         "- Do not send acknowledgment-only messages. If you have nothing "
         "substantive to add, send nothing — silence is fine."
-    ),
-    # Offered only to a member whose `Ack:` is on. Disqualifiers are phrased as
-    # OVERRIDES rather than positive triggers: every false close the #59
-    # experiments produced came from an obligation hidden under informational
-    # framing. The task layer allows a close only on a machine-originated
-    # thread, so the bullet says so — a proposal on any other thread is
-    # rejected and costs a nudge.
-    "work_close_without_reply": (
-        "- An automated notification that asks nothing of you gets closed, not "
-        "answered: print a line of its own reading exactly\n"
-        "        close_without_reply <thread>\n"
-        "    using that message's thread id from its header above, and send "
-        "nothing. Only machine-sent mail can be closed this way — a person or "
-        "a member is owed an answer. An assignment is still an assignment when "
-        "it is framed as an FYI, and a question is still a question — answer "
-        "those with a message instead."
     ),
     "work_body_only": (
         "- Your tell's body is the only thing the recipient sees — anything you "
@@ -657,7 +635,6 @@ def prompt_sections(
             *(members or ["    - (none)"]),
             ctx.prompt("work_direct"),
             ctx.prompt("work_no_ack"),
-            *([ctx.prompt("work_close_without_reply")] if member.ack else []),
             ctx.prompt("work_body_only"),
             ctx.prompt("work_commit"),
         ]),
@@ -942,7 +919,6 @@ def _ingest(
     config: RigConfig | None = None,
     files: list[dict] | None = None,
     bundle: Path | None = None,
-    dispatcher: bool = False,
 ) -> str:
     """Resolve the recipient and enqueue a structured r4t-message. Humans park
     in the seat; undeliverable mail dead-letters with an audit record; a
@@ -959,20 +935,27 @@ def _ingest(
     `Address:` — their doorbell reply is the human speaking, re-stamped to the
     seat so it routes and closes threads exactly like a chat/seat send.
 
-    `dispatcher` says r4t itself is opening this thread — the sweeps' own voice,
-    and the ledger's trust anchor for that fact. Ingress never sets it, so no
-    `--from` string can claim it (#83)."""
+    Routing also decides the thread's obligation: a thread opened from OUTSIDE
+    is owed nothing (#58), because out there r4t cannot enforce a reply and
+    must not pretend it can. Inside covers intra-roster traffic and the
+    roster's own human, whose doorbell mail is re-stamped to the seat above."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
         return SKIPPED
 
+    from_inside = internal
     if internal:
         _, sub = split_recipient(to)
     else:
         human = _human_by_address(roster, sender)
         if human is not None:
             sender = f"{ctx.node}:{human.name.lower()}"
+            # The roster's own human arrives through the doorbell like any
+            # outside sender, but they are a member: r4t knows who they are
+            # and can hold the roster to answering them. Their thread is owed
+            # an answer, so the wall is drawn AFTER this re-stamp (#58).
+            from_inside = True
         to = ctx.node
         sub = ""
         thread = None  # external mail always opens a fresh thread
@@ -1047,10 +1030,7 @@ def _ingest(
     if thread is None:
         thread = tasks.new_thread_id()
         hop = 0
-    tasks.ensure_task(
-        ctx.node, thread, sender, relay=not internal and klass == "auto",
-        dispatcher=dispatcher,
-    )
+    tasks.ensure_task(ctx.node, thread, sender, ingress=not from_inside)
 
     state.enqueue(
         ctx.node,
@@ -1610,16 +1590,6 @@ def _marshal_attachments(
     return bundle
 
 
-def _reply_thread(batch: list[dict], reply_target: str) -> str:
-    """The thread the stdout fallback would answer on — the newest message from
-    the reply target. Which obligation the fallback belongs to is what makes
-    ack suppression per-obligation instead of per-turn."""
-    for env_msg in reversed(batch):
-        if str(env_msg.get("from", "")) == reply_target:
-            return str(env_msg.get("thread", ""))
-    return ""
-
-
 def _run_turn(
     ctx: DispatchContext,
     config: RigConfig,
@@ -1794,25 +1764,8 @@ def _run_turn(
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
                 max_bytes=rig.history_max_bytes,
             )
-        # Propose -> validate -> commit, ahead of every reply path: a thread
-        # this turn deliberately closed must not then be answered by the
-        # stdout fallback, which exists to rescue members that do not know the
-        # protocol — and this one just spoke it. The suppression is per
-        # obligation, not per turn: it applies only when the thread the
-        # fallback would answer on is one of the threads just closed, so a
-        # batch that closed an FYI and answered a different thread in prose
-        # still delivers that answer.
-        closed = ack.run(ctx, member, rig, batch, output, roster=roster)
-        quiet = bool(closed) and _reply_thread(batch, reply_target) in closed
         if rig.echo:
             _stage_echo_reply(ctx, member, rig, reply_target, output)
-        elif quiet and not state.staged_envelopes(ctx.node, member.name):
-            state.append_log(
-                ctx.node,
-                f"r4t: ACK-QUIET {member.name.lower()} (rig {rig.name}) closed "
-                f"{len(closed)} thread(s) without replying; its "
-                f"{len(output.strip())} bytes of stdout stay transcript",
-            )
         elif not state.staged_envelopes(ctx.node, member.name):
             # The classic weak-rig shape: the model answers on stdout instead
             # of running `tell`. `tell` always wins — a turn that staged
@@ -1822,10 +1775,7 @@ def _run_turn(
             # `ProseReply: off` in the roster mutes that staging for a member
             # whose prose-only turns are noise, not answers; the quota signal
             # below still fires — a blank is a blank on any member.
-            # A rejected proposal leaves its protocol line in the transcript;
-            # the member's prose still deserves to reach whoever asked, the
-            # line it fumbled does not.
-            reply = clean_transcript(ack.strip_proposals(output))
+            reply = clean_transcript(output)
             if len(reply) > STDOUT_REPLY_MIN_CHARS and not reply_target:
                 _log_internal_only(ctx, member, rig, output)
             elif len(reply) > STDOUT_REPLY_MIN_CHARS and not member.prose_reply:
@@ -2057,6 +2007,70 @@ def handle_message(
     return 0
 
 
+def handle_batch(
+    ctx: DispatchContext,
+    raw_json: str,
+    *,
+    run_fn=run_harness,
+    drain_after: bool = True,
+) -> int:
+    """Ingest a JSON array of a8s envelopes from one batch wake, then drain
+    once. A malformed array is a hard error; per-entry failures (unreadable
+    envelopes, dead-letters, skips) do not abort the rest."""
+    try:
+        entries = json.loads(raw_json)
+    except (TypeError, ValueError):
+        print("dispatch: --batch must be a JSON array", file=sys.stderr)
+        return 2
+    if not isinstance(entries, list):
+        print("dispatch: --batch must be a JSON array", file=sys.stderr)
+        return 2
+
+    def unreadable(detail: str) -> None:
+        state.record_dead_letter(
+            ctx.node, reason="unreadable-envelope", sender="", to="",
+            thread="", content=detail[:2000],
+        )
+
+    senders: set[str] = set()
+    ingested = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            unreadable(repr(entry))
+            continue
+        if "_unreadable" in entry:
+            unreadable(f"{entry.get('_unreadable', '')}: {entry.get('error', '')}")
+            continue
+        # The wire is a boundary: a8s copies `content` through verbatim and
+        # never requires it to be a string, so one non-string field must
+        # dead-letter its own envelope rather than take the batch down.
+        fields = {k: entry.get(k) or "" for k in ("from", "to", "content")}
+        if any(not isinstance(v, str) for v in fields.values()):
+            unreadable(f"non-string envelope field: {entry!r}")
+            continue
+        sender = fields["from"]
+        if sender:
+            senders.add(sender)
+        _ingest(
+            ctx, sender, fields["to"], fields["content"].strip(),
+            klass=class_from_meta(json.dumps(entry.get("meta") or {})),
+            internal=_is_internal(ctx.node, sender),
+        )
+        ingested += 1
+
+    # Logged before the drain: the turn's own lines belong after the arrival
+    # that caused them, and a drain that dies must not take the record of
+    # what arrived with it.
+    state.append_log(
+        ctx.node,
+        f"r4t: BATCH ingested {ingested} of {len(entries)} message(s) from "
+        f"{', '.join(sorted(senders)) or '(none)'}",
+    )
+    if drain_after:
+        drain_until_quiet(ctx, run_fn=run_fn)
+    return 0
+
+
 def resting_note(ctx: DispatchContext, to: str) -> str | None:
     """A one-line note for the seat when a deliberate send lands on a resting
     member — the human is never blocked from sending, but should know the turn
@@ -2198,10 +2212,14 @@ def _quiet_task_sweep(
     `quiet_task_seconds`, wake the leader with a nudge to report current state
     (NOT to force-finish the work). Returns the threads nudged.
 
-    A relay thread is skipped: its originator is another cluster's machinery
-    (#167), so a status report to it is not attention owed — it is one more
-    inbound that peer must class and answer, which is how two rosters keep each
-    other awake forever. The nudge exists for whoever is actually waiting."""
+    An INGRESS thread is skipped, whoever sent it (#58). Outside the garden a8s
+    posts messages to nodes and nothing more; there is no reply obligation for
+    r4t to enforce and no way to acquire one without a decision point at every
+    node on the network. A thread that arrives from outside is a thread the
+    leader may answer or may not — that judgment is the leader's, and a
+    watchdog that second-guesses it just nudges forever. What the sweep still
+    owns is the inside: an intra-roster thread whose member never answered its
+    originator is a genuine dropped ball, because r4t knows both ends."""
     if config.quiet_task_seconds <= 0:
         return []
     if state.live_locks(ctx.node):
@@ -2214,7 +2232,7 @@ def _quiet_task_sweep(
     for task in tasks.list_tasks(ctx.node):
         if task.get("status") != tasks.STATUS_OPEN or task.get("answered"):
             continue
-        if task.get("relay"):
+        if task.get("ingress"):
             continue
         if tasks.last_activity(task) > cutoff:
             continue
@@ -2224,7 +2242,7 @@ def _quiet_task_sweep(
         _ingest(
             ctx, f"r4t:{ctx.node}", f"{ctx.node}:{leader.name.lower()}", body,
             klass="auto", internal=True, thread=thread_id, hop=0,
-            roster=roster, config=config, dispatcher=True,
+            roster=roster, config=config,
         )
         tasks.save_task(ctx.node, task)  # bump updated_at; won't re-fire until quiet again
         state.append_log(

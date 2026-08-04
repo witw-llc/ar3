@@ -25,6 +25,7 @@ import verdict
 from dispatch import (
     DispatchContext,
     class_from_meta,
+    handle_batch,
     handle_message,
     run_clear,
     run_flush,
@@ -516,6 +517,44 @@ def cmd_default(_args: argparse.Namespace) -> int:
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
+    if getattr(args, "batch", None) is not None:
+        if (
+            args.from_agent is not None
+            or args.to is not None
+            or args.message is not None
+            or args.meta
+        ):
+            print(
+                "dispatch: --batch cannot be combined with "
+                "--from/--to/--message/--meta",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            parsed = json.loads(args.batch)
+        except (TypeError, ValueError):
+            print("dispatch: --batch must be a JSON array", file=sys.stderr)
+            return 2
+        if not isinstance(parsed, list):
+            print("dispatch: --batch must be a JSON array", file=sys.stderr)
+            return 2
+        node = _node_from_batch(args.batch)
+        if not node:
+            node = _resolve_node(None)
+        if not node:
+            return 2
+        ctx = _context(args, node)
+        state.stamp_root(ctx.node, ctx.root)
+        return handle_batch(
+            ctx, args.batch, drain_after=not args.no_drain,
+        )
+    if args.from_agent is None or args.to is None or args.message is None:
+        print(
+            "dispatch: --from, --to, and --message are required "
+            "(or pass --batch)",
+            file=sys.stderr,
+        )
+        return 2
     node, _sub = split_recipient(args.to)
     if not node:
         print("dispatch: --to must carry the node name", file=sys.stderr)
@@ -527,6 +566,22 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         klass=class_from_meta(args.meta),
         drain_after=not args.no_drain,
     )
+
+
+def _node_from_batch(raw_json: str) -> str | None:
+    try:
+        entries = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict) or "_unreadable" in entry:
+            continue
+        node, _ = split_recipient(entry.get("to") or "")
+        if node:
+            return node.lower()
+    return None
 
 
 def cmd_clear(args: argparse.Namespace) -> int:
@@ -814,7 +869,7 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
             f"{task['id']}  creator={task.get('creator', '?')}  "
             f"status={task.get('status', '?')}"
             + ("  answered" if task.get("answered") else "")
-            + ("  relay" if task.get("relay") else ""),
+            + ("  ingress" if task.get("ingress") else ""),
             None,
         ))
     if not open_tasks:
@@ -2005,18 +2060,24 @@ def build_parser() -> argparse.ArgumentParser:
         "dispatch", description="Handle one delivered message (the a8s invoke entry)."
     )
     _add_common(dispatch_p)
-    dispatch_p.add_argument("--from", dest="from_agent", required=True)
+    dispatch_p.add_argument("--from", dest="from_agent", default=None)
     dispatch_p.add_argument(
         "--to",
-        required=True,
+        default=None,
         help="Full recipient as delivered ($RECIPIENT): <node> or <node>:<member>.",
     )
-    dispatch_p.add_argument("--message", required=True)
+    dispatch_p.add_argument("--message", default=None)
     dispatch_p.add_argument(
         "--meta",
         default="",
         help="Envelope metadata as JSON ($META): the sending cluster's "
         "protocol fields, of which r4t reads `class`.",
+    )
+    dispatch_p.add_argument(
+        "--batch",
+        default=None,
+        help="JSON array of a8s envelopes from a batch wake; mutually "
+        "exclusive with --from/--to/--message/--meta.",
     )
     dispatch_p.add_argument(
         "--no-drain",

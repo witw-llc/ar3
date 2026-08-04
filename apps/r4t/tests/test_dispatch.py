@@ -20,6 +20,7 @@ from dispatch import (
     RAN,
     drain,
     drain_until_quiet,
+    handle_batch,
     handle_message,
     run_harness,
     run_idle,
@@ -1922,10 +1923,11 @@ class TestAttachmentRelease:
 
 class TestExternalClassIngress:
     """Issue #167 — a peer cluster stamps `meta.class` on the a8s envelope and
-    the wake hands it over as `$META`. Machine-classed inbound is relay, not
-    attention: it delivers like any other message and opens a thread, but the
-    thread owes nobody a status report, which is what keeps two federated
-    rosters from nudging each other awake forever."""
+    the wake hands it over as `$META`, so a member can see what kind of traffic
+    it is holding. Issue #58 took the ledger off that signal: EVERY thread from
+    outside the roster is owed nothing, class or no class, because a8s posts
+    messages to nodes and has no notion of an expected reply. The class is
+    context for the reader; the wall decides the obligation."""
 
     def test_unmarked_external_mail_is_deliberate(self):
         assert dispatch.class_from_meta("") == "human"
@@ -1946,53 +1948,60 @@ class TestExternalClassIngress:
         # silently acquire meaning.
         assert dispatch.class_from_meta(raw) == "human"
 
-    def test_relay_mail_queues_as_auto_and_opens_a_relay_thread(self, ctx, r4t_home):
+    def test_ingress_owes_nothing_whatever_class_it_claims(self, ctx, r4t_home):
+        # The wire's class still rides the envelope for the member to read; it
+        # no longer decides whether an answer is owed. Outside is outside (#58).
         handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
-        queued = state.read_queue(NODE, "gerry")
-        assert [e["class"] for e in queued] == ["auto"]
-        assert tasks.list_tasks(NODE)[0]["relay"] is True
+        assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["auto"]
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_deliberate_mail_opens_a_thread_that_owes_a_report(self, ctx, r4t_home):
-        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+    def test_deliberate_ingress_owes_nothing_either(self, ctx, r4t_home):
+        # The case that closes #58: an unmarked outside sender used to open a
+        # thread the sweep chased forever. a8s cannot promise a reply for a
+        # node r4t does not own, so r4t stops acting as though it can.
+        handle_message(ctx, "beta", "acme", "ship it", drain_after=False)
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
-        assert tasks.list_tasks(NODE)[0]["relay"] is False
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_relay_thread_is_never_nudged(self, ctx, fake_harness):
-        handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
+    def test_ingress_thread_is_never_nudged(self, ctx, fake_harness):
+        handle_message(ctx, "beta", "acme", "roster sync", drain_after=False)
         task = tasks.list_tasks(NODE)[0]
         task["updated_at"] = "2020-01-01T00:00:00Z"
         state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
         assert run_idle(ctx)["quiet_nudged"] == []
 
-    def test_a_thread_the_human_opened_still_gets_nudged(self, ctx, fake_harness):
-        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+    def test_a_thread_the_roster_human_opened_still_gets_nudged(self, ctx, fake_harness):
+        # The human reaches the roster through the doorbell like any outside
+        # sender, but they are a MEMBER — r4t knows them and can hold the
+        # roster to answering them. Their thread keeps its backstop.
+        handle_message(ctx, "neil", "acme", "ship it", drain_after=False)
         task = tasks.list_tasks(NODE)[0]
+        assert task["ingress"] is False
         task["updated_at"] = "2020-01-01T00:00:00Z"
         state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
         assert run_idle(ctx)["quiet_nudged"] == [task["id"]]
 
-    def test_status_marks_the_relay_thread(self, ctx, repo, rig_config, r4t_home, capsys):
+    def test_status_marks_the_ingress_thread(self, ctx, repo, rig_config, r4t_home, capsys):
         # Why a thread is never nudged has to be visible to whoever is reading
         # the surface at 2am.
-        handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
+        handle_message(ctx, "beta", "acme", "roster sync", drain_after=False)
         r4t_main([
             "status", "--root", str(repo), "--node", NODE,
             "--rig-config", str(rig_config), "--no-notify",
         ])
         out = capsys.readouterr().out
-        assert "creator=beta" in out and "relay" in out
+        assert "creator=beta" in out and "ingress" in out
 
-    def test_internal_relay_keeps_the_originating_thread_owed(self, ctx, r4t_home):
-        # The class means the same thing inside the walls (member mail is relay
-        # too), but an intra-roster message rides an existing thread — the
-        # human's — and must not turn it into a relay thread.
-        handle_message(ctx, "boss", "acme", "ship it", drain_after=False)
+    def test_intra_roster_hop_keeps_the_originating_thread_owed(self, ctx, r4t_home):
+        # A delegation rides the thread it came in on — the human's — and must
+        # not relabel it. The flag is stamped at birth or never.
+        handle_message(ctx, "neil", "acme", "ship it", drain_after=False)
         thread_id = tasks.list_tasks(NODE)[0]["id"]
         dispatch._ingest(
             ctx, f"{NODE}:gerry", f"{NODE}:phil", "your turn",
             klass="auto", internal=True, thread=thread_id, hop=1,
         )
-        assert tasks.load_task(NODE, thread_id)["relay"] is False
+        assert tasks.load_task(NODE, thread_id)["ingress"] is False
 
 
 class TestQuietSweep:
@@ -2619,6 +2628,120 @@ class TestHistoryRigKnobs:
         assert "message truncated by r4t" in prompt
 
 
+class TestBatchIngress:
+    """a8s batch.format=envelopes → one --batch wake → N enqueues, one drain."""
+
+    def test_n_envelopes_one_turn(self, ctx, fake_harness):
+        raw = json.dumps([
+            {"from": "alice", "to": "acme", "content": "one", "meta": {}},
+            {"from": "bob", "to": "acme", "content": "two", "meta": {}},
+            {"from": "carol", "to": "acme", "content": "three", "meta": {}},
+        ])
+        assert handle_batch(ctx, raw) == 0
+        assert len(harness_calls(fake_harness)) == 1
+        prompt = read_prompt(harness_calls(fake_harness)[0])
+        assert "one" in prompt and "two" in prompt and "three" in prompt
+        assert (
+            "r4t: BATCH ingested 3 of 3 message(s) from alice, bob, carol"
+            in read_log()
+        )
+
+    def test_from_and_meta_class_reach_ledger_and_queue(self, ctx, fake_harness):
+        raw = json.dumps([
+            {
+                "from": "peer-a",
+                "to": "acme",
+                "content": "sync",
+                "meta": {"class": "auto"},
+            },
+            {
+                "from": "peer-b",
+                "to": "acme",
+                "content": "hello",
+                "meta": {"class": "human"},
+            },
+        ])
+        assert handle_batch(ctx, raw, drain_after=False) == 0
+        queued = state.read_queue(NODE, "gerry")
+        assert [e["class"] for e in queued] == ["auto", "human"]
+        assert [e["from"] for e in queued] == ["peer-a", "peer-b"]
+        creators = {t["creator"] for t in tasks.list_tasks(NODE)}
+        assert creators == {"peer-a", "peer-b"}
+
+    def test_ingress_threads_still_marked(self, ctx, fake_harness):
+        raw = json.dumps([
+            {"from": "outside", "to": "acme", "content": "hi", "meta": {}},
+        ])
+        assert handle_batch(ctx, raw, drain_after=False) == 0
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
+
+    def test_malformed_array_exits_nonzero(self, ctx, fake_harness):
+        assert handle_batch(ctx, "not-json") == 2
+        assert handle_batch(ctx, '{"from":"x"}') == 2
+        assert not harness_calls(fake_harness)
+        assert state.queue_depth(NODE, "gerry") == 0
+
+    def test_unreadable_dead_letters_rest_enqueue(self, ctx, fake_harness):
+        raw = json.dumps([
+            {"_unreadable": "bad.json", "error": "boom"},
+            {"from": "alice", "to": "acme", "content": "ok", "meta": {}},
+            {"from": "bob", "to": "acme", "content": "also", "meta": {}},
+        ])
+        assert handle_batch(ctx, raw, drain_after=False) == 0
+        assert "unreadable-envelope" in dead_reasons()
+        assert state.queue_depth(NODE, "gerry") == 2
+        assert [e["from"] for e in state.read_queue(NODE, "gerry")] == [
+            "alice", "bob",
+        ]
+
+    def test_non_string_field_dead_letters_only_its_own_envelope(
+        self, ctx, fake_harness
+    ):
+        # a8s copies `content` through verbatim and never requires a string,
+        # so a peer sending an object must not take the whole batch down.
+        raw = json.dumps([
+            {"from": "alice", "to": "acme", "content": {"oops": 1}, "meta": {}},
+            {"from": "bob", "to": "acme", "content": "survives", "meta": {}},
+        ])
+        assert handle_batch(ctx, raw, drain_after=False) == 0
+        assert "unreadable-envelope" in dead_reasons()
+        assert [e["from"] for e in state.read_queue(NODE, "gerry")] == ["bob"]
+
+    def test_batch_arrival_is_logged_before_the_turn(self, ctx, fake_harness):
+        raw = json.dumps([
+            {"from": "alice", "to": "acme", "content": "one", "meta": {}},
+            {"_unreadable": "bad.json", "error": "boom"},
+        ])
+        assert handle_batch(ctx, raw) == 0
+        lines = read_log().splitlines()
+        arrival = next(i for i, l in enumerate(lines) if "BATCH ingested" in l)
+        assert "ingested 1 of 2" in lines[arrival]
+        assert any("PROMPT" in l or "QUEUED" in l for l in lines[arrival + 1:])
+
+    def test_cli_batch_rejects_with_from(self, r4t_home, repo, rig_config, capsys):
+        rc = r4t_main([
+            "dispatch", "--root", str(repo),
+            "--batch", "[]",
+            "--from", "gerry",
+            "--rig-config", str(rig_config), "--no-notify",
+        ])
+        assert rc == 2
+        assert "cannot be combined" in capsys.readouterr().err
+
+    def test_cli_batch_end_to_end(self, r4t_home, repo, rig_config, fake_harness):
+        raw = json.dumps([
+            {"from": "alice", "to": "acme", "content": "a", "meta": {}},
+            {"from": "bob", "to": "acme", "content": "b", "meta": {"class": "auto"}},
+        ])
+        rc = r4t_main([
+            "dispatch", "--root", str(repo),
+            "--batch", raw,
+            "--rig-config", str(rig_config), "--no-notify",
+        ])
+        assert rc == 0
+        assert len(harness_calls(fake_harness)) == 1
+
+
 class TestCli:
     def run(self, *argv):
         return r4t_main(list(argv))
@@ -2633,8 +2756,8 @@ class TestCli:
         assert len(harness_calls(fake_harness)) == 1
 
     def test_dispatch_carries_the_envelope_class(self, r4t_home, repo, rig_config, fake_harness):
-        # The whole ingress half of #167: a8s expands `$META` into this flag and
-        # the thread it opens is relay, owed no report.
+        # a8s expands `$META` into this flag and the member gets to read it.
+        # It is context for the reader, not an obligation for the ledger.
         rc = self.run(
             "dispatch", "--root", str(repo), "--from", "beta",
             "--to", "acme", "--message", "roster sync",
@@ -2643,17 +2766,28 @@ class TestCli:
         )
         assert rc == 0
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["auto"]
-        assert tasks.list_tasks(NODE)[0]["relay"] is True
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_dispatch_without_meta_is_deliberate(self, r4t_home, repo, rig_config, fake_harness):
+    def test_dispatch_without_meta_is_still_ingress(self, r4t_home, repo, rig_config, fake_harness):
         rc = self.run(
-            "dispatch", "--root", str(repo), "--from", "boss",
+            "dispatch", "--root", str(repo), "--from", "beta",
             "--to", "acme", "--message", "ship it",
             "--rig-config", str(rig_config), "--no-notify", "--no-drain",
         )
         assert rc == 0
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
-        assert tasks.list_tasks(NODE)[0]["relay"] is False
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
+
+    def test_dispatch_from_the_roster_human_is_not_ingress(
+        self, r4t_home, repo, rig_config, fake_harness
+    ):
+        rc = self.run(
+            "dispatch", "--root", str(repo), "--from", "neil",
+            "--to", "acme", "--message", "ship it",
+            "--rig-config", str(rig_config), "--no-notify", "--no-drain",
+        )
+        assert rc == 0
+        assert tasks.list_tasks(NODE)[0]["ingress"] is False
 
     def test_dispatch_batches_queued_with_live(self, r4t_home, repo, rig_config, fake_harness):
         state.enqueue(

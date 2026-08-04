@@ -1604,8 +1604,9 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [-f|--follow] [--glow [theme]] [--heading-out T] [--heading-in T]` —
-    markdown history of messages to or from an agent."""
+    """`a8s convo <name> [--limit N] [-f|--follow] [--from NAME] [--glow [theme]]
+    [--heading-out T] [--heading-in T]` — markdown history of messages to or from
+    an agent."""
     import argparse
 
     from convo import (
@@ -1640,6 +1641,13 @@ def cmd_convo(args: list[str]) -> int:
         default=10,
         metavar="N",
         help="number of recent messages to show (default: 10)",
+    )
+    parser.add_argument(
+        "--from",
+        dest="senders",
+        action="append",
+        metavar="NAME",
+        help="only messages sent by NAME (repeat for several senders)",
     )
     parser.add_argument(
         "--glow",
@@ -1695,12 +1703,13 @@ def cmd_convo(args: list[str]) -> int:
                 heading_out=heading_out,
                 heading_in=heading_in,
                 glow_theme=glow_theme,
+                senders=parsed.senders,
             )
         except KeyboardInterrupt:
             pass
         return 0
 
-    rows = load_agent_entries(agent_name, limit=parsed.limit)
+    rows = load_agent_entries(agent_name, limit=parsed.limit, senders=parsed.senders)
     if glow_theme is not None:
         glow_stream = None
         try:
@@ -1725,13 +1734,121 @@ def cmd_convo(args: list[str]) -> int:
         limit=parsed.limit,
         heading_out=heading_out,
         heading_in=heading_in,
+        senders=parsed.senders,
     )
     if text:
         print(text)
     return 0
 
 
-# ---------- trace / logs ----------
+# ---------- transactions / trace / logs ----------
+
+def _format_tx(event: dict[str, str], *, show_id: bool = True) -> str:
+    fields = [event["timestamp"], event["event"]]
+    if show_id and event["msg_id"]:
+        fields.append(event["msg_id"])
+    for key in ("from", "to", "remote", "files", "detail"):
+        if event[key]:
+            fields.append(f"{key}={event[key]}")
+    return " ".join(fields)
+
+
+def cmd_transactions(args: list[str]) -> int:
+    """`a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID]`
+    — recent routing events across every message."""
+    import argparse
+    import time
+
+    from txlog import EVENTS, read_recent
+
+    parser = argparse.ArgumentParser(
+        prog="a8s transactions",
+        description="Show recent routing events. Alias: a8s tx.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "events:\n  " + "\n  ".join(EVENTS) + "\n\n"
+            "examples:\n"
+            "  a8s tx --limit 40\n"
+            "  a8s tx -f --event DISCARDED --event FILE_UPLOAD_FAILED\n"
+            "  a8s tx --from neil-phone --to ares\n\n"
+            "`a8s trace <ULID>` follows one envelope end to end; this is the view\n"
+            "for when you do not have a ULID yet. Retention is `txlog_max_rows`.\n"
+        ),
+    )
+    parser.add_argument(
+        "-f", "--follow", action="store_true", help="print recent rows, then new ones as they land"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=20, metavar="N", help="rows to show (default: 20)"
+    )
+    parser.add_argument(
+        "--event", dest="events", action="append", metavar="E",
+        help="only this event type (repeat for several)",
+    )
+    parser.add_argument(
+        "--from", dest="senders", action="append", metavar="NAME",
+        help="only messages sent by NAME (repeat for several)",
+    )
+    parser.add_argument(
+        "--to", dest="recipients", action="append", metavar="NAME",
+        help="only messages addressed to NAME (repeat for several)",
+    )
+    parser.add_argument("--msg", default="", metavar="ULID", help="only this envelope")
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as e:
+        return int(e.code if e.code is not None else 0)
+    if parsed.limit < 1:
+        print("a8s transactions: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    known = {e.lower() for e in EVENTS}
+    unknown = [e for e in (parsed.events or []) if e.strip().lower() not in known]
+    if unknown:
+        print(
+            f"a8s transactions: unknown event {unknown[0]!r} "
+            f"(known: {', '.join(EVENTS)})",
+            file=sys.stderr,
+        )
+        return 2
+    msg_id = parsed.msg.upper() if parsed.msg else ""
+
+    filters = {
+        "events": parsed.events,
+        "senders": parsed.senders,
+        "recipients": parsed.recipients,
+        "msg_id": msg_id,
+    }
+    rows = read_recent(limit=parsed.limit, **filters)
+    for _seq, event in rows:
+        print(_format_tx(event), flush=True)
+    if not parsed.follow:
+        if not rows:
+            narrowed = any(filters.values())
+            print(
+                "no matching transaction events" if narrowed else "no transaction events",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
+    # An empty filtered backlog must still start from the table's high-water
+    # mark, or the first poll replays every row that predates the command.
+    if rows:
+        cursor = rows[-1][0]
+    else:
+        newest = read_recent(limit=1)
+        cursor = newest[-1][0] if newest else 0
+    try:
+        while True:
+            time.sleep(1.0)
+            fresh = read_recent(after_seq=cursor, **filters)
+            for seq, event in fresh:
+                print(_format_tx(event), flush=True)
+                cursor = seq
+    except KeyboardInterrupt:
+        pass
+    return 0
+
 
 def cmd_trace(args: list[str]) -> int:
     if len(args) != 1 or not is_ulid(args[0]):
@@ -1744,11 +1861,7 @@ def cmd_trace(args: list[str]) -> int:
         return 1
     print(f"trace {msg_id}")
     for event in events:
-        fields = [event["timestamp"], event["event"]]
-        for key in ("from", "to", "remote", "files", "detail"):
-            if event[key]:
-                fields.append(f"{key}={event[key]}")
-        print("  " + " ".join(fields))
+        print("  " + _format_tx(event, show_id=False))
     return 0
 
 
@@ -2076,9 +2189,16 @@ def _storage_usage() -> int:
         "       a8s storage <name> <url> [--<k> <v> ...]             # add or overwrite\n"
         "       a8s unstorage <name>                                 # remove\n"
         "\n"
-        "The service kind is auto-dispatched from the URL host. Any --<opt> <value>\n"
+        "The service kind is auto-dispatched from the URL. Any --<opt> <value>\n"
         "pair past the URL is passed verbatim to the service (e.g. --expiry_hours\n"
-        "for tempfile.org). Unknown options are rejected by the service at load time.",
+        "for tempfile.org). Unknown options are rejected by the service at load time.\n"
+        "\n"
+        "  a8s storage scratch https://tempfile.org --expiry_hours 24\n"
+        "  a8s storage bucket  s3://my-bucket/a8s --region us-west-2\n"
+        "\n"
+        "s3 needs boto3 (pip install -r requirements/a8s-s3.txt) and uses the\n"
+        "standard AWS credential chain; it returns presigned URLs so a receiver\n"
+        "needs no credentials of its own.",
         file=sys.stderr,
     )
     return 2
@@ -2162,7 +2282,7 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     kind = detect_service_kind(url)
     if kind is None:
         print(
-            f"no storage service matches URL {url!r} (known kinds: tempfile_org)",
+            f"no storage service matches URL {url!r} (known kinds: tempfile_org, s3)",
             file=sys.stderr,
         )
         return 2

@@ -20,7 +20,7 @@ Every turn, `dispatch.py` runs the rig's argv with:
   workplace repo**.
 
 `tell` (via `apps/a8s/tell.py`) finds its outbox **only** from
-`$TELL_OUTBOX_DIR` — it no longer walks up from CWD. On each send it does
+`$TELL_OUTBOX_DIR` — never by walking up from CWD. On each send it does
 `mkdir -p $TELL_OUTBOX_DIR` and writes a probe file there; if that write
 fails it prints `cannot send from this directory` /
 `TELL_OUTBOX_DIR is set but outbox is unavailable` and exits 1.

@@ -472,14 +472,25 @@ def build_idle_command(
     )
 
 
+DEFAULT_BATCH_PAUSE_SECONDS = 3.0
+
+
 def pause_seconds(definition: dict) -> float:
+    """Seconds of inbox quiet before a wake fires. An agent that declares
+    `batch.invoke` debounces by default, because collecting a burst is the
+    whole reason it asked to be woken in batches; everything else stays
+    immediate. An explicit `0` is honored as off — only an absent or
+    unreadable value falls back to the default."""
+    default = (
+        DEFAULT_BATCH_PAUSE_SECONDS if has_batch_invoke(definition) else 0.0
+    )
     raw = definition.get("pause")
     if raw is None:
-        return 0.0
+        return default
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return 0.0
+        return default
     return v if v > 0 else 0.0
 
 
@@ -515,6 +526,20 @@ def batch_limit(definition: dict) -> int:
     return max(1, v)
 
 
+def batch_format(definition: dict) -> str:
+    """`batch.format`: `"envelopes"` only when that exact word is set
+    (case-insensitive, stripped); anything else, including absent or
+    garbage, is `"prompt"`. Unknown words must never silently acquire
+    meaning."""
+    batch = definition.get("batch")
+    if not isinstance(batch, dict):
+        return "prompt"
+    raw = batch.get("format")
+    if not isinstance(raw, str):
+        return "prompt"
+    return "envelopes" if raw.strip().lower() == "envelopes" else "prompt"
+
+
 class BatchEntry(NamedTuple):
     """One inbox envelope handed to `build_batch_command`. `msg` is the
     parsed envelope dict; it is None if the file failed to parse, in which
@@ -544,8 +569,9 @@ def format_batch_placeholder(name: str, error: str) -> str:
 
 
 def build_batch_prompt(recipient: str, entries: list[BatchEntry]) -> str:
-    """Compose the single prompt string passed to `batch.invoke`: the same
-    header `build_command` implies via the single-message CLI convention,
+    """Compose the single prompt string passed to `batch.invoke` when
+    `batch.format` is `"prompt"` (the default): the same header
+    `build_command` implies via the single-message CLI convention,
     followed by one '----' block per entry (or a placeholder for one that
     failed to parse).
 
@@ -575,6 +601,22 @@ def build_batch_prompt(recipient: str, entries: list[BatchEntry]) -> str:
     return "\n".join(blocks)
 
 
+def build_batch_envelopes(entries: list[BatchEntry]) -> str:
+    """Compact JSON array of parsed envelopes for `batch.format: envelopes`.
+    An unreadable entry becomes `{"_unreadable": <name>, "error": <error>}`
+    so the wake still accounts for every file it trashed."""
+    out: list[dict] = []
+    for entry in entries:
+        if entry.msg is None:
+            out.append({
+                "_unreadable": entry.name,
+                "error": entry.error or "unknown error",
+            })
+        else:
+            out.append(entry.msg)
+    return json.dumps(out, sort_keys=True, separators=(",", ":"))
+
+
 def build_batch_command(
     definition: dict,
     agent_name: str,
@@ -583,8 +625,8 @@ def build_batch_command(
     vars: dict[str, str] | None = None,
 ) -> list[str]:
     """Expand `batch.invoke` like idle (no incoming message) and append ONE
-    composed prompt string (see `build_batch_prompt`) as the trailing argv
-    element — not raw envelope paths."""
+    trailing argv element: a composed prose prompt (`batch.format` absent or
+    `"prompt"`) or a JSON array of envelopes (`"envelopes"`)."""
     batch = definition.get("batch")
     if not isinstance(batch, dict):
         raise ValueError("definition missing 'batch'")
@@ -594,7 +636,10 @@ def build_batch_command(
     cmd = _expand_argv(
         list(argv), "", agent_name, "", "", "", definition_path, vars=vars
     )
-    cmd.append(build_batch_prompt(agent_name, entries))
+    if batch_format(definition) == "envelopes":
+        cmd.append(build_batch_envelopes(entries))
+    else:
+        cmd.append(build_batch_prompt(agent_name, entries))
     return cmd
 
 

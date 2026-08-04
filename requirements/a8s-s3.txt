@@ -1,0 +1,3 @@
+# Optional: the s3 storage service (`a8s storage <name> s3://bucket`).
+# Not needed unless S3 or an S3-compatible endpoint is configured.
+boto3>=1.34

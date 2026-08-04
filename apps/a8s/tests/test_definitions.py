@@ -564,19 +564,33 @@ class TestLoadDefinition:
 # ---------- batch invoke ----------
 
 class TestPauseSeconds:
-    def test_zero_when_missing(self):
+    def test_default_three_when_batch_invoke_and_pause_absent(self):
+        from definitions import pause_seconds
+        assert pause_seconds({"invoke": ["x"], "batch": {"invoke": ["y"]}}) == 3.0
+
+    def test_zero_when_no_batch_invoke(self):
         from definitions import pause_seconds
         assert pause_seconds({"invoke": ["x"]}) == 0.0
 
-    def test_returns_positive_float(self):
+    def test_honors_explicit_zero(self):
         from definitions import pause_seconds
-        assert pause_seconds({"invoke": ["x"], "pause": 3}) == 3.0
-        assert pause_seconds({"invoke": ["x"], "pause": "2.5"}) == 2.5
+        assert pause_seconds({
+            "invoke": ["x"], "pause": 0, "batch": {"invoke": ["y"]},
+        }) == 0.0
 
-    def test_zero_or_negative_or_garbage_disables(self):
+    def test_honors_explicit_number(self):
         from definitions import pause_seconds
-        assert pause_seconds({"invoke": ["x"], "pause": 0}) == 0.0
+        assert pause_seconds({
+            "invoke": ["x"], "pause": 1.5, "batch": {"invoke": ["y"]},
+        }) == 1.5
+        assert pause_seconds({"invoke": ["x"], "pause": "2.5"}) == 2.5
         assert pause_seconds({"invoke": ["x"], "pause": -1}) == 0.0
+
+    def test_garbage_treated_as_absent(self):
+        from definitions import pause_seconds
+        assert pause_seconds({
+            "invoke": ["x"], "pause": "soon", "batch": {"invoke": ["y"]},
+        }) == 3.0
         assert pause_seconds({"invoke": ["x"], "pause": "soon"}) == 0.0
 
 
@@ -666,6 +680,111 @@ class TestBatchInvoke:
 
         placeholder = format_batch_placeholder("bad.json", "boom")
         assert placeholder == "---- [unreadable message file bad.json: boom]"
+
+    def test_batch_format_defaults_to_prompt(self):
+        from definitions import batch_format
+        assert batch_format({"invoke": ["x"]}) == "prompt"
+        assert batch_format({"invoke": ["x"], "batch": {"invoke": ["y"]}}) == "prompt"
+        assert batch_format({
+            "invoke": ["x"],
+            "batch": {"invoke": ["y"], "format": "prompt"},
+        }) == "prompt"
+
+    def test_batch_format_unknown_falls_back_to_prompt(self):
+        from definitions import batch_format
+        for garbage in ("json", "ENVELOPE", "  ", 12, None, True, []):
+            defn = {"invoke": ["x"], "batch": {"invoke": ["y"], "format": garbage}}
+            assert batch_format(defn) == "prompt"
+
+    def test_batch_format_envelopes_case_insensitive(self):
+        from definitions import batch_format
+        for word in ("envelopes", "Envelopes", "ENVELOPES", " envelopes "):
+            defn = {"invoke": ["x"], "batch": {"invoke": ["y"], "format": word}}
+            assert batch_format(defn) == "envelopes"
+
+    def test_prompt_path_byte_identical_with_explicit_format(self):
+        from definitions import BatchEntry, build_batch_command
+        entries = [
+            BatchEntry(
+                {"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi",
+                 "to": "neil", "meta": {"class": "auto"}},
+                "a.json",
+            ),
+        ]
+        bare = {"invoke": ["x"], "batch": {"invoke": ["agent", "--batch"]}}
+        explicit = {
+            "invoke": ["x"],
+            "batch": {"invoke": ["agent", "--batch"], "format": "prompt"},
+        }
+        assert build_batch_command(bare, "neil", entries) == (
+            build_batch_command(explicit, "neil", entries)
+        )
+
+    def test_envelopes_format_appends_parseable_json(self):
+        from definitions import BatchEntry, build_batch_command
+        import json
+        entries = [
+            BatchEntry(
+                {
+                    "from": "alice",
+                    "to": "acme:phil",
+                    "date": "2026-04-28T14:30:00Z",
+                    "content": "do the thing",
+                    "meta": {"class": "auto", "extra": 1},
+                },
+                "a.json",
+            ),
+            BatchEntry(
+                {
+                    "from": "bob",
+                    "to": "acme",
+                    "date": "2026-04-28T14:29:00Z",
+                    "content": "also this",
+                    "meta": {},
+                },
+                "b.json",
+            ),
+        ]
+        defn = {
+            "invoke": ["x"],
+            "batch": {
+                "invoke": ["r4t", "dispatch", "--batch"],
+                "format": "envelopes",
+            },
+        }
+        argv = build_batch_command(defn, "acme", entries)
+        assert argv[:3] == ["r4t", "dispatch", "--batch"]
+        assert len(argv) == 4
+        payload = json.loads(argv[-1])
+        assert isinstance(payload, list) and len(payload) == 2
+        assert payload[0]["from"] == "alice"
+        assert payload[0]["to"] == "acme:phil"
+        assert payload[0]["content"] == "do the thing"
+        assert payload[0]["meta"] == {"class": "auto", "extra": 1}
+        assert payload[1]["from"] == "bob"
+        assert payload[1]["to"] == "acme"
+        assert payload[1]["content"] == "also this"
+
+    def test_envelopes_unreadable_appears_as_marker(self):
+        from definitions import BatchEntry, build_batch_command
+        import json
+        entries = [
+            BatchEntry(
+                {"from": "A", "to": "acme", "content": "hi"}, "a.json",
+            ),
+            BatchEntry(None, "corrupt.json", "Expecting value: line 1"),
+        ]
+        defn = {
+            "invoke": ["x"],
+            "batch": {"invoke": ["agent"], "format": "envelopes"},
+        }
+        payload = json.loads(build_batch_command(defn, "acme", entries)[-1])
+        assert payload[0]["from"] == "A"
+        assert payload[1] == {
+            "_unreadable": "corrupt.json",
+            "error": "Expecting value: line 1",
+        }
+        assert len(payload) == 2
 
 
 # ---------- build_idle_command + idle_timeout_seconds ----------

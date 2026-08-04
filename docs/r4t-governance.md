@@ -136,20 +136,23 @@ an open thread whose originator is unanswered sees no activity for
 state — NOT to force-finish the work. The human, or the leader, decides what
 "done" means; r4t only makes sure the originator is not left in silence.
 
-The sweep only makes sense because a thread has a way to end without a
-message. A member closes a machine-originated obligation that asks nothing of
-it with `close_without_reply` — validated by the task layer against the ledger,
-never by the model ([r4t-ack.md](r4t-ack.md)) — so an open quiet thread means a
-dropped ball rather than a member exercising judgment the machinery cannot
-hear. A thread a person opened is never closable that way, so the sweep's own
-nudge can never be waved off.
+**The sweep watches the inside only.** A thread that arrived from outside the
+roster is owed nothing and is never nudged, whoever sent it and whatever the
+envelope claims. Beyond the wall a8s posts messages to nodes and stops there:
+it has no notion of a reply being expected, and giving it one would put a
+decision point on every node of a network r4t does not own. So a message
+arriving from outside is an offer, not a debt — the leader answers it or does
+not, and that judgment is the leader's. A leader that goes quiet on outside
+mail is no different from any lone agent that reads a message and moves on.
 
-A thread opened by relayed mail — an inbound the sending cluster marked
-`meta.class: auto` (see [r4t-message-flow.md](r4t-message-flow.md#class-across-the-wall))
-— is skipped. Its originator is another cluster's machinery, so a status report
-to it is not attention owed; it is one more inbound that peer must answer, which
-is how two rosters keep each other awake forever. The nudge exists for whoever
-is actually waiting.
+Inside the wall the obligation is real, because r4t holds both ends: a member
+that never answered its originator is a dropped ball, and that is what the
+nudge is for. The roster's own human counts as inside — their mail arrives
+through the doorbell like any outside sender, but they are a member, so their
+thread keeps its backstop.
+
+Nudges are the only thing the sweep does, and they are deliberately dull: it
+asks for current state, never for the work to be finished.
 
 Prior art: Erlang/OTP supervision — a bounded, rate-limited recovery action
 rather than an unbounded retry loop.

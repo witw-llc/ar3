@@ -223,7 +223,8 @@ any prefixes pointing at it.
 | `tell <name> [<msg>\|-]` (top-level shim, `tell` at the repo root) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when the a8s state root is readable (see [filedrop.md](a8s-filedrop.md)). Drops a JSON envelope. When the registry is reachable, `from` stamping applies; recipient validation applies only when the resolved outbox is a registered one (a staging outbox belongs to another router — see [a8s-tell.md](a8s-tell.md#who-validates-the-recipient)). Windows: `tell.cmd`. Operator internals: [a8s-tell.md](a8s-tell.md). |
 | `tells [-f] [--timeout SEC] [--body-max N] [--glow [theme]]` (shim `tells` at the repo root) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited) print a `python3 -c` recovery command for the inbox JSON. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
-| `a8s convo <name> [--limit N] [-f] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `a8s update` retains `convo_max_rows` rows (default 50000). |
+| `a8s convo <name> [--limit N] [-f] [--from NAME] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `--from NAME` (repeatable, case-insensitive) keeps only that sender's messages, in the backlog and under `-f`; the limit counts matches, not rows scanned. `a8s update` retains `convo_max_rows` rows (default 50000). |
+| `a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID]` (alias `a8s tx`) | Recent routing events across every message, oldest first. `--event` (repeatable, checked against the known set), `--from`/`--to` and `--msg` narrow it; `-f` polls for new rows once a second. Use it when you do not have a ULID yet — `--event DISCARDED --event FILE_UPLOAD_FAILED` is the "did anything get lost" view. Same `transactions.sqlite3` and the same `txlog_max_rows` retention as `trace`. |
 | `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. Rows come from `transactions.sqlite3`; `a8s update` retains `txlog_max_rows` (default 200000). |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
 | `a8s mcp serve`                                                             | Stdio MCP server (`apps/a8s/mcp_server.py`) registering server `a8s` with tool `tell` — the model sees `a8s_tell`. A harness spawns it as a child of the turn, so it inherits `TELL_OUTBOX_DIR`; the body arrives as a JSON argument and is delivered through `a8s tell <recipient> -`, so no shell touches it. Point a harness at it with the config idiom it accepts (r4t does this per turn behind `r4t rig set <rig> mcp on`). `A8S_MCP_LOG` appends one JSON line per tool call. |
@@ -376,7 +377,10 @@ This subsumes the retired `clear` use-case: define an idle invoke that runs what
 
 ### Batch invoke (optional)
 
-Agents that can process multiple tells in one subprocess can declare a `batch` block. When **two or more** inbox messages are waiting, a8s wakes once with `batch.invoke` plus the message JSON file paths as trailing argv elements (shell-style — no extra placeholder).
+Agents that can process multiple tells in one subprocess can declare a `batch`
+block. When **two or more** inbox messages are waiting, a8s wakes once with
+`batch.invoke` and appends a single trailing argv element — never raw envelope
+file paths.
 
 ```json
 {
@@ -389,14 +393,17 @@ Agents that can process multiple tells in one subprocess can declare a `batch` b
 }
 ```
 
-- `pause` — seconds to wait after the first inbox message of a burst before waking. Closely-spaced tells accumulate across handler iterations so `batch` is more likely to fire. `0` or omitted = wake as soon as the loop drains (previous behavior).
+- `pause` — trailing-edge quiet period in seconds: wake when no new inbox message has arrived for this long. Defaults to **3** when `batch.invoke` is declared (so a streaming burst rides one wake); defaults to **0** (immediate) when it is not. Explicit `0` disables the wait. The inbox reaching `batch.limit` messages wakes immediately — the bound that keeps a steady trickle from waiting forever.
 - `batch.invoke` — argv template with the same substitutions as `invoke` / `idle.invoke`.
-- `batch.limit` — max messages per batch wake; defaults to **5**.
+- `batch.limit` — max messages per batch wake; defaults to **5**. Also the escape hatch for `pause`: an inbox at this depth wakes without waiting for quiet.
+- `batch.format` — how the trailing argv element is shaped:
+  - `"prompt"` (default) — one composed prose prompt: a short header naming the recipient, then one `----` block per message (`"{sender} sent ({age}): {content}"`). Unreadable files become a visible `[unreadable message file …]` placeholder. Right for prompt-consuming CLI agents.
+  - `"envelopes"` — a compact JSON array of the parsed envelope dicts (`from`, `to`, `content`, `meta`, …). An unreadable file becomes `{"_unreadable": <name>, "error": <error>}` so the wake still accounts for every file it trashed. Right for routers (r4t) that must not re-parse prose for identity.
+  - Any other value, including absent, is `"prompt"`.
 - One waiting message still uses normal `invoke` (unchanged).
-- Paths point at the trashed inbox JSON files (under `agents/<NAME>/trash/` in the a8s state root), appended after the expanded `batch.invoke` argv.
 - Batch argv expansion matches idle: `$RECIPIENT` is the agent's own name; `$SENDER` / `$MESSAGE` / `$TIMESTAMP` / `$AGE` are empty.
 
-Debounce mechanics: on the first inbox message, a8s stamps `agents/<NAME>/inbox-waiting-since` under the a8s state root and skips waking until `pause` seconds elapse. Each loop iteration re-routes outboxes, so messages that arrive during the wait window join the inbox before the wake decision. The stamp clears when the inbox drains or a wake fires.
+Debounce mechanics: readiness is measured from the newest inbox message's mtime. A new arrival resets the quiet clock; once `pause` seconds pass with nothing newer, or the inbox depth hits `batch.limit`, the wake fires. `agents/<NAME>/inbox-waiting-since` under the a8s state root is a once-per-burst log marker only — it does not drive readiness. Each loop iteration re-routes outboxes, so messages that arrive during the wait join the inbox before the next wake decision. The stamp clears when the inbox drains or a wake fires.
 
 ### Delivery ack and retry
 
@@ -420,7 +427,7 @@ When `A8S_HOME` is set it is the a8s state root, whatever else exists on disk. U
 ├── secrets.json              remote secrets (`pass` / `password`; mode 0600)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
 ├── conversations.sqlite3     routed message archive (`a8s update` retains convo_max_rows)
-├── transactions.sqlite3      routing breadcrumbs for `a8s trace` (retains txlog_max_rows)
+├── transactions.sqlite3      routing breadcrumbs for `a8s tx` / `a8s trace` (retains txlog_max_rows)
 ├── log.txt                   process-scoped supervisor log
 └── agents/
     └── <NAME>/
@@ -521,16 +528,20 @@ apps/a8s/
 └── tests/
     ├── agents/       per-tool fixture dirs (CLAUDE/GEMINI/CODEX/Llama)
     ├── fixtures/     mock-cli + mock.json for end-to-end tests
-    ├── requirements.txt   test-only deps (paho-mqtt for transport tests)
+    ├── requirements.txt   test-only deps (pytest, paho-mqtt for transport)
+    ├── run           builds/reuses tests/.venv, then execs pytest
     ├── conftest.py   pytest scaffolding (sys.path + fake_home fixture)
-    └── test_*.py     ~230 tests, runs in <3s
+    └── test_*.py     ~875 tests, runs in ~30s
 ```
 
 ## Testing
 
 ```bash
-python3 -m pytest apps/a8s/tests/
+apps/a8s/tests/run
 ```
+
+`tests/run` builds and reuses `tests/.venv` from `tests/requirements.txt`, so
+pytest stays out of the system python; extra arguments pass through to pytest.
 
 Tests are isolated via a `fake_home` fixture that monkey-patches `HOME` to a tmp dir, so they never touch the real a8s state root. The daemon tests run real subprocesses against `tests/fixtures/mock-cli` (a deterministic bash script that echoes its argv) so wake_once's argv expansion and routing fan-out can be asserted on the per-agent log.
 

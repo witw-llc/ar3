@@ -319,6 +319,7 @@ class TestFailureModesKeepMailDeliverable:
         _register(
             tmp_path,
             {
+                "pause": 0,
                 "invoke": [str(fixtures_dir / "mock-flaky-cli"), "SINGLE"],
                 "batch": {
                     "invoke": [str(fixtures_dir / "mock-flaky-cli"), "BATCH"],

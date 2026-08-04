@@ -201,9 +201,7 @@ log); the same rule holds the `STDOUT-REPLY` fallback on non-echo rigs. A batch
 mixing r4t's prompt with a real message still replies to the real sender.
 On non-echo rigs, `- **ProseReply:** off` on a roster member (default on) mutes
 the `STDOUT-REPLY` fallback for that member: its prose-only turns log `SILENT`
-instead of staging a reply. `- **Ack:** off` (also default on) is the separate
-knob for the opposite move — revoking the member's `close_without_reply`
-([r4t-ack.md](r4t-ack.md)), which ends an obligation with no message at all.
+instead of staging a reply.
 
 ## The `a8s_tell` tool (`mcp`)
 
@@ -310,6 +308,6 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
 | `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Roster-wide pile-ups |
 | `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
-| `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
+| `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state. 0 disables the sweep | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
 | `log_retention_days` | 14 | Days of roster transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
 | `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |

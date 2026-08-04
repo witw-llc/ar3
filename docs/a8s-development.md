@@ -11,7 +11,9 @@ Read [a8s.md](a8s.md) first for concept and usage.
   expands via `definitions._expand_argv`. Vars are registry-backed (`a8s vars`),
   not OS environment. Used-but-unset raises `UndefinedVarsError` before spawn.
   Per-message wakes use `invoke` via `build_command`; batch wakes use
-  `batch.invoke` via `build_batch_command` with a composed prompt appended.
+  `batch.invoke` via `build_batch_command`, appending either a composed
+  prose prompt (`batch.format` absent/`"prompt"`) or a JSON array of
+  envelopes (`"envelopes"`).
 - **`core.PRINT_LOCK` is the cross-module log lock.** Only set when
   `daemon.attached_loop` starts.
 - **`run_with_prefix` uses `start_new_session=True`** — don't drop this.
@@ -26,7 +28,18 @@ Read [a8s.md](a8s.md) first for concept and usage.
   writes sidecars there. Ingest is atomic rename into `pending/`.
 - **Remote routing publishes to all configured remotes.** Receivers dedupe by ULID.
 - **Cross-cluster `FILE:` payloads ride storage services.** Configured under
-  `network.json`'s `services` map (separate from `remotes`).
+  `network.json`'s `services` map (separate from `remotes`). Two kinds ship:
+  `tempfile_org` (zero-signup, ephemeral) and `s3` (`s3://bucket[/prefix]`,
+  any S3-compatible endpoint). A new kind implements `StorageService` and
+  registers in two places in `network.py` — `_build_service` and
+  `detect_service_kind`.
+- **`s3` returns presigned URLs, not `s3://` URIs.** The capability to fetch
+  travels inside the envelope, so a receiving cluster needs no AWS credentials
+  and there is one code path instead of a mode switch. boto3 is a lazy,
+  optional import (`requirements/a8s-s3.txt`) chosen for its credential chain:
+  an operator who grants a machine an IAM role gets working uploads with no
+  a8s-side secret handling. Keys sit under a prefix (default `a8s`) so bucket
+  lifecycle rules own expiry — nothing in a8s deletes objects.
 - **Storage services are stateless.** No start/stop lifecycle.
 - **Absolute attachment paths in wake prompts.** Delivered messages append `ATTACHED FILE: <absolute-path>` lines (not bare `FILE:`). Path comes from definition `files_dir` (default `.files` under agent root) plus `<msg_id>/<filename>`.
 - **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `<files_dir>/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).
@@ -57,9 +70,9 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `a8s convo <agent>` — not per-agent storage; `--limit` only controls display.
 - **`transactions.sqlite3` holds routing breadcrumbs, not bodies.** Several rows
   per message, written concurrently by the router, wake handlers, and receive
-  loops. `txlog.log` never raises; `a8s trace <ULID>` is the only reader and
-  `a8s update` retains `txlog_max_rows`. Both stores share the WAL/busy-retry
-  discipline in `sqlite_store.py`.
+  loops. `txlog.log` never raises; `a8s trace <ULID>` and `a8s transactions`
+  are the only readers, and `a8s update` retains `txlog_max_rows`. Both
+  stores share the WAL/busy-retry discipline in `sqlite_store.py`.
 
 ## Per-tool quirks
 

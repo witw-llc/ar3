@@ -1,2 +1,3 @@
+pytest
 # Canonical deps: requirements/a8s-test.txt
 -r ../../../requirements/a8s-test.txt

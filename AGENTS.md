@@ -26,8 +26,10 @@ shipped artifact under its own license (CC BY-NC-ND 4.0 — see
 
 ## Hard rules
 
-- **Issues + feature branches off `main`; no direct commits to `main`.**
-  Every merge to `main` bumps `VERSION` (patch minimum) — CI enforces it.
+- **Batch onto a version branch; only the owner merges to `main`.** Work
+  accumulates on one branch named for the target semver (`0.1.54`); its PR
+  stays open until he flips the switch. No direct commits to `main`. Every
+  merge to `main` bumps `VERSION` (patch minimum) — CI enforces it.
 - **a8s is pre-v1: no migration code, no back-compat shims.** Schema
   changes are scorch-the-earth; the owner wipes state and re-derives.
 - **The `apps/` sibling layout and root shims are load-bearing** (r4t
@@ -57,12 +59,17 @@ shipped artifact under its own license (CC BY-NC-ND 4.0 — see
 ## Running the tests
 
 ```bash
-python3 -m pytest apps/a8s/tests/    # ~850
-python3 -m pytest apps/r4t/tests/    # ~860 (run separately from a8s —
+apps/a8s/tests/run                   # ~875
+apps/r4t/tests/run                   # ~1070 (run separately from a8s —
                                      #  the two ulid modules shadow)
-python3 -m pytest apps/ar3/tests/
-cd apps/k7e && tests/run             # ~126, builds its own venv
+apps/ar3/tests/run                   # ~37
+cd apps/k7e && tests/run             # ~170
 ```
+
+Each `tests/run` builds and reuses a venv at `apps/<app>/tests/.venv` from that
+suite's `requirements.txt`, so pytest never lands in the system or Homebrew
+python. Arguments pass through (`apps/a8s/tests/run -q -k convo`). Delete the
+`.venv` to rebuild it after a requirements change.
 
 CI is budget-conscious: suite jobs are path-filtered, so touching one
 app runs one suite. Keep it that way.

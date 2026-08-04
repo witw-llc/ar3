@@ -28,7 +28,6 @@ from core import (
     inbox_dir,
     kill_request_path,
     pid_path,
-    touch_inbox_waiting_since,
     trash_dir,
 )
 from daemon import (
@@ -881,6 +880,7 @@ class TestBatchWake:
         d = tmp_path / "b"
         d.mkdir()
         defn = {
+            "pause": 0,
             "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
             "batch": {
                 "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH"],
@@ -909,39 +909,107 @@ class TestBatchWake:
 class TestPauseBeforeWake:
     T0 = datetime(2026, 4, 28, 14, 30, 0, tzinfo=timezone.utc)
 
-    def test_pause_ready_immediate_when_zero(self, fake_home):
-        assert _pause_ready_for_wake("X", 0, now=self.T0) is True
+    def _defn(self, *, pause: float = 5, limit: int = 5) -> dict:
+        return {
+            "pause": pause,
+            "invoke": ["x"],
+            "batch": {"invoke": ["y"], "limit": limit},
+        }
 
-    def test_pause_ready_starts_timer_then_waits(self, fake_home):
-        clear_inbox_waiting_since("X")
-        assert _pause_ready_for_wake("X", 5, now=self.T0) is False
-        assert _pause_ready_for_wake("X", 5, now=self.T0 + timedelta(seconds=3)) is False
-        assert _pause_ready_for_wake("X", 5, now=self.T0 + timedelta(seconds=5)) is True
+    def _agent(self, tmp_path, name: str = "X") -> Participant:
+        d = tmp_path / name.lower()
+        d.mkdir()
+        p = Participant(name, d)
+        ensure_mailboxes(p)
+        clear_inbox_waiting_since(name)
+        return p
 
-    def _batch_pause_def(self, tmp_path, fixtures_dir, pause: float) -> Path:
+    def _drop(self, name: str, msg_id: str, *, mtime: datetime | None = None) -> Path:
+        path = inbox_dir(name) / f"{msg_id}.json"
+        path.write_text(json.dumps({
+            "id": msg_id, "date": "2026-04-28T14:30:00Z",
+            "from": "A", "to": name, "content": msg_id, "files": [],
+        }))
+        if mtime is not None:
+            ts = mtime.timestamp()
+            os.utime(path, (ts, ts))
+        return path
+
+    def _batch_pause_def(
+        self, tmp_path, fixtures_dir, pause: float, *, limit: int = 5
+    ) -> Path:
         defn = {
             "pause": pause,
             "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
             "batch": {
                 "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH|TO:$RECIPIENT"],
-                "limit": 5,
+                "limit": limit,
             },
         }
         defp = tmp_path / "pause-batch.json"
         defp.write_text(json.dumps(defn))
         return defp
 
-    def test_pause_defers_wake_until_elapsed(self, fake_home, tmp_path, fixtures_dir):
+    def test_pause_ready_immediate_when_zero(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        assert _pause_ready_for_wake(p, self._defn(pause=0), now=self.T0) is True
+
+    def test_second_message_resets_quiet_window(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        self._drop("X", "m0", mtime=self.T0)
+        # First message is already older than pause, but a second lands later.
+        self._drop("X", "m1", mtime=self.T0 + timedelta(seconds=4))
+        # More than pause since FIRST, but not since newest → not ready.
+        assert _pause_ready_for_wake(
+            p, self._defn(pause=5), now=self.T0 + timedelta(seconds=6)
+        ) is False
+        # Quiet since newest → ready.
+        assert _pause_ready_for_wake(
+            p, self._defn(pause=5), now=self.T0 + timedelta(seconds=9)
+        ) is True
+
+    def test_quiet_elapsed_since_newest_is_ready(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        self._drop("X", "m0", mtime=self.T0)
+        assert _pause_ready_for_wake(
+            p, self._defn(pause=5), now=self.T0 + timedelta(seconds=5)
+        ) is True
+
+    def test_batch_limit_escapes_pause(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        just_now = self.T0
+        for i in range(5):
+            self._drop("X", f"m{i}", mtime=just_now)
+        assert _pause_ready_for_wake(
+            p, self._defn(pause=60, limit=5), now=just_now
+        ) is True
+        assert "5 waiting at the limit, waking now" in _read_log("X")
+
+    def test_empty_inbox_is_ready(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        assert _pause_ready_for_wake(p, self._defn(pause=5), now=self.T0) is True
+
+    def test_waiting_log_emitted_once_across_polls(self, fake_home, tmp_path):
+        p = self._agent(tmp_path)
+        self._drop("X", "m0", mtime=self.T0)
+        defn = self._defn(pause=5)
+        assert _pause_ready_for_wake(p, defn, now=self.T0) is False
+        assert _pause_ready_for_wake(
+            p, defn, now=self.T0 + timedelta(seconds=1)
+        ) is False
+        assert _pause_ready_for_wake(
+            p, defn, now=self.T0 + timedelta(seconds=2)
+        ) is False
+        assert _read_log("X").count("pause 5s before wake") == 1
+
+    def test_pause_defers_wake_until_quiet(self, fake_home, tmp_path, fixtures_dir):
         d = tmp_path / "b"
         d.mkdir()
         defp = self._batch_pause_def(tmp_path, fixtures_dir, pause=60)
         save_registry({"B": {"root": str(d), "definition": str(defp)}})
         ensure_mailboxes(Participant("B", d))
         clear_inbox_waiting_since("B")
-        (inbox_dir("B") / "m0.json").write_text(json.dumps({
-            "id": "m0", "date": "2026-04-28T14:30:00Z",
-            "from": "A", "to": "B", "content": "one", "files": [],
-        }))
+        self._drop("B", "m0")
 
         attached_loop(["B"], 0.1, single_pass=True)
         log = _read_log("B")
@@ -949,16 +1017,16 @@ class TestPauseBeforeWake:
         assert "batch exec:" not in log
         assert "pause 60s before wake" in log
 
-    def test_pause_after_elapsed_batches_all(self, fake_home, tmp_path, fixtures_dir):
+    def test_pause_after_quiet_batches_all(self, fake_home, tmp_path, fixtures_dir):
         d = tmp_path / "b"
         d.mkdir()
         defp = self._batch_pause_def(tmp_path, fixtures_dir, pause=2)
         save_registry({"B": {"root": str(d), "definition": str(defp)}})
         ensure_mailboxes(Participant("B", d))
-        touch_inbox_waiting_since(
-            "B", datetime.now(timezone.utc) - timedelta(seconds=10)
-        )
-        TestBatchWake()._queue_inbox("B", 3, prefix="late")
+        clear_inbox_waiting_since("B")
+        old = datetime.now(timezone.utc) - timedelta(seconds=10)
+        for i in range(3):
+            self._drop("B", f"late{i}", mtime=old)
 
         attached_loop(["B"], 0.1, single_pass=True)
         log = _read_log("B")

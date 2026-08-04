@@ -20,7 +20,14 @@ import sqlite_store
 from core import transactions_path
 from settings import DEFAULTS, get_int, get_setting
 
-__all__ = ["TransactionLogError", "log", "prune_transactions", "read_events"]
+__all__ = [
+    "EVENTS",
+    "TransactionLogError",
+    "log",
+    "prune_transactions",
+    "read_events",
+    "read_recent",
+]
 
 Event = Literal[
     "ROUTED",
@@ -35,6 +42,20 @@ Event = Literal[
     "DROPPED",
     "PROXY_DELIVERED",
 ]
+
+EVENTS: tuple[str, ...] = (
+    "ROUTED",
+    "RECEIVED_REMOTE",
+    "RESOLVED_REMOTE",
+    "RECEIPT_PUBLISHED",
+    "DELIVERY_RECEIPT",
+    "FILE_DELIVERED",
+    "FILE_UPLOAD_FAILED",
+    "PUBLISHED",
+    "DISCARDED",
+    "DROPPED",
+    "PROXY_DELIVERED",
+)
 
 # Event dict keys, in trace display order. `from`/`to` are SQL keywords, so
 # the columns are named `sender`/`recipient` and mapped back here.
@@ -151,6 +172,55 @@ def read_events(msg_id: str) -> list[dict[str, str]]:
     except (OSError, sqlite3.Error):
         return []
     return [dict(zip(FIELDS, row)) for row in rows]
+
+
+def read_recent(
+    *,
+    limit: int = 20,
+    events: list[str] | None = None,
+    senders: list[str] | None = None,
+    recipients: list[str] | None = None,
+    msg_id: str = "",
+    after_seq: int | None = None,
+) -> list[tuple[int, dict[str, str]]]:
+    """Return `(seq, event)` pairs in chronological order, newest `limit` last.
+
+    With `after_seq` the limit does not apply: every matching row after that
+    cursor comes back, which is what `a8s transactions -f` polls for.
+    """
+    if not transactions_path().is_file():
+        return []
+    where: list[str] = []
+    params: list[object] = []
+    for column, values in (
+        ("event", events),
+        ("sender", senders),
+        ("recipient", recipients),
+    ):
+        wanted = [v.strip().lower() for v in (values or []) if v.strip()]
+        if wanted:
+            where.append(f"LOWER({column}) IN ({','.join('?' * len(wanted))})")
+            params.extend(wanted)
+    if msg_id:
+        where.append("msg_id = ?")
+        params.append(msg_id)
+    if after_seq is not None:
+        where.append("seq > ?")
+        params.append(after_seq)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    if after_seq is None:
+        sql = f"SELECT seq, {_COLUMNS} FROM transactions {clause} ORDER BY seq DESC LIMIT ?"
+        params.append(max(limit, 0))
+    else:
+        sql = f"SELECT seq, {_COLUMNS} FROM transactions {clause} ORDER BY seq"
+    try:
+        with closing(_connect()) as conn:
+            rows = conn.execute(sql, params).fetchall()
+    except (OSError, sqlite3.Error):
+        return []
+    if after_seq is None:
+        rows.reverse()
+    return [(int(row[0]), dict(zip(FIELDS, row[1:]))) for row in rows]
 
 
 def prune_transactions(max_rows: int | None = None) -> int:

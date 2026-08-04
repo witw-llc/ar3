@@ -290,6 +290,10 @@ def _build_service(name: str, spec: dict) -> StorageService:
         from services.tempfile_org import TempFileOrgService
 
         return TempFileOrgService(name, url=url, **opts)
+    if kind == "s3":
+        from services.s3 import S3Service
+
+        return S3Service(name, url=url, **opts)
     raise ValueError(f"storage {name!r}: unsupported service kind {kind!r}")
 
 
@@ -325,9 +329,10 @@ def detect_service_kind(url: str) -> str | None:
     `service` field at config-write time."""
     # Lazy imports keep the storage modules out of the import graph for
     # installs without storage configured.
+    from services.s3 import S3Service
     from services.tempfile_org import TempFileOrgService
 
-    for kind, cls in (("tempfile_org", TempFileOrgService),):
+    for kind, cls in (("tempfile_org", TempFileOrgService), ("s3", S3Service)):
         try:
             if cls.supports_config_url(url):
                 return kind

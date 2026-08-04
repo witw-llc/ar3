@@ -82,9 +82,9 @@ one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it
 in production too (`- **ProseReply:** off` in the roster mutes this per member).
-An automated notification that needs no answer gets closed instead of
-answered, so a quiet thread means a dropped ball rather than a judgment call
-([r4t-ack.md](r4t-ack.md)).
+Mail from outside the roster is owed no reply — the leader answers it or does
+not — so the quiet-thread sweep watches intra-roster threads, where a silence
+really is a dropped ball.
 Full flow: [r4t-message-flow.md](r4t-message-flow.md).
 
 ## Learn more
@@ -95,7 +95,6 @@ Full flow: [r4t-message-flow.md](r4t-message-flow.md).
 - [Message flow](r4t-message-flow.md) — threads, queues, the stdout fallback
 - [Operations](r4t-operations.md) — `status`, `logs`, `chat`, the human seat
 - [Org design](r4t-org.md) — cells and leads, `MISSION.md`, portable orgs
-- [Closing without a reply](r4t-ack.md) — `close_without_reply`, the allow-list, the `Ack:` knob
 - [Knowledge](r4t-knowledge.md) — a member's private k7e memory (experimental)
 - [Verification](r4t-verification.md) — `r4t check`, checklists, doorbell gate, the post-hoc judge, `r4t task trace`
 - [Governance](r4t-governance.md) — why each layer exists, with prior art

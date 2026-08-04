@@ -144,6 +144,18 @@ class TestLoading:
         assert config.quiet_task_seconds == 60
         assert config.log_retention_days == 3
 
+    def test_quiet_task_zero_means_off(self, tmp_path):
+        # The sweep has always read <= 0 as disabled while the loader rejected
+        # it, so the obvious off switch was a config error — and a config error
+        # fails the whole dispatch path, which is an outage (#58).
+        config = load_rig_config(
+            write_config(
+                tmp_path,
+                {"t": {"invoke": ["x", "{prompt}"]}, "quiet_task_seconds": 0},
+            )
+        )
+        assert config.quiet_task_seconds == 0
+
     def test_log_retention_zero_means_keep_forever(self, tmp_path):
         config = load_rig_config(
             write_config(
@@ -168,7 +180,6 @@ class TestLoading:
             ("cell_budget_earn_per_hour", -1),
             ("breaker_cap", 0),
             ("breaker_cooldown_seconds", -5),
-            ("quiet_task_seconds", 0),
         ):
             with pytest.raises(RigError):
                 load_rig_config(

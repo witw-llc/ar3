@@ -153,30 +153,13 @@ class TestParsing:
         assert "(try: ProseReply: off)" in member.error
         assert member.prose_reply is True
 
-    def test_ack_defaults_on_when_absent(self):
-        assert parse("### A\n- **Rig:** r\n").find("a").ack is True
-
-    @pytest.mark.parametrize("value", ["on", "yes"])
-    def test_ack_on(self, value):
-        member = parse(f"### A\n- **Rig:** r\n- **Ack:** {value}\n").find("a")
-        assert member.ack is True
-        assert not member.errors
-
-    @pytest.mark.parametrize("value", ["off", "no"])
-    def test_ack_off(self, value):
-        member = parse(f"### A\n- **Rig:** r\n- **Ack:** {value}\n").find("a")
-        assert member.ack is False
-        assert not member.errors
-
-    def test_ack_garbage_disables_member(self):
-        member = parse("### A\n- **Rig:** r\n- **Ack:** maybe\n").find("a")
-        assert "Ack must be on or off" in member.error
-        assert "(try: Ack: off)" in member.error
-
-    def test_ack_does_not_disturb_other_fields(self):
+    def test_retired_ack_field_is_ignored_not_an_error(self):
+        # `Ack:` was a knob on a protocol that no longer exists (#58). An
+        # unknown field has always been ignored, so a roster carrying the old
+        # line keeps working rather than failing its member.
         member = parse("### A\n- **Rig:** r\n- **Ack:** off\n").find("a")
         assert member.rig == "r"
-        assert member.prose_reply is True
+        assert not member.errors
 
     def test_reinforce_defaults_empty_when_absent(self):
         assert parse("### A\n- **Rig:** r\n").find("a").reinforce == ""

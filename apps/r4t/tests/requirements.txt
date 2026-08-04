@@ -1,0 +1,3 @@
+pytest
+# Runtime deps the suite exercises (textual TUI tests skip without it).
+-r ../../../requirements/r4t.txt

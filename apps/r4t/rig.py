@@ -14,8 +14,9 @@ optional — every knob has a sane default; see README.md for the table):
   gates, enforced before any rig check.
 - `"cell_budget_max"` / `"cell_budget_earn_per_hour"` — the shared cell spend
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
-- `"quiet_task_seconds"` — a thread quiet this long with its originator still
-  unanswered wakes the leader with a nudge to reply with current state.
+- `"quiet_task_seconds"` — an intra-roster thread quiet this long with its
+  originator still unanswered wakes the leader with a nudge to reply with
+  current state. 0 turns the sweep off; ingress threads are never swept (#58).
 - `"log_retention_days"` — how many UTC days of roster transcript `r4t clear`
   keeps; older day files are deleted whole. 0 keeps every day forever.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
@@ -1843,11 +1844,19 @@ def load_rig_config(path: Path) -> RigConfig:
                 _non_negative_number(value, DEFAULT_LOG_RETENTION_DAYS, key)
             )
             continue
+        if key == "quiet_task_seconds":
+            # 0 is OFF, matching what the sweep has always done with <= 0.
+            # The loader used to reject it, so the obvious way to disable the
+            # sweep was a config error — and a config error fails the WHOLE
+            # dispatch path, which is an outage (#58).
+            config.quiet_task_seconds = _non_negative_number(
+                value, DEFAULT_QUIET_TASK_SECONDS, key
+            )
+            continue
         if key in (
             "cell_budget_max",
             "cell_budget_earn_per_hour",
             "breaker_cooldown_seconds",
-            "quiet_task_seconds",
         ):
             n = _non_negative_number(value, 0, key)
             if n <= 0:

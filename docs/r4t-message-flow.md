@@ -8,7 +8,9 @@ member's queue and back out. For governance rationale see
 ## The six steps
 
 1. `tell acme "..."` routes through a8s to the roster node; the node's
-   definition invokes `r4t dispatch`. **The topmost leader IS the garden
+   definition invokes `r4t dispatch`. A burst of external mail arrives as one
+   `batch.format: envelopes` wake (`--batch`) and becomes one turn after a
+   single drain. **The topmost leader IS the garden
    from outside** — every external message enters at the top, no matter how
    it is addressed. A `node:member` sub-address from an outside sender is
    ignored (the namespace is the garden's outside address, not a way in to a
@@ -69,18 +71,11 @@ member's queue and back out. For governance rationale see
    `- **ProseReply:** off` in the roster: its no-tell turns log `SILENT`
    instead of staging a reply, and the blank-output quota detection is
    untouched.
-6. Closing without a reply — an automated notification that asks nothing of
-   the member is closed rather than answered. The member prints
-   `close_without_reply <thread>` on a line of its own; the task layer
-   validates eligibility (the verb echoed exactly, a thread this turn
-   actually holds, a machine-originated thread by the ledger, no direct
-   question or assignment on it, and this member the one its creator is
-   waiting on) and only then closes the ledger with a reason it derived
-   itself. Zero egress: nothing is staged and nothing crosses the wall. The
-   fallback is suppressed for that obligation only (`ACK-QUIET`), so a turn
-   that closes one thread and answers another still delivers the answer. Per
-   member, `- **Ack:** off` revokes the verb. Mechanics, the allow-list and
-   the overrides: [r4t-ack.md](r4t-ack.md).
+6. Silence — a member that has nothing to say sends nothing, and no
+   machinery objects. A thread from outside the roster is owed no reply at
+   all, so the doctrine bullet is the whole protocol: *do not send
+   acknowledgment-only messages.* What is owed, and to whom, is decided by
+   the ledger at the wall, never by a verb the member has to remember.
 
 ## The durable queue
 
@@ -116,13 +111,18 @@ directions. Releases carry `auto`, because everything a member sends is machine
 traffic; inbound mail is deliberate attention unless the sender marked it
 `auto`, so a human, a phone, or a peer that says nothing is heard as a person.
 
+**It is context for the member, not an obligation for the ledger.** The class
+rides the message so the reader knows what it is holding; it does not decide
+whether an answer is owed, because nothing on the wire decides that. Every
+thread opened from outside the roster is owed nothing regardless of its class
+(#58) — outside the wall a8s posts messages to nodes and carries no notion of
+a reply being expected, and building one in would mean a decision point on
+every node of a network r4t does not own. What r4t enforces is what it can
+see both ends of.
+
 Metadata is advisory for governance and never for identity. A peer can only
 downgrade its own traffic, an unknown word means deliberate, and thread and hop
-stay garden-internal — nothing on the wire can claim a thread. What a relayed
-inbound changes is what the garden owes it: the thread it opens is a label, not
-a report someone is waiting on, so the quiet-thread sweep leaves it alone. That
-is what keeps two federated rosters from reading each other's polite
-status updates as fresh human attention and nudging each other awake forever.
+stay garden-internal — nothing on the wire can claim a thread.
 
 What the outside sees is the org owner's choice. Dispatch releases with
 `from: <node>:<member>`, and by default that attribution stands — external

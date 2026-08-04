@@ -75,7 +75,13 @@ from definitions import (
     max_wake_seconds,
     pause_seconds,
 )
-from mailbox import ensure_mailboxes, next_inbox_message, peek_inbox_messages, route_outboxes
+from mailbox import (
+    ensure_mailboxes,
+    newest_inbox_mtime,
+    next_inbox_message,
+    peek_inbox_messages,
+    route_outboxes,
+)
 from network import (
     load_remotes,
     load_services,
@@ -326,23 +332,37 @@ def _deliver_file_proxy(p: Participant) -> None:
 
 
 def _pause_ready_for_wake(
-    name: str, pause: float, *, now: datetime | None = None
+    p: Participant,
+    definition: dict,
+    *,
+    now: datetime | None = None,
 ) -> bool:
-    """Return True when `pause` has elapsed since the first inbox message of
-    the current burst. Zero/negative pause means immediate readiness."""
+    """Trailing-edge debounce: ready when the inbox has been quiet for `pause`
+    seconds, or when depth reaches `batch_limit` (escape hatch). Zero pause
+    means immediate readiness. `inbox_waiting_since` is only a once-per-burst
+    log marker — readiness comes from newest inbox mtime."""
+    pause = pause_seconds(definition)
     if pause <= 0:
         return True
     if now is None:
         now = datetime.now(timezone.utc)
-    since = read_inbox_waiting_since(name)
-    if since is None:
-        touch_inbox_waiting_since(name, now)
-        out_agent(name, f"[{name}] pause {pause:g}s before wake")
-        return False
-    if (now - since).total_seconds() < pause:
-        return False
-    clear_inbox_waiting_since(name)
-    return True
+    limit = batch_limit(definition)
+    depth = len(peek_inbox_messages(p, limit))
+    if depth >= limit:
+        clear_inbox_waiting_since(p.name)
+        out_agent(p.name, f"[{p.name}] {depth} waiting at the limit, waking now")
+        return True
+    newest = newest_inbox_mtime(p)
+    if newest is None:
+        clear_inbox_waiting_since(p.name)
+        return True
+    if (now - newest).total_seconds() >= pause:
+        clear_inbox_waiting_since(p.name)
+        return True
+    if read_inbox_waiting_since(p.name) is None:
+        touch_inbox_waiting_since(p.name, now)
+        out_agent(p.name, f"[{p.name}] pause {pause:g}s before wake")
+    return False
 
 
 def _settle_wake(
@@ -980,7 +1000,7 @@ def _dispatch_agent(p: Participant, definition: dict, *, async_wake: bool) -> bo
     if not _wake_retry_ready(p.name):
         return False
 
-    if not _pause_ready_for_wake(p.name, pause_seconds(definition)):
+    if not _pause_ready_for_wake(p, definition):
         return False
 
     if has_batch_invoke(definition):
@@ -1167,9 +1187,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                     break
                                 if not _wake_retry_ready(p.name):
                                     break
-                                if not _pause_ready_for_wake(
-                                    p.name, pause_seconds(definition)
-                                ):
+                                if not _pause_ready_for_wake(p, definition):
                                     break
                         if async_wake and n:
                             wake_rr += 1

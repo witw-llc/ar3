@@ -80,6 +80,7 @@ access — env-only, by design.
 | Source | this seat's `.inbox` | machine-wide archive |
 | Shows | inbound only | to *and* from |
 | Needs | outbox/inbox for this seat | registered agent name |
+| Narrows to one sender | no | `--from NAME` |
 
 For a filedrop loop you want inbound only.
 

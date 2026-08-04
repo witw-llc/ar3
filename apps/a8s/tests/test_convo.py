@@ -741,3 +741,107 @@ class TestFollowConversation:
         assert "conversation archive sequence reset from 3 to 1" in captured.err
         assert captured.out.count("old-2") == 1
         assert captured.out.count("replacement-row") == 1
+
+
+class TestSenderFilter:
+    def _thread(self) -> None:
+        for i, sender in enumerate(["Alice", "Carol", "Alice", "Dave"]):
+            record(
+                {
+                    "id": f"01JSENDER0000000000000{i:03d}",
+                    "date": f"2026-06-18T12:00:0{i}.000000Z",
+                    "from": sender,
+                    "to": "Bob",
+                    "content": f"{sender.lower()}-{i}",
+                },
+                recipients=["Bob"],
+            )
+
+    def test_keeps_only_named_sender(self, fake_home):
+        self._thread()
+        text = format_conversation("Bob", limit=10, senders=["Alice"])
+        assert "alice-0" in text
+        assert "alice-2" in text
+        assert "carol-1" not in text
+        assert "dave-3" not in text
+
+    def test_match_is_case_insensitive(self, fake_home):
+        self._thread()
+        assert "carol-1" in format_conversation("Bob", limit=10, senders=["CAROL"])
+
+    def test_several_senders(self, fake_home):
+        self._thread()
+        text = format_conversation("Bob", limit=10, senders=["carol", "dave"])
+        assert "carol-1" in text
+        assert "dave-3" in text
+        assert "alice-0" not in text
+
+    def test_limit_counts_matches_not_rows_scanned(self, fake_home):
+        self._thread()
+        text = format_conversation("Bob", limit=2, senders=["Alice"])
+        assert "alice-0" in text
+        assert "alice-2" in text
+
+    def test_own_sends_are_reachable(self, fake_home):
+        record(
+            {
+                "id": "01JSENDEROWN000000000000",
+                "date": "2026-06-18T13:00:00.000000Z",
+                "from": "Bob",
+                "to": "Alice",
+                "content": "mine",
+            },
+            recipients=["Alice"],
+        )
+        assert "mine" in format_conversation("Bob", limit=10, senders=["bob"])
+        assert format_conversation("Bob", limit=10, senders=["alice"]) == ""
+
+    def test_cmd_convo_from_flag(self, fake_home, tmp_path, capsys):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+        self._thread()
+        assert cmd_convo(["bob", "--from", "alice"]) == 0
+        out = capsys.readouterr().out
+        assert "alice-2" in out
+        assert "carol-1" not in out
+
+    def test_follow_filters_new_rows(self, fake_home, monkeypatch, capsys):
+        record(
+            {
+                "id": "01JFOLLOWOLD000000000000",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Carol",
+                "to": "Bob",
+                "content": "backlog-noise",
+            },
+            recipients=["Bob"],
+        )
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                for i, sender in enumerate(["Carol", "Alice"]):
+                    record(
+                        {
+                            "id": f"01JFOLLOWNEW00000000000{i}",
+                            "date": "2026-06-18T11:00:00.000000Z",
+                            "from": sender,
+                            "to": "Bob",
+                            "content": f"live-{sender.lower()}",
+                        },
+                        recipients=["Bob"],
+                    )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        with pytest.raises(KeyboardInterrupt):
+            follow_conversation("Bob", limit=5, poll_interval=0.01, senders=["Alice"])
+        out = capsys.readouterr().out
+        assert "live-alice" in out
+        assert "live-carol" not in out
+        assert "backlog-noise" not in out

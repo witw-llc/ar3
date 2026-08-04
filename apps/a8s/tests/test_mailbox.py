@@ -927,6 +927,38 @@ class TestNextInboxMessage:
         assert next_inbox_message(p) is None
 
 
+class TestNewestInboxMtime:
+    def test_none_when_empty(self, fake_home, tmp_path):
+        from mailbox import newest_inbox_mtime
+        agent_root = tmp_path / "x"
+        agent_root.mkdir()
+        p = Participant("X", agent_root)
+        ensure_mailboxes(p)
+        assert newest_inbox_mtime(p) is None
+
+    def test_returns_newest_mtime_as_utc(self, fake_home, tmp_path):
+        import os
+        from datetime import datetime, timezone
+        from mailbox import newest_inbox_mtime
+
+        agent_root = tmp_path / "x"
+        agent_root.mkdir()
+        p = Participant("X", agent_root)
+        ensure_mailboxes(p)
+        older = inbox_dir("X") / "a.json"
+        newer = inbox_dir("X") / "b.json"
+        older.write_text("{}")
+        newer.write_text("{}")
+        t0 = datetime(2026, 4, 28, 14, 30, 0, tzinfo=timezone.utc).timestamp()
+        t1 = datetime(2026, 4, 28, 14, 30, 5, tzinfo=timezone.utc).timestamp()
+        os.utime(older, (t0, t0))
+        os.utime(newer, (t1, t1))
+        got = newest_inbox_mtime(p)
+        assert got is not None
+        assert got.tzinfo is not None
+        assert abs(got.timestamp() - t1) < 0.01
+
+
 class TestIngestPhase:
     """Phase 1 of `route_outboxes` (issue #63): a8s never reads a file in
     `<root>/.outbox/`; on every pass it atomically moves new outbox files

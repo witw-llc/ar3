@@ -18,6 +18,20 @@
     "$META"
   ],
   "max_wake_seconds": 2700,
+  "batch": {
+    "format": "envelopes",
+    "limit": 20,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "dispatch",
+      "--root",
+      ".",
+      "--definition",
+      "$DEFINITION_PATH",
+      "--batch"
+    ]
+  },
   "idle": {
     "timeout": 300,
     "invoke": [

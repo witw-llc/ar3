@@ -50,6 +50,15 @@ minimum, minor or major at the author's judgment per semver semantics. Merge and
 version bump are the same event, so `main`'s history doubles as the release
 ledger. Bump `VERSION` in the same PR as the change it describes.
 
+**A merge to `main` publishes.** The push runs `release.yml` — full suites on
+ubuntu and macOS, the Docker isolation test, a PII scan — and on success pushes
+a squash snapshot and a `v<version>` tag to the public mirror `witw-llc/ar3`.
+There is no second switch: the owner's merge is the release. Batch branches cost
+nothing, so iterate there.
+
+Add user-visible changes to `CHANGELOG.md` under `Unreleased` in the same PR,
+and rename that heading to the version when the batch is ready to merge.
+
 Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
 
 ## Conventions
@@ -87,10 +96,18 @@ frontmatter if it should be installable as a Claude skill.
 
 ### Workflow
 
-**Issues + feature branches off `main`. No direct commits to `main`.** Every
-change goes through a PR. The user squash-merges fast. After a squash, rebase
-follow-up work onto fresh `main` rather than stacking — squash hashes don't
-match the original branch's commits and stacking causes conflicts.
+**Batch onto a version branch; the owner merges.** Work accumulates on one
+branch named for the target semver (`0.1.55`), and the PR from it stays open
+until the owner flips the switch. No direct commits to `main`, and nobody else
+merges to `main` — a stream of individual merges is a stream of things the owner
+has to track, and the whole point of the suite is to spend less of his attention,
+not more. His merge also spends the Actions budget and ships to the public
+mirror, which is why the gate is his alone.
+
+Inside a batch, work however suits the change: commit straight to the version
+branch, or open sub-PRs targeting it. Bump `VERSION` to the branch's number once,
+not per change. After the owner merges, start the next batch from fresh `main` —
+squash hashes don't match the branch's commits, so stacking causes conflicts.
 
 ### Pre-v1 / scorch-the-earth
 
@@ -107,6 +124,10 @@ and on-disk pid/log paths. The contract changes only when the user declares 1.0.
   *what*.
 - Co-author trailer for AI-assisted work:
   `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`
+- **PR titles are synopses, not labels.** A batch PR is still titled by what it
+  contains — `0.1.55 — merge to main is the release, changelog, plan states,
+  and the Ark's own roster`, never `0.1.55 — batch`. The title is the only part
+  most readers see, and after the squash it is the commit subject on `main`.
 
 ### Code style
 
@@ -133,6 +154,21 @@ history. Never the words honest/honestly. User-facing surfaces (CLI help, skill
 descriptions) get one short sentence with no internals; mechanics go in the
 app's `docs/` page or the docstring.
 
+### Where a page goes
+
+Four homes, split by what the reader is doing — the Diátaxis quadrants, named
+here so new pages land deliberately instead of by feel:
+
+- **`guide/`** — *tutorial*. A lesson for someone who does not yet know the
+  thing. Hand-held, ordered, guaranteed to work if followed.
+- **`docs/<app>.md`** — *how-to*. A recipe for a goal the reader already has.
+- **`docs/<app>-*.md`** — *reference*. Facts consulted mid-task and never read
+  start to finish. Precise, scannable, no narrative.
+- **the private wiki** — *explanation*. Why it is built this way: rulings,
+  research, the design journey. Rationale in a `docs/` page belongs here.
+
+A page that is trying to be two of these is the usual reason it reads badly.
+
 ## Top-level scripts: `tell`
 
 `tell` is a **thin shim** to `a8s tell` (plus `tell.cmd` on Windows).
@@ -158,17 +194,16 @@ own harness come from `source <repo>/install.sh --skills`.
 ## Common operations
 
 ```bash
-# a8s tests (~640 tests)
-python3 -m pytest apps/a8s/tests/
+# Every suite runs through its own `tests/run`, which builds and reuses a venv
+# at apps/<app>/tests/.venv from that suite's requirements.txt. Never install
+# pytest into the system or Homebrew python — extra args pass through to pytest.
+apps/a8s/tests/run          # ~875
+apps/r4t/tests/run          # ~1070 (run separately from a8s — ulid modules shadow)
+apps/ar3/tests/run          # ~37
+cd apps/k7e && tests/run    # ~170; add -m "not llm" to skip model-backed tests
 
-# r4t tests
-python3 -m pytest apps/r4t/tests/
-
-# k7e tests (~69 tests)
-cd apps/k7e && tests/run
-
-# ar3 tests
-python3 -m pytest apps/ar3/tests/
+# Rebuild a suite's venv after its requirements change
+rm -rf apps/a8s/tests/.venv
 
 # Suite status and prerequisite probes
 ar3

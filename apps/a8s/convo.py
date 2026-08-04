@@ -37,6 +37,8 @@ __all__ = [
     "print_entries",
     "prune_conversations",
     "record",
+    "sender_keys",
+    "sent_by",
     "write_block",
 ]
 
@@ -89,7 +91,12 @@ def _consume_template(argv: list[str], start: int) -> tuple[str, int]:
 
 
 def convo_help_epilog() -> str:
-    return f"""heading templates:
+    return f"""filters:
+  --from NAME    show only messages sent by NAME (case-insensitive; repeat for several
+                 senders). The limit counts matching messages, so --from bob --limit 10
+                 shows bob's last ten however much other traffic sits between them.
+
+heading templates:
   Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
     {{from}}       sender name
     {{to}}         recipient or alias
@@ -109,6 +116,7 @@ def convo_help_epilog() -> str:
 
 examples:
   a8s convo neil-macbook -f --limit 10 --glow
+  a8s convo neil-macbook -f --from ares
   a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
   a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
 
@@ -156,6 +164,15 @@ def _connect() -> sqlite3.Connection:
     return sqlite_store.connect(
         conversations_path(), _SCHEMA, table="messages", foreign_keys=True
     )
+
+
+def sender_keys(senders: list[str] | None) -> set[str]:
+    return {key for name in (senders or []) if (key := _name_key(str(name)))}
+
+
+def sent_by(entry: dict[str, Any], keys: set[str]) -> bool:
+    """True when no sender filter is active or the entry came from one of them."""
+    return not keys or _name_key(entry.get("from", "")) in keys
 
 
 def _entry_agents(entry: dict[str, Any]) -> set[str]:
@@ -241,6 +258,7 @@ def _latest_agent_entries(
     limit: int,
     *,
     through_seq: int | None = None,
+    senders: list[str] | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
     if limit < 1:
         return []
@@ -249,28 +267,44 @@ def _latest_agent_entries(
     if through_seq is not None:
         through = "AND m.seq <= ?"
         params.append(through_seq)
-    params.append(limit)
-    rows = conn.execute(
-        f"""
+    sql = f"""
         SELECT m.seq, m.entry_json
         FROM messages AS m
         JOIN message_agents AS a ON a.seq = m.seq
         WHERE a.agent_key = ? {through}
         ORDER BY m.seq DESC
-        LIMIT ?
-        """,
-        params,
-    ).fetchall()
-    rows.reverse()
-    return _rows_to_entries(rows)
+    """
+    keys = sender_keys(senders)
+    if not keys:
+        sql += " LIMIT ?"
+        params.append(limit)
+    # A sender filter walks the cursor lazily instead: the limit must count
+    # matches, not rows scanned.
+    found: list[tuple[int, dict[str, Any]]] = []
+    for seq, raw in conn.execute(sql, params):
+        entry = _decode_entry(raw)
+        if entry is None or not sent_by(entry, keys):
+            continue
+        found.append((int(seq), entry))
+        if len(found) >= limit:
+            break
+    found.reverse()
+    return found
 
 
-def load_agent_entries(agent: str, *, limit: int) -> list[dict[str, Any]]:
+def load_agent_entries(
+    agent: str, *, limit: int, senders: list[str] | None = None
+) -> list[dict[str, Any]]:
     if limit < 1 or not conversations_path().is_file():
         return []
     try:
         with closing(_connect()) as conn:
-            return [entry for _, entry in _latest_agent_entries(conn, agent, limit)]
+            return [
+                entry
+                for _, entry in _latest_agent_entries(
+                    conn, agent, limit, senders=senders
+                )
+            ]
     except (OSError, sqlite3.Error):
         return []
 
@@ -433,11 +467,12 @@ def format_conversation(
     limit: int = 10,
     heading_out: str = DEFAULT_HEADING_OUT,
     heading_in: str = DEFAULT_HEADING_IN,
+    senders: list[str] | None = None,
 ) -> str:
     """Return markdown for the last `limit` messages involving `agent`."""
     if limit < 1:
         return ""
-    rows = load_agent_entries(agent, limit=limit)
+    rows = load_agent_entries(agent, limit=limit, senders=senders)
     parts = [
         format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
         for entry in rows
@@ -453,8 +488,10 @@ def follow_conversation(
     heading_in: str = DEFAULT_HEADING_IN,
     poll_interval: float = 1.0,
     glow_theme: str | None = None,
+    senders: list[str] | None = None,
 ) -> None:
     """Print the last `limit` messages, then emit rows after a sequence cursor."""
+    keys = sender_keys(senders)
     glow_stream = None
     if glow_theme is not None:
         try:
@@ -468,7 +505,9 @@ def follow_conversation(
             cursor = int(
                 conn.execute("SELECT COALESCE(MAX(seq), 0) FROM messages").fetchone()[0]
             )
-            rows = _latest_agent_entries(conn, agent, limit, through_seq=cursor)
+            rows = _latest_agent_entries(
+                conn, agent, limit, through_seq=cursor, senders=senders
+            )
             conn.commit()
         print_entries(
             agent,
@@ -515,6 +554,8 @@ def follow_conversation(
                     flush=True,
                 )
             for _, entry in _rows_to_entries(rows):
+                if not sent_by(entry, keys):
+                    continue
                 print_entries(
                     agent,
                     [entry],

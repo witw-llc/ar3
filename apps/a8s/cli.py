@@ -35,6 +35,7 @@ from commands import (
     cmd_tell,
     cmd_tells,
     cmd_trace,
+    cmd_transactions,
     cmd_unalias,
     cmd_unnamespace,
     cmd_unremote,
@@ -73,7 +74,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tells",    "[-f] [--timeout SEC] [--glow [theme]]", "Wait for inbound messages to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
-    ("convo",    "<name> [--limit N] [-f] [--glow [theme]]", "Show markdown conversation history for an agent."),
+    ("convo",    "<name> [--limit N] [-f] [--from NAME] [--glow [theme]]", "Show markdown conversation history for an agent."),
+    ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),
     ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
     ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
@@ -84,7 +86,9 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("health",   "",                          "Test connectivity of remotes and storage services."),
 ]
 
-KNOWN_COMMANDS = {name for name, _, _ in COMMANDS}
+ALIASES = {"tx": "transactions"}
+
+KNOWN_COMMANDS = {name for name, _, _ in COMMANDS} | set(ALIASES)
 
 
 def _format_commands(rows: list[tuple[str, str, str]], indent: int = 2) -> str:
@@ -154,6 +158,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_config(args)
     if cmd == "convo":
         return cmd_convo(args)
+    if cmd in ("transactions", "tx"):
+        return cmd_transactions(args)
     if cmd == "trace":
         return cmd_trace(args)
     if cmd == "mcp":

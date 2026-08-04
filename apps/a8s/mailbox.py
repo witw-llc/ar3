@@ -857,6 +857,22 @@ def peek_inbox_messages(p: Participant, limit: int) -> list[Path]:
     return _inbox_json_files(p)[:limit]
 
 
+def newest_inbox_mtime(p: Participant) -> datetime | None:
+    """Arrival time of the most recent inbox message — what the wake debounce
+    measures quiet against. A file listed and then trashed by a wake settling
+    concurrently is skipped rather than raising: the daemon loop calls this
+    every tick and must not die of a race it can simply ignore."""
+    mtimes = []
+    for f in _inbox_json_files(p):
+        try:
+            mtimes.append(f.stat().st_mtime)
+        except OSError:
+            continue
+    if not mtimes:
+        return None
+    return datetime.fromtimestamp(max(mtimes), tz=timezone.utc)
+
+
 # ---------- queue helpers (used by cmd_tell, cmd_prompt, cmd_clear) ----------
 
 def _split_content_and_files(raw: str) -> tuple[str, list[dict]]:
