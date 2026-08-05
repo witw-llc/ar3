@@ -553,9 +553,13 @@ def _failure_checks(
                 _gov_detail(silent) if silent else f"{member} staged nothing and r4t said nothing",
             ),
             (
-                "Quiet sweep nudged the leader",
-                bool(nudged),
-                _gov_detail(nudged) if nudged else "no thread was swept as quiet",
+                # The kickoff arrives through the human's a8s node, so every
+                # thread in this run descends from ingress and is owed nothing
+                # (#58). Silence here is the ruling working, not a dropped
+                # ball — the sweep watches threads that begin inside.
+                "Quiet sweep left the ingress thread alone",
+                not nudged,
+                _gov_detail(nudged) if nudged else "no ingress thread was swept",
             ),
             (
                 "Breaker stayed closed",
@@ -799,10 +803,20 @@ def run_sandbox(
                 ),
                 ("Program runs and exits 0", program_ok, program_detail),
             ]
+        # A muted leader is the one shape with nobody left to answer: the
+        # kickoff is ingress, owed nothing (#58), and the member that would
+        # have replied is the broken one. Silence is the outcome the ruling
+        # buys, so the run states it rather than failing over it.
+        answered_label = (
+            "Leader stayed silent on an ingress thread"
+            if failure and failure == ("lead", "mute")
+            else "Leader answered the originator"
+        )
+        answered_ok = (final is None) if failure == ("lead", "mute") else (final is not None)
         checks += [
             (
-                "Leader answered the originator",
-                final is not None,
+                answered_label,
+                answered_ok,
                 (str(final.get("content", ""))[:120] if final else "no message from the node reached the human"),
             ),
             ("Turn count within budget", turns <= MAX_TURNS, f"{turns} turn(s) <= {MAX_TURNS}"),

@@ -129,9 +129,10 @@ closed/open/half-open probe cycle.
 
 ### 7. Quiet-thread sweep (the termination backstop)
 
-A thread (conversation label) can go quiet with its originator never having
-heard back — a turn succeeds while staging no reply, or a chain stalls. When
-an open thread whose originator is unanswered sees no activity for
+This is the **watchdog** on an [idle pass](r4t-idle.md). A thread
+(conversation label) can go quiet with its originator never having heard
+back — a turn succeeds while staging no reply, or a chain stalls. When an
+open thread whose originator is unanswered sees no activity for
 `quiet_task_seconds`, the leader is woken with a nudge to report current
 state — NOT to force-finish the work. The human, or the leader, decides what
 "done" means; r4t only makes sure the originator is not left in silence.

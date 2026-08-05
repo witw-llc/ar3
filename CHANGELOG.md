@@ -12,6 +12,18 @@ version when the batch is ready to merge.
 
 ## [Unreleased]
 
+## [0.1.56]
+
+### Added
+- `docs/r4t-idle.md` — reference for one idle pass: what runs `r4t idle`, the
+  five mechanisms in order (watchdog, drain, flush, dream, heartbeat), costs,
+  knobs, and the heartbeat's backoff numbers.
+
+### Changed
+- Idle-pass vernacular adopted across the r4t docs and guide: **watchdog**
+  (`QUIET`), **heartbeat** (`MISSION-REVIEW`), **flush**, **dream**, and
+  **drain**, with cross-links to the new page.
+
 ## [0.1.55] — 2026-08-02
 
 ### Changed

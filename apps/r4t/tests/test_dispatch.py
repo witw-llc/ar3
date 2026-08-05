@@ -1970,11 +1970,25 @@ class TestExternalClassIngress:
         state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
         assert run_idle(ctx)["quiet_nudged"] == []
 
-    def test_a_thread_the_roster_human_opened_still_gets_nudged(self, ctx, fake_harness):
-        # The human reaches the roster through the doorbell like any outside
-        # sender, but they are a MEMBER — r4t knows them and can hold the
-        # roster to answering them. Their thread keeps its backstop.
+    def test_the_roster_humans_doorbell_is_ingress_too(self, ctx, fake_harness):
+        # Mail through the human's `Address:` is a8s protocol, so whether to
+        # answer is the member's judgment. Watching it turns every passing
+        # remark from the owner into an unprompted status report half an hour
+        # later — observed in production, which is what settled this.
         handle_message(ctx, "neil", "acme", "ship it", drain_after=False)
+        task = tasks.list_tasks(NODE)[0]
+        assert task["ingress"] is True
+        task["updated_at"] = "2020-01-01T00:00:00Z"
+        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
+        assert run_idle(ctx)["quiet_nudged"] == []
+
+    def test_the_seat_path_is_still_owed_an_answer(self, ctx, fake_harness):
+        # Reaching the roster from INSIDE — the seat, not the doorbell — is the
+        # path r4t owns both ends of, so it keeps its backstop.
+        dispatch._ingest(
+            ctx, f"{NODE}:neil", f"{NODE}:gerry", "where are we",
+            klass="human", internal=True,
+        )
         task = tasks.list_tasks(NODE)[0]
         assert task["ingress"] is False
         task["updated_at"] = "2020-01-01T00:00:00Z"
@@ -1992,16 +2006,16 @@ class TestExternalClassIngress:
         out = capsys.readouterr().out
         assert "creator=beta" in out and "ingress" in out
 
-    def test_intra_roster_hop_keeps_the_originating_thread_owed(self, ctx, r4t_home):
-        # A delegation rides the thread it came in on — the human's — and must
-        # not relabel it. The flag is stamped at birth or never.
-        handle_message(ctx, "neil", "acme", "ship it", drain_after=False)
+    def test_a_hop_never_relabels_the_thread_it_rides(self, ctx, r4t_home):
+        # A delegation inherits the inbound thread and must not change what it
+        # is owed either way. The flag is stamped at birth or never.
+        handle_message(ctx, "beta", "acme", "ship it", drain_after=False)
         thread_id = tasks.list_tasks(NODE)[0]["id"]
         dispatch._ingest(
             ctx, f"{NODE}:gerry", f"{NODE}:phil", "your turn",
             klass="auto", internal=True, thread=thread_id, hop=1,
         )
-        assert tasks.load_task(NODE, thread_id)["ingress"] is False
+        assert tasks.load_task(NODE, thread_id)["ingress"] is True
 
 
 class TestQuietSweep:
@@ -2778,7 +2792,7 @@ class TestCli:
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
         assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_dispatch_from_the_roster_human_is_not_ingress(
+    def test_dispatch_from_the_roster_humans_doorbell_is_ingress(
         self, r4t_home, repo, rig_config, fake_harness
     ):
         rc = self.run(
@@ -2787,7 +2801,7 @@ class TestCli:
             "--rig-config", str(rig_config), "--no-notify", "--no-drain",
         )
         assert rc == 0
-        assert tasks.list_tasks(NODE)[0]["ingress"] is False
+        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
     def test_dispatch_batches_queued_with_live(self, r4t_home, repo, rig_config, fake_harness):
         state.enqueue(

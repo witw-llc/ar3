@@ -51,10 +51,10 @@ continues the conversation *and* bounds how long it may sit idle before it is
 retired — dumped to disk, then refounded from that state on the next real
 message. `on` leaves the window open; anything but `on`, `off`, or a positive
 duration is a roster error, so an idle window can never ride a member that
-runs cold. The `r4t idle`
-sweep retires a conversation idle past the duration by running a budget-gated
-dump turn (a normal continuing turn prompting the member to save its state to
-STATUS.md). A rig swap that changes the CLI retires the conversation
+runs cold. That retirement is the **flush** on an
+[idle pass](r4t-idle.md): the pass retires a conversation idle past the
+duration by running a budget-gated dump turn (a normal continuing turn
+prompting the member to save its state to STATUS.md). A rig swap that changes the CLI retires the conversation
 immediately, with no dump turn — the old CLI may be quota-dead. A retired
 member's next turn runs cold with a read-your-state preamble; the dump prompt
 and preamble are overridable via the node definition's `prompts` object (keys

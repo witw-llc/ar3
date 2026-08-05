@@ -74,15 +74,16 @@ intent that no longer fits a page has usually gone stale into planning.
 
 ## The mission-review idle pass
 
-When an org goes fully quiet — every queue empty, no open thread — but the
-mission may not be met, the idle pass hands the topmost leader a budget-gated
-**mission-review** turn to reweigh the mission and delegate the next step
-(cadence is the a8s `idle.timeout` with a widening backoff; three silent
-reviews go dormant until a real message or a `MISSION.md` change re-arms it).
-The nudge never asks the leader to report to the human. Prompt text — the turn
-framing, doctrine bullets, and both nudges — is overridable per key under a
-`prompts` object in the a8s node definition (defaults live in `dispatch.py`);
-the definition reaches r4t via `--definition $DEFINITION_PATH`.
+This is the **heartbeat** on an [idle pass](r4t-idle.md). When an org goes
+fully quiet — every queue empty, no open thread — but the mission may not be
+met, the idle pass hands the topmost leader a budget-gated **mission-review**
+turn to reweigh the mission and delegate the next step (cadence is the a8s
+`idle.timeout` with a widening backoff; three silent reviews go dormant until
+a real message or a `MISSION.md` change re-arms it). The nudge never asks the
+leader to report to the human. Prompt text — the turn framing, doctrine
+bullets, and both nudges — is overridable per key under a `prompts` object in
+the a8s node definition (defaults live in `dispatch.py`); the definition
+reaches r4t via `--definition $DEFINITION_PATH`.
 
 ## Portable orgs
 

@@ -123,22 +123,22 @@ def test_fake_sandbox_silent_member_answers_on_stdout():
     assert "BREAKER" not in report
 
 
-def test_fake_sandbox_mute_member_is_swept_as_quiet():
+def test_fake_sandbox_mute_member_is_not_nudged_on_an_ingress_thread():
     report, _ = _run_sandbox("--break", "lead:mute")
 
     mechanical = _mechanical(report)
     for check in (
         "Silent turn logged",
-        "Quiet sweep nudged the leader",
+        "Quiet sweep left the ingress thread alone",
         "Breaker stayed closed",
-        "Leader answered the originator",
+        "Leader stayed silent on an ingress thread",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
-    # Nothing staged, nothing worth relaying, no failed turn — the quiet sweep
-    # is the only thing that gets the originator an answer.
+    # The cost of the ruling, stated plainly: the leader stages nothing, no
+    # watchdog chases an ingress thread, and the human's message goes
+    # unanswered with nothing objecting. Whether that is acceptable is a
+    # product decision, not a bug in this path.
     assert "SILENT lead" in report
-    assert "QUIET thread=" in report
-    assert "nudged leader lead" in report
+    assert "QUIET thread=" not in report
     assert "BREAKER" not in report
-    assert "ANSWERED thread=" in report

@@ -50,7 +50,7 @@ The effective inject budget resolves in this order:
 rig sits in the lower tier: local/opencode-class models measured (K2 campaign)
 smoothing over specifics rather than keeping them at a given byte budget.
 Models improve, so this is a courtesy nudge toward a bigger rig or a
-[distill-rig override](#distill-rig-a-different-writer-for-the-same-member)
+[distill-rig override](#distill-rig--a-different-writer-for-the-same-member)
 (`agy`-class rigs matched the fidelity of a much slower model at a tenth the
 wall clock), never a gate.
 
@@ -203,11 +203,12 @@ ollama answers, and the next pass embeds the backlog.
 
 ## Distill on the way out — dreaming, not per-turn
 
-Turn captures are already the cheap per-turn log. The extraction pass runs
-async from `run_idle` — bounded per pass, never inside a turn — feeding fresh
-captures to `k7e distill` and advancing a `.dreamed` watermark only on
-success. Failed turns are never distilled — their batch returns to the queue,
-and facts extracted from them would be premature.
+This is the **dream** sweep on an [idle pass](r4t-idle.md). Turn captures are
+already the cheap per-turn log. The extraction pass runs async from
+`run_idle` — bounded per pass, never inside a turn — feeding fresh captures
+to `k7e distill` and advancing a `.dreamed` watermark only on success. Failed
+turns are never distilled — their batch returns to the queue, and facts
+extracted from them would be premature.
 
 ### Distill rig — a different writer for the same member
 

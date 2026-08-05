@@ -937,25 +937,21 @@ def _ingest(
 
     Routing also decides the thread's obligation: a thread opened from OUTSIDE
     is owed nothing (#58), because out there r4t cannot enforce a reply and
-    must not pretend it can. Inside covers intra-roster traffic and the
-    roster's own human, whose doorbell mail is re-stamped to the seat above."""
+    must not pretend it can. That holds for the roster's own human too — mail
+    through their doorbell is a8s protocol, so whether to answer is the
+    member's judgment. Reaching them through the seat is the inside path, and
+    that one is owed an answer."""
     if roster is None:
         roster = _load_roster(ctx, sender)
     if roster is None:
         return SKIPPED
 
-    from_inside = internal
     if internal:
         _, sub = split_recipient(to)
     else:
         human = _human_by_address(roster, sender)
         if human is not None:
             sender = f"{ctx.node}:{human.name.lower()}"
-            # The roster's own human arrives through the doorbell like any
-            # outside sender, but they are a member: r4t knows who they are
-            # and can hold the roster to answering them. Their thread is owed
-            # an answer, so the wall is drawn AFTER this re-stamp (#58).
-            from_inside = True
         to = ctx.node
         sub = ""
         thread = None  # external mail always opens a fresh thread
@@ -1030,7 +1026,7 @@ def _ingest(
     if thread is None:
         thread = tasks.new_thread_id()
         hop = 0
-    tasks.ensure_task(ctx.node, thread, sender, ingress=not from_inside)
+    tasks.ensure_task(ctx.node, thread, sender, ingress=not internal)
 
     state.enqueue(
         ctx.node,
@@ -2212,14 +2208,15 @@ def _quiet_task_sweep(
     `quiet_task_seconds`, wake the leader with a nudge to report current state
     (NOT to force-finish the work). Returns the threads nudged.
 
-    An INGRESS thread is skipped, whoever sent it (#58). Outside the garden a8s
-    posts messages to nodes and nothing more; there is no reply obligation for
-    r4t to enforce and no way to acquire one without a decision point at every
-    node on the network. A thread that arrives from outside is a thread the
-    leader may answer or may not — that judgment is the leader's, and a
-    watchdog that second-guesses it just nudges forever. What the sweep still
-    owns is the inside: an intra-roster thread whose member never answered its
-    originator is a genuine dropped ball, because r4t knows both ends."""
+    An INGRESS thread is skipped, whoever sent it (#58) — the roster's own
+    human included. Outside the garden a8s posts messages to nodes and nothing
+    more; there is no reply obligation for r4t to enforce and no way to acquire
+    one without a decision point at every node on the network. A thread that
+    arrives from outside is a thread the leader may answer or may not — that
+    judgment is the leader's, and a watchdog that second-guesses it turns every
+    passing remark into a status report. What the sweep still owns is the
+    inside: an intra-roster thread whose member never answered its originator
+    is a genuine dropped ball, because r4t knows both ends."""
     if config.quiet_task_seconds <= 0:
         return []
     if state.live_locks(ctx.node):

@@ -26,9 +26,10 @@ About 20 minutes.
 
 `Continue: 15m` is a promise you made in chapter 2 without seeing it kept: a
 conversation idle past fifteen minutes is retired on the node's next idle
-pass. Fifteen minutes is the right setting and the wrong demo — you are not
-going to sit here watching a clock. `r4t flush` is the same cycle on your
-word:
+pass (the full pass — watchdog, drain, flush, dream, heartbeat — is in
+[`docs/r4t-idle.md`](../docs/r4t-idle.md)). Fifteen minutes is the right
+setting and the wrong demo — you are not going to sit here watching a clock.
+`r4t flush` is the same cycle on your word:
 
 ```bash
 r4t flush --node silo wren

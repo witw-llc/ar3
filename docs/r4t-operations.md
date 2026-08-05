@@ -29,7 +29,8 @@ is optional. (`a8s logs <node> -f` still shows the cross-wall view.)
 ## What the roster keeps, and for how long
 
 Everything above reads out of `~/.config/r4t/rosters/<node>/`, which grows with
-every turn. Maintenance passes (`r4t idle`, and `r4t clear` on its own) hold
+every turn. Maintenance passes (`r4t idle` — one
+[idle pass](r4t-idle.md) — and `r4t clear` on its own) hold
 it to a shape a roster can run for months on:
 
 - **Day logs** (`log/<date>.md`, the stream behind `r4t logs`) are kept for
