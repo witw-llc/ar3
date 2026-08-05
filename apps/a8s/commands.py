@@ -2399,7 +2399,7 @@ def cmd_health() -> int:
     if not remotes:
         print("remotes: (none configured)")
     for t in remotes:
-        name = getattr(t, "name", t.__class__.__name__)
+        name = t.id
         try:
             t.start(lambda *_: None)
             connected = t.is_connected() if hasattr(t, "is_connected") else True
@@ -2422,18 +2422,32 @@ def cmd_health() -> int:
         tmp.write("a8s health check")
         tmp.close()
         tmp_path = Path(tmp.name)
+        used_public_get = False
         try:
             url = svc.store(tmp_path)
             dl_dir = Path(tempfile.mkdtemp())
             dl_dest = dl_dir / "health-check.txt"
             ok = svc.retrieve(url, dl_dest)
+            if not ok:
+                # A service may decline its own URL on purpose: `rclone`
+                # hands back a public https link and leaves the fetch to the
+                # receiver, which needs no rclone and no credentials. Follow
+                # the same path a receiver would rather than calling that a
+                # failure.
+                from settings import get_int
+                from services.http_get import http_get_url_to_path
+
+                ok = http_get_url_to_path(url, dl_dest, max_bytes=get_int("max_file_bytes"))
+                if ok:
+                    used_public_get = True
             if ok and dl_dest.is_file() and dl_dest.read_text().strip() == "a8s health check":
-                print(f"storage {name}: OK (upload + download verified)")
+                how = "public URL" if used_public_get else "service"
+                print(f"storage {name}: OK (upload + download verified via {how})")
             elif ok:
                 print(f"storage {name}: WARN (download succeeded but content mismatch)")
                 errors += 1
             else:
-                print(f"storage {name}: FAIL (retrieve returned False)")
+                print(f"storage {name}: FAIL (no service claimed the URL and a public GET did not fetch it)")
                 errors += 1
             dl_dest.unlink(missing_ok=True)
             dl_dir.rmdir()

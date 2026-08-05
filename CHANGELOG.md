@@ -10,6 +10,18 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.58]
+
+### Fixed
+- `a8s health` follows the same path a receiver does. A service may decline
+  its own URL on purpose — `rclone` returns a public https link and leaves the
+  fetch to the receiver, which needs no rclone and no credentials — and health
+  reported that correct behaviour as `FAIL (retrieve returned False)`. It now
+  falls back to the public GET and says which route verified the round trip.
+- `a8s health` names the remote you configured instead of its Python class. It
+  read `.name` off a transport that exposes `.id`, the same slip the storage
+  loop had.
+
 ## [0.1.57] — 2026-08-05
 
 ### Added
