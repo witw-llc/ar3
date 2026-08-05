@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from services import StorageError, StorageService
+from services.public_url import public_scheme_ok
 
 
 # Recognized opts (post-aliasing). Anything else raises.
@@ -102,9 +103,9 @@ class TempFileOrgService(StorageService):
             )
         timeout_s = float(opts.get("timeout_s", 30))
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
+        if not public_scheme_ok(parsed.scheme):
             raise ValueError(
-                f"storage {name!r}: unsupported scheme {parsed.scheme!r} (expected http or https)"
+                f"storage {name!r}: unsupported scheme {parsed.scheme!r} (expected https)"
             )
         if not parsed.hostname:
             raise ValueError(f"storage {name!r}: URL missing host: {url!r}")

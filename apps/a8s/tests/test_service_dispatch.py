@@ -109,3 +109,12 @@ class TestDetectServiceKind:
 
     def test_bad_scheme_returns_none(self):
         assert detect_service_kind("ftp://tempfile.org") is None
+
+    def test_s3_url(self):
+        assert detect_service_kind("s3://bucket") == "s3"
+
+    def test_file_sync_url(self):
+        assert detect_service_kind("file:///tmp/sync") == "file_sync"
+
+    def test_webdav_url(self):
+        assert detect_service_kind("webdav://webdav.example/dav") == "webdav"

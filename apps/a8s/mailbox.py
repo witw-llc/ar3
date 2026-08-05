@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -67,6 +68,8 @@ from core import (
 from network import seen_id_append
 from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
+from services.attachment_errors import ATTACHMENT_UNAVAILABLE
+from services.attachment_path import bundle_file_path
 import txlog
 from ulid import new as new_ulid
 
@@ -75,6 +78,25 @@ def _max_file_bytes() -> int:
     from settings import get_int
 
     return get_int("max_file_bytes")
+
+
+def _storage_receive_wait_seconds() -> int:
+    from settings import get_setting
+
+    try:
+        return max(0, int(get_setting("storage_receive_wait_seconds")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _storage_fetch_poll_seconds() -> float:
+    from settings import get_setting
+
+    try:
+        return float(get_setting("storage_fetch_poll_seconds"))
+    except (TypeError, ValueError):
+        return 5.0
+
 
 # A function that publishes one routed-and-from-stamped message envelope to
 # every configured remote that hasn't yet accepted it. Returns the updated
@@ -134,16 +156,10 @@ def _pending_attachment_status(
     filename = (entry.get("filename") or "").strip()
     if not filename:
         return None, "missing filename in files entry"
-    if filename != Path(filename).name:
-        return None, f"filename {filename!r} is not a basename"
-    bundle = pending_bundle_dir(sender_name, msg_id).resolve()
-    try:
-        src = (bundle / filename).resolve()
-        src.relative_to(bundle)
-    except ValueError:
-        return None, f"path escapes pending bundle {bundle}"
-    except (OSError, RuntimeError) as e:
-        return None, f"cannot resolve {bundle / filename}: {e}"
+    bundle = pending_bundle_dir(sender_name, msg_id)
+    src, err = bundle_file_path(bundle, filename)
+    if src is None:
+        return None, err
     if not src.exists():
         return None, f"not found: {src}"
     if src.is_dir():
@@ -486,13 +502,81 @@ def _upload_files_for_remote(
     return True
 
 
+def _attempt_download_file(
+    recipient: Participant,
+    dest: Path,
+    filename: str,
+    urls: list,
+    services: list[StorageService],
+    max_bytes: int,
+    announce: bool = True,
+) -> bool:
+    """One pass over every URL/service for one file. `announce` is False on
+    retry rounds — a 900s wait polls ~180 times and each failure would
+    otherwise repeat the same warning into the agent's log."""
+    delivered = False
+    for url in urls:
+        for service in services:
+            try:
+                if service.retrieve(url, dest):
+                    delivered = True
+                    break
+            except StorageError as e:
+                if announce:
+                    out_agent(
+                        recipient.name,
+                        f"WARN storage {service.id} download failed for {filename!r}: {e}",
+                    )
+        if not delivered:
+            try:
+                from services.http_get import http_get_url_to_path
+
+                if http_get_url_to_path(url, dest, max_bytes=max_bytes):
+                    delivered = True
+            except StorageError as e:
+                if announce:
+                    out_agent(
+                        recipient.name,
+                        f"WARN http download failed for {filename!r}: {e}",
+                    )
+        if delivered:
+            break
+    if not delivered:
+        return False
+    try:
+        size = dest.stat().st_size
+    except OSError as e:
+        out_agent(
+            recipient.name,
+            f"WARN cannot stat downloaded {filename!r}: {e}",
+        )
+        return False
+    if size > max_bytes:
+        dest.unlink(missing_ok=True)
+        out_agent(
+            recipient.name,
+            f"WARN dropped {filename!r}: size {size} exceeds max_file_bytes ({max_bytes})",
+        )
+        return False
+    return True
+
+
 def _download_files_to_recipient(
     msg: dict,
     recipient: Participant,
     services: list[StorageService],
+    *,
+    wait_s: int | None = None,
+    announce_failures: bool = True,
 ) -> dict:
     """Pull `msg["files"][i]["storage"]` URLs into `<root>/.files/<msg_id>/`.
-    Returns a NEW dict with filename-only `files` entries."""
+
+    Retries until each file is delivered or the wait expires. `wait_s`
+    overrides `storage_receive_wait_seconds`; 0 means one attempt. Failures
+    become `error: ATTACHMENT_UNAVAILABLE` entries so wakes do not imply bytes
+    exist. Returns a NEW dict with filename-only or error-shaped `files`
+    entries. `announce_failures` is False when the caller is only probing and
+    will retry — the give-up warning belongs to whoever actually gives up."""
     out_msg = dict(msg)
     msg_id = (msg.get("id") or "").strip()
     src_files = msg.get("files") or []
@@ -502,34 +586,73 @@ def _download_files_to_recipient(
         return out_msg
     dest_root = recipient.files_bundle_dir(msg_id)
     dest_root.mkdir(parents=True, exist_ok=True)
+    max_bytes = _max_file_bytes()
+    if wait_s is None:
+        wait_s = _storage_receive_wait_seconds()
+    poll_s = _storage_fetch_poll_seconds()
+    pending: list[dict] = []
     for entry in src_files:
         filename = entry.get("filename") or ""
         urls = entry.get("storage") or []
         if not filename or not urls:
             continue
-        dest = dest_root / filename
-        delivered = False
-        for url in urls:
-            for service in services:
-                try:
-                    if service.retrieve(url, dest):
-                        delivered = True
-                        break
-                except StorageError as e:
-                    out_agent(
-                        recipient.name,
-                        f"WARN storage {service.id} download failed for {filename!r}: {e}",
-                    )
-                    # Real failure on a matched URL — try next URL/service.
-            if delivered:
-                break
-        if delivered:
-            new_files.append({"filename": filename})
-        else:
+        dest, err = bundle_file_path(dest_root, filename)
+        if dest is None:
             out_agent(
                 recipient.name,
-                f"WARN no configured storage service could download {filename!r} (urls={urls})",
+                f"WARN rejected inbound attachment filename {filename!r}: {err}",
             )
+            new_files.append({
+                "filename": filename,
+                "error": ATTACHMENT_UNAVAILABLE,
+                "detail": err,
+            })
+            continue
+        pending.append({"filename": filename, "urls": urls, "dest": dest})
+
+    deadline = time.monotonic() + wait_s if wait_s > 0 else time.monotonic()
+    first_pass = True
+    while pending:
+        still: list[dict] = []
+        for item in pending:
+            if _attempt_download_file(
+                recipient,
+                item["dest"],
+                item["filename"],
+                item["urls"],
+                services,
+                max_bytes,
+                announce=first_pass,
+            ):
+                new_files.append({"filename": item["filename"]})
+            else:
+                still.append(item)
+        pending = still
+        first_pass = False
+        if not pending:
+            break
+        if wait_s <= 0:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(poll_s)
+
+    for item in pending:
+        detail = (
+            f"could not download after {wait_s}s; contact an administrator"
+            if wait_s > 0
+            else "could not download; contact an administrator"
+        )
+        if announce_failures:
+            out_agent(
+                recipient.name,
+                f"WARN attachment {item['filename']!r} unavailable after retries ({detail})",
+            )
+        new_files.append({
+            "filename": item["filename"],
+            "error": ATTACHMENT_UNAVAILABLE,
+            "detail": detail,
+        })
     out_msg["files"] = new_files
     return out_msg
 

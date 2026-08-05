@@ -27,6 +27,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -176,14 +177,15 @@ def split_secret_keys(spec: dict) -> tuple[dict, dict]:
     return public, secrets
 
 
-def merge_remote_secrets(name: str, spec: dict) -> dict:
-    """Overlay secrets.json (and any legacy inline secrets) onto a remote spec.
+def merge_spec_secrets(section: str, name: str, spec: dict) -> dict:
+    """Overlay secrets.json (and any legacy inline secrets) onto a spec.
 
     secrets.json wins for secret keys. Inline values still in network.json
-    remain effective until the next `a8s remote` rewrite strips them.
+    remain effective until the next `a8s remote` / `a8s storage` rewrite
+    strips them. `section` is "remotes" or "services".
     """
     merged = dict(spec)
-    stored = (load_secrets_config().get("remotes") or {}).get(name)
+    stored = (load_secrets_config().get(section) or {}).get(name)
     if isinstance(stored, dict):
         for key, value in stored.items():
             if key in SECRET_SPEC_KEYS:
@@ -191,24 +193,36 @@ def merge_remote_secrets(name: str, spec: dict) -> dict:
     return merged
 
 
-def put_remote_secrets(name: str, secrets: dict) -> None:
-    """Merge ``secrets`` into secrets.json for remote ``name`` (no-op if empty)."""
+def put_spec_secrets(section: str, name: str, secrets: dict) -> None:
+    """Merge ``secrets`` into secrets.json for ``name`` (no-op if empty)."""
     if not secrets:
         return
     cfg = load_secrets_config()
-    prev = cfg["remotes"].get(name)
+    prev = cfg[section].get(name)
     merged = dict(prev) if isinstance(prev, dict) else {}
     merged.update(secrets)
-    cfg["remotes"][name] = merged
+    cfg[section][name] = merged
     save_secrets_config(cfg)
+
+
+def delete_spec_secrets(section: str, name: str) -> None:
+    cfg = load_secrets_config()
+    if name not in cfg[section]:
+        return
+    del cfg[section][name]
+    save_secrets_config(cfg)
+
+
+def merge_remote_secrets(name: str, spec: dict) -> dict:
+    return merge_spec_secrets("remotes", name, spec)
+
+
+def put_remote_secrets(name: str, secrets: dict) -> None:
+    put_spec_secrets("remotes", name, secrets)
 
 
 def delete_remote_secrets(name: str) -> None:
-    cfg = load_secrets_config()
-    if name not in cfg["remotes"]:
-        return
-    del cfg["remotes"][name]
-    save_secrets_config(cfg)
+    delete_spec_secrets("remotes", name)
 
 
 # Top-level keys in a network.json entry that are not transport options
@@ -270,6 +284,12 @@ def configured_remote_ids() -> list[str]:
 _RESERVED_SERVICE_SPEC_KEYS = {"service", "url"}
 
 
+def _normalize_opt_key(key: str) -> str:
+    """`--base-url` and `--base_url` name the same option. Services declare
+    their vocabulary in Python identifiers, so dashes fold to underscores."""
+    return key.replace("-", "_")
+
+
 def _build_service(name: str, spec: dict) -> StorageService:
     """Instantiate one StorageService from a network.json `services` entry.
 
@@ -283,7 +303,11 @@ def _build_service(name: str, spec: dict) -> StorageService:
     url = spec.get("url")
     if not url:
         raise ValueError(f"storage {name!r}: every service requires `url`")
-    opts = {k: v for k, v in spec.items() if k not in _RESERVED_SERVICE_SPEC_KEYS}
+    opts = {
+        _normalize_opt_key(k): v
+        for k, v in spec.items()
+        if k not in _RESERVED_SERVICE_SPEC_KEYS
+    }
     if kind == "tempfile_org":
         # Lazy import — keeps the storage modules out of the import graph
         # for users without storage configured.
@@ -294,6 +318,18 @@ def _build_service(name: str, spec: dict) -> StorageService:
         from services.s3 import S3Service
 
         return S3Service(name, url=url, **opts)
+    if kind == "file_sync":
+        from services.file_sync import FileSyncService
+
+        return FileSyncService(name, url=url, **opts)
+    if kind == "webdav":
+        from services.webdav import WebdavService
+
+        return WebdavService(name, url=url, **opts)
+    if kind == "rclone":
+        from services.rclone import RcloneService
+
+        return RcloneService(name, url=url, **opts)
     raise ValueError(f"storage {name!r}: unsupported service kind {kind!r}")
 
 
@@ -308,7 +344,9 @@ def load_services() -> list[StorageService]:
             out(f"WARN: storage {name!r} config is not an object; skipping")
             continue
         try:
-            out_list.append(_build_service(name, spec))
+            out_list.append(
+                _build_service(name, merge_spec_secrets("services", name, spec))
+            )
         except Exception as e:
             out(f"WARN: storage {name!r} skipped: {e}")
     return out_list
@@ -329,10 +367,19 @@ def detect_service_kind(url: str) -> str | None:
     `service` field at config-write time."""
     # Lazy imports keep the storage modules out of the import graph for
     # installs without storage configured.
+    from services.file_sync import FileSyncService
+    from services.rclone import RcloneService
     from services.s3 import S3Service
     from services.tempfile_org import TempFileOrgService
+    from services.webdav import WebdavService
 
-    for kind, cls in (("tempfile_org", TempFileOrgService), ("s3", S3Service)):
+    for kind, cls in (
+        ("tempfile_org", TempFileOrgService),
+        ("s3", S3Service),
+        ("file_sync", FileSyncService),
+        ("webdav", WebdavService),
+        ("rclone", RcloneService),
+    ):
         try:
             if cls.supports_config_url(url):
                 return kind
@@ -509,65 +556,47 @@ def receive_envelope(
         remote=remote_id,
         detail=f"{kind} resolved to {len(recipients)} local recipient(s)",
     )
-    # File payloads (#90): when storage services are configured, download
-    # each file's bytes into the recipient's `.files/` and rewrite the
-    # envelope entry to local-path shape. Without storage services
-    # configured, fall back to the v1 limitation (strip + warn).
+    # File payloads (#90): when the envelope carries `files[i].storage` URLs,
+    # download into the recipient's `.files/` and rewrite to local-path shape.
+    # Configured storage services are tried first; http(s) URLs then fall back
+    # to a plain GET so presigned links need no receiver-side credentials.
+    # Legacy envelopes with filename-only entries (no `storage`) are stripped.
     raw_files = msg.get("files") or []
     files_have_storage = any((isinstance(e, dict) and e.get("storage")) for e in raw_files)
-    if raw_files and (not services or not files_have_storage):
+    if raw_files and not files_have_storage:
         out(f"WARN: stripped FILE: payloads from incoming envelope id={msg_id}")
         msg = dict(msg)
         msg["files"] = []
     sender_label = msg.get("from") or "?"
     preview = _preview(msg.get("content", ""))
     delivered_names: list[str] = []
+    deferred: list[Participant] = []
     for recipient in recipients:
         # Per-recipient download: each recipient has its own `.files/`, so
         # the bytes land in the right place even on alias fan-out. Imported
         # lazily — `mailbox` imports `network`, so a top-level import here
         # would form an import cycle.
         msg_for_recipient = msg
-        if services and files_have_storage:
+        if files_have_storage:
             from mailbox import _download_files_to_recipient
 
-            msg_for_recipient = _download_files_to_recipient(msg, recipient, services)
-        # ensure_mailboxes lives in mailbox.py; importing it here would form
-        # a cycle. Just create dirs.
-        inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)
-        inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
-        final = inbox_dir(recipient.name) / f"{msg_id}.json"
-        if final.is_file():
-            txlog.log(
-                "RECEIVED_REMOTE",
-                msg_id=msg_id,
-                sender=msg.get("from") or "?",
-                recipient=recipient.name,
-                remote=remote_id,
-                detail="inbox already contained envelope",
+            # One attempt only. Everything here runs on the transport's single
+            # subscriber worker, so a retry loop that sleeps would hold every
+            # later message — including plain text from another sender —
+            # behind one unreachable URL.
+            wait_s = _receive_wait_seconds()
+            msg_for_recipient = _download_files_to_recipient(
+                msg, recipient, services or [],
+                wait_s=0,
+                announce_failures=wait_s <= 0,
             )
+            if _attachments_missing(msg_for_recipient) and wait_s > 0:
+                deferred.append(recipient)
+                continue
+        if _write_to_inbox(
+            msg_for_recipient, recipient, msg_id, sender_label, preview, remote_id
+        ):
             delivered_names.append(recipient.name)
-            continue
-        staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
-        try:
-            with staging.open("w", encoding="utf-8") as f:
-                json.dump(msg_for_recipient, f, indent=2)
-            os.replace(str(staging), str(final))
-        except OSError as e:
-            out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
-            continue
-        out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
-        file_names = [e.get("filename", "") for e in (msg_for_recipient.get("files") or []) if e.get("filename")]
-        txlog.log(
-            "RECEIVED_REMOTE",
-            msg_id=msg_id,
-            sender=sender_label,
-            recipient=recipient.name,
-            files=file_names or None,
-            remote=remote_id,
-            detail="inbox write complete",
-        )
-        delivered_names.append(recipient.name)
     if delivered_names:
         import convo
 
@@ -575,6 +604,165 @@ def receive_envelope(
     seen_id_append(msg_id)
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
+    for recipient in deferred:
+        _submit_deferred_delivery(
+            msg, recipient, services or [], msg_id, sender_label, preview,
+            remote_id, publish_control,
+        )
+
+
+def _receive_wait_seconds() -> int:
+    from settings import get_setting
+
+    try:
+        return max(0, int(get_setting("storage_receive_wait_seconds")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _attachments_missing(msg: dict) -> bool:
+    return any(e.get("error") for e in (msg.get("files") or []))
+
+
+def _write_to_inbox(
+    msg_for_recipient: dict,
+    recipient: Participant,
+    msg_id: str,
+    sender_label: str,
+    preview: str,
+    remote_id: str,
+) -> bool:
+    """Atomically land one envelope in one recipient's inbox. True when the
+    message is there (already present counts)."""
+    # ensure_mailboxes lives in mailbox.py; importing it here would form
+    # a cycle. Just create dirs.
+    inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)
+    inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
+    final = inbox_dir(recipient.name) / f"{msg_id}.json"
+    if final.is_file():
+        txlog.log(
+            "RECEIVED_REMOTE",
+            msg_id=msg_id,
+            sender=sender_label,
+            recipient=recipient.name,
+            remote=remote_id,
+            detail="inbox already contained envelope",
+        )
+        return True
+    staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
+    try:
+        with staging.open("w", encoding="utf-8") as f:
+            json.dump(msg_for_recipient, f, indent=2)
+        os.replace(str(staging), str(final))
+    except OSError as e:
+        out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
+        return False
+    out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
+    file_names = [
+        e.get("filename", "")
+        for e in (msg_for_recipient.get("files") or [])
+        if e.get("filename")
+    ]
+    txlog.log(
+        "RECEIVED_REMOTE",
+        msg_id=msg_id,
+        sender=sender_label,
+        recipient=recipient.name,
+        files=file_names or None,
+        remote=remote_id,
+        detail="inbox write complete",
+    )
+    return True
+
+
+# Attachment retries run here instead of on the subscriber worker. Bounded so a
+# burst of undeliverable attachments cannot spawn a thread apiece; queued work
+# still runs, just later. Daemon threads — a retry must never hold up exit.
+_ATTACHMENT_RETRY_WORKERS = 4
+_attachment_pool: "ThreadPoolExecutor | None" = None
+_attachment_pool_lock = threading.Lock()
+_attachment_futures: list = []
+
+
+def _get_attachment_pool() -> ThreadPoolExecutor:
+    global _attachment_pool
+    with _attachment_pool_lock:
+        if _attachment_pool is None:
+            _attachment_pool = ThreadPoolExecutor(
+                max_workers=_ATTACHMENT_RETRY_WORKERS,
+                thread_name_prefix="a8s-attach",
+            )
+        return _attachment_pool
+
+
+def drain_attachment_retries(timeout_s: float | None = None) -> bool:
+    """Block until every deferred attachment delivery has finished.
+
+    Returns False if `timeout_s` expired first. Deliveries are durable either
+    way — this is for callers that need the inbox settled before looking at
+    it (tests, and a shutdown that would rather not abandon a live download)."""
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    with _attachment_pool_lock:
+        pending = [f for f in _attachment_futures if not f.done()]
+    for future in pending:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return False
+        try:
+            future.result(timeout=remaining)
+        except TimeoutError:
+            return False
+        except Exception:
+            pass
+    return True
+
+
+def _submit_deferred_delivery(
+    msg: dict,
+    recipient: Participant,
+    services: list[StorageService],
+    msg_id: str,
+    sender_label: str,
+    preview: str,
+    remote_id: str,
+    publish_control: Callable[[bytes], None] | None,
+) -> None:
+    """Finish a delivery whose attachments were not ready on the first try.
+
+    The message is held out of the inbox until its files resolve — an agent
+    woken for a file it cannot open burns tokens hunting for it — but the
+    waiting happens off the subscriber worker so unrelated mail flows."""
+    out_agent(
+        recipient.name,
+        f"attachment(s) for id={msg_id} not ready; retrying in the background",
+    )
+
+    def finish() -> None:
+        from mailbox import _download_files_to_recipient
+
+        try:
+            resolved = _download_files_to_recipient(msg, recipient, services)
+            if not _write_to_inbox(
+                resolved, recipient, msg_id, sender_label, preview, remote_id
+            ):
+                return
+            import convo
+
+            convo.record(msg, recipients=[recipient.name])
+            if publish_control is not None:
+                _publish_delivery_receipt(
+                    msg, [recipient.name], publish_control, remote_id
+                )
+        except Exception as e:
+            out_agent(
+                recipient.name,
+                f"WARN deferred attachment delivery failed for id={msg_id}: {e}",
+            )
+
+    future = _get_attachment_pool().submit(finish)
+    with _attachment_pool_lock:
+        _attachment_futures[:] = [f for f in _attachment_futures if not f.done()]
+        _attachment_futures.append(future)
 
 
 def _receipt_sender(sender: str, all_agents: list[Participant]) -> Participant | None:

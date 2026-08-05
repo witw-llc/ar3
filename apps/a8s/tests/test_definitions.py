@@ -105,6 +105,21 @@ class TestMessageBody:
     def test_empty(self, files_root):
         assert _message_body({}, files_root) == ""
 
+    def test_attachment_unavailable_line(self, files_root):
+        msg = {
+            "content": "see attached",
+            "id": "01JTESTATTACH000000000000",
+            "files": [{
+                "filename": "report.pdf",
+                "error": "ATTACHMENT_UNAVAILABLE",
+                "detail": "could not download; contact an administrator",
+            }],
+        }
+        body = _message_body(msg, files_root)
+        assert "ATTACHMENT UNAVAILABLE: report.pdf" in body
+        assert "contact an administrator" in body
+        assert "ATTACHED FILE:" not in body
+
 
 # ---------- build_command + _expand_argv ----------
 

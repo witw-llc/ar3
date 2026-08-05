@@ -56,12 +56,16 @@ from daemon import (
     attached_loop,
 )
 from network import (
+    _build_service as build_service,
     configured_remote_ids,
     delete_remote_secrets,
+    delete_spec_secrets,
     detect_service_kind,
     load_network_config,
     merge_remote_secrets,
+    merge_spec_secrets,
     put_remote_secrets,
+    put_spec_secrets,
     save_network_config,
     split_secret_keys,
 )
@@ -2182,26 +2186,82 @@ def cmd_unremote(args: list[str]) -> int:
 # ---------- storage services (issue #90) ----------
 
 
-def _storage_usage() -> int:
-    print(
-        "usage: a8s storage                                          # list all\n"
-        "       a8s storage <name>                                   # show one\n"
-        "       a8s storage <name> <url> [--<k> <v> ...]             # add or overwrite\n"
-        "       a8s unstorage <name>                                 # remove\n"
-        "\n"
-        "The service kind is auto-dispatched from the URL. Any --<opt> <value>\n"
-        "pair past the URL is passed verbatim to the service (e.g. --expiry_hours\n"
-        "for tempfile.org). Unknown options are rejected by the service at load time.\n"
-        "\n"
-        "  a8s storage scratch https://tempfile.org --expiry_hours 24\n"
-        "  a8s storage bucket  s3://my-bucket/a8s --region us-west-2\n"
-        "\n"
-        "s3 needs boto3 (pip install -r requirements/a8s-s3.txt) and uses the\n"
-        "standard AWS credential chain; it returns presigned URLs so a receiver\n"
-        "needs no credentials of its own.",
-        file=sys.stderr,
-    )
-    return 2
+_STORAGE_HELP = """\
+usage: a8s storage                                # list all
+       a8s storage <name>                         # show one
+       a8s storage <name> <url> [--<k> <v> ...]   # add or overwrite
+       a8s unstorage <name>                       # remove
+
+Storage services carry attachment bytes between machines. A file attached to a
+message is uploaded to EVERY configured service, and every resulting URL rides
+along in the envelope — the receiver tries them in turn, so a service blocked
+on one network does not lose the file. Receivers fetch public URLs with a plain
+HTTP GET and need no credentials or storage config of their own.
+
+The kind is auto-dispatched from the URL scheme. Dashes and underscores in an
+option name are equivalent (--base-url == --base_url).
+
+  KIND          URL                              OPTIONS
+  tempfile_org  https://tempfile.org             --expiry_hours (1|6|24|48, default 24)
+                                                 --timeout_s (30)
+  s3            s3://<bucket>/<prefix>           --region --profile --endpoint_url
+                                                 --prefix (a8s) --presign_hours (24)
+                                                 --timeout_s (60)
+  file_sync     file:///<abs-path>               --base-url (REQUIRED) --prefix (a8s)
+  webdav        webdav://<host>/<path>           --base-url (REQUIRED) --user --password
+                                                 --prefix (a8s) --timeout_s (60)
+  rclone        rclone://<remote>/<path>         --prefix (a8s) --timeout_s (300)
+                                                 --rclone_path (rclone)
+
+URLs must be https. A peer picks the URL your node downloads from, and these
+links carry their own authorization in the query string. A download follows at
+most 3 redirects, and each hop obeys the same rule. Set storage_allow_http only
+for a store on your own network with no certificate.
+
+  a8s storage scratch https://tempfile.org --expiry_hours 24
+  a8s storage bucket s3://my-bucket/a8s --region us-west-2 --profile ops
+  a8s storage drive file:///home/me/Drive/a8s --base-url https://cdn.example/a8s
+  a8s storage fm webdav://webdav.fastmail.com/dav/fs/user@domain/a8s \\
+      --base-url https://files.example.com/a8s --user user@domain --password ...
+  a8s storage drive rclone://gdrive/A8S
+
+file_sync copies into a folder some other tool already syncs and hands out the
+public URL the object lands at, so a8s does no syncing of its own. It requires
+a store whose public URL is derivable from the path: a webserver or CDN over
+the synced directory, `rclone serve`, a Nextcloud public folder. It does NOT
+work with Google Drive, OneDrive or Dropbox, which mint an opaque per-file id
+at upload time that no path can predict.
+
+webdav PUTs directly and is for stores whose upload host and public host
+differ. Both need --base-url: the public https prefix a receiver downloads
+from, and `<base-url>/<prefix>/<token>/<filename>` must resolve.
+
+rclone is the answer for Google Drive and anything else that mints an opaque
+per-file id: it uploads with `rclone copyto` and asks for the public URL with
+`rclone link`, using the remote you already configured. Both calls are
+synchronous, so nothing waits on a sync daemon. The uploader needs rclone; the
+receiver still needs nothing. a8s must be able to read the rclone config of the
+user it runs as, and only backends with a known direct-download URL are
+accepted — Drive today — because storing a backend's preview page as the
+attachment would be silent corruption.
+
+s3 needs boto3 (pip install -r requirements/a8s-s3.txt) on the uploader only;
+uploads return presigned GET URLs.
+
+--password is written to secrets.json (mode 0600), never network.json.
+Config is validated here — a bad option fails now, not at daemon start.
+
+See also: a8s health (probe every service), a8s config (attachment knobs)."""
+
+
+def _storage_usage(*, explicit: bool = False) -> int:
+    """Usage text. `explicit` means the user asked (`--help`): stdout, exit 0.
+    Otherwise it is a usage error: stderr, exit 2."""
+    print(_STORAGE_HELP, file=sys.stdout if explicit else sys.stderr)
+    return 0 if explicit else 2
+
+
+_HELP_FLAGS = {"-h", "--help", "help"}
 
 
 def _format_storage_summary(spec: dict) -> str:
@@ -2228,13 +2288,13 @@ def cmd_storage(args: list[str]) -> int:
       a8s storage <name> <url> [--<k> <v> ...]    add or overwrite
       a8s unstorage <name>                        remove (see `cmd_unstorage`)
     """
+    if args and args[0] in _HELP_FLAGS:
+        return _storage_usage(explicit=True)
     if len(args) == 0:
         return _cmd_storage_list()
     if len(args) == 1:
         return _cmd_storage_show(args[0])
-    if len(args) >= 2:
-        return _cmd_storage_set(args[0], args[1], args[2:])
-    return _storage_usage()
+    return _cmd_storage_set(args[0], args[1], args[2:])
 
 
 def _cmd_storage_list() -> int:
@@ -2245,7 +2305,8 @@ def _cmd_storage_list() -> int:
         return 0
     name_w = max(len(n) for n in services)
     for name, spec in services.items():
-        print(f"  {name.ljust(name_w)}  {_format_storage_summary(spec)}")
+        summary = _format_storage_summary(merge_spec_secrets("services", name, spec))
+        print(f"  {name.ljust(name_w)}  {summary}")
     return 0
 
 
@@ -2254,7 +2315,8 @@ def _cmd_storage_show(name: str) -> int:
     if name not in cfg["services"]:
         print(f"no storage named {name!r}", file=sys.stderr)
         return 1
-    print(f"{name}: {_format_storage_summary(cfg['services'][name])}")
+    spec = merge_spec_secrets("services", name, cfg["services"][name])
+    print(f"{name}: {_format_storage_summary(spec)}")
     return 0
 
 
@@ -2269,7 +2331,7 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
         if not tok.startswith("--") or len(tok) <= 2:
             print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
             return _storage_usage()
-        key = tok[2:]
+        key = tok[2:].replace("-", "_")
         i += 1
         if i >= len(opt_tokens):
             print(f"missing value for {tok}", file=sys.stderr)
@@ -2282,15 +2344,24 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     kind = detect_service_kind(url)
     if kind is None:
         print(
-            f"no storage service matches URL {url!r} (known kinds: tempfile_org, s3)",
+            f"no storage service matches URL {url!r} (known kinds: tempfile_org, s3, file_sync, webdav, rclone)",
             file=sys.stderr,
         )
         return 2
+    spec: dict = {"service": kind, "url": url, **extras}
+    # Build it now so a typo'd option or a missing --base-url fails here rather
+    # than as a skipped service at daemon start.
+    try:
+        build_service(name, spec)
+    except (ValueError, TypeError) as e:
+        print(f"invalid storage config: {e}", file=sys.stderr)
+        return 2
+    public, secrets = split_secret_keys(spec)
     cfg = load_network_config()
     overwriting = name in cfg["services"]
-    spec: dict = {"service": kind, "url": url, **extras}
-    cfg["services"][name] = spec
+    cfg["services"][name] = public
     save_network_config(cfg)
+    put_spec_secrets("services", name, secrets)
     verb = "updated" if overwriting else "added"
     print(f"{verb} storage {name} ({_format_storage_summary(spec)})")
     return 0
@@ -2300,6 +2371,8 @@ def cmd_unstorage(args: list[str]) -> int:
     """`a8s unstorage <name>` — remove a configured storage service. Mirrors
     `unremote`'s shape so the surface stays uniform across configurable
     cross-cluster primitives."""
+    if args and args[0] in _HELP_FLAGS:
+        return _storage_usage(explicit=True)
     if len(args) != 1:
         print("usage: a8s unstorage <name>", file=sys.stderr)
         return 2
@@ -2310,6 +2383,7 @@ def cmd_unstorage(args: list[str]) -> int:
         return 1
     del cfg["services"][name]
     save_network_config(cfg)
+    delete_spec_secrets("services", name)
     print(f"removed storage {name}")
     return 0
 
@@ -2343,7 +2417,7 @@ def cmd_health() -> int:
     if not services:
         print("storage: (none configured)")
     for svc in services:
-        name = getattr(svc, "name", svc.__class__.__name__)
+        name = svc.id
         tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w")
         tmp.write("a8s health check")
         tmp.close()

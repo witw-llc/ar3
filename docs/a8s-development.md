@@ -28,9 +28,10 @@ Read [a8s.md](a8s.md) first for concept and usage.
   writes sidecars there. Ingest is atomic rename into `pending/`.
 - **Remote routing publishes to all configured remotes.** Receivers dedupe by ULID.
 - **Cross-cluster `FILE:` payloads ride storage services.** Configured under
-  `network.json`'s `services` map (separate from `remotes`). Two kinds ship:
+  `network.json`'s `services` map (separate from `remotes`). Kinds that ship:
   `tempfile_org` (zero-signup, ephemeral) and `s3` (`s3://bucket[/prefix]`,
-  any S3-compatible endpoint). A new kind implements `StorageService` and
+  any S3-compatible endpoint), `file_sync` (`file://` local sync folder plus
+  `base_url`), and `webdav` (`webdav://` endpoint plus `base_url`). A new kind implements `StorageService` and
   registers in two places in `network.py` — `_build_service` and
   `detect_service_kind`.
 - **`s3` returns presigned URLs, not `s3://` URIs.** The capability to fetch
@@ -40,6 +41,47 @@ Read [a8s.md](a8s.md) first for concept and usage.
   an operator who grants a machine an IAM role gets working uploads with no
   a8s-side secret handling. Keys sit under a prefix (default `a8s`) so bucket
   lifecycle rules own expiry — nothing in a8s deletes objects.
+- **WebDAV URLs use the `webdav://` scheme** at config time (`webdav+https` is not
+  used — map to HTTPS internally).
+- Inbound remote delivery **waits** (`storage_receive_wait_seconds`, default 900s)
+  for attachment URLs to become fetchable before writing the inbox envelope —
+  an agent woken for a file it cannot open burns tokens hunting for it.
+  The sender never waits on publication — an unsent message would block for
+  nothing, and pulling bytes is the receiver's job. Failures become
+  `ATTACHMENT_UNAVAILABLE` in `files` and `ATTACHMENT UNAVAILABLE:` in wake text.
+- **Attachment URLs are https.** A peer chooses the URL a node fetches, and
+  presigned links carry authorization in the query string; `storage_allow_http`
+  relaxes it for a LAN store without TLS. Read the knob with `get_setting`, not
+  `get_int` — `get_int` clamps to a minimum of 1, so 0 would read as true.
+- **`file_sync` needs a path-derivable public URL** (`base_url/<key>`). That
+  covers a webserver or CDN over the synced dir, `rclone serve`, and Nextcloud
+  public folders. It does not cover Google Drive, OneDrive or Dropbox, which
+  mint an opaque per-file id at upload time — that is what the `rclone` kind is
+  for.
+- **`rclone` shells out; both calls are synchronous.** `copyto` then `link`, so
+  the public URL exists when `store` returns and nothing waits on a sync
+  daemon. `retrieve` returns False on purpose: the link is public https and the
+  receiver's plain GET fetches it, so no receiver needs rclone. Only hosts in
+  `_DIRECT_LINK_HOSTS` are accepted — `rclone link` on Drive returns a viewer
+  URL that 307s, so it is rewritten to `drive.usercontent.google.com/download`
+  — a receiver would follow the redirect, but the direct form costs one less
+  round trip. An unknown host raises rather than
+  passing through, because storing a preview page as the attachment is silent
+  corruption. Verified against a live Drive remote: 110 KB round-tripped
+  sha256-identical, fetched anonymously with no redirect and no credential.
+- **The receive wait runs off the subscriber worker.** A transport delivers
+  envelopes on one serial thread, so a retry loop that sleeps there holds every
+  later message — including plain text from another sender — behind one
+  unreachable URL. `receive_envelope` makes a single download attempt inline;
+  only if bytes are missing does it hand that recipient's delivery to a bounded
+  pool, which retries, writes the inbox, and sends the receipt. Ordering is
+  preserved for everything that downloads first try.
+- **Storage option names fold dashes to underscores** (`--base-url` and
+  `--base_url` are one option), and `a8s storage` builds the service before
+  writing config so a bad option fails at the CLI rather than as a silently
+  skipped service at daemon start.
+- **`--password` on a storage service goes to `secrets.json`** (mode 0600),
+  never `network.json` — the same split `a8s remote` uses.
 - **Storage services are stateless.** No start/stop lifecycle.
 - **Absolute attachment paths in wake prompts.** Delivered messages append `ATTACHED FILE: <absolute-path>` lines (not bare `FILE:`). Path comes from definition `files_dir` (default `.files` under agent root) plus `<msg_id>/<filename>`.
 - **Outbox attachments are staged.** Tell copies sources into `.outbox/<msg_id>/`; outbox envelopes carry `filename` only. Ingest moves the bundle with the JSON. Routing delivers into `<files_dir>/<msg_id>/`. Delivered wakes append `ATTACHED FILE:` lines (not bare `FILE:`).

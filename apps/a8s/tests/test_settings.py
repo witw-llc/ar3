@@ -43,7 +43,8 @@ class TestSettingsResolution:
         sm.set_setting("convo_max_rows", 1500)
         sm.set_setting("loop_interval", 0.5)
         raw = json.loads(sm.settings_path().read_text())
-        assert raw == {"convo_max_rows": 1500, "loop_interval": 0.5}
+        assert raw["convo_max_rows"] == 1500
+        assert raw["loop_interval"] == 0.5
 
     def test_cannot_set_read_only_knob(self, fake_home):
         with pytest.raises(KeyError):

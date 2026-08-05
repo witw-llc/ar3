@@ -260,7 +260,37 @@ Remotes are git-shaped: an explicit list of places to fan messages out to. a8s o
 
 Configure as many remotes as you want and a8s publishes to all of them in parallel; receivers dedupe by ULID, so adding redundant brokers improves delivery without producing duplicate inbox writes. A message to an unknown-locally recipient publishes to all configured remotes and is delivered by whichever cluster has the recipient registered locally. Per-message exponential backoff (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h → 24h) retries unreachable remotes; after the schedule is exhausted the envelope and its attachment bundle are moved to the sender's trash, logged as "discarded after backoff", and recorded as `DISCARDED` in the transaction log with the last failure reason. A storage upload that fails on the way to a remote records `FILE_UPLOAD_FAILED` per attempt, so `a8s trace <ULID>` shows why a send kept parking.
 
-File payloads (`FILE:`) are local-only in v1 — the sender's path doesn't exist on the receiving cluster. Cross-cluster file transfer rides issue #62.
+### Storage services — attachments across clusters
+
+A remote carries the message; a **storage service** carries the bytes. Without one, a `FILE:` attachment is local-only — the sender's path does not exist on the receiving cluster. Register a service and a8s uploads each attachment, puts the resulting URLs in the envelope, and the receiver downloads them into its own `.files/`.
+
+| | |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a8s storage`                                      | List configured services (kind, URL, opts; passwords masked).                                                                                                     |
+| `a8s storage <name>`                               | Show one service's spec.                                                                                                                                          |
+| `a8s storage <name> <url> [--<opt> <value> ...]`   | Register or overwrite. Kind is auto-detected from the URL scheme. `--password` goes to `secrets.json` (0600), never `network.json`. The service is built before the config is written, so a bad or missing option fails here rather than as a skipped service at daemon start. |
+| `a8s unstorage <name>`                             | Forget a service. Running daemons keep using the prior config until restart.                                                                                      |
+| `a8s storage --help`                               | Every kind and its options, with examples.                                                                                                                        |
+
+Five kinds ship:
+
+| Kind | URL | Notes |
+| ---- | --- | ----- |
+| `tempfile_org` | `https://tempfile.org` | Zero signup, ephemeral. `--expiry_hours` 1/6/24/48. |
+| `s3` | `s3://bucket[/prefix]` | Any S3-compatible endpoint. Needs `boto3` **on the uploader only** — uploads return presigned GET URLs, so receivers need no credentials. |
+| `file_sync` | `file:///abs/path` | A folder some other tool already syncs. a8s copies in and hands out the public URL; it does no syncing itself. Requires a store whose public URL is **derivable from the path** — a webserver or CDN over the synced directory, `rclone serve`, a Nextcloud public folder. For Drive/OneDrive/Dropbox use `rclone` instead. Needs `--base-url`. |
+| `webdav` | `webdav://host/path` | PUTs directly. For stores whose upload host and public host differ. Needs `--base-url`. |
+| `rclone` | `rclone://remote/path` | Uploads through an rclone remote you already configured, then asks it for the public URL. The answer for **Google Drive** and anything else that mints an opaque per-file id. Uploader needs rclone; the receiver still needs nothing. |
+
+Attachments fan out to **every** configured service and every URL rides along in the envelope, so a service blocked on one network (a home ISP that filters `tempfile.org`, say) does not lose the file — the receiver tries each in turn.
+
+Sync-backed uploads are asynchronous — bytes copied into a Drive or rclone folder take a moment to reach the cloud — so the **receiver** waits, retrying the download for up to `storage_receive_wait_seconds` (default 900s) before delivering. The sender never waits: a message may not go anywhere for minutes, and pulling the file is the receiving node's job anyway. A message is held out of the inbox until its bytes land, because an agent woken for a file it cannot open burns tokens hunting for it. That retry runs in the background, so mail without attachments is never held up behind it. When the wait is exhausted the message is delivered anyway with the failure named: an `ATTACHMENT UNAVAILABLE: <file>: <reason>` line in the wake text instead of a path that goes nowhere.
+
+Attachment URLs must be **https**. A peer chooses the URL your node fetches, and presigned links carry their own authorization in the query string, so plaintext is refused. A download follows at most three redirects and applies the same rule at every hop — object stores routinely redirect a share URL to the host that holds the bytes, so refusing outright would break those links. `storage_allow_http=1` relaxes the scheme rule for a store on your own network with no certificate.
+
+`rclone` is worth its own note, because it is the only kind that solves the awkward case. Google Drive, OneDrive and Dropbox assign an opaque id at upload time, so no path predicts the download URL and `file_sync` cannot address them. rclone can: `rclone copyto` uploads and `rclone link` returns the public URL, both synchronously, using the remote and credentials you already set up. a8s reads the rclone config of the user it runs as. Only backends whose share URL has a known direct-download form are accepted — Google Drive today — because a backend's preview page saved as the attachment would be silent corruption; adding a backend means teaching a8s its download URL. One operational note: if the remote's root is a large Drive, the first call of a run can spend ~30s listing it, so point the remote at a subfolder (`rclone://gdrive/A8S`) rather than the root.
+
+`a8s health` round-trips an upload and download through every configured service and names the one that failed.
 
 `a8s` with no command prints help. There is no auto-discovery of agents from CWD — registration is always explicit.
 
@@ -628,7 +658,7 @@ last locally confirmed boundary.
 Pre-v1 — the surface still moves. Tracked threads:
 
 - **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
-- **#62** — Cross-cluster file payloads. `FILE:` entries currently stay local-only across remotes; cross-cluster transfer needs a payload host (TempFile.org-style ephemeral storage with signed URLs and per-message symmetric keys) so the sender's bytes can move with the message envelope.
+- **#62 payload encryption** — cross-cluster file payloads ship (see [Storage services](#storage-services--attachments-across-clusters)); per-message symmetric encryption of the stored object does not. Today a payload's confidentiality is whatever the storage service provides: presigned S3 URLs and WebDAV credentials are private, `tempfile.org` is a public link to anyone holding it.
 
 Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between rosters.
 

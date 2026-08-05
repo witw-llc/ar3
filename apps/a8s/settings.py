@@ -61,6 +61,30 @@ KNOBS: tuple[Knob, ...] = (
         "Attachment size cap at routing time (bytes); a8s also injects TELL_FILE_MAX on wake for tell",
     ),
     Knob(
+        "storage_allow_http",
+        0,
+        "machine",
+        True,
+        "A8S_STORAGE_ALLOW_HTTP",
+        "Fetch attachment URLs over plaintext http as well as https (0 = https only)",
+    ),
+    Knob(
+        "storage_receive_wait_seconds",
+        900,
+        "machine",
+        True,
+        "A8S_STORAGE_RECEIVE_WAIT_SECONDS",
+        "Seconds to retry downloading remote attachment URLs before delivering ATTACHMENT_UNAVAILABLE (0 = one try)",
+    ),
+    Knob(
+        "storage_fetch_poll_seconds",
+        5,
+        "machine",
+        True,
+        "A8S_STORAGE_FETCH_POLL_SECONDS",
+        "Sleep between attachment fetch/probe attempts",
+    ),
+    Knob(
         "max_seen_ids",
         10000,
         "machine",
@@ -199,6 +223,9 @@ def _coerce(key: str, raw: str) -> Any:
         "convo_max_rows",
         "max_file_bytes",
         "max_seen_ids",
+        "storage_allow_http",
+        "storage_receive_wait_seconds",
+        "storage_fetch_poll_seconds",
         "txlog_detail_max",
         "txlog_max_rows",
     ):
@@ -218,6 +245,21 @@ def _validate(key: str, value: Any) -> Any:
         n = int(value)
         if n < 1:
             raise ValueError("max_file_bytes must be a positive integer")
+        return n
+    if key == "storage_allow_http":
+        n = int(value)
+        if n not in (0, 1):
+            raise ValueError("storage_allow_http must be 0 or 1")
+        return n
+    if key == "storage_receive_wait_seconds":
+        n = int(value)
+        if n < 0:
+            raise ValueError("storage_receive_wait_seconds must be zero or positive")
+        return n
+    if key == "storage_fetch_poll_seconds":
+        n = int(value)
+        if n < 1:
+            raise ValueError("storage_fetch_poll_seconds must be a positive integer")
         return n
     if key == "max_seen_ids":
         n = int(value)

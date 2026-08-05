@@ -180,6 +180,22 @@ class S3Service(StorageService):
         key = self._key_from_url(url)
         if key is None:
             return False
+        try:
+            parsed = urllib.parse.urlsplit(url.strip())
+        except ValueError:
+            return False
+        if parsed.scheme.lower() in ("http", "https"):
+            from settings import get_int
+            from services.http_get import http_get_url_to_path
+
+            return http_get_url_to_path(
+                url,
+                dest,
+                timeout_s=self._timeout_s,
+                max_bytes=get_int("max_file_bytes"),
+            )
+        if parsed.scheme.lower() != "s3":
+            return False
         client = self._client()
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)

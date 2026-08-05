@@ -1536,9 +1536,13 @@ class TestStorageDownload:
             "files": [{"filename": "doc.txt", "storage": ["stub://other/99"]}],
         }).encode()
         receive_envelope(envelope, [b], services=[s])
-        # Message delivered, files dropped.
+        # Message delivered; attachment marked unavailable for the agent.
         body = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert body["files"] == []
+        assert body["files"] == [{
+            "filename": "doc.txt",
+            "error": "ATTACHMENT_UNAVAILABLE",
+            "detail": "could not download; contact an administrator",
+        }]
         assert body["content"] == "see attached"
 
     def test_no_services_strips_files(self, fake_home, tmp_path):
@@ -1556,7 +1560,64 @@ class TestStorageDownload:
             "content": "see attached",
             "files": [{"filename": "doc.txt", "storage": ["stub://x/1"]}],
         }).encode()
-        # No `services` argument → falls back to v1 behavior.
         receive_envelope(envelope, [b])
         body = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert body["files"] == []
+        assert body["files"][0]["error"] == "ATTACHMENT_UNAVAILABLE"
+        assert body["content"] == "see attached"
+
+    def test_https_presigned_without_storage_services(self, fake_home, tmp_path):
+        from _fake_storage import start_fake_tempfile_server
+        from network import receive_envelope
+        from registry import save_registry
+        from ulid import new as new_ulid
+
+        server, base = start_fake_tempfile_server()
+        try:
+            server.files["f0001"] = b"remote-payload"
+            url = f"{base}/f0001/download"
+            b_root = tmp_path / "B"
+            b_root.mkdir()
+            save_registry({"B": {"root": str(b_root)}})
+            b = Participant("B", b_root)
+            msg_id = new_ulid()
+            envelope = json.dumps({
+                "id": msg_id,
+                "from": "X",
+                "to": "B",
+                "content": "see attached",
+                "files": [{"filename": "doc.txt", "storage": [url]}],
+            }).encode()
+            receive_envelope(envelope, [b], services=[])
+            assert (b.files_bundle_dir(msg_id) / "doc.txt").read_bytes() == b"remote-payload"
+            body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+            assert body["files"] == [{"filename": "doc.txt"}]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_rejects_path_traversal_filename(self, fake_home, tmp_path):
+        from network import receive_envelope
+        from registry import save_registry
+        from ulid import new as new_ulid
+
+        b_root = tmp_path / "B"
+        b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+        msg_id = new_ulid()
+        escaped = tmp_path / "ESCAPED"
+        envelope = json.dumps({
+            "id": msg_id,
+            "from": "X",
+            "to": "B",
+            "content": "evil",
+            "files": [{
+                "filename": "../../../ESCAPED/pwned",
+                "storage": ["http://127.0.0.1:9/nope"],
+            }],
+        }).encode()
+        receive_envelope(envelope, [b], services=[])
+        assert not (escaped / "pwned").exists()
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert body["files"][0]["error"] == "ATTACHMENT_UNAVAILABLE"
+        assert "not a basename" in body["files"][0]["detail"]

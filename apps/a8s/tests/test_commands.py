@@ -1340,6 +1340,72 @@ class TestCmdStorage:
         assert rc == 2
         assert "must be alphanumeric" in capsys.readouterr().err
 
+    @pytest.mark.parametrize("flag", ["-h", "--help", "help"])
+    def test_help_prints_usage_to_stdout(self, fake_home, capsys, flag):
+        rc = cmd_storage([flag])
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        # The kinds and their options are the whole point — an unsupported
+        # option is only discoverable from here.
+        for kind in ("tempfile_org", "s3", "file_sync", "webdav"):
+            assert kind in captured.out
+        assert "--base-url" in captured.out
+
+    def test_set_accepts_dashed_option_names(self, fake_home):
+        rc = cmd_storage([
+            "drive", "file:///tmp/drive-sync",
+            "--base-url", "https://cdn.example/a8s",
+        ])
+        assert rc == 0
+        # Services declare options as Python identifiers; the CLI spelling
+        # must not decide whether the config loads.
+        assert load_network_config()["services"]["drive"]["base_url"] == (
+            "https://cdn.example/a8s"
+        )
+
+    def test_set_rejects_unknown_option_at_write_time(self, fake_home, capsys):
+        rc = cmd_storage([
+            "drive", "file:///tmp/drive-sync",
+            "--base-url", "https://cdn.example/a8s", "--bogus", "x",
+        ])
+        assert rc == 2
+        assert "unknown option(s) bogus" in capsys.readouterr().err
+        assert "drive" not in load_network_config()["services"]
+
+    def test_set_rejects_missing_required_option(self, fake_home, capsys):
+        rc = cmd_storage(["drive", "file:///tmp/drive-sync"])
+        assert rc == 2
+        assert "base_url is required" in capsys.readouterr().err
+        assert "drive" not in load_network_config()["services"]
+
+    def test_password_goes_to_secrets_not_network_json(self, fake_home, capsys):
+        from network import load_secrets_config
+
+        rc = cmd_storage([
+            "fm", "webdav://dav.example.com/dav/a8s",
+            "--base-url", "https://files.example.com/a8s",
+            "--user", "me@example.com", "--password", "hunter2",
+        ])
+        assert rc == 0
+        spec = load_network_config()["services"]["fm"]
+        assert "password" not in spec
+        assert spec["user"] == "me@example.com"
+        assert load_secrets_config()["services"]["fm"]["password"] == "hunter2"
+        assert "hunter2" not in capsys.readouterr().out
+
+    def test_configured_service_sees_its_secret(self, fake_home):
+        from network import load_services
+
+        cmd_storage([
+            "fm", "webdav://dav.example.com/dav/a8s",
+            "--base-url", "https://files.example.com/a8s",
+            "--user", "me@example.com", "--password", "hunter2",
+        ])
+        svc = load_services()[0]
+        assert svc.id == "fm"
+        assert svc._auth_header() == "Basic bWVAZXhhbXBsZS5jb206aHVudGVyMg=="
+
 
 class TestCmdUnstorage:
     def test_remove(self, fake_home):

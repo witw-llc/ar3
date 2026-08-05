@@ -45,6 +45,7 @@ from core import (
 from registry import load_registry, resolve_recipient
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
+ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "
 
 BUILTIN_PLACEHOLDERS = frozenset({
     "SENDER",
@@ -295,6 +296,10 @@ def _file_lines(msg: dict, files_root: Path) -> list[str]:
             continue
         filename = (entry.get("filename") or "").strip()
         if not filename:
+            continue
+        if entry.get("error"):
+            detail = (entry.get("detail") or entry.get("error") or "").strip()
+            out.append(f"{ATTACHMENT_FAILURE_PREFIX}{filename}: {detail}")
             continue
         path = (files_root / msg_id / filename).resolve()
         out.append(f"{ATTACHED_FILE_PREFIX}{path}")

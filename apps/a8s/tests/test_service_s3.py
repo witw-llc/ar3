@@ -15,6 +15,7 @@ import pytest
 from network import detect_service_kind
 from services import StorageError
 from services.s3 import S3Service
+from settings import get_int
 
 
 class FakeClient:
@@ -157,14 +158,27 @@ class TestStore:
 
 
 class TestRetrieve:
-    def test_round_trips_its_own_presigned_url(self, tmp_path):
+    def test_round_trips_its_own_presigned_url(self, tmp_path, monkeypatch):
         svc, _ = _service()
         src = tmp_path / "a.txt"
         src.write_text("x", encoding="utf-8")
         url = svc.store(src)
+
+        seen: dict = {}
+
+        def fake_get(u, dest, timeout_s=60, max_bytes=None):
+            seen["max_bytes"] = max_bytes
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("payload", encoding="utf-8")
+            return True
+
+        monkeypatch.setattr("services.http_get.http_get_url_to_path", fake_get)
         dest = tmp_path / "out" / "a.txt"
         assert svc.retrieve(url, dest) is True
         assert dest.read_text(encoding="utf-8") == "payload"
+        # The receiver's size cap applies to presigned GETs too, not just to
+        # the generic http fallback.
+        assert seen["max_bytes"] == get_int("max_file_bytes")
 
     def test_accepts_an_s3_uri(self, tmp_path):
         svc, client = _service()
@@ -172,12 +186,19 @@ class TestRetrieve:
         assert svc.retrieve("s3://my-bucket/a8s/abc/a.txt", dest) is True
         assert client.downloads[0][1] == "a8s/abc/a.txt"
 
-    def test_accepts_path_style_urls(self, tmp_path):
+    def test_accepts_path_style_urls(self, tmp_path, monkeypatch):
         svc, client = _service()
         dest = tmp_path / "a.txt"
         url = "https://s3.us-west-2.amazonaws.com/my-bucket/a8s/abc/a.txt"
+
+        def fake_get(u, d, timeout_s=60, max_bytes=None):
+            d.write_text("via-http", encoding="utf-8")
+            return True
+
+        monkeypatch.setattr("services.http_get.http_get_url_to_path", fake_get)
         assert svc.retrieve(url, dest) is True
-        assert client.downloads[0][1] == "a8s/abc/a.txt"
+        assert dest.read_text(encoding="utf-8") == "via-http"
+        assert client.downloads == []
 
     def test_percent_escapes_are_decoded(self, tmp_path):
         svc, client = _service()
@@ -211,6 +232,11 @@ class TestRetrieve:
         dest = tmp_path / "deep" / "nested" / "a.txt"
         assert svc.retrieve("s3://my-bucket/a8s/abc/a.txt", dest) is True
         assert dest.is_file()
+
+
+    def test_profile_option(self):
+        svc, _ = _service(profile="ops")
+        assert svc._profile == "ops"
 
 
 class TestMissingBoto3:

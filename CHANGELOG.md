@@ -10,7 +10,74 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## [Unreleased]
+## [0.1.57] — 2026-08-05
+
+### Added
+- Two storage kinds that need no account of their own. **`file_sync`** copies
+  into a folder something else already syncs and hands out the public URL the
+  object lands at; a8s does no syncing itself. It needs a store whose public
+  URL is derivable from the path — a webserver or CDN over the synced
+  directory, `rclone serve`, a Nextcloud public folder. **`webdav`** PUTs
+  directly, for stores whose upload host and public host differ. Both take
+  `--base-url`, the public prefix a receiver downloads from. Bring what you
+  already have rather than standing up a bucket.
+- **`rclone` storage** — upload through a remote you already configured, and
+  let rclone hand back the public URL. This is the answer for Google Drive,
+  which mints an opaque per-file id at upload so no path can predict the
+  download URL; `file_sync` cannot address it and never could. `rclone copyto`
+  and `rclone link` are both synchronous, so nothing waits on a background sync
+  daemon. The uploader needs rclone; the receiver still needs nothing, because
+  the result is an ordinary public https URL. Only backends with a known
+  direct-download form are accepted — Drive today — since storing a backend's
+  preview page as the attachment would be silent corruption.
+- Attachment delivery waits for bytes instead of promising them. Sync-backed
+  uploads take a moment to reach the cloud, so the **receiver** retries the
+  download for up to `storage_receive_wait_seconds` (15m) and holds the message
+  out of the inbox until its files land — an agent woken for a file it cannot
+  open burns tokens hunting for it. The sender never waits: a message may sit
+  unsent for minutes, so blocking on publication buys nothing, and pulling the
+  bytes is the receiving node's job. When the wait is exhausted the message
+  arrives with the failure named: `ATTACHMENT UNAVAILABLE: <file>: <reason>` in
+  the wake text, and `error: ATTACHMENT_UNAVAILABLE` on the `files` entry.
+- **Attachment URLs must be https.** A peer chooses the URL a node downloads
+  from, and presigned links carry their own authorization in the query string,
+  so plaintext is refused and redirects are not followed. `storage_allow_http=1`
+  relaxes it for a store on your own network with no certificate.
+- `a8s storage --help` (and `-h`) prints every kind with its options and
+  examples. The text existed; no argument reached it.
+- `a8s.md` documents storage services — the command table, the five kinds, the
+  fan-out redundancy, the wait knobs. The page previously told readers
+  cross-cluster file transfer did not exist.
+
+### Fixed
+- S3 attachment downloads use a plain HTTP GET on presigned `https` URLs so
+  receiving clusters need no AWS credentials or `s3` storage entry. A generic
+  http(s) fallback runs when no configured service claims the URL.
+- **A stalled attachment no longer holds up unrelated mail.** A transport hands
+  envelopes to one serial worker, so the receive retry loop blocked every later
+  message — including plain text from another sender — behind a single
+  unreachable URL, for the full 15-minute default. Delivery attempts the
+  download once inline and defers only the retry, to a bounded pool.
+- **An inbound attachment cannot write outside its message bundle.** The
+  receive path took `filename` off the wire and joined it to the destination
+  directory unchecked, while the send path already rejected non-basenames; a
+  peer could write an arbitrary file as the a8s user. Both directions now share
+  one guard.
+- Downloads are capped by `max_file_bytes` — on the presigned-URL path as well
+  as the generic fallback — instead of streaming whatever the peer serves.
+- Attachment downloads follow at most three redirects, and every hop obeys the
+  same https rule as the first URL. Object stores redirect a share URL to the
+  host that holds the bytes, so refusing redirects outright breaks those links;
+  following them without a limit would let the sender of an envelope choose
+  where a receiver goes.
+- `a8s storage` builds the service before writing config, so a typo'd or
+  missing option fails at the CLI instead of silently skipping that service at
+  daemon start. Option names fold dashes to underscores, so the documented
+  `--base-url` works.
+- A storage `--password` is written to `secrets.json` (mode 0600) rather than
+  `network.json`, matching `a8s remote`.
+- `a8s health` names the storage service that failed rather than its Python
+  class.
 
 ## [0.1.56]
 

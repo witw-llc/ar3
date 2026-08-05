@@ -21,6 +21,16 @@ sys.path.insert(0, str(_PKG_DIR))
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
 
 
+@pytest.fixture(autouse=True)
+def _allow_plaintext_http_in_tests(monkeypatch):
+    """Fixtures are served from a local `http.server`, and production refuses
+    plaintext attachment URLs. Opt the suite in via the env var rather than the
+    settings file so tests without `fake_home` are covered too; a test that
+    writes the knob to its own settings file still wins, since stored values
+    are read before the environment."""
+    monkeypatch.setenv("A8S_STORAGE_ALLOW_HTTP", "1")
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     """Redirect `Path.home()` to `tmp_path` so registry / agent / log files
@@ -33,6 +43,18 @@ def fake_home(tmp_path, monkeypatch):
     monkeypatch.delenv("A8S_HOME", raising=False)
     # Prefer legacy ~/.a8s when present so existing path assertions stay stable.
     (tmp_path / ".a8s").mkdir(parents=True, exist_ok=True)
+    import json
+
+    settings_path = tmp_path / ".a8s" / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "storage_receive_wait_seconds": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     import core
     # Make sure no prior test left a Lock attached.
