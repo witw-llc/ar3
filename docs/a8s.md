@@ -313,7 +313,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 
 | File            | Purpose                                                                                                                                                                                                                                            |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude.json`   | Claude Code with `--permission-mode dontAsk` allowlist + `--continue`                                                                                                                                                                              |
+| `claude.json`   | Claude Code with `--permission-mode dontAsk` allowlist. One fresh session per wake, and `--exclude-dynamic-system-prompt-sections` so cwd and git state do not fragment the prompt cache — see the note below.                                       |
 | `agy.json`      | Antigravity (agy) with `--dangerously-skip-permissions` + `--continue` for headless operation (no `--sandbox`: it confines child writes to CWD, blocking `tell`'s staging outbox)                                                                  |
 | `codex.json`    | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last`                                                                                                                                                                             |
 | `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
@@ -326,6 +326,25 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `echo.json`     | Echo node — replies to the sender with the same message; attachments acknowledged by name. A reachability probe: one tell proves the whole path out and back. Bare name: `a8s add <name> <dir> echo`.                                               |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
 
+#### Continuing a CLI conversation costs money
+
+Most of these definitions resume the CLI's previous conversation. That is
+cheap while the provider still holds the conversation's prefix in cache, and
+expensive the moment it does not: the whole accumulated conversation is sent
+again and charged at a premium to write back. Cache lifetimes are minutes, and
+a conversation large enough gets rewritten even while it is in active use, so
+waking an agent often enough to keep it warm does not save you.
+
+a8s wakes an agent whenever a message arrives, and it does not decide how long
+ago that was — so `claude.json` no longer resumes. Each wake is a fresh
+session, and the agent's memory is its own repo: `CLAUDE.md`, its notes, and
+the message it just received.
+
+[r4t](r4t.md) governs this properly, because a roster turn knows when the
+member last ran and how big its conversation has become. Use `Continue:` there
+if you want continuation with a cost ceiling. The remaining definitions still
+carry their resume flag; they have not been measured, and the wiki's
+per-engine research pages are where that work lands.
 
 ### Marker files & auto-discovery
 

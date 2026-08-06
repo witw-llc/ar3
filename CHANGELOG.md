@@ -10,6 +10,38 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.60]
+
+### Added
+- **r4t prices a continuation before it pays for one.** `Continue: on` is only
+  cheap while the provider still holds the conversation's prefix in cache. Two
+  independent things end that, and only one is about time: the cache window
+  slides shut, and a conversation grows big enough that it is re-written even
+  while in use. r4t now checks both before each turn. Past either limit it logs
+  `r4t: CONTINUE-CHILL` with the reason and founds a fresh conversation instead
+  of re-sending the old one. The turn still runs.
+- **Per-turn cache telemetry.** Each dispatched turn logs `r4t: CACHE` with the
+  context carried, how much of it was read from cache, and how much was
+  written. This is what the limits above get tuned against.
+- **Conversation probes, one per harness** (`apps/r4t/transcript.py`). The
+  `claude` preset reads its JSONL session log and reports what the next
+  continuation would carry. A harness with no probe is never gated — an
+  unmeasured window is a guess, and a guess costs money on a schedule nobody
+  chose. The knobs are `continue_warm_seconds`,
+  `continue_max_context_tokens` and `continue_max_transcript_bytes`.
+
+### Changed
+- **The `claude` rigs stabilize their prompt prefix.** The `claude` and
+  `claude-ollama` presets pass `--exclude-dynamic-system-prompt-sections`,
+  which moves cwd, environment info, memory paths and git status out of the
+  system prompt. Those change without anyone editing anything — a commit
+  between two turns used to invalidate the largest cached block.
+- **The a8s `claude` definition runs one fresh session per wake.** a8s wakes an
+  agent when mail arrives, minutes to hours apart, which is almost never inside
+  a cache window. It dropped `--continue`, so a wake no longer pays to re-send
+  a conversation it cannot reuse. Continuation stays in r4t, which dispatches
+  turns close enough together for it to pay.
+
 ## [0.1.59]
 
 ### Added

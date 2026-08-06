@@ -1,10 +1,10 @@
 {
-  "description": "Claude Code default — granular permissions, continues prior session.",
+  "description": "Claude Code default — granular permissions, one fresh session per wake.",
   "invoke": [
     "claude",
     "--permission-mode", "dontAsk",
     "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
-    "--continue",
+    "--exclude-dynamic-system-prompt-sections",
     "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

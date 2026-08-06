@@ -122,6 +122,18 @@ RESERVED_CONFIG_KEYS = frozenset({
 # need no pattern. `continue_anchor` places the tokens immediately after that
 # argv token instead of at the end, the way `model_anchor` does — a CLI whose
 # continuation is a subcommand cannot be appended to a finished argv.
+#
+# The three `continue_*` limits price that continuation. A provider holds the
+# conversation's prefix in cache for a while and re-reads it cheaply; past that
+# it re-sends and re-writes the whole thing at a premium, and a conversation
+# large enough gets re-written even while it is in active use. Past any limit
+# the turn drops `--continue` and the CLI founds a fresh, small conversation —
+# r4t's own bounded transcript rides in the prompt, so the member is not
+# amnesiac. The numbers are per-harness because the cache behaviour is, and
+# they stay unset until that harness has been measured: a preset nobody has
+# read up on is unmeasured, which is not the same as safe, and guessing a
+# window is how you pay the premium on purpose. `transcript.PROBES` is the
+# other half — without a probe the size limits cannot be evaluated at all.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
         "text_tier": "big",
@@ -135,11 +147,24 @@ HARNESS_PRESETS: dict[str, dict] = {
             "dontAsk",
             "--allowedTools",
             "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            # Moves cwd, environment, memory paths and git status out of the
+            # system prompt and into the first user message. Those change per
+            # machine and per commit, and they sit at the very front of the
+            # prefix, so leaving them there splits the cache across every
+            # workdir and every commit a member runs on. Verified in 2.1.220.
+            "--exclude-dynamic-system-prompt-sections",
             "-p",
             "{prompt}",
         ],
         "model_argv": ["--model", "{model}"],
         "continue_argv": ["--continue"],
+        # Baseline cache lifetime is five minutes. A subscription may get an
+        # hour, but the same account can fall back to five minutes without
+        # notice, so the window is set under the shorter one with enough slack
+        # for a late scheduler.
+        "continue_warm_seconds": 270,
+        "continue_max_context_tokens": 180_000,
+        "continue_max_transcript_bytes": 4 * 1024 * 1024,
     },
     "codex": {
         # Continuation is the `resume --last` SUBCOMMAND, so it cannot be
@@ -262,6 +287,10 @@ HARNESS_PRESETS: dict[str, dict] = {
             "dontAsk",
             "--allowedTools",
             "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            # Kept in step with the `claude` preset. A local runner reuses a
+            # stable prefix too, so moving the per-machine facts out of the
+            # system prompt is worth the same here as it is against the API.
+            "--exclude-dynamic-system-prompt-sections",
             "-p",
             "{prompt}",
         ],
@@ -542,6 +571,29 @@ class Rig:
         flag-shaped CLI) means append at the end; codex needs one because
         `resume --last` is a subcommand and only reads in that position."""
         return HARNESS_PRESETS.get(self.preset or "", {}).get("continue_anchor")
+
+    @property
+    def continue_warm_seconds(self) -> int | None:
+        """How long after a turn this rig's CLI can still continue cheaply.
+        None means the harness has not been measured, so nothing is gated."""
+        raw = HARNESS_PRESETS.get(self.preset or "", {}).get("continue_warm_seconds")
+        return int(raw) if raw else None
+
+    @property
+    def continue_max_context_tokens(self) -> int | None:
+        """Cached prefix past which continuing costs more than founding."""
+        raw = HARNESS_PRESETS.get(self.preset or "", {}).get(
+            "continue_max_context_tokens"
+        )
+        return int(raw) if raw else None
+
+    @property
+    def continue_max_transcript_bytes(self) -> int | None:
+        """Transcript size cap — the fallback when usage records are absent."""
+        raw = HARNESS_PRESETS.get(self.preset or "", {}).get(
+            "continue_max_transcript_bytes"
+        )
+        return int(raw) if raw else None
 
     @property
     def supports_continue(self) -> bool:
