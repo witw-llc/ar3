@@ -236,6 +236,13 @@ candidates for a later isolation round; today, mount only credentials the
 rig's job actually needs, and treat "isolated" as meaning *it cannot
 change what runs* — not *it cannot phone out*.
 
+The inverse is worth naming too: some separations exist *only* because a
+boundary is set. Per-member knowledge stores are files under `R4T_HOME`, and
+`R4T_HOME` is in the turn environment — so on a bare org a tool-capable member
+can read any member's store off disk, observed live in the K1 rig matrix. That
+is not a leak in the inject path; the inject path never claimed to own it. See
+[r4t-knowledge.md](r4t-knowledge.md#the-separation-is-prompt-path-only-until-the-os-enforces-it).
+
 ## Whole-node containment (a deployment choice, not a feature)
 
 The org boundary wraps each member's turn. Because r4t anchors a roster on a

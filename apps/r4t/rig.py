@@ -16,7 +16,7 @@ optional — every knob has a sane default; see README.md for the table):
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
 - `"quiet_task_seconds"` — an intra-roster thread quiet this long with its
   originator still unanswered wakes the leader with a nudge to reply with
-  current state. 0 turns the sweep off; ingress threads are never swept (#58).
+  current state. 0 turns the sweep off; ingress threads are never swept.
 - `"log_retention_days"` — how many UTC days of roster transcript `r4t clear`
   keeps; older day files are deleted whole. 0 keeps every day forever.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
@@ -59,7 +59,7 @@ its own conversation instead of starting from a cold prompt. A rig with no
 preset, or one whose preset has no `continue_argv`, cannot continue; a roster
 member asking for it fails closed (see `RigConfig.rig_for`).
 
-`framing` (#62) — this rig's default for the cautionary line under a member's
+`framing` — this rig's default for the cautionary line under a member's
 `## Knowledge` section: `"default"` (or absent) is the built-in wording,
 `"off"` drops the line, any other string is custom wording taken verbatim (no
 quote marks needed — the JSON string already delimits it). A member's own
@@ -172,7 +172,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         # same anchor the model flags use, leaving
         # `codex exec resume --last -m MODEL <flags> <prompt>`.
         # `resume` also takes an optional [SESSION_ID] in place of --last: the
-        # native way to pin ONE conversation, which is where #256 will look.
+        # native way to pin ONE conversation, which is where per-member
+        # session pinning (#17) will look.
         "text_tier": "big",
         "description": "OpenAI Codex CLI — matches apps/a8s/definitions/codex.json",
         "a8s_definition": "codex.json",
@@ -208,7 +209,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         # `agent` reuses the LAST --model it was given when the flag is
         # omitted, so an unpinned invoke inherits invisible machine-global
         # state — a rig founded "modelless" kept riding a usage-limited
-        # frontier model (#275). `auto` is the CLI's own way to say "the
+        # frontier model. `auto` is the CLI's own way to say "the
         # subscription default", so pin it; an explicit --model still wins.
         "model_default": "auto",
         "continue_argv": ["--continue"],
@@ -226,7 +227,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         # relative --dir against $PWD, falling back to its real cwd only when
         # PWD is unset, and a spawned process inherits the PWD of whoever
         # started r4t — so `--dir .` anchored the file tools wherever r4t was
-        # invoked from, not the member's `Workdir:` (#273).
+        # invoked from, not the member's `Workdir:`.
         "invoke": [
             "opencode",
             "run",
@@ -384,7 +385,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         # No continue_argv: `copilot --continue` resumes the machine's most
         # recent session whatever the directory, so members cannot be kept
         # apart. Clean support means pinning `--resume=<session-id>` per
-        # member; that is issue #256, not this preset.
+        # member; that is #17, not this preset.
         "text_tier": "moderate",
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
         "a8s_definition": "copilot.json",
@@ -434,7 +435,7 @@ def text_defaults(preset: str | None) -> dict[str, int]:
     return TEXT_TIERS.get(tier or "small", TEXT_TIERS["small"])
 
 
-# Knowledge inject-budget tiers by harness class (#52, the K2 campaign):
+# Knowledge inject-budget tiers by harness class:
 # local/opencode-class members write smaller, smoothed-over notes at a given
 # byte budget, so they default lower; codex/claude default highest. This is
 # NOT `text_tier` — agy is a big-context harness but a fast small-effort model
@@ -484,7 +485,7 @@ def resolve_knowledge_bytes(member: Member, rig: "Rig | None") -> int:
 
 
 def resolve_framing(member: Member, rig: "Rig | None") -> FramingSpec:
-    """The effective `Framing:` choice for a member's Knowledge section (#62):
+    """The effective `Framing:` choice for a member's Knowledge section:
     the member's own roster line wins when present, else the rig's own
     config default, else the built-in framing (an unset FramingSpec —
     off=False, text=None)."""
@@ -658,8 +659,8 @@ class Rig:
         return argv
 
     def distill_command(self, workdir: str | Path) -> str | None:
-        """A stdin->stdout shell command line for k7e's `K7E_DISTILL_COMMAND`
-        (#52), built from this rig's own invoke. k7e pipes the prompt to the
+        """A stdin->stdout shell command line for k7e's `K7E_DISTILL_COMMAND`,
+        built from this rig's own invoke. k7e pipes the prompt to the
         command's stdin with no shell of its own, and not every harness reads
         stdin as its prompt (agy prints usage instead), so `{prompt}` becomes
         `"$(cat)"` inside an `sh -c` wrapper — the prompt lands in the exact
@@ -755,7 +756,7 @@ def continue_presets() -> list[str]:
 # as children of the turn process, which already carries the per-turn
 # TELL_OUTBOX_DIR, so one blob serves every member on every node. Where the
 # idiom accepts `env`/`cwd` they are pinned anyway, so the outbox is stated
-# rather than inferred (#289).
+# rather than inferred.
 #
 # Each idiom rides a different channel, and an OS boundary (isolate.py) keeps
 # only what it is told to keep: argv passes through untouched, environment and
@@ -1008,7 +1009,7 @@ def apply_mcp(
         path = _mcp_config_dir(env, cwd) / OPENCODE_CONFIG_BASENAME
         _write_if_changed(path, _mcp_opencode_config(env, command, isolated=isolated))
         # OPENCODE_CONFIG_CONTENT is not an option: `ollama launch` sets it for
-        # provider+model and clobbers anything r4t puts there (measured, #310).
+        # provider+model and clobbers anything r4t puts there (measured).
         env["OPENCODE_CONFIG"] = str(path)
         # The variable is the whole idiom: a boundary that resets the environment
         # must re-export it, and a container must be able to see the file.
@@ -1768,7 +1769,7 @@ def _parse_rig(name: str, raw: object) -> Rig:
         problems.append(f"echo_max_chars: {err}")
     rig.echo_max_chars = int(echo_max)
 
-    # A rig-level Framing default (#62): same three forms as the roster line
+    # A rig-level Framing default: same three forms as the roster line
     # (roster.parse_framing), but unquoted — the value is already a JSON
     # string, so there is no "off"/"default" keyword collision to guard
     # against with quote marks.
@@ -1900,7 +1901,7 @@ def load_rig_config(path: Path) -> RigConfig:
             # 0 is OFF, matching what the sweep has always done with <= 0.
             # The loader used to reject it, so the obvious way to disable the
             # sweep was a config error — and a config error fails the WHOLE
-            # dispatch path, which is an outage (#58).
+            # dispatch path, which is an outage.
             config.quiet_task_seconds = _non_negative_number(
                 value, DEFAULT_QUIET_TASK_SECONDS, key
             )

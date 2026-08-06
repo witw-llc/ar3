@@ -1,4 +1,4 @@
-"""Member-level knowledge — k7e inject on wake, batch distill when idle (#41).
+"""Member-level knowledge — k7e inject on wake, batch distill when idle.
 
 The store is private to one member: `agents/<member>/k7e` under the roster's
 state dir, one store per security principal per the research gate — tags
@@ -16,7 +16,7 @@ half and the turn nothing.
 k7e is driven as a subprocess — the a8s/r4t `ulid` modules shadow an import,
 and the CLI is the stable surface anyway.
 
-Dreaming's distill rig (#52) is the member's own turn rig by default (the K2
+Dreaming's distill rig is the member's own turn rig by default (the K2
 verdict: least surprising, costs nothing extra, and not broken at 88%
 fact-write fidelity) or the `Knowledge:` line's rig-name override for a
 member whose own rig writes smoothed-over notes. Either way it bridges to k7e
@@ -24,7 +24,7 @@ as `K7E_DISTILL_COMMAND` in the subprocess env — `Rig.distill_command` turns
 the rig's own invoke into the stdin->stdout shell command k7e expects.
 
 The `## Knowledge` section is packed rank-proportionally, not greedily
-(k-budget-packing, #12/#52): the budget splits across the top search hits by
+(k-budget-packing): the budget splits across the top search hits by
 a 1/(rank+1) weight with unspent slack swept back down the ranks, so a
 budget too small for the top hit's whole snippet still surfaces evidence
 from ranks 2 and 3 instead of spending everything on rank 1. Each entry's
@@ -50,7 +50,7 @@ from rig import RigConfig, resolve_framing, resolve_knowledge_bytes
 K7E_ENTRY = Path(__file__).resolve().parent.parent / "k7e" / "k7e.py"
 SEARCH_LIMIT = 8
 # The rank-proportional packer's weighting pool (k-budget-packing
-# s4-rank-proportional, #12/#52) — matches SEARCH_LIMIT because a search
+# s4-rank-proportional) — matches SEARCH_LIMIT because a search
 # already returns at most that many hits, so every hit found earns a
 # 1/(rank+1) share before slack sweeps back down the ranks.
 RANK_POOL = SEARCH_LIMIT
@@ -74,7 +74,7 @@ _EMBED_MS_RE = re.compile(r"^embed (\d+)ms( \(semantic track unavailable\))?$", 
 
 KNOWLEDGE_HEADER = "## Knowledge (recalled from your private store)"
 # The built-in framing line — `resolve_framing`'s fallback when neither the
-# member's `Framing:` roster line nor the rig's own default (#62) says
+# member's `Framing:` roster line nor the rig's own default says
 # otherwise. A member/rig `Framing: off` drops this line but never the
 # header: the entries still need SOME introduction.
 KNOWLEDGE_FRAMING = (
@@ -82,7 +82,7 @@ KNOWLEDGE_FRAMING = (
     "wrong. When they disagree with the messages above or your own files, "
     "the messages and files win."
 )
-# k-age-presentation (#62): on the 4B floor the absolute-date stamp measured
+# k-age-presentation: on the 4B floor the absolute-date stamp measured
 # worse than no date at all (official-looking dates read as authority, not
 # staleness); relative age + this status line was the only presentation that
 # worked on both reader classes. Threshold and wording are copied verbatim
@@ -122,6 +122,15 @@ def _embed_note(stderr: str) -> str:
     if match.group(2):
         return f"embed {match.group(1)}ms unanswered, fts-only"
     return f"embed {match.group(1)}ms"
+
+
+def _distill_skips(stdout: str) -> list[str]:
+    """The files k7e could not read, from the lines its CLI prints for them."""
+    return [
+        line.strip()[len("[skipped] "):]
+        for line in stdout.splitlines()
+        if line.strip().startswith("[skipped] ")
+    ]
 
 
 def _seed_query(ctx, member, batch: list[dict]) -> str:
@@ -219,7 +228,7 @@ def _entry_overhead(preamble: str) -> int:
 def _pack_rank_proportional(entries: list[dict], budget: int) -> list[tuple[int, str]]:
     """`budget` bytes of `entries` (already in rank order, each a
     `{"preamble", "snippet"}` dict) as `(index, block)` pairs in rank order,
-    packed by k-budget-packing's s4-rank-proportional strategy (#12/#52):
+    packed by k-budget-packing's s4-rank-proportional strategy:
     split the budget across the entries by a 1/(rank+1) weight, then sweep
     unspent slack back down the ranks so nothing is left on the table. The
     preamble is atomic — provenance and a staleness stamp mean nothing
@@ -273,7 +282,7 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
     — on any failure, empty store included. `rig` is the member's own turn
     rig, which tiers the inject budget when the roster line named no explicit
     size (`resolve_knowledge_bytes`) and supplies the rig-level `Framing:`
-    default when the member names none (`resolve_framing`, #62). Injection,
+    default when the member names none (`resolve_framing`). Injection,
     not fetch, is what counts as a recall: sizing reads every pool entry with
     `get --no-track`, and one `touch` afterward bumps the k7e usage counter
     only for entries that survived packing into the prompt."""
@@ -306,18 +315,26 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
     # greedy loop — fetching does not stop early just because the entries
     # seen so far already cover the budget. It still stops at RANK_POOL:
     # a hit past the weighting pool would never earn a share, so getting it
-    # would only cost a subprocess for nothing. This sizing read is
-    # untracked (`--no-track`) because most of what it reads never reaches
-    # the prompt — `_touch_injected` below bumps usage for what does.
+    # would only cost bytes for nothing. This sizing read is untracked
+    # (`--no-track`) because most of what it reads never reaches the prompt
+    # — `_touch_injected` below bumps usage for what does. One call for the
+    # whole pool: the per-entry read is trivial next to interpreter startup,
+    # so N gets cost N startups and a wake must never wait on this path.
+    pool = [str(hit["id"]) for hit in hits[:RANK_POOL]]
+    texts: dict[str, str] = {}
+    if pool:
+        try:
+            got = _run_k7e(home, "get", *pool, "--no-track", "--json")
+            if got.returncode == 0 or got.stdout.strip():
+                texts = {e["id"]: e["text"] for e in json.loads(got.stdout or "[]")}
+        except Exception:
+            texts = {}
     entries: list[dict] = []
     for hit in hits[:RANK_POOL]:
-        try:
-            got = _run_k7e(home, "get", str(hit["id"]), "--no-track")
-        except Exception:
+        text = texts.get(str(hit["id"]))
+        if text is None:
             continue
-        if got.returncode != 0:
-            continue
-        date, snippet = _entry_snippet(got.stdout)
+        date, snippet = _entry_snippet(text)
         if not snippet:
             continue
         age_days = _age_days(date)
@@ -485,4 +502,9 @@ def _distill_fresh(ctx, m, home: Path, config: RigConfig) -> bool:
         f"r4t: DREAM {m.name.lower()} distilled {len(fresh)} capture(s) "
         "into the knowledge store",
     )
+    # A capture k7e could not read is dropped from the sweep and never comes
+    # back — the mark advances past it. A successful dream is exactly when that
+    # would go unnoticed, so the skips get their own line.
+    for line in _distill_skips(res.stdout or ""):
+        state.append_log(ctx.node, f"r4t: DREAM-SKIPPED {m.name.lower()} {line}")
     return True

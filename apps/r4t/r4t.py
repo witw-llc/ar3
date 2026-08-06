@@ -66,7 +66,7 @@ from rig import (
     swap_preset_rig,
     unset_rig_value,
 )
-from notify import resolve_tell_fn, simulate_enabled
+from notify import resolve_tell_fn, simulate_enabled, visible_a8s_names
 from org import check_org, load_org
 from roster import (
     Member,
@@ -1544,6 +1544,32 @@ def cmd_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def _name_shadow_warnings(roster) -> list[str]:
+    """Where a member's name also names something outside the wall.
+
+    The leader stands in the doorway: it addresses roster members and
+    registered a8s nodes with the same verb. In-roster wins, so a shadowed
+    outside name is simply unreachable from this leader — deliberate, and
+    silent, which is the part worth saying out loud. Nothing is blocked;
+    a single-owner network rarely collides, and when it does the operator
+    may well mean it.
+    """
+    visible = visible_a8s_names()
+    if not visible:
+        return []
+    out: list[str] = []
+    for m in roster.members:
+        kind = visible.get(m.name) or visible.get(m.name.lower())
+        if kind is None:
+            continue
+        out.append(
+            f"{m.name}: also names an a8s {kind} visible from this host — "
+            f"inside the roster the member wins, so that {kind} cannot be "
+            f"reached from here by name (rename either, or accept it)"
+        )
+    return out
+
+
 def cmd_roster_check(args: argparse.Namespace) -> int:
     org = load_org(_resolve_root(args.root))
     root = org.dir
@@ -1627,6 +1653,9 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         for message in continue_collisions(roster, config, org.workplace):
             print(f"warning: {message}")
             warnings += 1
+    for message in _name_shadow_warnings(roster):
+        print(f"warning: {message}")
+        warnings += 1
     for severity, message in roster.tree_problems():
         if severity == "error":
             print(message)

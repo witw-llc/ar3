@@ -67,6 +67,27 @@ reads. Seed or inspect a store directly with the k7e CLI:
 K7E_HOME=~/.config/r4t/rosters/<node>/agents/wren/k7e k7e store "Deploy notes" --tags ops
 ```
 
+### The separation is prompt-path only until the OS enforces it
+
+One store per member bounds what a member is *given*. It does not bound what a
+member can *take*. The stores are files under `R4T_HOME`, r4t exports
+`R4T_HOME` into the turn environment, and a tool-capable rig has a shell.
+
+**On a bare org — no `run_as`, no container — there is no boundary between a
+tool-capable member and any member's store, its own or a sibling's.** This is
+observed, not theoretical: in the K1 rig matrix a full-tool preset stated a
+codeword that existed only in a seeded store, with no Knowledge line and
+nothing in the prompt, in half its trials. Other presets on the same condition
+could have looked and did not — which is the point. It is a choice the member
+makes, so nothing on the inject path can prevent it.
+
+Under `run_as` or container isolation the stores are another OS user's files
+and the cage holds. The isolation result that matters is an OS boundary; the
+prompt path was never the whole surface. Consistent with a8s doctrine — the
+filesystem is the identity boundary — but worth stating where someone is
+deciding whether an org needs isolation, because "each member has its own
+store" reads like a guarantee and on a bare org it is a convention.
+
 ## Inject on the way in
 
 Waking a knowledge-carrying member, dispatch searches its store — seeded with
@@ -77,9 +98,12 @@ never as instructions. The section rides after the how-to-work doctrine and befo
 `Reinforce:`, so the closing line keeps last-read primacy. The budget bounds
 the section in bytes; packing (below) is deterministic. Echo members never get
 the section, and any k7e failure logs `KNOWLEDGE-SKIP` and costs only the
-section — never the turn. Sizing an entry reads it with `k7e get --no-track`,
-which does not count as a use — the packer fetches every entry in its
-weighting pool to size it, and most never make the prompt. Injection is what
+section — never the turn. Sizing reads the whole weighting pool in one
+`k7e get --no-track --json` call, which does not count as a use — the packer
+needs every entry's size before it can weigh any of them, and most never make
+the prompt. One call rather than one per entry keeps the pass off the wake's
+latency budget; the per-entry read is trivial next to interpreter startup.
+Injection is what
 counts: after packing, one `k7e touch` call bumps the usage counter for
 exactly the entries that survived into the section, so `k7e stats` shows what
 recall actually earns its keep.
@@ -140,6 +164,13 @@ date at all on the small-model floor, and relative age plus this status
 line was the only presentation that worked on both reader classes tested —
 see `apps/r4t/experiments/k-age-presentation/`. The status line's bytes
 count against the section's inject budget like every other block byte.
+
+The stamped id is a second, weaker recency signal whether or not anyone
+intends it — k7e allocates ids in sequence, and models compare the ordinals
+unprompted. It agrees with the age stamp until a store is imported, merged, or
+rebuilt, at which point the ordinals say one thing and the dates another.
+That is why the age stamp has to be right rather than merely present; see
+[k7e-architecture.md](k7e-architecture.md#ids-leak-write-order).
 
 ## Framing — the cautionary line, as a knob
 

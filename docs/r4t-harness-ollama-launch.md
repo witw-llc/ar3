@@ -29,10 +29,10 @@ ollama launch <integration> --model <tag> -y -- <the harness's own headless argv
   by spawning each wrapped integration with a cwd of its own and reading the
   OS-reported cwd of every descendant: launcher, harness, and the node/codex
   helpers underneath all sat in the spawn directory. That is what makes
-  `Workdir:` work on the `*-ollama` presets (issue #289). A harness that reads
+  `Workdir:` work on the `*-ollama` presets (bin#289). A harness that reads
   something other than its cwd needs more than the hop: opencode resolves
   `--dir` against `$PWD`, so r4t pins `PWD` to the turn directory and the
-  opencode presets pass the workdir absolutely (issue #273).
+  opencode presets pass the workdir absolutely (bin#273).
 
 ## What the launcher persists, per integration
 

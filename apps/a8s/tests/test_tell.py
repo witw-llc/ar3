@@ -645,6 +645,90 @@ def test_tell_staging_outbox_skips_registry_validation(
     assert list((agent_root / ".outbox").glob("*.json")) == []
 
 
+def test_tell_warns_when_a_leaked_outbox_dir_points_at_another_seat(
+    fake_home, tmp_path, monkeypatch
+):
+    """The stale-variable hijack: a live seat's TELL_OUTBOX_DIR is inherited by
+    a shell that is nowhere near that seat, so mail leaves under the wrong name
+    with every check passing. The pair is the tell — a registered outbox plus a
+    CWD outside its owner. Warn; never refuse, since a deliberate operator may
+    mean it."""
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    seat_outbox = seat / ".outbox"
+    seat_outbox.mkdir(parents=True)
+    save_registry({"MOSS": {"root": str(seat)}})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    res = _run_a8s(elsewhere, "MOSS", "hi", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
+    assert res.returncode == 0, res.stderr
+    assert "warning" in res.stderr
+    assert "MOSS's outbox" in res.stderr
+    assert "unset TELL_OUTBOX_DIR" in res.stderr
+    # A warning, not a refusal — the message still goes.
+    _name, msg = _read_outbox(seat_outbox)
+    assert msg["to"] == "MOSS"
+
+
+def test_tell_from_a_seats_own_root_is_not_a_hijack(fake_home, tmp_path, monkeypatch):
+    """The ordinary case a8s itself creates on every wake: the injected
+    variable names the seat whose root the agent is working in. Warning here
+    would fire on every message the suite sends."""
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    workplace = seat / "workplace"
+    workplace.mkdir(parents=True)
+    seat_outbox = seat / ".outbox"
+    seat_outbox.mkdir()
+    save_registry({"MOSS": {"root": str(seat)}})
+    monkeypatch.chdir(workplace)
+
+    res = _run_a8s(workplace, "MOSS", "hi", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
+    assert res.returncode == 0, res.stderr
+    assert "warning" not in res.stderr
+
+
+def test_tell_staging_outbox_is_not_a_hijack(fake_home, tmp_path, monkeypatch):
+    """r4t's per-turn staging dir is deliberately outside any registered seat
+    and deliberately not the CWD's own. It is not registered, so it cannot be
+    the hijack shape."""
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    (seat / ".outbox").mkdir(parents=True)
+    save_registry({"MOSS": {"root": str(seat)}})
+    staging = tmp_path / "r4t-state" / "staging"
+    staging.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    res = _run_a8s(elsewhere, "moss", "hi", env={"TELL_OUTBOX_DIR": str(staging)})
+    assert res.returncode == 0, res.stderr
+    assert "warning" not in res.stderr
+
+
+def test_tell_check_reports_the_hijack_shape(fake_home, tmp_path, monkeypatch):
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    seat_outbox = seat / ".outbox"
+    seat_outbox.mkdir(parents=True)
+    save_registry({"MOSS": {"root": str(seat)}})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    res = _run_a8s(elsewhere, "--check", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
+    assert res.returncode == 0, res.stderr
+    assert "warning:" in res.stdout
+    assert "MOSS's outbox" in res.stdout
+
+
 def test_tell_check_defers_recipient_on_staging_outbox(
     fake_home, tmp_path, monkeypatch
 ):

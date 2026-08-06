@@ -56,7 +56,7 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 # File-transfer cap for FILE: payloads. Larger sources are dropped at routing
 # time with a log line; agents needing larger payloads should use a side-
-# channel (see issue #63 — TempFile.org-style staging supports 100 MiB).
+# channel (TempFile.org-style staging supports 100 MiB).
 MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
 
 # Path constants — computed once at module load.
@@ -136,7 +136,7 @@ def canonical_name(name: str) -> str:
 
 
 def agent_dir(name: str) -> Path:
-    """Per-agent internal directory under ~/.a8s/. Holds inbox/, trash/,
+    """Per-agent internal directory under ~/.config/a8s/. Holds inbox/, trash/,
     log.txt, and the pid file."""
     return _a8s_dir() / "agents" / _safe_name(name)
 
@@ -315,7 +315,7 @@ def pending_dir(name: str) -> Path:
     moves each new file from `<root>/.outbox/` into here on every pass before
     parsing or producing any retry sidecars — the agent's outbox is one-way
     (agent writes, a8s renames out), and everything a8s does after the rename
-    happens under ~/.a8s/. Sidecar metadata (`<file>.retry`) lives alongside
+    happens under ~/.config/a8s/. Sidecar metadata (`<file>.retry`) lives alongside
     the pending file in this dir."""
     return agent_dir(name) / "pending"
 
@@ -405,12 +405,12 @@ def secrets_config_path() -> Path:
 
 
 def settings_path() -> Path:
-    """`~/.a8s/settings.json` — operator settings (`a8s config`)."""
+    """`~/.config/a8s/settings.json` — operator settings (`a8s config`)."""
     return _a8s_dir() / "settings.json"
 
 
 def user_definitions_dir() -> Path:
-    """User-installed definition templates under ``~/.a8s/definitions/``.
+    """User-installed definition templates under ``~/.config/a8s/definitions/``.
 
     Bare names for ``a8s add`` / ``a8s define`` resolve here after the
     repo-bundled ``DEFINITIONS_DIR``. Install with ``a8s defs add``.
@@ -520,7 +520,7 @@ def _emit_supervisor(line: str) -> None:
 
 def _emit_agent(name: str, line: str) -> None:
     """Stdout + per-agent log only. Does NOT write to the supervisor log —
-    agent-scoped events live in `~/.a8s/agents/<NAME>/log.txt` and `a8s logs`
+    agent-scoped events live in `~/.config/a8s/agents/<NAME>/log.txt` and `a8s logs`
     reads them directly."""
     sys.stdout.write(line)
     sys.stdout.flush()
@@ -542,7 +542,7 @@ def out(text: str = "", end: str = "\n") -> None:
 
 
 def out_agent(name: str, text: str = "", end: str = "\n") -> None:
-    """Agent-scoped output. Lands in `~/.a8s/agents/<NAME>/log.txt`."""
+    """Agent-scoped output. Lands in `~/.config/a8s/agents/<NAME>/log.txt`."""
     line = text + end
     if PRINT_LOCK is not None:
         with PRINT_LOCK:

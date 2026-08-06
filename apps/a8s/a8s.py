@@ -6,7 +6,7 @@ and Codex CLI project directories ("participants") to communicate.
 This file is the script entry point; functionality lives in sibling modules:
 
   core.py         paths, logging, Participant, helpers, MARKER_FILES
-  registry.py     ~/.a8s/a8s.json I/O + alias resolution + sender_from_cwd
+  registry.py     ~/.config/a8s/a8s.json I/O + alias resolution + sender_from_cwd
   mailbox.py      inbox/outbox/trash routing + queue helpers
   definitions.py  invoke* verbs, prompt formatting, definition loading
   daemon.py       wake subprocess, pid attachment, signal handling
@@ -30,9 +30,9 @@ Surface (CLI):
 be explicitly registered with `a8s add` (use `a8s discover` to find candidates).
 
 State:
-  ~/.a8s/a8s.json             registry: {agents, aliases}
-  ~/.a8s/agents/<NAME>/       per-agent: inbox/, trash/, log.txt, pid
-  ~/.a8s/log.txt              process-scoped supervisor log
+  ~/.config/a8s/a8s.json             registry: {agents, aliases}
+  ~/.config/a8s/agents/<NAME>/       per-agent: inbox/, trash/, log.txt, pid
+  ~/.config/a8s/log.txt              process-scoped supervisor log
   <agent-root>/.outbox/       agent-writable; routing re-stamps `from`
 """
 from __future__ import annotations

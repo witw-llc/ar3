@@ -134,6 +134,20 @@ Read [a8s.md](a8s.md) first for concept and usage.
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
+- **A node's `PATH` is the start shell's `PATH`, forever.** `a8s start` copies
+  its own environment into the handler and the handler copies it into every
+  wake; the only additions are `TELL_OUTBOX_DIR` and the size cap. Start from
+  an interactive login shell and the harness resolves; start from
+  `ssh host -- 'a8s start x'`, cron or CI and the rc-managed entries are
+  missing, so the first wake fails hours later while the operator's own shell
+  still resolves the binary fine. `_warn_unresolvable_harnesses` probes at
+  start, in exactly the environment the node will inherit. It resolves the
+  harness through wrappers (`harness_program` unwraps `flock`, `timeout`,
+  `env`, `nice` and friends) because the `FileNotFoundError` guard around the
+  spawn only ever sees `argv[0]` and a wrapped harness fails *inside* the
+  wrapper. It declines to guess inside `sh -c` and skips an unexpanded `$VAR`.
+  It warns and never refuses: the harness may be installed later, and an
+  attached node that cannot wake is still worth having.
 - **Receive-side dedup needs the claim as well as the ring.** `seen-ids` is read
   on entry and written after delivery, and the gap between the two is a whole
   download. Several daemons on one machine each subscribe and each resolve
@@ -179,8 +193,11 @@ Read [a8s.md](a8s.md) first for concept and usage.
 
 ## Active design threads
 
+`bin#N` is an issue in the pre-carve repository; a bare `#N` is this one. The
+numbering overlaps, so the prefix is what tells them apart.
+
 | # | State | Topic |
 |---|---|---|
-| #63 | partial | Multi-cluster routing. MQTT in, mini-MQTT/HTTPS/TCP/encryption still open. |
-| #72 | open | Mailbox file format discussion. |
-| #93 | open | Grok CLI as tool kind. |
+| bin#63 | partial | Multi-cluster routing. MQTT in, mini-MQTT/HTTPS/TCP/encryption still open. |
+| bin#72 | open | Mailbox file format discussion. |
+| bin#93 | open | Grok CLI as tool kind. |

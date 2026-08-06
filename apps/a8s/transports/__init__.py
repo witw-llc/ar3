@@ -1,4 +1,4 @@
-"""Transport plugin interface for a8s remote routing (issue #63).
+"""Transport plugin interface for a8s remote routing.
 
 a8s never asks what kind of transport a remote is. It calls `publish(envelope)`
 on every configured remote and runs a subscriber thread per remote that hands

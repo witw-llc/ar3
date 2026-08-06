@@ -86,7 +86,20 @@ def distill(paths, dry_run=False):
         else:
             files = [p]
         for f in files:
-            candidates = extract_from_file(f)
+            # One unreadable or surprising file must not cost the whole sweep.
+            # `dream_sweep` treats a nonzero exit as a failed dream and re-runs
+            # the same directory next time, so an undecodable byte anywhere in
+            # a capture directory used to wedge distillation permanently rather
+            # than skip one file.
+            try:
+                candidates = extract_from_file(f)
+            except (OSError, UnicodeDecodeError, ValueError, TypeError) as e:
+                print(
+                    f"  [distill] skipping {f}: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+                results.append({"action": "skipped", "source": str(f), "reason": str(e)})
+                continue
             candidates = [c for c in candidates if not _should_reject(c["content"])]
             new_knowledge = diff_against_store(candidates)
             if dry_run:
@@ -196,11 +209,33 @@ def _parse_multimodal_response(text, path):
     try:
         item = json.loads(match.group())
         if isinstance(item, dict) and "content" in item:
-            return {
-                "title": item.get("title") or Path(path).stem.replace("-", " ").replace("_", " "),
-                "content": item["content"],
-                "tags": item.get("tags", [_media_type(path)]),
-            }
+            # A model that answers with a content *list* (a common multimodal
+            # response shape) used to reach `.strip()` downstream and take the
+            # whole batch down with an AttributeError. `_parse_llm_response`
+            # already guards the same class; this is the media path.
+            title = item.get("title")
+            if not isinstance(title, str) or not title.strip():
+                title = Path(path).stem.replace("-", " ").replace("_", " ")
+            content = item["content"]
+            if not isinstance(content, str):
+                print(
+                    f"  [distill] {path}: content is {type(content).__name__}, "
+                    "expected string — falling back to the raw response",
+                    file=sys.stderr,
+                )
+                raise TypeError("non-string content")
+            tags = item.get("tags", [_media_type(path)])
+            if tags is None:
+                tags = [_media_type(path)]
+            elif isinstance(tags, str):
+                tags = [tags]
+            elif not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+                print(
+                    f"  [distill] {path}: tags must be a list of strings — using the media type",
+                    file=sys.stderr,
+                )
+                tags = [_media_type(path)]
+            return {"title": title, "content": content, "tags": tags}
     except (json.JSONDecodeError, TypeError):
         # Fallback: use raw text
         if len(text.strip()) > 20:

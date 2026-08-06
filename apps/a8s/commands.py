@@ -45,7 +45,10 @@ from definitions import (
     builtin_definition_stems,
     default_definition_path,
     definition_stem,
+    harness_is_resolvable,
+    harness_program,
     list_definition_entries,
+    load_definition,
     resolve_definition_arg,
     validate_var_name,
 )
@@ -107,7 +110,7 @@ def cmd_add(args: list[str]) -> int:
     The name is canonicalized (lowercase, alphanumeric) at registration so
     `a8s add CLAUDE` and `a8s add claude` collapse to the same agent — closes
     the case-collision footgun where independent registry entries each got
-    their own dir but lookups conflated them (issue #65).
+    their own dir but lookups conflated them.
 
     Without `<definition>`, `<dir>` is scanned for a marker file
     (CLAUDE.md/GEMINI.md/CODEX.md) and the matching built-in definition is
@@ -116,33 +119,34 @@ def cmd_add(args: list[str]) -> int:
     With `<definition>`, the JSON file is validated and set as the agent's
     definition. A bare name (`filedrop`, `claude`, `ollama-opencode`) resolves
     against bundled `apps/a8s/definitions/`, then user-installed
-    ``~/.a8s/definitions/`` (`a8s defs add`); any other path is used as-is.
+    ``~/.config/a8s/definitions/`` (`a8s defs add`); any other path is used as-is.
 
-    Trailing ``--KEY=value`` flags set per-node a8s vars (same as
-    ``a8s vars <name> set KEY value``). Keys are case-insensitive.
+    Trailing ``--KEY value`` or ``--KEY=value`` flags set per-node a8s vars
+    (same as ``a8s vars <name> set KEY value``). Keys are case-insensitive.
+    The first flag ends the positional arguments, so the definition, if given,
+    comes before it.
 
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2:
         print(
-            "usage: a8s add <name> <dir> [<definition>] [--KEY=value ...]",
+            "usage: a8s add <name> <dir> [<definition>] [--KEY value ...]",
             file=sys.stderr,
         )
         return 2
     raw_name, dir_str = args[0], args[1]
     rest = args[2:]
-    definition_arg: str | None = None
-    var_tokens: list[str] = []
-    for tok in rest:
-        if tok.startswith("--"):
-            var_tokens.append(tok)
-        elif definition_arg is None and not var_tokens:
-            definition_arg = tok
-        else:
-            print(
-                "usage: a8s add <name> <dir> [<definition>] [--KEY=value ...]",
-                file=sys.stderr,
-            )
-            return 2
+    # The definition is positional and the vars are flags, so the first `--`
+    # is the boundary: everything after it belongs to the option parser, which
+    # is what lets `--KEY value` work here without swallowing the definition.
+    first_flag = next((n for n, t in enumerate(rest) if t.startswith("--")), len(rest))
+    positionals, var_tokens = rest[:first_flag], rest[first_flag:]
+    if len(positionals) > 1:
+        print(
+            "usage: a8s add <name> <dir> [<definition>] [--KEY value ...]",
+            file=sys.stderr,
+        )
+        return 2
+    definition_arg: str | None = positionals[0] if positionals else None
     try:
         initial_vars = _parse_add_var_flags(var_tokens)
     except ValueError as e:
@@ -170,7 +174,7 @@ def cmd_add(args: list[str]) -> int:
             return 1
     namespaces = load_namespaces()
     # A prefix already bound to this exact name is the agent's own namespace
-    # (#175) — re-adding the node is fine. A prefix bound to a *different* agent
+    # — re-adding the node is fine. A prefix bound to a *different* agent
     # would be shadowed by `tell <name>` (namespace beats agent), so it stands.
     for k, bound in namespaces.items():
         if k.lower() == name and str(bound).strip().lower() != name:
@@ -206,21 +210,69 @@ def cmd_add(args: list[str]) -> int:
     return 0
 
 
-def _parse_add_var_flags(tokens: list[str]) -> dict[str, str]:
-    """Parse ``--KEY=value`` tokens into a canonical (uppercase) vars map."""
+def parse_option_tokens(
+    tokens: list[str],
+    *,
+    aliases: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Parse ``--key value`` and ``--key=value`` tokens into an option map.
+
+    Both spellings are accepted everywhere. An operator who has used one a8s
+    command has no way to guess that the next one wants the other spelling,
+    and the failure was silent in the worst way: `--user=me --password=x`
+    parsed as one option literally named `user=me` whose value was
+    `--password=x`, so the error named an option nobody had typed and the
+    password never reached the config at all.
+
+    A space-form value that itself looks like an option is therefore an
+    error, never a capture. ``--key=value`` remains the only spelling that
+    can carry a value starting with a dash, and the message says so.
+
+    Keys are lowercased in the sense that `-` becomes `_`; `aliases` maps
+    operator-facing spellings onto canonical ones. Raises ValueError with a
+    message written for the person at the terminal.
+    """
     out: dict[str, str] = {}
-    for tok in tokens:
-        if not tok.startswith("--") or len(tok) < 3:
-            raise ValueError(f"expected --KEY=value, got: {tok!r}")
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok.startswith("--") or len(tok) <= 2:
+            if tok.startswith("-") and len(tok) > 1:
+                raise ValueError(
+                    f"{tok!r}: options here take two dashes and a full name "
+                    f"(try --{tok.lstrip('-')})"
+                )
+            raise ValueError(f"expected --<opt> <value> or --<opt>=<value>, got: {tok!r}")
         body = tok[2:]
-        if "=" not in body:
-            raise ValueError(f"expected --KEY=value, got: {tok!r}")
-        raw_key, _, value = body.partition("=")
-        if not raw_key:
-            raise ValueError(f"expected --KEY=value, got: {tok!r}")
-        key = validate_var_name(raw_key)
+        if "=" in body:
+            raw_key, _, value = body.partition("=")
+            if not raw_key:
+                raise ValueError(f"missing option name before '=': {tok!r}")
+            i += 1
+        else:
+            raw_key = body
+            if i + 1 >= len(tokens):
+                raise ValueError(f"missing value for {tok}")
+            value = tokens[i + 1]
+            if value.startswith("--"):
+                raise ValueError(
+                    f"missing value for {tok}: the next token {value!r} looks like "
+                    f"another option. Use {tok}=<value> if the value really starts "
+                    "with a dash."
+                )
+            i += 2
+        key = (aliases or {}).get(raw_key, raw_key).replace("-", "_")
+        if key in out:
+            raise ValueError(f"duplicate option: --{key}")
         out[key] = value
     return out
+
+
+def _parse_add_var_flags(tokens: list[str]) -> dict[str, str]:
+    """Parse agent-var option tokens into a canonical (uppercase) vars map."""
+    return {
+        validate_var_name(k): v for k, v in parse_option_tokens(tokens).items()
+    }
 
 
 def cmd_remove(args: list[str]) -> int:
@@ -229,7 +281,7 @@ def cmd_remove(args: list[str]) -> int:
     drops <name> from any alias's member list, and deletes any alias that
     becomes empty as a result. Cascades into namespaces the same way: any
     prefix bound to <name> is unbound (no orphans). Wipes the on-disk
-    per-agent dir (~/.a8s/agents/<NAME>/) — inbox, trash, log, pid file
+    per-agent dir (~/.config/a8s/agents/<NAME>/) — inbox, trash, log, pid file
     all gone."""
     if len(args) != 1:
         print("usage: a8s remove <name>", file=sys.stderr)
@@ -355,7 +407,7 @@ def _definitions_usage() -> int:
         "       a8s definitions|defs add <path.json>        # install as bare name\n"
         "       a8s definitions|defs remove|rm <name>       # uninstall user definition\n"
         "\n"
-        "Copies into ~/.a8s/definitions/<basename>.json. Basename must not\n"
+        "Copies into ~/.config/a8s/definitions/<basename>.json. Basename must not\n"
         "collide with a repo built-in. Bare names then work with add/define.",
         file=sys.stderr,
     )
@@ -368,7 +420,7 @@ def cmd_definitions(args: list[str]) -> int:
     Forms:
       a8s defs                         list builtin + user
       a8s defs list|ls                 list
-      a8s defs add <path.json>         copy into ~/.a8s/definitions/
+      a8s defs add <path.json>         copy into ~/.config/a8s/definitions/
       a8s defs remove|rm <name>        delete a user definition (not builtins)
     """
     if len(args) == 0:
@@ -707,7 +759,7 @@ def cmd_alias(args: list[str]) -> int:
       a8s alias <alias> <member>     add or create
 
     Names are canonicalized (lowercase) so `a8s alias Devs CLAUDE` and
-    `a8s alias devs claude` are the same operation (issue #65). Members
+    `a8s alias devs claude` are the same operation. Members
     may be agent names OR existing alias names (nesting OK, cycles
     rejected at resolve time). The alias name must not collide with an
     existing agent name."""
@@ -867,7 +919,7 @@ def cmd_aliases() -> int:
     return 0
 
 
-# ---------- namespace commands (issue #148) ----------
+# ---------- namespace commands ----------
 
 def cmd_namespace(args: list[str]) -> int:
     """`a8s namespace` — bind address prefixes to node agents.
@@ -884,7 +936,7 @@ def cmd_namespace(args: list[str]) -> int:
     namespace delegation is single-delivery by design, the opposite of
     alias fan-out. Prefixes share the agent/alias name grammar (lowercase
     canonical form). A prefix may match the name of the agent it binds to (a
-    node owning its own namespace, #175) but must not collide with an alias or
+    node owning its own namespace) but must not collide with an alias or
     with any other agent."""
     opaque = "--opaque" in args
     args = [a for a in args if a != "--opaque"]
@@ -911,7 +963,7 @@ def cmd_namespace(args: list[str]) -> int:
     agents = load_registry()
     aliases = load_aliases()
     # A prefix may match the name of the agent it binds to — that's a node
-    # owning its own namespace (#175), so cross-wall traffic is attributed to
+    # owning its own namespace, so cross-wall traffic is attributed to
     # `s1l`, not `s1l-node`. It must not match any *other* agent's name, which
     # `tell <prefix>` would silently shadow (namespace beats agent in resolve).
     for k in agents:
@@ -1094,6 +1146,7 @@ def cmd_start(args: list[str]) -> int:
     if not members:
         print(f"start: {name!r} resolves to no agents", file=sys.stderr)
         return 1
+    _warn_unresolvable_harnesses(members)
     # NOTE: the child must launch the entrypoint script (a8s.py), NOT this
     # commands.py module. That's why core.ENTRYPOINT exists.
     cmd = [sys.executable, str(ENTRYPOINT), "run", name]
@@ -1109,6 +1162,49 @@ def cmd_start(args: list[str]) -> int:
     else:
         print(f"started {name} (alias of {len(members)}) as PID {proc.pid}")
     return 0
+
+
+def _warn_unresolvable_harnesses(members: list[str]) -> None:
+    """Say so at `a8s start` when a node's harness is not on this shell's PATH.
+
+    `a8s start` hands its own environment to the handler and the handler hands
+    it to every wake, so a node's PATH is whatever the shell that started it
+    happened to have — permanently, until restart. Start from a login shell and
+    it works; start from `ssh host -- 'a8s start x'`, cron or CI and the rc-managed
+    entries are missing, so the harness is unresolvable hours later at the first
+    wake. The operator's own shell resolves it fine, which is what makes the
+    failure read as intermittent instead of as a PATH problem.
+
+    Probing here rather than at first wake is the point: this process holds
+    exactly the environment the node will get.
+
+    A warning, never a refusal. The definition may name a harness this machine
+    installs later, and a node that cannot wake is still worth having attached.
+    """
+    for member in members:
+        try:
+            definition = load_definition(member)
+        except Exception:
+            continue  # a broken definition has its own diagnostics
+        for label, argv in (
+            ("invoke", definition.get("invoke")),
+            ("idle.invoke", (definition.get("idle") or {}).get("invoke")
+             if isinstance(definition.get("idle"), dict) else None),
+        ):
+            if not isinstance(argv, list) or not argv:
+                continue
+            program = harness_program([str(a) for a in argv])
+            if program is None or "$" in program:
+                continue  # a shell string, or a var that expands per wake
+            if harness_is_resolvable(program):
+                continue
+            print(
+                f"warning: {member}: {program!r} ({label}) is not on this "
+                f"shell's PATH, and the node inherits this PATH for every wake.\n"
+                f"         Start from a login shell, or give the definition an "
+                f"absolute path. `ar3 doctor` lists what it can find.",
+                file=sys.stderr,
+            )
 
 
 def cmd_step(args: list[str], interval: float) -> int:
@@ -1528,7 +1624,7 @@ def cmd_drain(args: list[str]) -> int:
 # ---------- config ----------
 
 def cmd_config(args: list[str]) -> int:
-    """`a8s config` — read or write `~/.a8s/settings.json`; list all knobs."""
+    """`a8s config` — read or write `~/.config/a8s/settings.json`; list all knobs."""
     import settings as sm
 
     if not args:
@@ -2045,7 +2141,7 @@ def cmd_logs(args: list[str]) -> int:
                 pass
 
 
-# ---------- remotes (issue #63) ----------
+# ---------- remotes ----------
 
 _REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SECRET_KEYS = {"pass", "password"}
@@ -2058,10 +2154,12 @@ def _remote_usage() -> int:
         "       a8s remote <name> <broker> <topic> [--<k> <v> ...]   # add or overwrite\n"
         "       a8s unremote <name>                                # remove\n"
         "\n"
-        "Any --<opt> <value> pair past the broker and topic is passed verbatim\n"
-        "to the transport (e.g. --user / --pass for mqtt). --pass/--password are\n"
-        "stored in secrets.json (not network.json). Unknown options are rejected\n"
-        "by the transport at load time.",
+        "Any option past the broker and topic is passed verbatim to the\n"
+        "transport (e.g. --user / --pass for mqtt). Either spelling works,\n"
+        "--user alice or --user=alice, and dashes and underscores in an option\n"
+        "name are equivalent. --pass/--password are stored in secrets.json (not\n"
+        "network.json). Unknown options are rejected by the transport at load\n"
+        "time.",
         file=sys.stderr,
     )
     return 2
@@ -2135,23 +2233,11 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
     if not _REMOTE_NAME_RE.match(name):
         print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
         return 2
-    extras: dict = {}
-    i = 0
-    while i < len(opt_tokens):
-        tok = opt_tokens[i]
-        if not tok.startswith("--") or len(tok) <= 2:
-            print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
-            return _remote_usage()
-        key = tok[2:]
-        i += 1
-        if i >= len(opt_tokens):
-            print(f"missing value for {tok}", file=sys.stderr)
-            return _remote_usage()
-        if key in extras:
-            print(f"duplicate option: {tok}", file=sys.stderr)
-            return _remote_usage()
-        extras[key] = opt_tokens[i]
-        i += 1
+    try:
+        extras = parse_option_tokens(opt_tokens)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return _remote_usage()
     cfg = load_network_config()
     overwriting = name in cfg["remotes"]
     public, secrets = split_secret_keys(
@@ -2183,7 +2269,7 @@ def cmd_unremote(args: list[str]) -> int:
     return 0
 
 
-# ---------- storage services (issue #90) ----------
+# ---------- storage services ----------
 
 
 _STORAGE_HELP = """\
@@ -2198,9 +2284,9 @@ along in the envelope — the receiver tries them in turn, so a service blocked
 on one network does not lose the file. Receivers fetch public URLs with a plain
 HTTP GET and need no credentials or storage config of their own.
 
-The kind is auto-dispatched from the URL scheme. Dashes and underscores in an
-option name are equivalent (--base-url == --base_url), and --pass is accepted
-for --password. Give --prefix an empty value to put objects at the top of the
+The kind is auto-dispatched from the URL scheme. Options take either spelling,
+--user alice or --user=alice. Dashes and underscores in an option name are
+equivalent (--base-url == --base_url), and --pass is accepted for --password. Give --prefix an empty value to put objects at the top of the
 configured path when that path is already dedicated to a8s.
 
   KIND          URL                              OPTIONS
@@ -2300,7 +2386,7 @@ _STORAGE_OPT_ALIASES = {"pass": "password"}
 
 def cmd_storage(args: list[str]) -> int:
     """`a8s storage` — manage cross-cluster file services declared in
-    `~/.a8s/network.json` (services map).
+    `~/.config/a8s/network.json` (services map).
 
     Forms (mirror `a8s remote`):
       a8s storage                                 list all
@@ -2344,23 +2430,11 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     if not _REMOTE_NAME_RE.match(name):
         print(f"storage name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
         return 2
-    extras: dict = {}
-    i = 0
-    while i < len(opt_tokens):
-        tok = opt_tokens[i]
-        if not tok.startswith("--") or len(tok) <= 2:
-            print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
-            return _storage_usage()
-        key = _STORAGE_OPT_ALIASES.get(tok[2:], tok[2:]).replace("-", "_")
-        i += 1
-        if i >= len(opt_tokens):
-            print(f"missing value for {tok}", file=sys.stderr)
-            return _storage_usage()
-        if key in extras:
-            print(f"duplicate option: {tok}", file=sys.stderr)
-            return _storage_usage()
-        extras[key] = opt_tokens[i]
-        i += 1
+    try:
+        extras = parse_option_tokens(opt_tokens, aliases=_STORAGE_OPT_ALIASES)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return _storage_usage()
     kind = detect_service_kind(url)
     if kind is None:
         print(

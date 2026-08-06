@@ -10,6 +10,130 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.63]
+
+### Added
+- **`r4t roster check` flags a member name that shadows something outside the
+  wall.** The leader addresses roster members and registered a8s nodes with the
+  same verb, and a name inside the roster wins — so an outside node sharing a
+  member's name is unreachable from that leader, by precedence rather than by
+  a block, and nothing said so. The check now names the overlap (node, alias,
+  or namespace) and the message flow page states the precedence rule. It warns
+  and blocks nothing: on a single-owner network there usually is no collision,
+  and where there is one the operator may mean it. (#40)
+- **`tell` names the one shape a leaked `TELL_OUTBOX_DIR` makes.** A variable
+  inherited from a live seat into an unrelated shell passes every check the
+  send path makes — the directory exists, it is writable, it belongs to a real
+  agent — and the mail simply leaves under that agent's name. What gives it
+  away is the pair: the outbox is a registered agent's own, and the working
+  directory is nowhere near that agent. `tell` now warns on stderr and sends
+  anyway, and `tell --check` reports the same line. A refusal would be wrong;
+  an operator may mean it. r4t's staging outbox is not registered and a seat
+  working in its own root matches its owner, so neither warns. (#92)
+
+### Documentation
+- **Per-member knowledge stores are separated by convention until an OS
+  boundary enforces it.** One store per member bounds what a member is given,
+  not what it can take: the stores are files under `R4T_HOME`, `R4T_HOME` is
+  in the turn environment, and a tool-capable rig has a shell. On a bare org
+  there is no boundary between such a member and any store, its own or a
+  sibling's — observed live in the K1 rig matrix, where a full-tool preset
+  stated a codeword present only on disk. Stated in the knowledge and
+  isolation pages, because "each member has its own store" reads like a
+  guarantee. Partial: the lab-driver mitigation and the #51 read-path
+  consequence are still open on #54. (#54)
+- **Sequential entry ids are a recency signal, and models read them.** With
+  every date stripped from the injected entries, a 4B model resolved a
+  fact-supersession conflict off the id ordinals alone. Nothing tells a reader
+  that `K7E-BBB-NNNNN` is allocated in order; it works it out. In production
+  the signal is free and usually correct, and silently wrong after a bulk
+  import, a store merge, or a rebuild that re-numbers. An experiment testing
+  "no temporal information" has to shuffle or mask ids or it under-measures
+  the penalty. Written down in the k7e architecture and r4t knowledge pages so
+  it is not rediscovered as a mystery. (#69)
+
+### Changed
+- **`k7e get` takes several ids, and the knowledge pass stops paying for
+  startup.** Rank-proportional packing has to read every entry in its
+  weighting pool before it can weigh any of them, and it was spending one
+  interpreter startup per entry to do it — 8 entries measured at 379ms, of
+  which the reads themselves were almost none. `k7e get` now accepts many ids
+  (`--json` for the parseable form, both flags applying to the whole batch),
+  and r4t's sizing pass makes one call: **375ms → 60ms measured on 8 entries**.
+  A missing id is reported on stderr and skipped rather than failing the
+  batch, since a caller sizing a pool would rather pack the rest. Single-id
+  behaviour is unchanged. (#111)
+- **One issue-number namespace in the source.** Code and docs carried in from
+  the pre-carve repository quote that repository's issue numbers, and the two
+  namespaces overlap — `#90` is a real issue in both, on different subjects.
+  GitHub linked every legacy reference to whatever this repo happens to number
+  the same, so a reader following one landed on unrelated work. 98 references
+  are now written `bin#N`; a bare `#N` means this repo and nothing else. Each
+  was classified by comparing when the line was written against when this
+  repo's issue of that number was opened, not by eye. (#73)
+
+### Fixed
+- **A shared handler's idle pass rotates, and a quiet stretch no longer
+  shuffles the wake order.** Two fairness gaps left over from the #20
+  wake-rotation review. The wake counter advanced on every free-slot
+  iteration whether or not anyone had mail, so a short interval spun it
+  through each idle pass and which of two agents mailed at the same moment
+  went first depended on how long the lull happened to be — fair on average,
+  unreproducible in the particular. It now advances only when a wake actually
+  started. The idle pass had the wake loop's original bug untouched: it began
+  at index 0 and stopped at the first started invoke, so an agent whose clock
+  keeps expiring first took every idle slot and its siblings were never
+  checked. It now rotates on its own counter. (#74)
+- **`a8s start` says so when a node cannot see its harness.** `a8s start`
+  hands its own environment to the handler, which hands it to every wake, so a
+  node's `PATH` is whatever the shell that started it happened to have —
+  permanently, until restart. Start from a login shell and everything works;
+  start from `ssh host -- 'a8s start x'`, cron or CI and the harness is
+  unresolvable at the first wake, hours later, while the operator's own shell
+  still resolves it fine. That gap is why the failure reads as intermittent
+  rather than as a `PATH` problem. `a8s start` now probes each node's harness
+  in exactly the environment the node will inherit, and looks *through*
+  wrappers — the old guard saw only `argv[0]`, so a definition wrapping its
+  harness in `flock` or `timeout` failed inside the wrapper and reported the
+  wrong program. It declines to guess inside `sh -c`, skips an unexpanded
+  `$VAR`, and warns rather than refuses. `ar3 doctor` now names the same
+  consequence when a harness is not on `PATH`, so the two symptoms tell one
+  story. (#121)
+- **A media file with a surprising response no longer takes the distill batch
+  with it.** `_parse_llm_response` was hardened against non-string content by
+  #57, but `_parse_multimodal_response` is a separate path reached only through
+  a media file, so the fix never covered it. The wider problem was the batch
+  itself: `dream_sweep` reads a nonzero exit as a failed dream and re-runs the
+  same directory, so one undecodable byte in one capture wedged distillation
+  permanently. `distill()` now skips the file, records why, and keeps going.
+  (#70)
+- **A skipped capture is now visible to the operator who was asleep for it.**
+  k7e wrote its skip notes to stderr; r4t captures stderr and prints it only
+  when the exit code is nonzero, so on a *successful* dream the note was
+  captured and discarded. The watermark advances past the skipped file
+  regardless, so nobody ever learned a capture went unread. `k7e distill` now
+  prints skipped files on stdout alongside what it stored, and a successful
+  dream logs each one as `DREAM-SKIPPED`. (#71)
+- **The CLI stopped pointing at a directory new installs do not have.** 36
+  user-facing strings and docstrings still named `~/.a8s`; `a8s config` printed
+  it directly. Swept to `~/.config/a8s`, keeping the three places that describe
+  the legacy fallback itself. (#72)
+- **`--opt=value` works everywhere it should have.** The three commands that
+  take open-ended options disagreed with each other: `a8s add` demanded
+  `--KEY=value` and rejected the spaced form, while `a8s remote` and
+  `a8s storage` demanded `--opt value` and rejected `=`. The disagreement
+  failed silently in the worst way — `a8s storage fm webdav://… --base_url=…
+  --user=… --password=…` parsed as *two* options literally named
+  `base_url=…` and `user=…`, each swallowing the following flag as its value,
+  so the error named options nobody had typed and the password never reached
+  the config at all. All three now share one parser: both spellings work, `-`
+  and `_` in an option name are equivalent, `--pass` still aliases to
+  `--password`, and a spaced value that looks like another option is refused
+  with a message that says to use `--opt=<value>` if the value really starts
+  with a dash. A single-dash option says which long form to type instead.
+  `a8s tell --attach` and `a8s logs --tail` already took both spellings; now
+  the rest of the CLI agrees with them.
+
 ## [0.1.62]
 
 ### Fixed

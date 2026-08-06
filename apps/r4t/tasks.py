@@ -9,7 +9,7 @@ every inbound message enqueues regardless of a thread's status.
 A thread has one terminal disposition: `close_task`, when the originator has
 had a substantive reply.
 
-An `ingress` thread came from outside the garden, and it is owed nothing (#58).
+An `ingress` thread came from outside the garden, and it is owed nothing.
 Beyond the wall a8s posts messages to nodes; it carries no notion of a reply
 being expected, and giving it one would put a decision point on every node of
 a network r4t does not own. So the obligation graph stops at the wall: an
@@ -21,7 +21,7 @@ that never answered its originator is a real dropped ball.
 `ingress` is stamped at birth from which side of the wall the sender is on —
 not from anything the sender says about itself. `creator` is whatever `from`
 the message carried and `r4t dispatch --from` accepts any string, so wire
-claims never move the ledger (#83).
+claims never move the ledger.
 
 The thread id + hop travel as structured fields on the r4t-message
 (`dispatch.py`), never as a text header — there is no serialize/parse step

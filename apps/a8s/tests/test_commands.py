@@ -4,6 +4,7 @@ the casing the user typed) and the per-agent kill / no-orphan rule from
 issue #68."""
 from __future__ import annotations
 
+import json
 import os
 import signal
 from pathlib import Path
@@ -35,6 +36,8 @@ from commands import (
     cmd_update,
     cmd_vars,
     _update_restart_targets,
+    _warn_unresolvable_harnesses,
+    parse_option_tokens,
 )
 from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
 from mailbox import ensure_mailboxes
@@ -160,7 +163,25 @@ class TestCmdAddBundledDefinition:
     def test_add_rejects_bad_var_flag(self, fake_home, agent_root, capsys):
         rc = cmd_add(["bob", str(agent_root), "filedrop", "--model"])
         assert rc == 2
-        assert "expected --KEY=value" in capsys.readouterr().err
+        assert "missing value for --model" in capsys.readouterr().err
+
+    def test_add_takes_a_var_the_space_way_too(self, fake_home, agent_root):
+        # `a8s storage` and `a8s remote` have always wanted the space form and
+        # `a8s add` has always wanted `=`. Nobody can be expected to remember
+        # which is which, so both work everywhere now.
+        assert cmd_add(["bob", str(agent_root), "filedrop", "--Model", "qwen3.6"]) == 0
+        assert load_registry()["bob"]["vars"]["MODEL"] == "qwen3.6"
+
+    def test_a_var_the_space_way_without_a_definition(self, fake_home, agent_root):
+        # The definition is positional, so the first `--` has to be the
+        # boundary or the option value would be read as the definition.
+        assert cmd_add(["bob", str(agent_root), "--Model", "qwen3.6"]) == 0
+        assert load_registry()["bob"]["vars"]["MODEL"] == "qwen3.6"
+
+    def test_two_positionals_is_still_a_usage_error(self, fake_home, agent_root, capsys):
+        rc = cmd_add(["bob", str(agent_root), "filedrop", "extra"])
+        assert rc == 2
+        assert "usage: a8s add" in capsys.readouterr().err
 
     def test_add_rejects_var_named_builtin(self, fake_home, agent_root, capsys):
         rc = cmd_add(["bob", str(agent_root), "filedrop", "--message=x"])
@@ -992,6 +1013,154 @@ class TestCmdVars:
             vars=load_agent_vars("bob"),
         )
         assert argv == ["x", "qwen3.6"]
+
+
+class TestHarnessWarningAtStart:
+    """`a8s start` hands its own environment to the handler, which hands it to
+    every wake. So a node's PATH is whatever the shell that started it happened
+    to have, permanently, until restart — and the failure surfaces hours later
+    at the first wake, in a shell the operator is no longer looking at (#121).
+    """
+
+    def _register(self, agent_root, tmp_path, invoke, *, idle=None):
+        spec = {"description": "probe", "invoke": invoke}
+        if idle is not None:
+            spec["idle"] = {"timeout": 3600, "invoke": idle}
+        path = tmp_path / "probe-definition.json"
+        path.write_text(json.dumps(spec))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+
+    def test_an_unresolvable_harness_is_named(self, fake_home, agent_root, tmp_path, capsys):
+        self._register(agent_root, tmp_path, ["a8s-no-such-harness-xyz", "-p", "$MESSAGE"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "a8s-no-such-harness-xyz" in err
+        assert "PATH" in err
+
+    def test_it_sees_through_a_wrapper(self, fake_home, agent_root, tmp_path, capsys):
+        # The case the FileNotFoundError guard could never catch: argv[0]
+        # resolves, and the failure happens inside flock.
+        self._register(agent_root, tmp_path, ["flock", "/tmp/a8s.lock", "a8s-no-such-harness-xyz"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "a8s-no-such-harness-xyz" in err
+        assert "flock" not in err  # the wrapper is not the problem
+
+    def test_a_resolvable_harness_says_nothing(self, fake_home, agent_root, tmp_path, capsys):
+        self._register(agent_root, tmp_path, ["python3", "-c", "pass"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_an_idle_invoke_is_probed_too(self, fake_home, agent_root, tmp_path, capsys):
+        self._register(
+            agent_root, tmp_path, ["python3", "-c", "pass"],
+            idle=["a8s-no-such-idle-harness-xyz", "clear"],
+        )
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "a8s-no-such-idle-harness-xyz" in err
+        assert "idle.invoke" in err
+
+    def test_a_shell_string_is_not_second_guessed(self, fake_home, agent_root, tmp_path, capsys):
+        self._register(agent_root, tmp_path, ["sh", "-c", "a8s-no-such-harness-xyz"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_an_unexpanded_var_is_not_probed(self, fake_home, agent_root, tmp_path, capsys):
+        # `$HARNESS` becomes a real path per wake via `a8s vars`, so there is
+        # nothing to resolve here and a warning would be pure noise.
+        self._register(agent_root, tmp_path, ["$HARNESS", "-p", "$MESSAGE"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_an_unknown_member_is_not_fatal(self, fake_home, capsys):
+        # Warning, never a refusal — a node that cannot wake is still worth
+        # having attached, and a broken definition has its own diagnostics.
+        _warn_unresolvable_harnesses(["no-such-agent"])
+        assert capsys.readouterr().err == ""
+
+
+class TestParseOptionTokens:
+    """One parser behind `a8s add`, `a8s remote` and `a8s storage`.
+
+    The three used to disagree: `add` demanded `--KEY=value` and the other two
+    demanded `--opt value`. The disagreement was not merely annoying, it was
+    silent — `--user=me --password=x` parsed as a single option literally named
+    `user=me` whose value was `--password=x`, so the error named an option
+    nobody typed and the password never reached the config.
+    """
+
+    def test_both_spellings_mean_the_same_thing(self):
+        assert parse_option_tokens(["--user", "alice"]) == {"user": "alice"}
+        assert parse_option_tokens(["--user=alice"]) == {"user": "alice"}
+
+    def test_the_reported_failure(self):
+        # The operator's actual line. Every option must survive it.
+        assert parse_option_tokens([
+            "--base_url=https://files.example.com",
+            "--prefix=_a8s_",
+            "--user=alice",
+            "--password=s3cret",
+        ]) == {
+            "base_url": "https://files.example.com",
+            "prefix": "_a8s_",
+            "user": "alice",
+            "password": "s3cret",
+        }
+
+    def test_a_flag_is_never_swallowed_as_a_value(self):
+        with pytest.raises(ValueError) as e:
+            parse_option_tokens(["--base_url", "--user=alice"])
+        msg = str(e.value)
+        assert "missing value for --base_url" in msg
+        assert "--base_url=<value>" in msg  # and how to mean it on purpose
+
+    def test_the_equals_form_can_carry_a_leading_dash(self):
+        assert parse_option_tokens(["--prefix=--odd"]) == {"prefix": "--odd"}
+
+    def test_an_empty_value_is_a_value(self):
+        assert parse_option_tokens(["--prefix="]) == {"prefix": ""}
+
+    def test_a_value_may_contain_equals(self):
+        assert parse_option_tokens(["--token=a=b=c"]) == {"token": "a=b=c"}
+
+    def test_dashes_in_a_key_become_underscores(self):
+        assert parse_option_tokens(["--base-url=x"]) == {"base_url": "x"}
+        assert parse_option_tokens(["--base-url", "x"]) == {"base_url": "x"}
+
+    def test_aliases_apply_to_both_spellings(self):
+        al = {"pass": "password"}
+        assert parse_option_tokens(["--pass=x"], aliases=al) == {"password": "x"}
+        assert parse_option_tokens(["--pass", "x"], aliases=al) == {"password": "x"}
+
+    def test_a_duplicate_is_refused_across_spellings(self):
+        with pytest.raises(ValueError, match="duplicate option: --user"):
+            parse_option_tokens(["--user=a", "--user", "b"])
+
+    def test_a_single_dash_says_what_to_type_instead(self):
+        with pytest.raises(ValueError, match=r"try --user"):
+            parse_option_tokens(["-user", "alice"])
+
+    def test_a_bare_word_is_not_an_option(self):
+        with pytest.raises(ValueError, match="expected --<opt>"):
+            parse_option_tokens(["user", "alice"])
+
+    def test_a_missing_name_before_equals(self):
+        with pytest.raises(ValueError, match="missing option name"):
+            parse_option_tokens(["--=alice"])
+
+    def test_a_trailing_option_with_no_value(self):
+        with pytest.raises(ValueError, match="missing value for --user"):
+            parse_option_tokens(["--user"])
+
+    def test_no_tokens_is_no_options(self):
+        assert parse_option_tokens([]) == {}
 
 
 class TestCmdRemote:

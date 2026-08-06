@@ -49,13 +49,13 @@ from commands import (
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir> [<def>] [--K=v ...]", "Register a node (optional a8s vars)."),
+    ("add",      "<name> <dir> [<def>] [--K v ...]", "Register a node (optional a8s vars)."),
     ("remove",   "<name>",                    "Unregister a node and delete its mailbox."),
     ("rm",       "<name>",                    "Alias for remove."),
     ("ls",       "[-q]",                      "List all registered nodes, running or not."),
     ("discover", "<path>",                    "Scan a path for nodes and suggest `add` commands."),
     ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare name)."),
-    ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.a8s/definitions)."),
+    ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.config/a8s/definitions)."),
     ("defs",     "[add|rm|ls ...]",          "Alias for definitions."),
     ("vars",     "<name> [set|unset ...]",   "Get/set per-node a8s vars for definition $KEY interpolation."),
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
@@ -76,7 +76,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("tells",    "[-f] [--timeout SEC] [--glow [theme]]", "Wait for inbound messages to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
-    ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.a8s/settings.json."),
+    ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.config/a8s/settings.json."),
     ("convo",    "<name> [--limit N] [-f] [--from NAME] [--glow [theme]]", "Show markdown conversation history for an agent."),
     ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),
     ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),

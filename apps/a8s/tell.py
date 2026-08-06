@@ -1,11 +1,11 @@
 """tell — drop a JSON envelope in the outbox directory.
 
 Requires `TELL_OUTBOX_DIR` when set (a8s injects it on agent wake). If unset
-and `~/.a8s` is readable, `tell` may resolve a unique configured outbox from
+and `~/.config/a8s` is readable, `tell` may resolve a unique configured outbox from
 CWD — see `docs/a8s-filedrop.md`. System installs for agent users typically
 have no registry access and always need the env var.
 
-`~/.a8s` reachable and CWD inside a registered agent stamps `from` and logs to
+`~/.config/a8s` reachable and CWD inside a registered agent stamps `from` and logs to
 the agent log. Recipient validation is narrower: it runs only when the resolved
 outbox is some registered agent's own outbox. Any other outbox makes tell a
 staging writer for another router (r4t points a caged member's
@@ -225,7 +225,7 @@ def file_max_bytes() -> int:
     """Effective attachment size cap for tell.
 
     Prefer `TELL_FILE_MAX` (set by a8s on wake, or by the operator). Else
-    `max_file_bytes` from settings when `~/.a8s` is reachable. Else 50 MiB.
+    `max_file_bytes` from settings when `~/.config/a8s` is reachable. Else 50 MiB.
     """
     raw = os.environ.get(TELL_FILE_MAX_ENV, "").strip()
     if raw:
@@ -506,6 +506,30 @@ def _optional_sender() -> tuple[str, dict] | None:
         return None
 
 
+def _registered_owner(outbox: Path):
+    """The registered participant whose own outbox this is, or None."""
+    from registry import participants_from_registry
+
+    try:
+        for p in participants_from_registry():
+            try:
+                registered = p.outbox_path().resolve()
+            except (OSError, RuntimeError):
+                continue
+            try:
+                if os.path.samefile(registered, outbox):
+                    return p
+            except OSError:
+                # Registered outbox (or the resolved outbox) doesn't exist yet
+                # on disk — samefile can't stat it, so fall back to the path
+                # comparison it would otherwise replace.
+                if registered == outbox:
+                    return p
+    except OSError:
+        return None
+    return None
+
+
 def _outbox_is_registered(outbox: Path) -> bool:
     """True when `outbox` is some registered agent's own outbox.
 
@@ -517,26 +541,38 @@ def _outbox_is_registered(outbox: Path) -> bool:
     recipient against its own roster. Roster members are not a8s agents, so
     validating them here would reject every intra-roster delegation.
     """
-    from registry import participants_from_registry
+    return _registered_owner(outbox) is not None
 
+
+def _hijack_note(outbox: Path) -> str | None:
+    """The one shape a leaked `TELL_OUTBOX_DIR` makes and nothing else does.
+
+    An inherited variable from a live seat points a fresh shell's mail at that
+    seat's outbox, and every check passes — the directory exists, it is
+    writable, it is a real agent's. The mail simply leaves under the wrong
+    name. What gives it away is the pair: the outbox belongs to a registered
+    agent, and the CWD is nowhere near that agent. A staging outbox (r4t's
+    per-turn dir) is not registered, and a seat working in its own root
+    matches, so neither trips this.
+    """
+    if not os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
+        return None
+    owner = _registered_owner(outbox)
+    if owner is None:
+        return None
     try:
-        for p in participants_from_registry():
-            try:
-                registered = p.outbox_path().resolve()
-            except (OSError, RuntimeError):
-                continue
-            try:
-                if os.path.samefile(registered, outbox):
-                    return True
-            except OSError:
-                # Registered outbox (or the resolved outbox) doesn't exist yet
-                # on disk — samefile can't stat it, so fall back to the path
-                # comparison it would otherwise replace.
-                if registered == outbox:
-                    return True
-    except OSError:
-        return False
-    return False
+        cwd = Path.cwd().resolve()
+        root = owner.root.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if _cwd_matches_outbox(cwd, root, outbox):
+        return None
+    return (
+        f"{TELL_OUTBOX_DIR_ENV} points at {owner.name}'s outbox, but this "
+        f"directory is not {owner.name}'s ({cwd}). Mail sent from here leaves "
+        f"as {owner.name}. If that is not what you meant, the variable was "
+        f"inherited from another shell — unset {TELL_OUTBOX_DIR_ENV}."
+    )
 
 
 def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]:
@@ -597,6 +633,10 @@ def run_check(recipient: str | None) -> int:
         return 1
 
     lines = ["tell: ok", f"  outbox: {outbox}"]
+
+    note = _hijack_note(outbox)
+    if note is not None:
+        lines.append(f"  warning: {note}")
 
     if recipient is not None:
         if not _outbox_is_registered(outbox):
@@ -669,6 +709,10 @@ def tell_main(argv: list[str]) -> int:
     if outbox is None:
         _report_outbox_unavailable()
         return 1
+
+    note = _hijack_note(outbox)
+    if note is not None:
+        print(f"tell: warning: {note}", file=sys.stderr)
 
     sender = _optional_sender()
     to = recipient

@@ -71,6 +71,51 @@ class TestSeenIdsCap:
         assert 1000 <= MAX_SEEN_IDS <= 1_000_000
 
 
+class TestNoLegacyStateRootInUserFacingText:
+    """`~/.a8s` is the legacy root. It still resolves, but naming it in output
+    sends operators to a directory that does not exist on a new install.
+
+    Issue #46 fixed the docs and #72 found the tool still printing it — the
+    grep is the guard, because a docstring is not something a behavioural test
+    would ever read.
+    """
+
+    # The three places that legitimately name the legacy path, because they are
+    # describing the fallback itself.
+    ALLOWED = {
+        ("core.py", "already exists (legacy)"),
+        ("settings.py", "or legacy ~/.a8s if present"),
+    }
+
+    def _offenders(self):
+        import core
+
+        pkg = Path(core.__file__).resolve().parent
+        out = []
+        for path in sorted(pkg.rglob("*.py")):
+            if "tests" in path.parts or "__pycache__" in path.parts:
+                continue
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                if "~/.a8s" not in line:
+                    continue
+                if any(path.name == f and marker in line for f, marker in self.ALLOWED):
+                    continue
+                out.append(f"{path.name}:{n}: {line.strip()}")
+        return out
+
+    def test_no_source_file_names_the_legacy_root(self):
+        offenders = self._offenders()
+        assert offenders == [], "legacy state root named in:\n" + "\n".join(offenders)
+
+    def test_the_knob_notes_name_the_current_root(self):
+        # `a8s config` prints these straight at the operator.
+        import settings as sm
+
+        blob = " ".join(k.note or "" for k in sm.KNOBS)
+        assert "~/.config/a8s" in blob
+        assert "~/.a8s" not in blob.replace("or legacy ~/.a8s if present", "")
+
+
 class TestA8sHomeOverride:
     def test_default_under_home(self, fake_home):
         assert _a8s_dir() == fake_home / ".a8s"

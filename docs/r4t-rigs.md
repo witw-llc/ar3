@@ -39,7 +39,7 @@ else fails closed at `r4t roster check` and at dispatch. Most presets append a
 so its tokens are inserted after `exec` instead. `copilot` is the one
 unsupported CLI: its `--continue` resumes the machine's most recent session
 whatever the directory, so members cannot be kept apart, and supporting it
-cleanly means pinning a session id per member (issue #256).
+cleanly means pinning a session id per member (bin#256).
 
 ### What a continuation costs
 
@@ -144,7 +144,7 @@ a guarantee — models obey it imperfectly, and it is overridable per node via
 the `prompts` object's `intro` key. When placement has to be certain, change
 the filesystem instead: give the workdir its own `.git`
 (`git worktree add agents/bob`), or point `Workdir:` at an absolute path with
-no repo above it. See issue #273 for the investigation and the obedience
+no repo above it. See bin#273 for the investigation and the obedience
 measurements.
 
 ## Picking a model (`--model`)

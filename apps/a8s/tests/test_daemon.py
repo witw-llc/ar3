@@ -789,6 +789,73 @@ class TestAttachedLoopIdleIntegration:
         assert "IDLE-FIRED-FOR" not in log
 
 
+class TestIdleFairness:
+    """The idle pass breaks on the first started invoke, so from a fixed
+    index-0 start an agent that is always ready takes every idle slot and
+    its siblings never get checked. Equal timeouts are self-limiting —
+    firing refreshes last-active — but an agent whose clock keeps expiring
+    first is not."""
+
+    def test_an_always_ready_agent_does_not_own_every_idle_slot(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        import daemon as daemon_mod
+
+        reg = {}
+        for name in ("A", "B"):
+            root = tmp_path / name.lower()
+            root.mkdir()
+            defp = tmp_path / f"idle-{name}.json"
+            _write_idle_def(defp, fixtures_dir, timeout=1)
+            reg[name] = {"root": str(root), "definition": str(defp)}
+        save_registry(reg)
+        for name in ("A", "B"):
+            ensure_mailboxes(Participant(name, tmp_path / name.lower()))
+
+        touch_last_active("A", datetime.now(timezone.utc) - timedelta(seconds=600))
+        touch_last_active("B", datetime.now(timezone.utc) - timedelta(seconds=600))
+
+        # A's clock always reads expired — the shape a much shorter
+        # idle.timeout produces against slower siblings. Patched at the read
+        # rather than the file, so firing cannot quietly make A unready and
+        # hand B the slot for a reason other than rotation.
+        real_read = daemon_mod.read_last_active
+
+        def a_is_always_overdue(name):
+            if name == "A":
+                return datetime.now(timezone.utc) - timedelta(seconds=600)
+            return real_read(name)
+
+        monkeypatch.setattr(daemon_mod, "read_last_active", a_is_always_overdue)
+
+        fired: list[str] = []
+        orig = daemon_mod.maybe_run_idle
+
+        def track_idle(p, *, async_wake=False):
+            ran = orig(p, async_wake=async_wake)
+            if ran:
+                fired.append(p.name)
+            return ran
+
+        monkeypatch.setattr(daemon_mod, "maybe_run_idle", track_idle)
+
+        passes = 0
+
+        def keep_a_always_ready(_event, timeout=None):
+            nonlocal passes
+            passes += 1
+            if "B" in fired or passes > 12:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", keep_a_always_ready)
+        attached_loop(["A", "B"], 0.01, single_pass=False)
+
+        assert "B" in fired, f"A took every idle slot; fired={fired}"
+
+
 class TestBatchWake:
     def _queue_inbox(self, recipient: str, n: int, *, prefix: str = "msg") -> list[Path]:
         paths: list[Path] = []
@@ -1329,6 +1396,48 @@ class TestSharedHandlerWakeFairness:
         # next free slot tries B (empty) then C — at most a handful of A
         # wakes before C, never an unbounded run of A-only.
         assert woke.index("C") <= 3
+
+    def test_a_quiet_period_does_not_spin_the_rotation(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        """Rotation is "next after the one that woke". An idle pass wakes
+        nobody, so it must not advance — otherwise the counter spins through
+        every quiet iteration and which of two agents mailed at the same
+        moment goes first is decided by how long the lull happened to be."""
+        import daemon as daemon_mod
+
+        self._register(tmp_path, fixtures_dir, ("A", "B"))
+        queue = self._queue
+        woke: list[str] = []
+        orig = daemon_mod.wake_once
+
+        def track_wake(p, msg_path, *, async_wake=False):
+            woke.append(p.name)
+            return orig(p, msg_path, async_wake=async_wake)
+
+        monkeypatch.setattr(daemon_mod, "wake_once", track_wake)
+
+        # An odd number of quiet passes, so a counter that spun would hand the
+        # slot to B and an unspun one still starts at A.
+        quiet_passes = 3
+        calls = 0
+
+        def mail_both_after_a_lull(_event, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls == quiet_passes:
+                queue("A", "same moment")
+                queue("B", "same moment")
+            if woke or calls > quiet_passes + 5:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", mail_both_after_a_lull)
+        attached_loop(["A", "B"], 0.01, single_pass=False)
+
+        assert woke[:1] == ["A"], (
+            f"three idle passes moved the rotation; first wake was {woke[:1]}"
+        )
 
     def test_step_wakes_in_handler_index_order(
         self, fake_home, tmp_path, fixtures_dir, monkeypatch

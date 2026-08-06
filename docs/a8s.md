@@ -11,7 +11,7 @@ Modern agent tooling like Claude Code's subagents is great inside one process an
 - **Process and machine boundaries matter.** One agent might need codex's workspace-write sandbox; another might need Claude with a narrow allowlist; another might need to run on a different machine entirely. Cramming them into a single host process is the wrong abstraction.
 - **Members shouldn't have to know about a8s.** Drop in any existing project unchanged. The agent just sees a `tell` command and wakes to messages — same shape whether it's a Claude session, a Python program, or (someday) an SMS gateway routing to a human.
 - **Recipient opacity is the load-bearing invariant.** The sender doesn't know whether the recipient is a Claude session, a script, or a person on the other end of an email-to-message bridge. That's how this scales — anywhere the abstraction fits, you plug in.
-- **Eventually, one fabric across machines.** Tracked in #63: two a8s clusters on the same network see each other and route messages as peers. The local design today is shaped to accommodate that without breaking.
+- **Eventually, one fabric across machines.** Tracked in bin#63: two a8s clusters on the same network see each other and route messages as peers. The local design today is shaped to accommodate that without breaking.
 
 The win at scale: a roster of agents that share knowledge through ordinary conversation grows faster than a collection of silos, and you interact with all of them through one verb (`tell`).
 
@@ -203,7 +203,7 @@ any prefixes pointing at it.
 
 |                    |                                                                                                                                                                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process).                                                                                                                                                                              |
+| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Warns first if a node's harness is not resolvable in this shell's environment, because that environment is what every wake gets.|
 | `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
 | `a8s stop <name> [--force]` | SIGTERM the handler, then **wait** until it has detached. Idle stops immediately; a busy wake finishes first (like first Ctrl+C). `--force` / `-f` sends a second SIGTERM to kill the in-flight wake (like second Ctrl+C), then waits. |
@@ -245,14 +245,14 @@ Env vars apply only when a key is absent from `settings.json` (e.g. `A8S_CONVO_M
 Pre-v1 rename: `convo_max_limit` / `A8S_CONVO_MAX_LIMIT` were replaced by `convo_max_rows` / `A8S_CONVO_MAX_ROWS`. Existing values under the old names are ignored.
 
 
-### Remotes (issue #63)
+### Remotes (bin#63)
 
 
 |                                                                |                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s remote`                                                   | List configured remotes (transport, broker, topic, opts; passwords masked).                                                                                                                                                                                                                                                                                                                                                            |
 | `a8s remote <name>`                                            | Show one remote's spec.                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Non-secret opts land in `network.json`; `--pass` / `--password` go to `secrets.json` (0600) in the same command — `--pass` is optional. Unknown options are rejected by the transport at load time so typos fail loud. |
+| `a8s remote <name> <broker-url> <topic> [--<opt> <value> ...]` | Register or overwrite a remote. Broker URL is `mqtt://host[:1883]` or `mqtts://host[:8883]`. Persistent session + QoS 1 are wired automatically so an offline cluster catches up on reconnect. Non-secret opts land in `network.json`; `--pass` / `--password` go to `secrets.json` (0600) in the same command — `--pass` is optional. Unknown options are rejected by the transport at load time so typos fail loud. Options take either spelling — `--user alice` or `--user=alice`. |
 | `a8s unremote <name>`                                          | Forget a remote. Running daemons keep using the prior config until restart.                                                                                                                                                                                                                                                                                                                                                            |
 
 
@@ -270,7 +270,7 @@ A remote carries the message; a **storage service** carries the bytes. Without o
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s storage`                                      | List configured services (kind, URL, opts; passwords masked).                                                                                                     |
 | `a8s storage <name>`                               | Show one service's spec.                                                                                                                                          |
-| `a8s storage <name> <url> [--<opt> <value> ...]`   | Register or overwrite. Kind is auto-detected from the URL scheme. `--password` (or `--pass`) goes to `secrets.json` (0600), never `network.json`. Objects land under `--prefix` (default `a8s`); pass an empty value when the configured path is already dedicated to a8s. The service is built before the config is written, so a bad or missing option fails here rather than as a skipped service at daemon start. |
+| `a8s storage <name> <url> [--<opt> <value> ...]`   | Register or overwrite. Kind is auto-detected from the URL scheme. `--password` (or `--pass`) goes to `secrets.json` (0600), never `network.json`. Objects land under `--prefix` (default `a8s`); pass an empty value when the configured path is already dedicated to a8s. The service is built before the config is written, so a bad or missing option fails here rather than as a skipped service at daemon start. Options take either spelling — `--user alice` or `--user=alice` — and `-` and `_` in an option name are equivalent. |
 | `a8s unstorage <name>`                             | Forget a service. Running daemons stop using it on their next pass.                                                                                               |
 | `a8s storage --help`                               | Every kind and its options, with examples.                                                                                                                        |
 
@@ -380,7 +380,7 @@ The first five are **definition-specific** marker locations — for the tools th
 
 Every wake reads `definition["invoke"]` — one argv per definition. There is no verb dispatch and no special-case branches: `prompt` and `clear` are gone. Every message is a `tell` with a force-stamped agent `from`, so the same argv shape covers every wake.
 
-Strict opacity (issues #69, #70) still holds: a routed message looks identical whether it arrived directly or via alias fan-out — `$RECIPIENT` resolves to whatever the sender wrote in `to` (the alias name for fanned messages, the agent name for direct ones). Mailing-list semantics.
+Strict opacity (bin#69, bin#70) still holds: a routed message looks identical whether it arrived directly or via alias fan-out — `$RECIPIENT` resolves to whatever the sender wrote in `to` (the alias name for fanned messages, the agent name for direct ones). Mailing-list semantics.
 
 ### Schema
 
@@ -424,6 +424,8 @@ Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies
 Top-level numeric field. When set, the attached handler kills the wake subprocess (whole process group) if it runs longer than N seconds. Useful for CLIs that hang instead of exiting (OpenCode, AGY, etc.). Omitted or non-positive = no limit.
 
 While a wake subprocess is running, the handler keeps looping: it still routes every handled agent's outbox each iteration and can deliver tells that arrive mid-wake. Only one wake subprocess runs at a time per handler process; the next inbox message or idle invoke waits until the current wake finishes or is killed.
+
+One slot for several agents means the order they are offered it decides who waits. A shared handler rotates both offers — the wake pass and the idle pass keep their own round-robin start, each advancing only when something actually started, so an agent that is always ready cannot hold the slot and a quiet stretch does not shuffle the order. `a8s step` (single pass) stays index-0 ordered, since a single deterministic pass is the point of it.
 
 ### Idle invoke (optional)
 
@@ -690,7 +692,7 @@ last locally confirmed boundary.
 
 Pre-v1 — the surface still moves. Tracked threads:
 
-- **#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
+- **bin#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
 - **#62 payload encryption** — cross-cluster file payloads ship (see [Storage services](#storage-services--attachments-across-clusters)); per-message symmetric encryption of the stored object does not. Today a payload's confidentiality is whatever the storage service provides: presigned S3 URLs and WebDAV credentials are private, `tempfile.org` is a public link to anyone holding it.
 
 Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between rosters.

@@ -3015,6 +3015,51 @@ class TestCli:
         assert rc == 0
         assert "OK" in capsys.readouterr().out
 
+    def test_roster_check_flags_a_member_shadowing_an_a8s_node(
+        self, r4t_home, tmp_path, rig_config, monkeypatch, capsys
+    ):
+        """The leader addresses members and outside nodes with the same verb,
+        and in-roster wins. A shadowed outside node is unreachable from this
+        leader — deliberate, but silent, which is the part to say out loud."""
+        import r4t as r4t_mod
+
+        monkeypatch.setattr(
+            r4t_mod, "visible_a8s_names",
+            lambda: {"phil": "node", "ops": "namespace"},
+        )
+        root = tmp_path / "shadow-repo"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n\n"
+            "### Phil\n- **Rig:** junior-dev\n",
+            encoding="utf-8",
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        # A warning, never a problem: single-owner networks rarely collide and
+        # the operator may well mean it.
+        assert rc == 0
+        assert "warning: Phil: also names an a8s node" in out
+        # `ops` is registered but nobody is called that, and Gerry collides
+        # with nothing — only a real overlap earns a line.
+        assert "ops" not in out
+        assert "warning: Gerry" not in out
+
+    def test_roster_check_is_quiet_when_a8s_has_nothing_registered(
+        self, r4t_home, tmp_path, rig_config, capsys
+    ):
+        """The r4t_home fixture points A8S_HOME at an empty state root, which
+        is also the shape of a host with no a8s at all."""
+        root = tmp_path / "no-a8s-repo"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n", encoding="utf-8"
+        )
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "also names an a8s" not in out
+
     def test_roster_check_says_nothing_about_prose_reply_when_absent(
         self, r4t_home, tmp_path, rig_config, capsys
     ):

@@ -1,4 +1,4 @@
-"""Storage service plugin interface for a8s cross-cluster file transfer (#90).
+"""Storage service plugin interface for a8s cross-cluster file transfer.
 
 A "service" is the file-side analogue of a "transport". Where the messaging
 layer publishes/subscribes JSON envelopes, the file layer uploads bytes and
@@ -8,7 +8,7 @@ configures file services, and the two are independently composable.
 
 Lifecycle: services are stateless HTTP clients, so there's no start/stop.
 The dispatcher in `network._build_service` instantiates one per
-configured `~/.a8s/network.json` `services` entry and hands the same
+configured `~/.config/a8s/network.json` `services` entry and hands the same
 instance to both the upload path (sender's `_process_pending`) and the
 download path (receiver's `_download_files_to_recipient`).
 

@@ -91,7 +91,7 @@ Gmail and the next idle tick picks them up.
 
 - No attachments yet. `FILE:` payloads in a8s messages are stringified
   into the email body but no MIME attachment is created. (Cross-cluster
-  files / attachment passthrough is tracked in #62.)
+  files / attachment passthrough is tracked in bin#62.)
 - No HTML email — body is plain text only.
 - Polling, not push. Reply latency is bounded by `idle.timeout`.
 - One Gmail account per connector instance. Multiple bridges = multiple

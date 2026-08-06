@@ -1,4 +1,4 @@
-"""a8s settings — operator config at `~/.a8s/settings.json` plus knob catalog.
+"""a8s settings — operator config at `~/.config/a8s/settings.json` plus knob catalog.
 
 Writable machine-wide keys resolve:
   1. settings.json (`a8s config set`)
@@ -90,7 +90,7 @@ KNOBS: tuple[Knob, ...] = (
         "machine",
         True,
         "A8S_MAX_SEEN_IDS",
-        "Cluster-wide receive dedup ring size (~/.a8s/seen-ids)",
+        "Cluster-wide receive dedup ring size (~/.config/a8s/seen-ids)",
     ),
     Knob(
         "txlog_detail_max",
@@ -363,8 +363,8 @@ _GROUP_ORDER: tuple[Group, ...] = ("machine", "definition", "registry", "network
 _GROUP_LABELS = {
     "machine": "Machine-wide (a8s config set)",
     "definition": "Per-agent definition (a8s define)",
-    "registry": "Registry (~/.a8s/a8s.json)",
-    "network": "Network (~/.a8s/network.json)",
+    "registry": "Registry (~/.config/a8s/a8s.json)",
+    "network": "Network (~/.config/a8s/network.json)",
     "env": "Runtime environment",
     "constant": "Code constants (not in settings.json)",
 }

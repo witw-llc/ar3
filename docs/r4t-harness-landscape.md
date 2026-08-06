@@ -24,7 +24,7 @@ A harness is a viable r4t rig only if it can do all of:
    session stores are fine. Machine-global or cloud-synced
    continuation that crosses directories is nuke-class: it disqualifies
    continue support until a session id (or equivalent) can be pinned
-   cleanly (the lesson from #256 / Copilot).
+   cleanly (the lesson from bin#256 / Copilot).
 
 Judge a new harness against these four. Capability breadth alone is
 not enough.
@@ -41,13 +41,13 @@ behavior, cross-directory scope probe.
 | Preset | Headless shape | Continue | MCP idiom | Notes |
 |---|---|---|---|---|
 | `claude` | `claude … -p {prompt}` with `--permission-mode dontAsk` | `--continue` | `claude-flag` | |
-| `codex` | `codex exec --full-auto … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the #256 pin path |
+| `codex` | `codex exec --full-auto … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
-| `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (#273) |
+| `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
 | `opencode-ollama` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
 | `claude-ollama` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
 | `codex-ollama` | `ollama launch codex --model … -y -- exec --full-auto` | no | `codex-config` | Requires `--model` |
-| `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; wait for #256 |
+| `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; wait for bin#256 |
 | `copilot-ollama` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
 | `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | none | MCP only from `~/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
 | `ollama` | `ollama run {model} {prompt}` | no | none | No tools; stdout-fallback replies |
@@ -74,7 +74,7 @@ notes for agy and the `ollama launch` wrappers:
 | Harness | Notes |
 |---|---|
 | **Kiro CLI v2** (AWS) | `kiro-cli chat --no-interactive --trust-all-tools "…"`. Sessions **per-directory** in `~/.kiro/`; resume with `--resume` / `--resume-id`. **Pin v2 for headless:** CLI 3.0 EA drops classic/non-TUI mode and breaks the session format. Model via `/model` interactively; headless model pin — confirm `--list-models` / agent config for the pinned v2 build |
-| **Amp** (Sourcegraph) | `amp --execute "…" --stream-json` (`-x`). Product modes instead of a conventional `--model` (reported as `low` / `medium` / `high` / `ultra` — **unverified; confirm the mode names on the installed build**). Threads sync to ampcode.com and are globally addressable — **continuation needs the #256 treatment before enabling**. MCP in settings JSON |
+| **Amp** (Sourcegraph) | `amp --execute "…" --stream-json` (`-x`). Product modes instead of a conventional `--model` (reported as `low` / `medium` / `high` / `ultra` — **unverified; confirm the mode names on the installed build**). Threads sync to ampcode.com and are globally addressable — **continuation needs the bin#256 treatment before enabling**. MCP in settings JSON |
 | **Kimi Code CLI** (Moonshot) | Unattended print path is `--print`, which implies `--afk`; `-p` alone is not AFK. Example: `kimi --print --final-message-only -p "…"`. `--continue` / `-C` is **cwd-scoped**. `-m` / `--model`. `--yolo` is orthogonal (user still reachable for questions). Print mode waits on background work up to a long ceiling before exiting (a `print_wait_ceiling_s` setting, default reported as 3600s — **unverified**) — use an external timeout. MCP: `--mcp-config` / `--mcp-config-file`, default `~/.kimi/mcp.json` |
 
 ### Watch
@@ -108,18 +108,18 @@ conversation.
 | CLI | Continue mechanism | Scope | Pin path | Roster continue? |
 |---|---|---|---|---|
 | claude (preset) | `--continue` | per-directory (CLI convention) | distinct `Workdir:` / CLI | yes |
-| codex (preset) | `exec resume --last` | last session | `resume <SESSION_ID>` (#256) | yes (`--last`) |
+| codex (preset) | `exec resume --last` | last session | `resume <SESSION_ID>` (bin#256) | yes (`--last`) |
 | cursor (preset) | `--continue` | per-directory | distinct workdirs | yes |
 | opencode / opencode-ollama | `--continue` | per-directory store | distinct workdirs | yes |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
-| copilot (preset) | `--continue` exists | **machine-global** | needs `--resume=<id>` (#256) | **no** until pinned |
+| copilot (preset) | `--continue` exists | **machine-global** | needs `--resume=<id>` (bin#256) | **no** until pinned |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
 | Cline | `--continue` | current directory’s latest task | `--taskId` (unverified) / workdirs | candidate |
 | Qwen Code | `--continue` / `--resume` | project hash under `~/.qwen/projects/` | session id | candidate (best contract) |
 | Aider | history file | per-cwd / repo file | `--chat-history-file` + `--restore-chat-history` | candidate (file-based) |
 | Goose | `--name` + `--resume` | named session files | required name/id | candidate (feature-detect) |
 | Kiro v2 | `--resume` / `--resume-id` | per-directory DB in `~/.kiro/` | session UUID | candidate (v2 only) |
-| Amp | `amp threads continue [id]` | **cloud-synced / global** | thread id + #256 rules | **continue off** until pinned |
+| Amp | `amp threads continue [id]` | **cloud-synced / global** | thread id + bin#256 rules | **continue off** until pinned |
 | Kimi | `--continue` / `-C` | cwd | `--session` id | candidate |
 | Grok Build | `--continue` / `-c` | cwd; `~/.grok/sessions` | `--session-id` / `--resume` | watch |
 | Factory Droid | `--session-id` | session id (no bare `--continue`) | required id | watch |

@@ -56,13 +56,37 @@ ssh -L 8080:target:80 bastion — forwards local:8080 to target:80 via bastion
 * 2026-05-20: Initial entry.
 ```
 
-- `id` — `K7E-BBB-NNNNN`, stable for the life of the entry.
+- `id` — `K7E-BBB-NNNNN`, stable for the life of the entry. Sequential, and
+  therefore a **recency signal a reader can use without being told to** — see
+  below.
 - `status` — `active` (default), `superseded`, or `compiled`. Only `active`
   entries appear in default search (see [k7e-retrieval.md](k7e-retrieval.md)).
 - `confidence` — 0..1, a static prior folded into ranking.
 - `aliases` — alternate names matched by metadata search.
 - Sections (`Verified Protocol`, `Edge Cases`, `False Paths`, `History`) are
   conventional; `k7e append` adds to a named section.
+
+## Ids leak write order
+
+`K7E-BBB-NNNNN` is allocated in sequence, so a higher ordinal means written
+later. Nothing documents that to a model, and models use it anyway: in the
+age-presentation arms, with every date stripped from the injected entries, a
+4B model resolved a fact-supersession conflict straight off the ordinals —
+*"the safer bet on recency (ID 122 > 121)"*.
+
+Two consequences, and neither calls for a code change:
+
+- **In production the signal is usually free and usually right**, because write
+  order does track recency. It is silently wrong whenever it stops doing so:
+  bulk imports, merged stores, and the pre-v1 rebuilds that re-number
+  everything. Nothing warns, because nothing knows it is being read.
+- **An experiment that means to test "no temporal information" must shuffle or
+  mask ids**, or it under-measures the penalty for withholding dates — the
+  model still has a clock, just a coarse one.
+
+The date stamp is what carries recency deliberately, and it must be present
+wherever recency matters. If ids are ever randomized or hashed, this crutch
+disappears without notice.
 
 ## Derived index schema
 

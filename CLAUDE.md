@@ -129,6 +129,25 @@ and on-disk pid/log paths. The contract changes only when the user declares 1.0.
   and the Ark's own roster`, never `0.1.55 — batch`. The title is the only part
   most readers see, and after the squash it is the commit subject on `main`.
 
+### Issue references — forward-looking only, and `#N` is this repo
+
+**A code comment carries a number only when the number names work still to be
+done.** "This preset cannot pin a session; that is `#17`" earns its reference —
+a reader who hits the limit needs somewhere to go. "Load configured remotes
+(bin#63)" does not: it records which change added the line, and `git blame`
+already answers that better than a comment can. History belongs to git, not to
+arbitrary comments. The same holds for PR numbers and line numbers.
+
+When a number does belong: **a bare `#N` always means this repo. A reference to
+the pre-carve repo `neilobremski/bin` is written `bin#N`.** The two namespaces
+overlap — `#90` is a real issue in both — so a bare legacy number reads as this
+repo's and GitHub links it here, silently pointing at unrelated work. Write the
+prefix when quoting a legacy number, including inside a markdown link label.
+
+Docs and `apps/r4t/experiments/` are outside this rule. A doc page cites issues
+as references a reader follows, and an experiment record is a dated account by
+design.
+
 ### Code style
 
 - Default to no comments. Names should explain what; comments are only for

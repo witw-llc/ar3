@@ -99,7 +99,7 @@ import txlog
 # Set by wake subprocess helpers; read by _kill_wake_subprocess_group via the
 # signal handler. _CURRENT_WAKE_NAME pairs with _CURRENT_WAKE_PROC so the
 # SIGUSR1 kill-request handler can decide whether the in-flight wake is the one
-# being killed (per-agent kill, issue #68 follow-up).
+# being killed.
 _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
 _WAKE_STARTED_MONO: float | None = None
@@ -373,7 +373,7 @@ def _settle_wake(
     *,
     reason: str | None = None,
 ) -> None:
-    """Ack or requeue the envelopes a wake consumed (issue #152).
+    """Ack or requeue the envelopes a wake consumed.
 
     Exit 0 is the only ack: the envelopes stay in trash and the agent's retry
     record clears. Any other outcome — nonzero exit, timeout kill, failed spawn,
@@ -774,7 +774,7 @@ def _read_detach_request(name: str) -> int | None:
     Reaps malformed contents (empty / non-int / non-positive) and stale
     requests from dead requesters — without the liveness check, an
     `acquire()` caller that crashes after writing the request would cause
-    the holder's next iteration to release the agent to nobody (issue #71)."""
+    the holder's next iteration to release the agent to nobody."""
     p = detach_request_path(name)
     if not p.is_file():
         return None
@@ -813,7 +813,7 @@ def _write_kill_request(name: str, requester_pid: int) -> None:
 
 def _read_kill_request(name: str) -> int | None:
     """Same parse-and-reap discipline as `_read_detach_request`, including
-    the dead-requester reap (issue #71)."""
+    the dead-requester reap."""
     p = kill_request_path(name)
     if not p.is_file():
         return None
@@ -1023,8 +1023,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     pid file.
 
     Per iteration:
-      - honor any detach-requests for our handled agents (per-agent take-over,
-        issue #68): release just the requested agent and keep serving the rest
+      - honor any detach-requests for our handled agents (per-agent
+        take-over): release just the requested agent and keep serving the rest
       - reload registry (so newly-added agents become routable recipients)
       - drop any agent whose pid file no longer points at us (defense)
       - route each handled agent's outbox; deliver every file proxy's inbox;
@@ -1068,11 +1068,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     for n in names:
         out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
 
-    # Issue #63: load configured remotes and start one subscriber loop per
+    # Load configured remotes and start one subscriber loop per
     # remote. The receive callback always asks the registry for the current
     # participant list so agents added after startup become routable without
     # restarting the daemon.
-    # Storage services (#90) — stateless, no start/stop, and deliberately NOT
+    # Storage services — stateless, no start/stop, and deliberately NOT
     # captured here. A daemon runs for days; one started before a service was
     # configured would never see it, and would fail every attachment while
     # `a8s storage` cheerfully listed the service it was ignoring. Both sides
@@ -1087,9 +1087,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
     async_wake = not single_pass
     # Round-robin wake start across attached-loop iterations so a busy early
-    # agent cannot starve siblings on the same handler (issue #20). Scoped to
-    # async_wake only — `a8s step` (single_pass) stays index-0 ordered.
+    # agent cannot starve siblings on the same handler. Scoped to
+    # async_wake only — `a8s step` (single_pass) stays index-0 ordered. The
+    # idle pass below has the same starve shape and its own counter.
     wake_rr = 0
+    idle_rr = 0
     try:
         while True:
             if _STOP_EVENT.is_set() and not _wake_in_flight():
@@ -1163,7 +1165,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                             out_agent(p.name, f"[{p.name}] {e}")
                     # A file proxy's delivery is a file move that spawns
                     # nothing, so it has no reason to queue behind the single
-                    # wake slot (issue #163). Gating it froze proxy inboxes —
+                    # wake slot. Gating it froze proxy inboxes —
                     # and `tells`, which watches them — for as long as some
                     # other handled agent's turn ran, up to max_wake_seconds.
                     for p, definition in defined:
@@ -1172,6 +1174,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                     if not _wake_in_flight():
                         n = len(defined)
                         start = (wake_rr % n) if async_wake and n else 0
+                        woke_this_pass = False
                         for i in range(n):
                             p, definition = defined[(start + i) % n]
                             if _wake_in_flight():
@@ -1185,6 +1188,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                     p, definition, async_wake=async_wake
                                 )
                                 if started:
+                                    woke_this_pass = True
                                     break
                                 if async_wake:
                                     break
@@ -1194,18 +1198,35 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                     break
                                 if not _pause_ready_for_wake(p, definition):
                                     break
-                        if async_wake and n:
+                        # Rotation means "next after the one that woke", so a
+                        # pass where nobody had mail must not move it. Advancing
+                        # unconditionally spins the counter through every idle
+                        # iteration, and then which of two simultaneously-mailed
+                        # agents goes first depends on how long the quiet period
+                        # happened to be — fair on average, unreproducible in
+                        # the particular.
+                        if async_wake and n and woke_this_pass:
                             wake_rr += 1
                 if (
                     not _STOP_EVENT.is_set()
                     and drain_seconds == 0
                     and not _wake_in_flight()
                 ):
-                    for p in handled:
+                    # Same shape as the wake loop above, and the same fix: it
+                    # breaks on the first started invoke, so from a fixed
+                    # index-0 start an agent with a much shorter idle.timeout
+                    # than its siblings takes every idle slot it is ready for.
+                    # last-active limits that but does not divide it fairly.
+                    m = len(handled)
+                    idle_start = (idle_rr % m) if async_wake and m else 0
+                    for j in range(m):
+                        p = handled[(idle_start + j) % m]
                         if _wake_in_flight():
                             break
                         try:
                             if maybe_run_idle(p, async_wake=async_wake):
+                                if async_wake:
+                                    idle_rr = idle_start + j + 1
                                 break
                         except Exception as e:
                             out_agent(p.name, f"[{p.name}] idle check error: {e}")

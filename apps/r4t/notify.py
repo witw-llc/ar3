@@ -22,6 +22,39 @@ def default_tell(agent: str, body: str) -> None:
     subprocess.run([sys.executable, str(A8S_PY), "tell", agent, body], check=False)
 
 
+def visible_a8s_names() -> dict[str, str]:
+    """Every name an outward `tell` from this host resolves, by what it is.
+
+    Asked of a8s rather than read off disk: the registry's shape is pre-v1 and
+    may be rebuilt, but `ls` / `aliases` / `namespaces` are the contract. An
+    unreachable or unreadable a8s is not an error here — the caller is
+    warning about a name collision, and no registry means nothing to collide
+    with.
+    """
+    kinds = {"ls": "node", "aliases": "alias", "namespaces": "namespace"}
+    found: dict[str, str] = {}
+    for command, kind in kinds.items():
+        # No registered nodes means no registry worth asking twice more about.
+        if command != "ls" and not found:
+            break
+        argv = [sys.executable, str(A8S_PY), command]
+        if command == "ls":
+            argv.append("-q")
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if res.returncode != 0:
+            continue
+        for line in (res.stdout or "").splitlines():
+            # `ls -q` is bare names; the other two lead with the name and
+            # then describe it (`local  [neil-macbook]`, `silo -> silo-node`).
+            name = line.strip().split()[0] if line.strip() else ""
+            if name:
+                found.setdefault(name, kind)
+    return found
+
+
 def simulate_tell(agent: str, body: str) -> None:
     print(f"r4t> tell {agent}:", file=sys.stderr)
     for line in body.splitlines():

@@ -79,7 +79,7 @@ DRAIN_MAX_PASSES = 20
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
 
 # Default prompt text, overridable sparsely by key via the a8s node definition's
-# `prompts` object (#190). Substitution fields: {name}, {node}, {workplace},
+# `prompts` object. Substitution fields: {name}, {node}, {workplace},
 # {creator}, {thread}. Structural section headers stay in code (not doctrine).
 PROMPT_DEFAULTS: dict[str, str] = {
     "intro": (
@@ -121,7 +121,7 @@ PROMPT_DEFAULTS: dict[str, str] = {
     ),
     # Used in place of `work_tell` on a rig with the `mcp` knob on. It names the
     # tool verbatim: a tool described generically goes unused on small models,
-    # while the named one was called 20/20 (#310).
+    # while the named one was called 20/20.
     "work_tell_mcp": (
         "- Send messages by calling the `a8s_tell` tool (call the tool — "
         "printing text sends nothing). Pass `recipient` (the name) and `body` "
@@ -322,7 +322,7 @@ def _tell_error(
     roster: Roster | None = None,
 ) -> None:
     """Operational feedback to a sender. For an INTRA-roster sender it is an
-    internal `class=error` r4t-message carrying the ORIGINATING thread id (#160):
+    internal `class=error` r4t-message carrying the ORIGINATING thread id:
     because it already has a thread it can never mint a fresh one, so it cannot
     spawn a headerless new-task turn — it dies at the normal budget/answer gates
     like any other message. External senders keep the direct a8s tell."""
@@ -526,8 +526,8 @@ def prompt_sections(
     refound: bool = False,
 ) -> list[tuple[str, list[str]]]:
     """The wake prompt as ordered, labeled sections — the composition is
-    knowable only here, at build time, so this is where its shape is exposed
-    (#39). Joining every section's parts with newlines yields the prompt
+    knowable only here, at build time, so this is where its shape is
+    exposed. Joining every section's parts with newlines yields the prompt
     byte-for-byte; `prompt_stats` measures the same structure.
 
     `continues` means this turn runs inside the CLI's own conversation
@@ -803,7 +803,7 @@ def run_harness(
     # PWD is a shell convention no kernel maintains, so a spawned harness
     # inherits the PWD of whoever started r4t however `cwd` is set. A harness
     # that resolves its own paths against it (opencode does, for --dir) would
-    # anchor them outside the member's workdir (#273).
+    # anchor them outside the member's workdir.
     turn_env = dict(env if env is not None else os.environ, PWD=str(cwd))
     start = time.monotonic()
     try:
@@ -889,7 +889,7 @@ def _throttle_block(ctx: DispatchContext, config: RigConfig) -> str | None:
 # ---------- ingress (enqueue only; never runs a turn) ----------
 
 def class_from_meta(raw: str) -> str:
-    """The class an external peer stamped on the a8s envelope's `meta` (#167).
+    """The class an external peer stamped on the a8s envelope's `meta`.
 
     Wire metadata is advisory for governance and never for identity: a peer may
     downgrade its OWN traffic to machine relay (`auto`), and anything else —
@@ -937,7 +937,7 @@ def _ingest(
     seat so it routes and closes threads exactly like a chat/seat send.
 
     Routing also decides the thread's obligation: a thread opened from OUTSIDE
-    is owed nothing (#58), because out there r4t cannot enforce a reply and
+    is owed nothing, because out there r4t cannot enforce a reply and
     must not pretend it can. That holds for the roster's own human too — mail
     through their doorbell is a8s protocol, so whether to answer is the
     member's judgment. Reaching them through the seat is the inside path, and
@@ -1157,7 +1157,7 @@ def _copy_lateral_to_lead(
     body: str,
     thread_id: str,
 ) -> None:
-    """`leader_sees_lateral` (#185): land a read-only history copy of a lateral
+    """`leader_sees_lateral`: land a read-only history copy of a lateral
     (peer) delivery on the sender's lead so the lead sees it on its next real
     turn — no turn is burned, and traffic UP to the lead is skipped (already
     visible)."""
@@ -1274,7 +1274,7 @@ def release_staging(
                 f"member; routing as external (members: {names})",
             )
 
-        # Egress gate (#183): the org presents as a single a8s node, and only
+        # Egress gate: the org presents as a single a8s node, and only
         # the topmost leader may originate external mail. A non-top member's
         # external tell redirects to the top leader (the garden's voice),
         # regardless of comms mode. When egress is disabled, not even the top
@@ -2277,7 +2277,7 @@ def _quiet_task_sweep(
     `quiet_task_seconds`, wake the leader with a nudge to report current state
     (NOT to force-finish the work). Returns the threads nudged.
 
-    An INGRESS thread is skipped, whoever sent it (#58) — the roster's own
+    An INGRESS thread is skipped, whoever sent it — the roster's own
     human included. Outside the garden a8s posts messages to nodes and nothing
     more; there is no reply obligation for r4t to enforce and no way to acquire
     one without a decision point at every node on the network. A thread that
@@ -2535,7 +2535,7 @@ def _mission_review(
     """When the org is structurally stalled — every queue empty, no open thread,
     the drain ran nothing, no live turn — hand the top leader a budget-gated
     mission-review turn so a done-looking-but-unmet mission does not sleep
-    forever (#189). r4t detects the STALL; the leader judges whether the mission
+    forever. r4t detects the STALL; the leader judges whether the mission
     is met (§5.3). A backoff widens the cadence (2->4->8... stalled ticks); K
     silent reviews (the leader stages nothing) go dormant until a real message
     or a MISSION.md change re-arms it. The nudge must not train leaders to
@@ -2580,7 +2580,7 @@ def _mission_review(
     runnable, reason = _runnable(ctx, config, leader, rig)
     if not runnable:
         # A broke leader is a non-issue by construction — hold the counter at the
-        # threshold so the review fires the moment the bucket refills (#189).
+        # threshold so the review fires the moment the bucket refills.
         state.write_mission_review(
             ctx.node,
             {"stalls": stalls, "silent_reviews": silent, "dormant": False, "mission_mtime": mtime},

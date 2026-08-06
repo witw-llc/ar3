@@ -131,7 +131,7 @@ def handle(msg: dict) -> dict | None:
     else:
         # Anything else a client probes for (ping, resources/list) gets an empty
         # result rather than an error — the shape that connected against every
-        # harness measured in #310.
+        # harness measured.
         result = {}
     return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 

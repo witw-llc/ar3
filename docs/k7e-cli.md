@@ -20,11 +20,22 @@ query-embedding cost alone, so a caller on a latency budget can price it. The
 line gains `(semantic track unavailable)` when ollama did not answer in time and
 FTS5 carried the search by itself. stdout is untouched either way.
 
-### `get <id> [--no-track]`
-Print a full entry. Counts as a "use" (bumps ranking signals) unless
+### `get <id> [<id> ...] [--no-track] [--json]`
+Print full entries. Counts as a "use" (bumps ranking signals) unless
 `--no-track` is given — for a caller that reads an entry only to size it
 before deciding whether to use it (r4t's knowledge packer), and wants
 `touch` to be the thing that actually counts as a recall.
+
+One id prints the entry alone. Several print them in the order asked,
+separated by a `--- k7e:<id> ---` line before each entry after the first;
+`--json` emits `[{"id", "text"}]` instead and is the form to parse. Both
+flags apply to the whole batch.
+
+A batch is one interpreter startup rather than one per id, which is most of
+what a small local read costs: eight entries take ~60ms batched against
+~375ms fetched singly. An id that does not exist is reported on stderr and
+skipped — a caller sizing a pool would rather pack the rest than pack
+nothing. The exit code is 1 only when nothing at all was found.
 
 ### `touch <id> [<id> ...]`
 Bump the usage ranking signal (`use_count`, `last_used_at`) for one or more

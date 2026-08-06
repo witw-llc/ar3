@@ -91,6 +91,63 @@ class TestDistillContentType:
         assert "Malformed list content" not in titles
 
 
+class TestDistillMediaContentType:
+    """The media sibling of TestDistillContentType (#70).
+
+    `_parse_llm_response` was hardened for non-string content by #57.
+    `_parse_multimodal_response` was not, and it is a separate code path
+    reached only through a media file — so the fix did not cover it and the
+    tests could not see it.
+    """
+
+    def test_list_typed_content_falls_back_to_the_raw_response(self, tmp_path):
+        raw = (
+            'Some preamble. {"title": "A clip", "content": ["frag one", "frag two"]} '
+            "and a long enough tail that the raw-text fallback opens."
+        )
+        parsed = distill._parse_multimodal_response(raw, tmp_path / "clip.mp4")
+        assert parsed is not None
+        assert isinstance(parsed["content"], str)
+        assert parsed["title"] == "clip"
+
+    def test_a_non_string_title_falls_back_to_the_filename(self, tmp_path):
+        raw = '{"title": 42, "content": "a real transcription of the clip"}'
+        parsed = distill._parse_multimodal_response(raw, tmp_path / "team-standup.m4a")
+        assert parsed["title"] == "team standup"
+        assert parsed["content"] == "a real transcription of the clip"
+
+    @pytest.mark.parametrize("tags", [None, [1, 2], {"a": "b"}])
+    def test_bad_tags_fall_back_to_the_media_type(self, tmp_path, tags):
+        raw = json.dumps({"title": "A clip", "content": "words", "tags": tags})
+        parsed = distill._parse_multimodal_response(raw, tmp_path / "clip.mp4")
+        assert parsed["tags"] == ["video"]
+
+    def test_a_string_tag_is_wrapped_not_split(self, tmp_path):
+        raw = json.dumps({"title": "A clip", "content": "words", "tags": "standup"})
+        parsed = distill._parse_multimodal_response(raw, tmp_path / "clip.mp4")
+        assert parsed["tags"] == ["standup"]
+
+
+class TestDistillSurvivesOneBadFile:
+    """`dream_sweep` treats a nonzero exit as a failed dream and re-runs the
+    same directory, so an exception anywhere in `distill()` wedged distillation
+    permanently instead of skipping one file."""
+
+    def test_an_undecodable_file_does_not_stop_the_sweep(self, store, tmp_path, capsys):
+        (tmp_path / "bad.md").write_bytes(b"\xff\xfe not utf-8 at all")
+        (tmp_path / "good.md").write_text("A note long enough to reach the length gate.\n" * 3)
+        results = distill.distill([str(tmp_path)])
+        skipped = [r for r in results if r["action"] == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["source"].endswith("bad.md")
+        assert "skipping" in capsys.readouterr().err
+
+    def test_a_missing_file_is_skipped_not_fatal(self, store, tmp_path):
+        # A capture removed between the directory listing and the read.
+        results = distill.distill([str(tmp_path / "vanished.md")])
+        assert [r["action"] for r in results] == ["skipped"]
+
+
 class TestDistillVoiceRule:
     """A note that states a requirement is obeyed by whoever reads the store —
     on a 4B floor reader, unconditionally (apps/r4t/experiments/k4e-poisoning).

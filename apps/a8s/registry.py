@@ -1,4 +1,4 @@
-"""a8s registry — ~/.a8s/a8s.json I/O and name resolution.
+"""a8s registry — ~/.config/a8s/a8s.json I/O and name resolution.
 
 Schema:
   {
@@ -10,10 +10,10 @@ Schema:
   attachments may originate at routing time, in addition to `root`.
   `vars` — optional per-node a8s variables (`a8s vars`); expanded as `$KEY` in
   definition argv. Not OS environment variables.
-  `namespaces` — prefix routing (#148): a recipient `<PREFIX>:<sub-address>`
+  `namespaces` — prefix routing: a recipient `<PREFIX>:<sub-address>`
   routes to the single bound agent with the full address preserved in `to`.
 Aliases are disjoint from both agents and namespaces. A namespace prefix may
-match the name of the agent it binds to (a node owning its own namespace, #175);
+match the name of the agent it binds to (a node owning its own namespace);
 it may not match an alias or a *different* agent (`cmd_add` / `cmd_namespace`
 reject those).
 
@@ -172,7 +172,7 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
     For an alias, members are walked recursively; cycles raise ValueError.
     Unknown names raise KeyError.
 
-    A colon in `query` makes it a namespace address (#148): the prefix before
+    A colon in `query` makes it a namespace address: the prefix before
     the first colon resolves via the `namespaces` map to its single bound
     agent. A bare `query` with no colon that matches a bound prefix is also
     a namespace address (delivered with `to` = the prefix alone — the node
@@ -206,7 +206,7 @@ def resolve_name(query: str) -> tuple[str, list[str]]:
         return "namespace", [agent_lookup[bound_key]]
     q = query.strip().lower()
     # Namespace beats agent: when a node owns a namespace matching its own name
-    # (#175, e.g. agent `s1l` bound to prefix `s1l`), both routes land on the
+    # (e.g. agent `s1l` bound to prefix `s1l`), both routes land on the
     # same node — the namespace path just delivers `to` as the bare prefix so
     # the node self-routes, which is exactly what a bare `tell s1l` should do.
     if q in namespace_lookup:

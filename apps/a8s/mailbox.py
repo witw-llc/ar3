@@ -4,10 +4,10 @@ Mailbox routing is process-agnostic: a per-agent daemon may write into any
 other agent's inbox even though it isn't handling them. Only `wake_once` (in
 daemon.py) requires the handler attachment.
 
-Routing runs in two phases per pass (issue #63 prep):
+Routing runs in two phases per pass:
 
 1. INGEST — atomically move `<root>/.outbox/<f>.json` into
-   `~/.a8s/agents/<sender>/pending/<f>.json`. This is the only thing a8s
+   `~/.config/a8s/agents/<sender>/pending/<f>.json`. This is the only thing a8s
    ever does to a file in `<root>/.outbox/` — the agent's directory is
    one-way (agent writes, a8s renames out, never read-modify-write). After
    this phase the agent's outbox dir is empty for the duration of the pass.
@@ -17,23 +17,23 @@ Routing runs in two phases per pass (issue #63 prep):
    already accepted the publish, and whether local delivery has happened.
    Local delivery uses the existing maildir-style staging (`inbox.tmp/` →
    `inbox/` via `os.replace`). Remote publishing is the chunk-7 hook —
-   the no-remote path stays semantically identical to the pre-#63 code:
+   the no-remote path is exactly what it was before remotes existed:
    deliver locally, unlink.
 
-Backoff / retry (issue #63): when some configured remote hasn't yet
+Backoff / retry: when some configured remote hasn't yet
 accepted, attempts increment and the sidecar's `next_attempt` is bumped
 according to `BACKOFF_SCHEDULE`. After `MAX_ATTEMPTS` failures the
 message is moved to trash with a "discarded after backoff exhausted"
 log.
 
-Atomic alias fan-out (issue #67): each routed copy is written into
+Atomic alias fan-out: each routed copy is written into
 `<recipient>/inbox.tmp/<source-fname>` first, then renamed into
 `<recipient>/inbox/` only after every recipient has staged. A crash mid-
 fan-out leaves no partial state. Source filename (a ULID) is preserved
 across staging so a recipient whose final inbox already has the file is
 skipped — retries are idempotent.
 
-FILE: payload transfer (issue #62): tell stages outgoing attachments in
+FILE: payload transfer: tell stages outgoing attachments in
 `.outbox/<msg_id>/` (basename only in the JSON). Ingest moves each bundle
 with its envelope into pending; routing copies into each recipient's
 `.files/<msg_id>/`. Envelope `path` fields are invalid.
@@ -109,7 +109,7 @@ PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
 
 def ensure_mailboxes(p: Participant) -> None:
     """Create mailbox dirs for `p`. Inbox, inbox.tmp, pending, and trash live
-    under ~/.a8s/ (hidden from the agent); outbox lives at the resolved
+    under ~/.config/a8s/ (hidden from the agent); outbox lives at the resolved
     `outbox_dir` (default `.outbox` under agent root). Incoming attachments
     use `files_dir` (default `.files`); that directory is created on wake."""
     for d in (
@@ -228,7 +228,7 @@ def _build_routed_message(
     paths in the returned message. Files that fail validation are dropped
     (logged); the message is delivered with the surviving files.
 
-    Strict opacity (#69, #70): the `to` field is left at whatever the sender
+    Strict opacity: the `to` field is left at whatever the sender
     wrote — alias for fanned messages, agent name for direct ones — same as
     a public mailing list's `To:` header."""
     routed = dict(base_msg)
@@ -455,7 +455,7 @@ def _upload_files_for_remote(
 
     The floor is one, not zero. A file no service accepted is a real failure
     and keeps the backoff: publishing an envelope whose attachment nobody can
-    fetch is the silent loss #93 closed.
+    fetch is a silent loss.
 
     Results cache in `sidecar["uploaded"][filename][service_id] = url`, so a
     backoff retry only re-attempts services still missing.
@@ -730,7 +730,7 @@ def _process_pending(
     configured_remote_ids: list[str],
     services: Optional[list[StorageService]] = None,
 ) -> int:
-    """Phase 2: iterate `~/.a8s/agents/<sender>/pending/`, deliver each
+    """Phase 2: iterate `~/.config/a8s/agents/<sender>/pending/`, deliver each
     pending file locally and/or publish to not-yet-succeeded remotes. The
     sidecar tracks per-message progress so a partial pass can be resumed
     cheaply on the next routing iteration. Returns the count of completed
@@ -885,8 +885,8 @@ def _process_pending(
                 # No storage services configured — file payloads can't make
                 # the trip. Mark all remotes "succeeded" so the message
                 # finalizes after local delivery instead of looping on
-                # retries (#62 v1 fallback: local-only with files when no
-                # services, full pipeline when services are configured).
+                # retries — local-only with files when no services, full
+                # pipeline when services are configured.
                 if sidecar["attempts"] == 0:
                     out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (no storage configured)")
                 sidecar["succeeded_remotes"] = list(configured_remote_ids)
@@ -968,7 +968,7 @@ def route_outboxes(
     """Two-phase routing pass:
 
       1. Ingest: move new outbox files out of every sender's `<root>/.outbox/`
-         and into `~/.a8s/agents/<sender>/pending/`. The agent's directory is
+         and into `~/.config/a8s/agents/<sender>/pending/`. The agent's directory is
          touched only by the rename — never read-modified-rewritten.
       2. Process: deliver each pending message to local recipients (via
          `inbox.tmp/` → `inbox/` atomic stage→commit) and/or publish to any
@@ -977,10 +977,10 @@ def route_outboxes(
 
     `publish_remotes` and `configured_remote_ids` are the daemon-wired
     hooks for cross-cluster routing; both default to None / [] so an
-    install with no remotes configured behaves identically to pre-#63
-    except for the on-disk location of in-flight messages.
+    install with no remotes configured behaves as it did before remotes
+    existed, except for the on-disk location of in-flight messages.
 
-    `services` is the storage-service hook (#90) for cross-cluster `FILE:`
+    `services` is the storage-service hook for cross-cluster `FILE:`
     payloads. When set and a message has files, each service uploads its
     bytes and the wire envelope carries `files[i].storage = [...]`. None /
     empty falls back to the v1 limitation (files local-only, remote skip)."""

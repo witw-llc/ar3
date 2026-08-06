@@ -16,6 +16,8 @@ from definitions import (
     _format_age,
     _message_body,
     build_command,
+    harness_is_resolvable,
+    harness_program,
     default_definition_path,
     load_definition,
     resolve_definition_arg,
@@ -858,3 +860,75 @@ class TestIdleTimeoutSeconds:
         from definitions import idle_timeout_seconds
         assert idle_timeout_seconds({"idle": {"timeout": "soon"}}) is None
         assert idle_timeout_seconds({"idle": {"timeout": None}}) is None
+
+
+class TestHarnessProgram:
+    """What a node actually needs installed (#121).
+
+    The spawn guard only ever saw `argv[0]`, so a definition that wraps its
+    harness — and the real ones do, for locking and timeouts — resolved
+    `argv[0]` fine and failed inside the wrapper. The operator got
+    `flock: failed to execute claude: No such file or directory`, which names
+    the wrong program and says nothing about PATH.
+    """
+
+    @pytest.mark.parametrize("argv,expected", [
+        (["claude", "-p", "$MESSAGE"], "claude"),
+        (["flock", "/tmp/a8s.lock", "claude", "-p"], "claude"),
+        (["flock", "-w", "5", "/tmp/a8s.lock", "claude"], "claude"),
+        (["timeout", "240", "agy", "--print"], "agy"),
+        (["timeout", "-k", "5", "30", "claude"], "claude"),
+        (["nice", "-n", "10", "timeout", "60", "cursor-agent"], "cursor-agent"),
+        (["env", "FOO=bar", "codex", "exec"], "codex"),
+        (["env", "-u", "FOO", "BAR=1", "gemini"], "gemini"),
+        (["nohup", "flock", "/tmp/l", "timeout", "30", "opencode", "run"], "opencode"),
+        (["/usr/local/bin/h4l", "dispatch"], "/usr/local/bin/h4l"),
+    ])
+    def test_it_looks_through_the_wrapper(self, argv, expected):
+        assert harness_program(argv) == expected
+
+    @pytest.mark.parametrize("argv", [
+        ["sh", "-c", "claude -p x"],
+        ["bash", "-lc", "claude"],
+        ["/bin/sh", "-c", "anything"],
+    ])
+    def test_a_shell_string_is_declined_not_guessed(self, argv):
+        # The command lives inside the -c string. Naming the wrong thing is
+        # worse than saying nothing, so the probe stays quiet.
+        assert harness_program(argv) is None
+
+    @pytest.mark.parametrize("argv", [[], ["timeout"], ["flock", "/tmp/only-a-lock"]])
+    def test_an_argv_with_no_command_left_is_none(self, argv):
+        assert harness_program(argv) is None
+
+    def test_a_wrapper_chain_deeper_than_we_unpick_gives_up(self):
+        argv = ["nice", "nice", "nice", "nice", "nice", "claude"]
+        assert harness_program(argv) is None
+
+
+class TestHarnessIsResolvable:
+    def test_a_program_on_path_resolves(self):
+        assert harness_is_resolvable("python3") is True
+
+    def test_a_program_not_on_path_does_not(self):
+        assert harness_is_resolvable("a8s-no-such-harness-xyz") is False
+
+    def test_an_empty_path_resolves_nothing(self):
+        # The reported failure: a non-login shell whose PATH lacks the rc
+        # entries. Same binary, same machine, different environment.
+        assert harness_is_resolvable("python3", {"PATH": ""}) is False
+
+    def test_an_absolute_path_is_checked_directly(self, tmp_path):
+        exe = tmp_path / "harness"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        assert harness_is_resolvable(str(exe), {"PATH": ""}) is True
+
+    def test_an_absolute_path_that_is_not_executable_does_not(self, tmp_path):
+        exe = tmp_path / "harness"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o644)
+        assert harness_is_resolvable(str(exe)) is False
+
+    def test_nothing_resolves_nothing(self):
+        assert harness_is_resolvable("") is False

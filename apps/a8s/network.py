@@ -3,13 +3,13 @@
 a8s only crosses cluster boundaries on outbound `tell` messages — every
 message has a force-stamped agent `from`, no senderless channel exists.
 State queries (`logs`, `ls`, `agents`) are strictly local.
-This module wires the message side: `~/.a8s/network.json` (dict-shaped:
+This module wires the message side: `~/.config/a8s/network.json` (dict-shaped:
 name → {transport, broker, topic, ...}) becomes a list of Transport
 instances. The routing pass uses `publish_with_backoff` as its
 `route_outboxes(publish_remotes=...)` hook; each running attached_loop
 spawns one subscriber thread per remote that calls into
 `receive_envelope`. Cluster-wide dedup lives in the seen-ids ring file
-at `~/.a8s/seen-ids`.
+at `~/.config/a8s/seen-ids`.
 
 Transport modules are imported lazily. `load_remotes()` only pulls in
 e.g. `transports.mqtt` when it sees a `transport: mqtt` entry in the
@@ -277,7 +277,7 @@ def configured_remote_ids() -> list[str]:
     return list(load_network_config()["remotes"].keys())
 
 
-# ---------- storage services (#90) ----------
+# ---------- storage services ----------
 
 # Top-level keys in a network.json `services` entry that the dispatcher
 # consumes itself before forwarding the rest to the StorageService constructor.
@@ -616,7 +616,7 @@ def receive_envelope(
     malformed or duplicate envelopes drop silently. Nothing should crash the
     subscriber thread.
 
-    `services`: configured storage services (#90). When set and the
+    `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
     helper downloads each file into the recipient's `<root>/.files/` and
     rewrites the entry to local `{filename, path}` shape. None / empty
@@ -704,7 +704,7 @@ def _deliver_claimed_envelope(
         remote=remote_id,
         detail=f"{kind} resolved to {len(recipients)} local recipient(s)",
     )
-    # File payloads (#90): when the envelope carries `files[i].storage` URLs,
+    # File payloads: when the envelope carries `files[i].storage` URLs,
     # download into the recipient's `.files/` and rewrite to local-path shape.
     # Configured storage services are tried first; http(s) URLs then fall back
     # to a plain GET so presigned links need no receiver-side credentials.
@@ -993,7 +993,7 @@ def make_receive_callback(
     """Wrap `receive_envelope` so the subscriber thread always passes the
     CURRENT participant list — agents added via `a8s add` after the
     subscriber started are picked up without restarting the loop. Storage
-    services (#90) are resolved the same way and for the same reason: a
+    services are resolved the same way and for the same reason: a
     daemon that has been up for days must be able to download an attachment
     through a service configured this morning. Passing an explicit list
     pins it instead, which is what the tests want. `publish_control` enables
@@ -1026,9 +1026,9 @@ def start_remotes(
     block a8s startup. Returns the list of successfully-started remotes.
 
     `services` is passed through to the receive callback so cross-cluster
-    `FILE:` payloads (#90) can be downloaded into each recipient's
-    `.files/` as envelopes arrive. None / empty preserves pre-#90
-    behavior (incoming files are stripped + warned)."""
+    `FILE:` payloads can be downloaded into each recipient's
+    `.files/` as envelopes arrive. None / empty strips incoming files and
+    warns instead."""
     started: list[Transport] = []
     for r in remotes:
         try:

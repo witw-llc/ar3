@@ -44,7 +44,7 @@ from hygiene import run_audit, index_disagreement
 
 COMMANDS: list[tuple[str, str, str]] = [
     ("search",      "<query> [--limit N] [--json] [--ids]", "Hybrid search (BM25 + semantic + metadata)."),
-    ("get",         "<id> [--no-track]",               "Read a full knowledge entry."),
+    ("get",         "<id> [<id> ...] [--no-track] [--json]", "Read full knowledge entries."),
     ("touch",       "<id> [<id> ...]",                 "Bump the usage ranking signal without reading."),
     ("supersede",   "<old_id> <new_id>",               "Mark an entry as superseded by a newer one."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
@@ -91,8 +91,9 @@ def main(argv=None):
 
     # get
     p = sub.add_parser("get", help="Read entry")
-    p.add_argument("id", help="Entry ID (e.g., KG-00001)")
+    p.add_argument("ids", nargs="+", help="Entry ID(s), e.g. K7E-000-00001")
     p.add_argument("--no-track", action="store_true", help="Don't bump the usage ranking signal")
+    p.add_argument("--json", action="store_true", help="Emit [{id, text}] instead of the entries")
 
     # touch
     p = sub.add_parser("touch", help="Bump usage ranking signal without reading")
@@ -205,10 +206,27 @@ def main(argv=None):
                 print(f"  {r['id']}  {r['title']}  (score: {r['score']})")
 
     elif args.command == "get":
-        try:
-            print(get(args.id, track_usage=not args.no_track))
-        except FileNotFoundError as e:
-            print(str(e), file=sys.stderr)
+        # A batch is one interpreter startup instead of N. The sizing pass in
+        # r4t's inject path fetches a whole ranking pool before it can weigh
+        # anything, and startup — not the read — was most of what that cost.
+        found = []
+        for node_id in args.ids:
+            try:
+                found.append((node_id, get(node_id, track_usage=False)))
+            except FileNotFoundError as e:
+                # One missing id must not cost the batch: a caller sizing a
+                # pool would rather pack the entries that do exist.
+                print(str(e), file=sys.stderr)
+        if not args.no_track and found:
+            engine._bump_usage([node_id for node_id, _ in found])
+        if args.json:
+            print(json.dumps([{"id": i, "text": t} for i, t in found]))
+        else:
+            for n, (node_id, text) in enumerate(found):
+                if n:
+                    print(f"--- k7e:{node_id} ---")
+                print(text)
+        if not found:
             return 1
 
     elif args.command == "touch":
@@ -275,6 +293,9 @@ def main(argv=None):
         results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
             action = r["action"]
+            if action == "skipped":
+                print(f"  [skipped] {r['source']}: {r['reason']}")
+                continue
             title = r["title"]
             entry_id = r.get("id", "")
             print(f"  [{action}] {entry_id} {title}")

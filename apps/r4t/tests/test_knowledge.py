@@ -629,6 +629,27 @@ class TestDreamSweep:
         assert knowledge.dream_sweep(ctx, roster, config) == []
         assert calls == []
 
+    def test_a_successful_dream_still_reports_the_files_it_could_not_read(
+        self, ctx, monkeypatch
+    ):
+        """The watermark advances past a skipped capture, so the skip never
+        comes back. A dream that succeeds is exactly where it would otherwise
+        pass unseen — the failure paths already log."""
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(
+                stdout="  [stored] K7E-000-00001 A real note\n"
+                       "  [skipped] /caps/bad.md: UnicodeDecodeError: bad byte\n"
+            ),
+        )
+        state.write_turn_capture(NODE, "phil", "20260730T000000000004Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        log = read_log()
+        assert "DREAM phil distilled 1" in log
+        assert "DREAM-SKIPPED phil /caps/bad.md: UnicodeDecodeError" in log
+        assert "A real note" not in log
+
     def test_failure_leaves_the_watermark(self, ctx, monkeypatch):
         monkeypatch.setattr(
             knowledge, "_run_k7e",

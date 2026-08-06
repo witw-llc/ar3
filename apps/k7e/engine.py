@@ -63,7 +63,7 @@ QUERY_EMBED_TIMEOUT = 2.0   # read path: a wake must not wait on a sick ollama
 LAST_QUERY_EMBED_MS = None
 LAST_QUERY_EMBED_OK = False
 
-# Recency decay + use-count ranking (see issue #145, workstream 1).
+# Recency decay + use-count ranking.
 # Defaults tuned for dev-knowledge churn (tighter than the article's 5yr).
 DECAY_OFFSET_DAYS = 30.0   # flat zone: facts younger than this don't decay
 DECAY_SCALE_DAYS = 365.0   # days past the flat zone at which the multiplier hits 0.5
@@ -620,7 +620,7 @@ def _snippet(node_id, length=200):
 
 def _rerank(query, results, limit):
     """Reorder candidates using the LLM as a cross-encoder-style relevance
-    scorer (issue #145, workstream 2). Over-fetch wide, rerank a small pool.
+    scorer. Over-fetch wide, rerank a small pool.
     Degrades gracefully to the input order when no LLM is available or the
     response can't be parsed, so callers can always rely on it."""
     if len(results) <= 1:

@@ -335,3 +335,43 @@ def test_git_probe_requires_identity_configuration(monkeypatch):
     probe = ar3._git_probe()
     assert probe.ok is False
     assert probe.detail == "git version 2.0.0, unset: user.email"
+
+
+# ---------- the spawn-env cross-link (#121) ----------
+
+def _path_check(name, detail):
+    return ar3.Check(name, ar3.HARNESS, lambda: ar3.Probe(False, detail), "install it")
+
+
+def test_doctor_links_an_invisible_harness_to_the_node_spawn_env(monkeypatch, capsys):
+    # A harness this shell cannot see is one no node started from this shell
+    # can see either — the node inherits this PATH for the life of the process,
+    # so the failure lands hours later at a wake nobody is watching.
+    monkeypatch.setattr(ar3, "CHECKS", (
+        _path_check("claude", "not on PATH"),
+        _path_check("codex", "not on PATH"),
+    ))
+    monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
+    ar3.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert "claude, codex not visible from this shell" in out
+    assert "a8s start" in out
+    assert "login shell" in out
+
+
+def test_a_harness_that_answered_badly_is_not_a_path_note(monkeypatch, capsys):
+    # Present but broken is a different problem, and saying "PATH" about it
+    # would send the operator to the wrong place.
+    monkeypatch.setattr(ar3, "CHECKS", (_path_check("claude", "--version exited 1"),))
+    monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
+    ar3.cmd_doctor(None)
+    assert "not visible from this shell" not in capsys.readouterr().out
+
+
+def test_no_note_when_every_harness_resolves(monkeypatch, capsys):
+    monkeypatch.setattr(ar3, "CHECKS", (
+        ar3.Check("claude", ar3.HARNESS, lambda: ar3.Probe(True, "1.0 (/usr/bin/claude)"), "h"),
+    ))
+    monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
+    ar3.cmd_doctor(None)
+    assert "not visible from this shell" not in capsys.readouterr().out

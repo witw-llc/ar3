@@ -54,7 +54,7 @@ working directory as an argument, and the prompt names it as the member's root.
 No harness is obliged to treat it as the project root, though:
 opencode-family rigs also advertise the enclosing git root to the model as a
 "workspace root". A workdir nested in a repo can therefore still attract writes
-to the repo root (issue #273; see docs/r4t-rigs.md).
+to the repo root (see docs/r4t-rigs.md).
 
 An optional `- **Knowledge:** on` (default off) gives the member a private
 k7e store (docs/r4t-knowledge.md). The grammar, in ascending specificity:
@@ -113,7 +113,7 @@ def parse_flush(value: str) -> float:
 # T-shirt sizes -> bytes. r4t owns this mapping (not any one rig or preset) so
 # a roster written today stays meaningful as the industry's usable context
 # grows: move `large` here and every roster using it moves with it, no roster
-# edits. `small` is 4096 (k-budget-packing, #12/#52): at the rank-proportional
+# edits. `small` is 4096 (k-budget-packing): at the rank-proportional
 # packer (knowledge.py), 4096 covers 26/48 LongMemEval questions against 14/48
 # for the old 2048 greedy-whole default, without the flat-cap regression that
 # dropped single-session-assistant coverage. `medium`/`large` are unmoved by
@@ -194,7 +194,7 @@ def parse_knowledge(value: str) -> KnowledgeSpec | None:
 @dataclass
 class FramingSpec:
     """One resolved `Framing:` choice — a member's roster line or a rig's
-    config default (#62). `off` drops the framing line entirely under the
+    config default. `off` drops the framing line entirely under the
     `## Knowledge` header (the header and entries still render); `text=None`
     with `off=False` picks the built-in line; `text` set is custom wording
     taken verbatim."""

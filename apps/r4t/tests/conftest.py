@@ -83,6 +83,12 @@ def r4t_home(tmp_path, monkeypatch):
     home = tmp_path / "r4t-home"
     monkeypatch.setenv("R4T_HOME", str(home))
     monkeypatch.delenv("TELL_OUTBOX_DIR", raising=False)
+    # `roster check` asks a8s which names are visible from this host. Point it
+    # at an empty state root: a test's result must not depend on what the
+    # developer happens to have registered.
+    a8s_home = tmp_path / "a8s-home"
+    a8s_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("A8S_HOME", str(a8s_home))
     return home
 
 

@@ -10,7 +10,7 @@ a self-contained node (e.g. r4t) can read its own definition for settings the
 wire does not carry.
 
 `$META` is the envelope's `meta` object as verbatim JSON — protocol metadata
-one node stamps for another (r4t's message class, #167). a8s carries it and
+one node stamps for another (r4t's message class). a8s carries it and
 hands it to the wake; it never reads inside, so the vocabulary belongs to the
 nodes at the edges and a8s learns nothing about any node's protocol.
 
@@ -18,7 +18,7 @@ A8s vars are NOT process environment variables — they live on the agent in
 the registry and expand only through this interpolator. A `$NAME` that is
 neither a built-in placeholder nor a set a8s var is a hard error.
 
-Strict opacity (issues #69, #70): the recipient sees only sender + message
+Strict opacity: the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
 alias-fanned tell produce the same prompt shape, distinguished only by what
 `$RECIPIENT` resolves to (the original `to` field, which is the alias name
@@ -28,7 +28,9 @@ mailing list: you know it came via the list, you don't know who else got it).
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -134,7 +136,7 @@ def builtin_definition_stems() -> set[str]:
 def list_definition_entries() -> list[tuple[str, str, Path]]:
     """All known templates as ``(name, source, path)``, sorted by name.
 
-    ``source`` is ``builtin`` (repo) or ``user`` (``~/.a8s/definitions``).
+    ``source`` is ``builtin`` (repo) or ``user`` (``~/.config/a8s/definitions``).
     Builtin wins when both exist for the same stem.
     """
     entries: dict[str, tuple[str, str, Path]] = {}
@@ -154,7 +156,7 @@ def resolve_definition_arg(spec: str) -> Path:
 
     A bare name — no path separator, no `.json` suffix (`filedrop`, `r4t`) —
     is a definition NAME and resolves only against bundled `definitions/`,
-    then user-installed ``~/.a8s/definitions/``. The working directory is
+    then user-installed ``~/.config/a8s/definitions/``. The working directory is
     deliberately not consulted for it, so an unrelated same-named file next to
     the caller (the repo-root `r4t` shim) cannot shadow the definition.
     Anything else is a filesystem path first, with a bare `<name>.json`
@@ -663,6 +665,84 @@ def idle_timeout_seconds(definition: dict) -> float | None:
     except (TypeError, ValueError):
         return None
     return v if v > 0 else None
+
+
+# Programs that run another program. A definition that wraps its harness in
+# one of these resolves argv[0] fine and fails *inside* the wrapper, so the
+# `FileNotFoundError` guard around the spawn never sees it and the operator
+# gets the wrapper's diagnostic instead of a8s's:
+#   flock: failed to execute claude: No such file or directory
+#
+# Each entry is (flags that take a separate value, fixed operands before the
+# command). Both are needed: `nice -n 10 claude` and `timeout 60 claude` skip
+# different things for different reasons.
+_WRAPPERS: dict[str, tuple[frozenset[str], int]] = {
+    "env":     (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), 0),
+    "nohup":   (frozenset(), 0),
+    "setsid":  (frozenset(), 0),
+    "time":    (frozenset({"-f", "--format", "-o", "--output"}), 0),
+    "nice":    (frozenset({"-n", "--adjustment"}), 0),
+    "ionice":  (frozenset({"-c", "-n", "--class", "--classdata"}), 0),
+    "stdbuf":  (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), 0),
+    "sudo":    (frozenset({"-u", "--user", "-g", "--group"}), 0),
+    "doas":    (frozenset({"-u", "-C"}), 0),
+    "timeout": (frozenset({"-s", "--signal", "-k", "--kill-after"}), 1),
+    "flock":   (frozenset({"-w", "--wait", "--timeout", "-E", "--conflict-exit-code"}), 1),
+}
+
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+_MAX_WRAPPER_DEPTH = 4
+
+
+def harness_program(argv: list[str]) -> str | None:
+    """The program a definition actually depends on being installed.
+
+    `argv[0]` is not it whenever the definition wraps the harness, which the
+    real-world ones do for locking and timeouts. Returns None when the argv
+    cannot be reduced to one program name — notably `sh -c`, where the command
+    lives inside a shell string and guessing at it would be worse than saying
+    nothing.
+    """
+    i = 0
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        if i >= len(argv):
+            return None
+        tok = argv[i]
+        base = Path(tok).name
+        if base in _SHELLS:
+            return None
+        entry = _WRAPPERS.get(base)
+        if entry is None:
+            return tok
+        value_flags, operands = entry
+        i += 1
+        while i < len(argv) and argv[i].startswith("-"):
+            takes_value = argv[i] in value_flags and "=" not in argv[i]
+            i += 1
+            if takes_value and i < len(argv):
+                i += 1
+        if base == "env":
+            while i < len(argv) and "=" in argv[i] and not argv[i].startswith(os.sep):
+                i += 1
+        i += operands
+    return None
+
+
+def harness_is_resolvable(program: str, env: dict[str, str] | None = None) -> bool:
+    """Whether `program` can be executed from `env`'s PATH.
+
+    A path with a separator in it is checked directly; a bare name goes
+    through PATH. `env` defaults to this process's environment, which is
+    exactly what `a8s start` hands the node — that equivalence is the whole
+    point of probing here rather than at first wake.
+    """
+    if not program:
+        return False
+    if os.sep in program or (os.altsep and os.altsep in program):
+        return os.access(program, os.X_OK)
+    path = (env or os.environ).get("PATH")
+    return shutil.which(program, path=path) is not None
 
 
 def _autodiscover_definition(root: Path) -> tuple[str, str]:

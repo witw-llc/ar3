@@ -104,6 +104,20 @@ Symmetrically, external ingress is untrusted: a sub-address can't pick a member
 and nothing is parsed out of the body — everything from outside enters at the
 top lead on a fresh thread. One ingress point means one thing to reason about.
 
+## When a name means two things
+
+The leader stands in the doorway: it addresses roster members and registered
+a8s nodes with the same `tell`. **A name inside the roster wins.** An outside
+node sharing a member's name is simply not reachable from that leader by name
+— by precedence, not by a block, and the outside node loses nothing else,
+since externals cannot address a non-top member in the first place.
+
+Nothing prevents the collision, because on a single-owner network there
+usually is not one and the operator may well mean it. `r4t roster check`
+warns when a member's name also names an a8s node, alias, or namespace visible
+from the host, and says which. That is the whole treatment: a warning, and
+this sentence.
+
 ## Class across the wall
 
 `meta.class` is the one protocol field that crosses the wall in both

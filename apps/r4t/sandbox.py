@@ -554,8 +554,8 @@ def _failure_checks(
             ),
             (
                 # The kickoff arrives through the human's a8s node, so every
-                # thread in this run descends from ingress and is owed nothing
-                # (#58). Silence here is the ruling working, not a dropped
+                # thread in this run descends from ingress and is owed
+                # nothing. Silence here is the ruling working, not a dropped
                 # ball — the sweep watches threads that begin inside.
                 "Quiet sweep left the ingress thread alone",
                 not nudged,
@@ -804,7 +804,7 @@ def run_sandbox(
                 ("Program runs and exits 0", program_ok, program_detail),
             ]
         # A muted leader is the one shape with nobody left to answer: the
-        # kickoff is ingress, owed nothing (#58), and the member that would
+        # kickoff is ingress, owed nothing, and the member that would
         # have replied is the broken one. Silence is the outcome the ruling
         # buys, so the run states it rather than failing over it.
         answered_label = (

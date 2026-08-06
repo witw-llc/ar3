@@ -85,6 +85,8 @@ When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess envi
 
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
+**Inherited-variable warning.** When `TELL_OUTBOX_DIR` names a registered agent's own outbox and CWD is neither that agent's root nor the outbox itself, `tell` prints a warning to stderr and sends anyway; `tell --check` reports the same line. That pair is the shape a stale variable makes when it leaks from a live seat into another shell — every check passes, and the mail leaves under the wrong name. A staging outbox is not registered and an agent in its own root matches, so neither warns.
+
 ## Who validates the recipient
 
 Recipient validation belongs to whoever routes the outbox, so `tell` asks one

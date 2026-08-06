@@ -2,7 +2,7 @@
 
 Uses MQTT 3.1.1 with `clean_session=False` and QoS 1 so the broker holds
 messages for an offline subscriber until reconnect — this is the persistent-
-session shape decided in the #63 plan. The client_id needs to be stable
+session shape remote routing needs. The client_id needs to be stable
 across runs (same machine, same a8s install) for the broker to recognize the
 session and replay; we default to `a8s-<machine-hash>-<remote_id>`.
 

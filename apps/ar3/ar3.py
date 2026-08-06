@@ -418,6 +418,22 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         _print_rows(doctor_rows(results, group))
     failed = doctor_failures(results)
     green = sum(1 for _check, probe in results if probe.ok)
+    # The two symptoms are one story. A harness this shell cannot see is a
+    # harness no a8s node started from this shell can see either — the node
+    # inherits the start shell's PATH for the life of the process, so the
+    # failure lands hours later at a wake, in a shell nobody is watching.
+    unseen = [
+        check.name
+        for check, probe in results
+        if check.group == HARNESS and not probe.ok and probe.detail == "not on PATH"
+    ]
+    if unseen:
+        print()
+        print(
+            f"note: {', '.join(unseen)} not visible from this shell. `a8s start` "
+            "here would hand\n      the same PATH to every wake — start nodes from "
+            "a login shell, or give the\n      definition an absolute path."
+        )
     print()
     if failed:
         print(f"✗ core prerequisites missing: {', '.join(failed)}  ({green}/{len(results)} probes green)")
