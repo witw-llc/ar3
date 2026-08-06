@@ -2214,6 +2214,7 @@ configured path when that path is already dedicated to a8s.
                                                  --prefix (a8s) --timeout_s (60)
   rclone        rclone://<remote>/<path>         --prefix (a8s) --timeout_s (300)
                                                  --rclone_path (rclone)
+  sync_folder   <a local folder path>            --prefix (none) --retain_days (off)
 
 URLs must be https. A peer picks the URL your node downloads from, and these
 links carry their own authorization in the query string. A download follows at
@@ -2226,6 +2227,18 @@ for a store on your own network with no certificate.
   a8s storage fm webdav://webdav.fastmail.com/dav/fs/user@domain/a8s \\
       --base-url https://files.example.com/a8s --user user@domain --password ...
   a8s storage drive rclone://gdrive/A8S
+  a8s storage onedrive "~/OneDrive - Contoso/A8S" --retain_days 30
+
+sync_folder is the desktop and laptop answer: point it at a folder your sync
+client already watches, point a second machine at the same folder, and the
+bytes cross by themselves. Nothing is published — no host, no credential, and
+no URL that resolves for anyone outside the folder. The marker that rides in
+the envelope names neither the service nor the path, so configure two folders
+and whichever syncs first delivers the file. Attachments are keyed by message
+ULID, so one message's files stay together. Set --retain_days to sweep old
+bundles; it is off by default because deleting from one machine deletes from
+all of them. Use rclone instead on headless and VM machines, which have no
+sync client to ride along with.
 
 file_sync copies into a folder some other tool already syncs and hands out the
 public URL the object lands at, so a8s does no syncing of its own. It requires
@@ -2351,7 +2364,8 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     kind = detect_service_kind(url)
     if kind is None:
         print(
-            f"no storage service matches URL {url!r} (known kinds: tempfile_org, s3, file_sync, webdav, rclone)",
+            f"no storage service matches URL {url!r} (known kinds: tempfile_org, s3, "
+            "file_sync, webdav, rclone, sync_folder)",
             file=sys.stderr,
         )
         return 2

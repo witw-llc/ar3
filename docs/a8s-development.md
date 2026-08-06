@@ -31,9 +31,22 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `network.json`'s `services` map (separate from `remotes`). Kinds that ship:
   `tempfile_org` (zero-signup, ephemeral) and `s3` (`s3://bucket[/prefix]`,
   any S3-compatible endpoint), `file_sync` (`file://` local sync folder plus
-  `base_url`), and `webdav` (`webdav://` endpoint plus `base_url`). A new kind implements `StorageService` and
+  `base_url`), `webdav` (`webdav://` endpoint plus `base_url`), `rclone`, and
+  `sync_folder` (a bare path to a folder some sync client watches; publishes
+  nothing). A new kind implements `StorageService` and
   registers in two places in `network.py` — `_build_service` and
   `detect_service_kind`.
+- **Upload is any-of.** Every send attempts every service; a message publishes
+  once each file landed somewhere, and only services that accepted a file
+  contribute a URL. Requiring all-of made a second storage service a second way
+  to lose mail — one unreachable remote pushed the envelope through the whole
+  backoff schedule and into the trash while a working remote held a copy. The
+  floor is one, not zero: zero successes keeps the retry (#93).
+- **Services resolve at use time, not daemon start.** `load_services` rebuilds
+  only when `network.json` or `secrets.json` changes, so both the routing pass
+  and the receive callback can call it per use. A daemon runs for days, and one
+  that captured its list at startup ignored every service configured
+  afterwards while `a8s storage` listed them as configured.
 - **`s3` returns presigned URLs, not `s3://` URIs.** The capability to fetch
   travels inside the envelope, so a receiving cluster needs no AWS credentials
   and there is one code path instead of a mode switch. boto3 is a lazy,
@@ -58,6 +71,25 @@ Read [a8s.md](a8s.md) first for concept and usage.
   public folders. It does not cover Google Drive, OneDrive or Dropbox, which
   mint an opaque per-file id at upload time — that is what the `rclone` kind is
   for.
+- **`sync_folder` publishes nothing**, which is why it is a separate kind from
+  `file_sync` rather than a mode of it. It claims **bare paths** at config time,
+  so it never collides with a scheme somebody else owns. Its marker
+  (`a8s+sync:<ULID>/<name>`) carries no host, no path and no service name, so
+  each configured folder resolves it against its own root and the existing
+  first-to-answer download loop makes two folders race. Keys are the message
+  ULID rather than a random token — a sync folder is private, so unguessability
+  buys nothing, while grouping a message's attachments gives the retention
+  sweep something to act on. Published kinds keep their random token for the
+  opposite reason: a ULID is time-ordered and therefore guessable, which matters
+  on a public URL.
+- **A sync folder is written by another program, so presence is not arrival.**
+  Bytes go to a `.part` name and are renamed, and `manifest.json` records the
+  size a receiver must see before accepting a copy. Anything short is treated
+  as absent — `retrieve` returns False and the receive wait keeps polling —
+  never as a failure. This is what defends against a mid-sync file and against
+  a OneDrive Files On-Demand placeholder.
+- **`store` takes an optional `msg_id`.** `a8s health` has no envelope, so a
+  service that needs one mints its own rather than growing a second code path.
 - **`rclone` shells out; both calls are synchronous.** `copyto` then `link`, so
   the public URL exists when `store` returns and nothing waits on a sync
   daemon. `retrieve` returns False on purpose: the link is public https and the

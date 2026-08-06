@@ -406,14 +406,25 @@ def _resolve_file_source(sender_name: str, msg_id: str, entry: dict) -> Path | N
 
 
 def _record_upload_failure(
-    msg: dict, sender: Participant, sidecar: dict, filename: str, detail: str
+    msg: dict,
+    sender: Participant,
+    sidecar: dict,
+    filename: str,
+    detail: str,
+    *,
+    blocking: bool = True,
 ) -> None:
     """One attachment-upload failure, on all three surfaces: the agent log for
     a tailing operator, a `FILE_UPLOAD_FAILED` row so `a8s trace` sees it, and
     the sidecar so an eventual discard can name what kept killing the send.
     Fires once per attempt per service — the attempt number is in the detail,
-    so a repeated network fault reads as a sequence rather than a duplicate."""
-    out_agent(sender.name, f"FILE: upload failed for {filename!r}: {detail}; will retry")
+    so a repeated network fault reads as a sequence rather than a duplicate.
+
+    `blocking` is False when another service already carries this file. The
+    operator still hears about the dead service, but it is not what the send
+    is waiting on, so it must not become the discard diagnostic."""
+    tail = "will retry" if blocking else "another service carries this file"
+    out_agent(sender.name, f"FILE: upload failed for {filename!r}: {detail}; {tail}")
     txlog.log(
         "FILE_UPLOAD_FAILED",
         msg_id=msg.get("id", ""),
@@ -422,7 +433,8 @@ def _record_upload_failure(
         files=[filename],
         detail=detail,
     )
-    sidecar["last_error"] = detail
+    if blocking:
+        sidecar["last_error"] = detail
 
 
 def _upload_files_for_remote(
@@ -431,26 +443,39 @@ def _upload_files_for_remote(
     services: list[StorageService],
     sidecar: dict,
 ) -> bool:
-    """Upload every file in `msg["files"]` to every configured storage
-    service that hasn't yet accepted it. Caches results in
-    `sidecar["uploaded"][filename][service_id] = url` so a backoff retry
-    only re-uploads to services still missing.
+    """Try every configured storage service for every file, and publish once
+    each file has at least one copy somewhere.
+
+    Redundancy is any-of, not all-of. Every send still attempts every service,
+    so the good case is a copy in all of them — but one dead service must not
+    take the others down with it. Requiring all-of meant a single unreachable
+    remote pushed the whole message through `BACKOFF_SCHEDULE` and into the
+    trash, which is precisely the failure configuring a second remote was
+    supposed to survive.
+
+    The floor is one, not zero. A file no service accepted is a real failure
+    and keeps the backoff: publishing an envelope whose attachment nobody can
+    fetch is the silent loss #93 closed.
+
+    Results cache in `sidecar["uploaded"][filename][service_id] = url`, so a
+    backoff retry only re-attempts services still missing.
 
     Side-effects:
       - Mutates `sidecar["uploaded"]` with each successful upload.
-      - On full success (every file × every service covered), rewrites
-        `msg["files"]` in-place to the wire shape:
+      - On success, rewrites `msg["files"]` in-place to the wire shape:
         `[{"filename": ..., "storage": [url1, url2, ...]}]` (drops `path`).
+        Only services that accepted the file contribute a URL, so a failed
+        service publishes nothing rather than a link that cannot resolve.
 
-    Returns True if every file is now covered by every configured service
-    (caller proceeds to publish). Returns False if any upload failed
-    (caller schedules retry; msg["files"] stays in its on-disk shape)."""
+    Returns True when every file has at least one URL (caller proceeds to
+    publish), False otherwise (caller schedules retry; `msg["files"]` stays in
+    its on-disk shape)."""
     files = msg.get("files") or []
     if not files or not services:
         return True  # no work to do
 
     uploaded: dict = sidecar.setdefault("uploaded", {})
-    all_done = True
+    every_file_covered = True
     msg_id = (msg.get("id") or "").strip()
     for entry in files:
         filename = entry.get("filename") or ""
@@ -462,37 +487,46 @@ def _upload_files_for_remote(
             if msg_id
             else (None, "missing message id")
         )
-        if src is None and any(s.id not in per_file for s in services):
-            _record_upload_failure(msg, sender, sidecar, filename, src_reason)
-            all_done = False
-            continue
-        attempt = sidecar.get("attempts", 0) + 1
-        for service in services:
-            if service.id in per_file:
-                continue
-            try:
-                url = service.store(src)  # type: ignore[arg-type]
-            except StorageError as e:
-                _record_upload_failure(
-                    msg, sender, sidecar, filename,
-                    f"storage {service.id} upload failed (attempt {attempt}): {e}",
-                )
-                all_done = False
-                continue
-            except Exception as e:
-                _record_upload_failure(
-                    msg, sender, sidecar, filename,
-                    f"storage {service.id} upload raised (attempt {attempt}): {e}",
-                )
-                all_done = False
-                continue
-            per_file[service.id] = url
+        # Whether a failure blocks the send depends on what the other services
+        # manage, so the details are collected and graded after the loop.
+        failures: list[str] = []
+        if src is None:
+            # Unreadable bytes only matter while nothing has been uploaded; a
+            # copy placed by an earlier attempt still covers this file.
+            if not per_file:
+                failures.append(src_reason)
+        else:
+            attempt = sidecar.get("attempts", 0) + 1
+            for service in services:
+                if service.id in per_file:
+                    continue
+                try:
+                    url = service.store(src, msg_id=msg_id)
+                except StorageError as e:
+                    failures.append(
+                        f"storage {service.id} upload failed (attempt {attempt}): {e}"
+                    )
+                    continue
+                except Exception as e:
+                    failures.append(
+                        f"storage {service.id} upload raised (attempt {attempt}): {e}"
+                    )
+                    continue
+                per_file[service.id] = url
 
-    if not all_done:
+        blocking = not per_file
+        for detail in failures:
+            _record_upload_failure(
+                msg, sender, sidecar, filename, detail, blocking=blocking
+            )
+        if blocking:
+            every_file_covered = False
+
+    if not every_file_covered:
         return False
     sidecar.pop("last_error", None)
 
-    # Every file is covered by every service — rewrite to the wire shape.
+    # Every file has a copy somewhere — rewrite to the wire shape.
     new_files: list[dict] = []
     for entry in files:
         filename = entry.get("filename") or ""

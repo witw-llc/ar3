@@ -10,6 +10,44 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.61]
+
+### Added
+- **`sync_folder` storage — attachments through a folder your sync client
+  already watches.** Point it at a bare path (`a8s storage onedrive
+  "~/OneDrive - Contoso/A8S"`), point a second machine at the same folder, and
+  the bytes cross by themselves. Nothing is published: no host, no credential,
+  and no URL that resolves for anyone outside the folder. The marker in the
+  envelope names neither the service nor the path, so two machines need not
+  agree on what to call it, and configuring two folders makes them race —
+  whichever syncs first delivers. Attachments are keyed by message ULID, so one
+  message's files stay together. `--retain_days` sweeps old bundles and is off
+  by default, because deleting from a shared folder deletes from every machine
+  sharing it. Use `rclone` on headless and VM machines, which have no sync
+  client to ride along with.
+- A file is staged under a `.part` name and renamed, and a `manifest.json`
+  records the size a receiver must see before it accepts the copy. A sync
+  client publishes a name before the bytes behind it land, and OneDrive's
+  Files On-Demand shows a placeholder that only materializes when read — both
+  now read as "not here yet" rather than as a delivered file.
+
+### Fixed
+- **One dead storage service no longer blocks the others.** Upload required
+  every file to reach every configured service, so a single unreachable remote
+  pushed the whole message through the backoff schedule and into the trash
+  while a working remote held a copy the entire time — configuring a second
+  service was a second way to lose mail. A message now publishes once each file
+  landed somewhere. Every send still attempts every service, and only services
+  that accepted a file contribute a URL, so a failed one publishes nothing
+  rather than a link that cannot resolve. A file no service accepted still
+  keeps the retry.
+- **A daemon picks up storage services configured after it started.** Services
+  were loaded once per daemon lifetime, so a node running since before a
+  service was added failed every attachment through it and said nothing, while
+  `a8s storage` listed the service as configured. Both the routing pass and the
+  receive callback now resolve at use time; the built list is reused until
+  `network.json` or `secrets.json` changes.
+
 ## [0.1.60]
 
 ### Added

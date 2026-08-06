@@ -330,13 +330,47 @@ def _build_service(name: str, spec: dict) -> StorageService:
         from services.rclone import RcloneService
 
         return RcloneService(name, url=url, **opts)
+    if kind == "sync_folder":
+        from services.sync_folder import SyncFolderService
+
+        return SyncFolderService(name, url=url, **opts)
     raise ValueError(f"storage {name!r}: unsupported service kind {kind!r}")
+
+
+#: Built services, and the config stamp they were built from. A daemon runs
+#: for days, so a service configured after it started must still become usable
+#: — the same reason the receive path re-reads the participant list. Rebuilding
+#: is keyed on the config file's identity rather than done every pass, because
+#: a service constructor can read secrets and touch the filesystem.
+_SERVICE_CACHE: tuple[tuple, list[StorageService]] | None = None
+
+
+def _service_config_stamp() -> tuple:
+    """What has to change before the built services are stale."""
+    marks = []
+    for path in (network_config_path(), secrets_config_path()):
+        # The path itself is part of the stamp: a8s tests relocate the config
+        # home, and two homes that both lack the file would otherwise look
+        # identical and share a cached answer.
+        try:
+            st = path.stat()
+            marks.append((str(path), st.st_mtime_ns, st.st_size))
+        except OSError:
+            marks.append((str(path), None, None))
+    return tuple(marks)
 
 
 def load_services() -> list[StorageService]:
     """Return StorageService instances for every entry in
     `network.json`'s `services` map. Failures (bad config, missing
-    module) are logged and skipped — never block a8s startup."""
+    module) are logged and skipped — never block a8s startup.
+
+    Cheap to call repeatedly: the built list is reused until the config or
+    the secrets file changes underneath it."""
+    global _SERVICE_CACHE
+    stamp = _service_config_stamp()
+    if _SERVICE_CACHE is not None and _SERVICE_CACHE[0] == stamp:
+        return _SERVICE_CACHE[1]
     cfg = load_network_config()
     out_list: list[StorageService] = []
     for name, spec in cfg["services"].items():
@@ -349,6 +383,7 @@ def load_services() -> list[StorageService]:
             )
         except Exception as e:
             out(f"WARN: storage {name!r} skipped: {e}")
+    _SERVICE_CACHE = (stamp, out_list)
     return out_list
 
 
@@ -370,6 +405,7 @@ def detect_service_kind(url: str) -> str | None:
     from services.file_sync import FileSyncService
     from services.rclone import RcloneService
     from services.s3 import S3Service
+    from services.sync_folder import SyncFolderService
     from services.tempfile_org import TempFileOrgService
     from services.webdav import WebdavService
 
@@ -379,6 +415,7 @@ def detect_service_kind(url: str) -> str | None:
         ("file_sync", FileSyncService),
         ("webdav", WebdavService),
         ("rclone", RcloneService),
+        ("sync_folder", SyncFolderService),
     ):
         try:
             if cls.supports_config_url(url):
@@ -844,16 +881,18 @@ def make_receive_callback(
     """Wrap `receive_envelope` so the subscriber thread always passes the
     CURRENT participant list — agents added via `a8s add` after the
     subscriber started are picked up without restarting the loop. Storage
-    services (#90) are passed in once at startup; the receive helper uses
-    them to download cross-cluster `FILE:` payloads. `publish_control`
-    enables content-free delivery receipts on that same transport."""
+    services (#90) are resolved the same way and for the same reason: a
+    daemon that has been up for days must be able to download an attachment
+    through a service configured this morning. Passing an explicit list
+    pins it instead, which is what the tests want. `publish_control` enables
+    content-free delivery receipts on that same transport."""
 
     def callback(envelope: bytes) -> None:
         try:
             receive_envelope(
                 envelope,
                 get_participants(),
-                services=services,
+                services=load_services() if services is None else services,
                 publish_control=publish_control,
                 remote_id=remote_id,
             )

@@ -88,7 +88,7 @@ class FileSyncService(StorageService):
         dest.relative_to(root)
         return dest
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         key = self._object_key(src.name)
         dest = self._local_path_for_key(key)
         try:

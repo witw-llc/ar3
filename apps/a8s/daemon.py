@@ -1071,12 +1071,13 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # remote. The receive callback always asks the registry for the current
     # participant list so agents added after startup become routable without
     # restarting the daemon.
-    # Storage services (#90) — stateless, no start/stop. Loaded once per
-    # daemon lifetime and shared between routing-side uploads and the
-    # receive callback's downloads. An empty list keeps the path
-    # local-files-only (pre-#90 behavior).
-    services = load_services()
-    started_remotes = start_remotes(load_remotes(), participants_from_registry, services=services)
+    # Storage services (#90) — stateless, no start/stop, and deliberately NOT
+    # captured here. A daemon runs for days; one started before a service was
+    # configured would never see it, and would fail every attachment while
+    # `a8s storage` cheerfully listed the service it was ignoring. Both sides
+    # resolve at use time instead — `load_services` rebuilds only when the
+    # config changes.
+    started_remotes = start_remotes(load_remotes(), participants_from_registry)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
@@ -1138,7 +1139,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         all_agents=all_agents,
                         publish_remotes=publish_remotes,
                         configured_remote_ids=configured_remote_ids,
-                        services=services,
+                        services=load_services(),
                     )
                 _service_in_flight_wake()
                 if drain_seconds > 0:

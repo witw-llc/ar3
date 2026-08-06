@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from core import (
     inbox_dir,
     inbox_tmp_dir,
     outbox_dir,
+    pending_bundle_dir,
     pending_dir,
     retry_sidecar_path,
     trash_dir,
@@ -1303,7 +1305,7 @@ class _StubStorage:
     def supports_config_url(cls, url: str) -> bool:
         return True
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         if self._fail_n > 0:
             self._fail_n -= 1
             from services import StorageError
@@ -1362,11 +1364,11 @@ class TestStorageUpload:
         # Message finalized — no pending leftovers.
         assert list(pending_dir("A").iterdir()) == []
 
-    def test_upload_cached_in_sidecar_on_failure(self, two_agents):
-        # When ONE of two services fails on the first pass, the success on
-        # the other is cached in the sidecar so the retry doesn't re-upload
-        # to it. The publish hook is NOT called this pass (uploads
-        # incomplete).
+    def test_one_dead_service_does_not_block_the_send(self, two_agents):
+        # Redundancy is any-of. A second storage service exists so that the
+        # first one going down cannot stop the mail; requiring all-of inverted
+        # that, and one unreachable remote pushed the whole message through
+        # the backoff schedule and into the trash.
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload bytes")
@@ -1377,47 +1379,92 @@ class TestStorageUpload:
             return list(succeeded_so_far) + ["hub"]
 
         good = _StubStorage("good")
-        flaky = _StubStorage("flaky", fail_n=1)
-        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
-        entry_id = out_path.stem
+        dead = _StubStorage("dead", fail_n=99)
+        _write_staged("A", a.root, "GHOST", "see attached", payload)
         route_outboxes(
             [a, b],
             all_agents=[a, b],
             publish_remotes=stub_publish,
             configured_remote_ids=["hub"],
-            services=[good, flaky],
+            services=[good, dead],
         )
-        # First pass: good succeeded, flaky failed → no publish, sidecar
-        # written.
+        # Both were attempted; one copy is enough to go.
         assert len(good.uploads) == 1
-        assert len(flaky.uploads) == 0
+        assert len(dead.uploads) == 0
+        assert len(published) == 1
+        # Only the service that accepted the file contributes a URL, so a
+        # dead service publishes nothing rather than a link that 404s.
+        urls = published[0]["files"][0]["storage"]
+        assert urls == [u for u in urls if u.startswith("stub://good/")]
+        # Nothing is left waiting on the dead service.
+        assert list(pending_dir("A").iterdir()) == []
+
+    def test_a_file_no_service_accepted_still_blocks(self, two_agents):
+        # Any-of means at least one, not zero. An envelope whose attachment
+        # nobody can fetch is the silent loss #93 closed.
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+        published: list[dict] = []
+
+        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+            published.append(msg)
+            return list(succeeded_so_far) + ["hub"]
+
+        _write_staged("A", a.root, "GHOST", "see attached", payload)
+        route_outboxes(
+            [a, b],
+            all_agents=[a, b],
+            publish_remotes=stub_publish,
+            configured_remote_ids=["hub"],
+            services=[_StubStorage("dead", fail_n=99),
+                      _StubStorage("also-dead", fail_n=99)],
+        )
         assert published == []
-        # Sidecar has the good service cached.
         pending_files = [f for f in pending_dir("A").iterdir()
                          if f.name.endswith(".json") and not f.name.endswith(".retry")]
+        assert len(pending_files) == 1
         sidecar = json.loads(retry_sidecar_path(pending_files[0]).read_text())
-        staged_name = "doc.txt"
-        assert sidecar["uploaded"][staged_name]["good"].startswith("stub://good/")
-        assert "flaky" not in sidecar["uploaded"][staged_name]
-        # Force the next-attempt clock open and route again.
-        sidecar["next_attempt"] = ""
-        retry_sidecar_path(pending_files[0]).write_text(json.dumps(sidecar))
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-            services=[good, flaky],
-        )
-        # Second pass: good was NOT re-uploaded; flaky succeeded; publish
-        # was called.
-        assert len(good.uploads) == 1  # unchanged
-        assert len(flaky.uploads) == 1
-        assert len(published) == 1
-        # Wire entry has both URLs.
-        urls = published[0]["files"][0]["storage"]
-        assert any(u.startswith("stub://good/") for u in urls)
-        assert any(u.startswith("stub://flaky/") for u in urls)
+        # A blocking failure is what an eventual discard should name.
+        assert "last_error" in sidecar
+
+    def test_a_survivable_failure_is_not_the_discard_diagnostic(self, two_agents):
+        # The operator still hears that a service is down, but it is not what
+        # the send is waiting on, so it must not become the discard reason.
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload bytes")
+        sidecar: dict = {}
+        msg = {"id": "01KZAAAAAAAAAAAAAAAAAAAAAA", "to": "GHOST",
+               "files": [{"filename": "doc.txt"}]}
+        bundle = pending_bundle_dir("A", msg["id"])
+        bundle.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(payload, bundle / "doc.txt")
+
+        assert _upload_files_for_remote(
+            msg, a, [_StubStorage("good"), _StubStorage("dead", fail_n=99)], sidecar
+        ) is True
+        assert "last_error" not in sidecar
+
+    def test_sidecar_cache_survives_a_block_by_another_file(self, two_agents):
+        # One file covered, one file not, so the send blocks. The retry must
+        # not re-upload the file that already landed.
+        a, b = two_agents
+        good = _StubStorage("good")
+        sidecar: dict = {}
+        msg = {"id": "01KZBBBBBBBBBBBBBBBBBBBBBB", "to": "GHOST",
+               "files": [{"filename": "here.txt"}, {"filename": "gone.txt"}]}
+        bundle = pending_bundle_dir("A", msg["id"])
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "here.txt").write_text("payload bytes")
+        # `gone.txt` is named in the envelope but its bytes never staged.
+
+        assert _upload_files_for_remote(msg, a, [good], sidecar) is False
+        assert len(good.uploads) == 1
+        assert sidecar["uploaded"]["here.txt"]["good"].startswith("stub://good/")
+
+        assert _upload_files_for_remote(msg, a, [good], sidecar) is False
+        assert len(good.uploads) == 1  # unchanged — served from the sidecar
 
     def test_store_failure_reaches_txlog_and_sidecar(self, two_agents):
         # A failing store used to be a per-agent WARN and nothing else, so a

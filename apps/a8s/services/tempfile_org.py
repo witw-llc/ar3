@@ -134,7 +134,7 @@ class TempFileOrgService(StorageService):
         host = (parsed.hostname or "").lower()
         return host in _DEFAULT_HOSTS
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         try:
             size = src.stat().st_size
             with src.open("rb") as f:

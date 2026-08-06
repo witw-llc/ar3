@@ -73,10 +73,16 @@ class StorageService(ABC):
         about the URL is just "not for me"."""
 
     @abstractmethod
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         """Upload the bytes at `src` and return a download URL. Raises
         `StorageError` on failure. The returned URL is opaque to the
-        caller; the receiver round-trips it through `retrieve`."""
+        caller; the receiver round-trips it through `retrieve`.
+
+        `msg_id` is the envelope's ULID when there is one — `a8s health`
+        uploads a probe that belongs to no message. A backend that publishes
+        to the open web should keep ignoring it and keep minting an
+        unguessable key: a ULID is time-ordered and therefore guessable, which
+        matters for a public URL and does not for a private folder."""
 
     @abstractmethod
     def retrieve(self, url: str, dest: Path) -> bool:

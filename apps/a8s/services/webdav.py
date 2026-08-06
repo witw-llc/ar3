@@ -160,7 +160,7 @@ class WebdavService(StorageService):
                 ) from e
             self._made_collections.add(path)
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         key = self._object_key(src.name)
         put_url = self._put_url_for_key(key)
         try:

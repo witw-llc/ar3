@@ -146,7 +146,7 @@ class RcloneService(StorageService):
             raise StorageError(f"rclone {args[0]} failed: {reason}")
         return done.stdout.strip()
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         target = self._remote_target(src.name)
         self._run(["copyto", str(src), target])
         link = self._run(["link", target])

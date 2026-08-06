@@ -118,3 +118,45 @@ class TestDetectServiceKind:
 
     def test_webdav_url(self):
         assert detect_service_kind("webdav://webdav.example/dav") == "webdav"
+
+    def test_a_bare_folder_path_is_a_sync_folder(self):
+        assert detect_service_kind("/srv/sync/a8s") == "sync_folder"
+        assert detect_service_kind("~/OneDrive/A8S") == "sync_folder"
+
+    def test_a_file_url_stays_file_sync(self):
+        # sync_folder claims bare paths only; `file://` still means the
+        # publish-a-base-URL service.
+        assert detect_service_kind("file:///srv/sync") == "file_sync"
+
+
+class TestServicesFollowTheConfig:
+    """A daemon runs for days. One that captured its services at startup
+    ignored everything configured afterwards, failed every attachment, and
+    said nothing — while `a8s storage` listed the service it was skipping."""
+
+    def test_a_service_added_later_is_picked_up(self, fake_home, tmp_path):
+        save_network_config({"remotes": {}, "services": {}})
+        assert load_services() == []
+        save_network_config({
+            "remotes": {},
+            "services": {"drop": {"service": "sync_folder", "url": str(tmp_path)}},
+        })
+        assert [s.id for s in load_services()] == ["drop"]
+
+    def test_a_service_removed_later_stops_being_used(self, fake_home, tmp_path):
+        save_network_config({
+            "remotes": {},
+            "services": {"drop": {"service": "sync_folder", "url": str(tmp_path)}},
+        })
+        assert [s.id for s in load_services()] == ["drop"]
+        save_network_config({"remotes": {}, "services": {}})
+        assert load_services() == []
+
+    def test_an_unchanged_config_is_not_rebuilt(self, fake_home, tmp_path):
+        # Repeated calls are on the routing path, and a constructor can read
+        # secrets and touch the filesystem.
+        save_network_config({
+            "remotes": {},
+            "services": {"drop": {"service": "sync_folder", "url": str(tmp_path)}},
+        })
+        assert load_services()[0] is load_services()[0]

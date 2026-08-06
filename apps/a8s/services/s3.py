@@ -138,7 +138,7 @@ class S3Service(StorageService):
         safe = Path(filename).name
         return f"{self._prefix}/{token}/{safe}" if self._prefix else f"{token}/{safe}"
 
-    def store(self, src: Path) -> str:
+    def store(self, src: Path, *, msg_id: str = "") -> str:
         client = self._client()
         key = self._key_for(src.name)
         try:
