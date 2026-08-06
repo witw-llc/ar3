@@ -2199,7 +2199,9 @@ on one network does not lose the file. Receivers fetch public URLs with a plain
 HTTP GET and need no credentials or storage config of their own.
 
 The kind is auto-dispatched from the URL scheme. Dashes and underscores in an
-option name are equivalent (--base-url == --base_url).
+option name are equivalent (--base-url == --base_url), and --pass is accepted
+for --password. Give --prefix an empty value to put objects at the top of the
+configured path when that path is already dedicated to a8s.
 
   KIND          URL                              OPTIONS
   tempfile_org  https://tempfile.org             --expiry_hours (1|6|24|48, default 24)
@@ -2278,6 +2280,11 @@ def _format_storage_summary(spec: dict) -> str:
     return line
 
 
+# `a8s remote` spells the credential `--pass`, so an operator who has typed
+# one command reasonably types the other. Accept both here.
+_STORAGE_OPT_ALIASES = {"pass": "password"}
+
+
 def cmd_storage(args: list[str]) -> int:
     """`a8s storage` — manage cross-cluster file services declared in
     `~/.a8s/network.json` (services map).
@@ -2331,7 +2338,7 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
         if not tok.startswith("--") or len(tok) <= 2:
             print(f"expected --<opt> <value> pair, got: {tok!r}", file=sys.stderr)
             return _storage_usage()
-        key = tok[2:].replace("-", "_")
+        key = _STORAGE_OPT_ALIASES.get(tok[2:], tok[2:]).replace("-", "_")
         i += 1
         if i >= len(opt_tokens):
             print(f"missing value for {tok}", file=sys.stderr)
@@ -2440,9 +2447,17 @@ def cmd_health() -> int:
                 ok = http_get_url_to_path(url, dl_dest, max_bytes=get_int("max_file_bytes"))
                 if ok:
                     used_public_get = True
+            # Health runs often. Without this every run leaves a probe object
+            # behind for good, and for a service with a public base_url that
+            # litter is served on the open web.
+            try:
+                removed = svc.delete(url)
+            except Exception:
+                removed = False
             if ok and dl_dest.is_file() and dl_dest.read_text().strip() == "a8s health check":
                 how = "public URL" if used_public_get else "service"
-                print(f"storage {name}: OK (upload + download verified via {how})")
+                left = "" if removed or svc.objects_expire else f"; probe left at {url}"
+                print(f"storage {name}: OK (upload + download verified via {how}{left})")
             elif ok:
                 print(f"storage {name}: WARN (download succeeded but content mismatch)")
                 errors += 1

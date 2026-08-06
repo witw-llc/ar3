@@ -10,7 +10,37 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## [0.1.58]
+## [0.1.59]
+
+### Added
+- **Every CLI answers `--version`** — `ar3`, `a8s`, `r4t`, `k7e`, `tell` and
+  `tells` all print the suite semver from `VERSION`. `ar3 doctor` prints it too
+  and says whether a newer version is published on the public mirror. The check
+  is only in `doctor`, has a short timeout, and stays quiet when GitHub cannot
+  be reached: bare `ar3` remains offline and instant.
+- **`a8s health` removes the probe object it uploads.** Storage services gained
+  an optional `delete`, implemented for `webdav`, `file_sync`, `s3` and
+  `rclone`. Attachments are never deleted — the receiver decides how long it
+  needs them. A store that expires on its own says so and health stays quiet
+  about it; anything else that survives is reported with its URL.
+
+### Fixed
+- **WebDAV uploads work against a real server.** Every object key carries a
+  fresh random directory, and WebDAV `PUT` does not create parent collections,
+  so every upload answered `409 Conflict`. Collections are now created first.
+  The in-process test server accepted any `PUT`, which is why the suite stayed
+  green against a client that could not upload anything anywhere; it now
+  enforces the rule a real server enforces.
+- **A WebDAV filename with a space now uploads.** The object key went into the
+  request target unescaped, so voice memos and screenshots — the files most
+  likely to carry spaces — failed before leaving the machine.
+- `--prefix ""` means no prefix. An empty value fell back to `a8s`, so an
+  operator pointing a service at a folder already dedicated to a8s could not
+  avoid a redundant level below it.
+- `a8s storage` accepts `--pass` as well as `--password`. `a8s remote` takes
+  `--pass`, and the two surfaces disagreeing was a trap.
+
+## [0.1.58] — 2026-08-05
 
 ### Fixed
 - `a8s health` follows the same path a receiver does. A service may decline

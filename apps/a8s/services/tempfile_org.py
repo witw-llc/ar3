@@ -88,6 +88,10 @@ class TempFileOrgService(StorageService):
             silently produce a broken service.
     """
 
+    # The host deletes on its own schedule (see `expiry_hours`), and offers no
+    # delete API, so an undeleted probe here is not litter.
+    objects_expire = True
+
     def __init__(self, name: str, *, url: str, **opts: Any) -> None:
         unknown = set(opts) - _KNOWN_OPTS
         if unknown:

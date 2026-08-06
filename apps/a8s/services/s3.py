@@ -36,7 +36,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from services import StorageError, StorageService
+from services import StorageError, StorageService, resolve_prefix
 
 _KNOWN_OPTS: set[str] = {
     "region",
@@ -75,7 +75,7 @@ class S3Service(StorageService):
             )
         self._name = name
         self._bucket = bucket
-        self._prefix = str(opts.get("prefix") or url_prefix or DEFAULT_PREFIX).strip("/")
+        self._prefix = resolve_prefix(opts, url_prefix or DEFAULT_PREFIX)
         self._region = (opts.get("region") or "").strip() or None
         self._endpoint_url = (opts.get("endpoint_url") or "").strip() or None
         self._profile = (opts.get("profile") or "").strip() or None
@@ -175,6 +175,16 @@ class S3Service(StorageService):
         if first == self._bucket and rest:
             return rest
         return None
+
+    def delete(self, url: str) -> bool:
+        key = self._key_from_url(url)
+        if key is None:
+            return False
+        try:
+            self._client().delete_object(Bucket=self._bucket, Key=key)
+        except Exception:
+            return False
+        return True
 
     def retrieve(self, url: str, dest: Path) -> bool:
         key = self._key_from_url(url)

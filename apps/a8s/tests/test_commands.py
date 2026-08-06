@@ -38,7 +38,7 @@ from commands import (
 )
 from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
 from mailbox import ensure_mailboxes
-from network import load_network_config, save_network_config
+from network import load_network_config, merge_spec_secrets, save_network_config
 from registry import load_aliases, load_namespaces, load_registry, save_aliases, save_namespaces, save_registry
 from definitions import resolve_definition_arg
 
@@ -1311,6 +1311,27 @@ class TestCmdStorage:
         spec = load_network_config()["services"]["tempfile"]
         assert spec["expiry_hours"] == "48"
         assert spec["timeout_s"] == "60"
+
+    def test_pass_is_an_alias_for_password(self, fake_home):
+        # `a8s remote` takes --pass, so the same finger habit reaches here.
+        rc = cmd_storage([
+            "fm", "webdav://dav.example.com/dav",
+            "--base-url", "https://files.example.com",
+            "--user", "alice@example.com", "--pass", "s3cret",
+        ])
+        assert rc == 0
+        spec = load_network_config()["services"]["fm"]
+        assert "pass" not in spec and "password" not in spec
+        merged = merge_spec_secrets("services", "fm", dict(spec))
+        assert merged["password"] == "s3cret"
+
+    def test_blank_prefix_means_no_prefix(self, fake_home):
+        rc = cmd_storage([
+            "fm", "webdav://dav.example.com/dav/_a8s_",
+            "--base-url", "https://files.example.com/_a8s_", "--prefix", "",
+        ])
+        assert rc == 0
+        assert load_network_config()["services"]["fm"]["prefix"] == ""
 
     def test_set_rejects_unknown_url(self, fake_home, capsys):
         rc = cmd_storage(["weird", "https://example.com"])

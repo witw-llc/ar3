@@ -37,7 +37,7 @@ def test_help_hides_machinery_and_maintainer_verbs():
 
 def test_help_usage_line_does_not_enumerate_commands():
     usage = _top_level_help().splitlines()[0]
-    assert usage == "usage: r4t [-h] COMMAND ..."
+    assert usage == "usage: r4t [-h] [--version] COMMAND ..."
 
 
 def test_help_lists_every_user_command():

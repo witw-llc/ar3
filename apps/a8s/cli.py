@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
+
+from core import version_line
 import settings as sm
 from commands import (
     cmd_add,
@@ -192,6 +195,7 @@ def main(argv: list[str]) -> int:
         default=None,
         help=f"loop poll interval seconds (default from settings: {sm.DEFAULTS['loop_interval']})",
     )
+    parser.add_argument("--version", action="version", version=version_line("a8s"))
     parser.add_argument("command", nargs="?", help=argparse.SUPPRESS)
     parser.add_argument("rest", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)

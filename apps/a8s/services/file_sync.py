@@ -20,7 +20,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from services import StorageError, StorageService
+from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
 from services.public_url import (
     join_public_url,
@@ -64,7 +64,7 @@ class FileSyncService(StorageService):
         self._name = name
         self._root = _local_root_from_file_url(url)
         self._base_url = base_url.rstrip("/")
-        self._prefix = str(opts.get("prefix") or DEFAULT_PREFIX).strip("/")
+        self._prefix = resolve_prefix(opts)
 
     @property
     def id(self) -> str:
@@ -97,6 +97,23 @@ class FileSyncService(StorageService):
         except OSError as e:
             raise StorageError(f"file_sync copy failed for {src.name}: {e}") from e
         return join_public_url(self._base_url, key)
+
+    def delete(self, url: str) -> bool:
+        key = relative_key_under_base(self._base_url, url)
+        if key is None:
+            return False
+        try:
+            target = self._local_path_for_key(key)
+        except ValueError:
+            return False
+        try:
+            target.unlink(missing_ok=True)
+            # The per-object directory is ours and now empty; leave anything
+            # else alone.
+            target.parent.rmdir()
+        except OSError:
+            pass
+        return True
 
     def retrieve(self, url: str, dest: Path) -> bool:
         key = relative_key_under_base(self._base_url, url)

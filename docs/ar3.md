@@ -15,6 +15,7 @@ something is missing, `ar3` names the real command to fix it.
 ```
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
+ar3 --version  # the suite semver (every Ark CLI answers this)
 ```
 
 ## `ar3` — the greeter
@@ -57,6 +58,10 @@ Functional probes for the CLIs the suite runs on — every one is read-only and
 time-bounded, so `doctor` never hangs and never installs, starts, or
 configures anything.
 
+- **Suite** — the version this copy is running, and whether a newer one is
+  published on the public mirror. This is the one probe that reaches the
+  network, so it lives here and not in bare `ar3`; when GitHub cannot be
+  reached it says so rather than claiming you are current.
 - **Harnesses** — `claude`, `agent` (Cursor), `codex`, `copilot`, `opencode`,
   `agy`, `ollama`: on PATH, and does a version probe actually answer?
 - **Services** — the ollama server (reachable? which models are pulled?) and

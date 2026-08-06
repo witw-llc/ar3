@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from services import StorageError, StorageService
+from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
 from services.public_url import (
     join_public_url,
@@ -72,13 +72,14 @@ class WebdavService(StorageService):
         self._name = name
         self._dav_base = _webdav_url_to_https(url).rstrip("/")
         self._base_url = base_url.rstrip("/")
-        self._prefix = str(opts.get("prefix") or DEFAULT_PREFIX).strip("/")
+        self._prefix = resolve_prefix(opts)
         self._user = (opts.get("user") or "").strip()
         self._password = (opts.get("password") or "").strip()
         raw_timeout = opts.get("timeout_s")
         self._timeout_s = int(DEFAULT_TIMEOUT_S if raw_timeout is None else raw_timeout)
         if self._timeout_s < 1:
             raise ValueError(f"storage {name!r}: timeout_s must be positive")
+        self._made_collections: set[str] = set()
 
     @property
     def id(self) -> str:
@@ -105,19 +106,20 @@ class WebdavService(StorageService):
         return f"{self._prefix}/{token}/{safe}" if self._prefix else f"{token}/{safe}"
 
     def _put_url_for_key(self, key: str) -> str:
-        return f"{self._dav_base}/{key}"
+        """The DAV URL for a decoded object key.
 
-    def store(self, src: Path) -> str:
-        key = self._object_key(src.name)
-        put_url = self._put_url_for_key(key)
-        try:
-            body = src.read_bytes()
-        except OSError as e:
-            raise StorageError(f"webdav cannot read {src.name}: {e}") from e
+        Keys carry the sender's filename verbatim, so a space or a `#` is
+        ordinary. Each segment is escaped separately to keep the `/` structure.
+        """
+        parts = [p for p in key.strip("/").split("/") if p]
+        encoded = "/".join(urllib.parse.quote(p, safe="") for p in parts)
+        return f"{self._dav_base}/{encoded}"
+
+    def _request(self, url: str, method: str, data: bytes | None = None):
         req = urllib.request.Request(
-            put_url,
-            data=body,
-            method="PUT",
+            url,
+            data=data,
+            method=method,
             headers={
                 "User-Agent": "a8s/1",
                 "Content-Type": "application/octet-stream",
@@ -126,8 +128,50 @@ class WebdavService(StorageService):
         auth = self._auth_header()
         if auth:
             req.add_header("Authorization", auth)
+        return req
+
+    def _make_collections(self, key: str) -> None:
+        """MKCOL every directory above `key`, outermost first.
+
+        WebDAV PUT does not create parent collections: a PUT into a directory
+        that does not exist answers 409 Conflict. Every object key carries a
+        fresh random directory, so that 409 is the normal case, not the rare
+        one. 405 means the collection is already there.
+        """
+        parts = key.split("/")[:-1]
+        path = ""
+        for part in parts:
+            path = f"{path}/{part}" if path else part
+            if path in self._made_collections:
+                continue
+            try:
+                urllib.request.urlopen(
+                    self._request(f"{self._dav_base}/{path}", "MKCOL"),
+                    timeout=self._timeout_s,
+                )
+            except urllib.error.HTTPError as e:
+                if e.code not in (405, 301):
+                    raise StorageError(
+                        f"webdav MKCOL HTTP {e.code} for {self._dav_base}/{path}: {e.reason}"
+                    ) from e
+            except urllib.error.URLError as e:
+                raise StorageError(
+                    f"webdav MKCOL network error for {self._dav_base}/{path}: {e.reason}"
+                ) from e
+            self._made_collections.add(path)
+
+    def store(self, src: Path) -> str:
+        key = self._object_key(src.name)
+        put_url = self._put_url_for_key(key)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
+            body = src.read_bytes()
+        except OSError as e:
+            raise StorageError(f"webdav cannot read {src.name}: {e}") from e
+        self._make_collections(key)
+        try:
+            with urllib.request.urlopen(
+                self._request(put_url, "PUT", body), timeout=self._timeout_s
+            ) as resp:
                 if resp.status and resp.status >= 400:
                     raise StorageError(f"webdav PUT HTTP {resp.status} for {put_url}")
         except urllib.error.HTTPError as e:
@@ -139,6 +183,32 @@ class WebdavService(StorageService):
                 f"webdav PUT network error for {put_url}: {e.reason}"
             ) from e
         return join_public_url(self._base_url, key)
+
+    def _delete_path(self, key: str) -> bool:
+        try:
+            urllib.request.urlopen(
+                self._request(self._put_url_for_key(key), "DELETE"),
+                timeout=self._timeout_s,
+            )
+        except urllib.error.HTTPError as e:
+            return e.code == 404
+        except urllib.error.URLError:
+            return False
+        return True
+
+    def delete(self, url: str) -> bool:
+        key = relative_key_under_base(self._base_url, url)
+        if key is None:
+            return False
+        ok = self._delete_path(key)
+        parts = key.strip("/").split("/")
+        if ok and len(parts) > 1:
+            # The per-object directory holds only this object, so removing the
+            # file alone would leave an empty collection behind on every run.
+            parent = "/".join(parts[:-1])
+            self._made_collections.discard(parent)
+            self._delete_path(parent)
+        return ok
 
     def retrieve(self, url: str, dest: Path) -> bool:
         key = relative_key_under_base(self._base_url, url)

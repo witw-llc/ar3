@@ -31,6 +31,19 @@ def _allow_plaintext_http_in_tests(monkeypatch):
     monkeypatch.setenv("A8S_STORAGE_ALLOW_HTTP", "1")
 
 
+@pytest.fixture(autouse=True)
+def _settle_deferred_attachment_retries():
+    """Deferred attachment delivery runs on a background pool that outlives the
+    test that started it. Left to run, a retry from an earlier test announces
+    its failure into a later test's captured stdout — a cross-test leak that
+    only shows up when the timing lines up, which is to say on someone else's
+    machine."""
+    yield
+    import network
+
+    network.drain_attachment_retries(timeout_s=10)
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     """Redirect `Path.home()` to `tmp_path` so registry / agent / log files

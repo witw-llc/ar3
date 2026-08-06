@@ -20,6 +20,21 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+# `arkver` sits at the repo root and carries the suite semver. A copy of this
+# tree relocated away from that root (the isolation container copies apps/r4t
+# alone to /opt/r4t) still has to run: the version is a nicety, never a
+# dependency, so a missing module degrades to "unknown" instead of killing
+# the CLI on import.
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+try:
+    from arkver import update_note, version_line  # noqa: E402
+except ImportError:
+    def version_line(app: str) -> str:
+        return f"{app} unknown (The Ark)"
+
+    def update_note(timeout_s: float = 0) -> str:
+        return "unknown (no VERSION file beside this copy)"
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -394,6 +409,9 @@ def doctor_failures(results: list[tuple[Check, Probe]]) -> list[str]:
 def cmd_doctor(_args: argparse.Namespace) -> int:
     results = doctor_results(CHECKS)
     print("ar3 doctor — probes only; nothing here is installed, started, or changed")
+    # The only probe pointed at the suite itself. It reaches the public mirror,
+    # so it is here and not in bare `ar3`, which must stay offline and instant.
+    print(f"suite: {update_note()}")
     for group in (HARNESS, SERVICES, TOOLING):
         print()
         print(group)
@@ -419,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
             "another product's commands for you."
         ),
     )
+    parser.add_argument("--version", action="version", version=version_line("ar3"))
     parser.set_defaults(func=cmd_default)
     sub = parser.add_subparsers(dest="command")
     doctor = sub.add_parser("doctor", help="Probe harness and tool prerequisites")

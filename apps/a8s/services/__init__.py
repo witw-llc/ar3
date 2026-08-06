@@ -28,6 +28,21 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 
+DEFAULT_PREFIX = "a8s"
+
+
+def resolve_prefix(opts: dict, default: str = DEFAULT_PREFIX) -> str:
+    """The object-key prefix from a service's options.
+
+    An absent `prefix` takes the default, which keeps a8s objects together in
+    a bucket or a home directory shared with other things. An explicitly blank
+    one means no prefix — the operator has pointed the service at a folder that
+    is already dedicated to a8s, and a second level below it is just noise.
+    """
+    raw = opts.get("prefix")
+    return (default if raw is None else str(raw)).strip("/")
+
+
 class StorageError(Exception):
     """Raised by `store` / `retrieve` when an upload or download genuinely
     failed (network, auth, oversize, server 5xx). Callers warn-and-continue
@@ -36,6 +51,11 @@ class StorageError(Exception):
 
 class StorageService(ABC):
     """A single configured storage backend."""
+
+    #: True when the backend drops objects on its own schedule. A store that
+    #: forgets does not need `delete`, and `health` must not report an
+    #: undeleted probe as litter when the host will clear it anyway.
+    objects_expire: bool = False
 
     @property
     @abstractmethod
@@ -64,3 +84,14 @@ class StorageService(ABC):
         belong to this service (caller should try the next configured
         service). Returns True after a successful write. Raises
         `StorageError` if the URL was ours but the download itself failed."""
+
+    def delete(self, url: str) -> bool:
+        """Remove an object this service stored. False when the URL is not
+        ours or the backend offers no delete.
+
+        Only `a8s health` calls this, and only on the probe object it just
+        uploaded. Attachments are never deleted: the receiver decides how long
+        it needs them, and a sender that tidied up would race that. A backend
+        that cannot delete is not broken — `tempfile_org` expires on its own —
+        so the default is a quiet False rather than an error."""
+        return False

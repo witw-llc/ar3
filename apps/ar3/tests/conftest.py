@@ -8,6 +8,9 @@ import pytest
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
+# `arkver` sits at the repo root, shared by every CLI. Put it on the path here
+# rather than relying on ar3's own import having run first.
+sys.path.append(str(_PKG.parent.parent))
 
 import ar3  # noqa: E402
 

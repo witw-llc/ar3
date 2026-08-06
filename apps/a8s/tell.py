@@ -28,7 +28,15 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core import _preview, out_agent, outbox_bundle_dir, TELL_FILE_MAX_ENV, TELL_OUTBOX_DIR_ENV
+
+from core import (
+    _preview,
+    out_agent,
+    outbox_bundle_dir,
+    version_line as _version_line,
+    TELL_FILE_MAX_ENV,
+    TELL_OUTBOX_DIR_ENV,
+)
 from mailbox import _split_content_and_files
 from ulid import new as new_ulid
 
@@ -410,6 +418,8 @@ def parse_tell_argv(
             check = True
         elif arg in ("-h", "--help"):
             raise TellHelp()
+        elif arg == "--version":
+            raise TellVersion()
         elif recipient is None:
             recipient = arg
         else:
@@ -468,6 +478,11 @@ class TellUsageError(Exception):
 
 class TellHelp(Exception):
     pass
+
+
+class TellVersion(Exception):
+    """`--version` reached the parser. Without this branch the flag becomes
+    the recipient name, which fails later and for the wrong reason."""
 
 
 _USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>|-]"
@@ -621,6 +636,9 @@ def tell_main(argv: list[str]) -> int:
         recipient, attachments, message_argv, check, split = parse_tell_argv(argv)
     except TellHelp:
         _print_usage()
+        return 0
+    except TellVersion:
+        print(_version_line("tell"))
         return 0
     except TellUsageError as e:
         print(f"tell: {e}", file=sys.stderr)

@@ -32,6 +32,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+
+from core import version_line as _version_line
 from tell import agent_root_from_outbox, find_outbox
 
 DEFAULT_TIMEOUT_SEC = 5.0
@@ -50,6 +52,10 @@ class TellsUsageError(Exception):
 
 class TellsHelp(Exception):
     pass
+
+
+class TellsVersion(Exception):
+    """`--version` reached the parser."""
 
 
 _USAGE = (
@@ -176,6 +182,8 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
                 glow_theme = "auto"
         elif arg in ("-h", "--help"):
             raise TellsHelp()
+        elif arg == "--version":
+            raise TellsVersion()
         else:
             raise TellsUsageError(f"unexpected argument: {arg!r}")
         i += 1
@@ -347,6 +355,9 @@ def tells_main(argv: list[str]) -> int:
         opts = parse_tells_argv(argv)
     except TellsHelp:
         _print_usage()
+        return 0
+    except TellsVersion:
+        print(_version_line("tells"))
         return 0
     except TellsUsageError as e:
         print(f"tells: {e}", file=sys.stderr)

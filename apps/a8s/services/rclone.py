@@ -25,7 +25,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from services import StorageError, StorageService
+from services import StorageError, StorageService, resolve_prefix
 
 _KNOWN_OPTS: set[str] = {"prefix", "timeout_s", "rclone_path"}
 
@@ -99,12 +99,13 @@ class RcloneService(StorageService):
         self._name = name
         self._remote = remote
         self._base_path = urllib.parse.unquote(parsed.path).strip("/")
-        self._prefix = str(opts.get("prefix") or DEFAULT_PREFIX).strip("/")
+        self._prefix = resolve_prefix(opts)
         self._rclone = str(opts.get("rclone_path") or DEFAULT_RCLONE_PATH)
         raw_timeout = opts.get("timeout_s")
         self._timeout_s = int(DEFAULT_TIMEOUT_S if raw_timeout is None else raw_timeout)
         if self._timeout_s < 1:
             raise ValueError(f"storage {name!r}: timeout_s must be positive")
+        self._minted: dict[str, str] = {}
 
     @property
     def id(self) -> str:
@@ -151,9 +152,28 @@ class RcloneService(StorageService):
         link = self._run(["link", target])
         if not link:
             raise StorageError(f"rclone link returned nothing for {target}")
-        return direct_download_url(link)
+        url = direct_download_url(link)
+        self._minted[url] = target
+        return url
 
     def retrieve(self, url: str, dest: Path) -> bool:
         # Not ours to fetch: the URL is public https and the receiver's plain
         # GET handles it without rclone or credentials.
         return False
+
+    def delete(self, url: str) -> bool:
+        """Only for a URL this process minted.
+
+        A share link from Drive or OneDrive carries an opaque file id, not the
+        path the object was written to, so there is no way back from an
+        arbitrary URL to a remote target. `store` remembers what it just
+        uploaded, which is all `health` needs.
+        """
+        target = self._minted.pop(url, None)
+        if target is None:
+            return False
+        try:
+            self._run(["deletefile", target])
+        except StorageError:
+            return False
+        return True
