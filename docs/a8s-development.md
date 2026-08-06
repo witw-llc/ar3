@@ -134,6 +134,17 @@ Read [a8s.md](a8s.md) first for concept and usage.
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
+- **Receive-side dedup needs the claim as well as the ring.** `seen-ids` is read
+  on entry and written after delivery, and the gap between the two is a whole
+  download. Several daemons on one machine each subscribe and each resolve
+  recipients from the shared registry, so they all read a ring that does not
+  mention the message yet and all deliver it. `claim_message` takes the ULID
+  first, with a single `O_CREAT | O_EXCL`; the loser drops the envelope exactly
+  as it would a duplicate. Claiming is an optimisation over the ring and never
+  a gate on delivery: if the claims directory cannot be written, deliver and
+  accept the duplicate. A claim expires after `CLAIM_STALE_SECONDS`, and
+  `sweep_stale_claims` runs at daemon startup, so a process killed mid-delivery
+  cannot turn a duplicate-delivery bug into a lost-message bug.
 - **`settings.json` is the stable operator config.** `a8s config set` persists
   machine-wide keys; `a8s config` (no args) catalogs every knob including
   definition, registry, and network fields. Env vars apply only when a key

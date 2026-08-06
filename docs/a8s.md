@@ -260,6 +260,8 @@ Remotes are git-shaped: an explicit list of places to fan messages out to. a8s o
 
 Configure as many remotes as you want and a8s publishes to all of them in parallel; receivers dedupe by ULID, so adding redundant brokers improves delivery without producing duplicate inbox writes. A message to an unknown-locally recipient publishes to all configured remotes and is delivered by whichever cluster has the recipient registered locally. Per-message exponential backoff (30s → 1m → 2m → 5m → 15m → 30m → 1h → 6h → 24h) retries unreachable remotes; after the schedule is exhausted the envelope and its attachment bundle are moved to the sender's trash, logged as "discarded after backoff", and recorded as `DISCARDED` in the transaction log with the last failure reason. A storage upload that fails on the way to a remote records `FILE_UPLOAD_FAILED` per attempt, so `a8s trace <ULID>` shows why a send kept parking.
 
+Dedup runs on two levels, because one machine may run several daemons and each one subscribes to the same remote and resolves recipients from the same registry. `seen-ids` records what has already been delivered. A **claim** — one file per message under `claims/`, created with `O_CREAT | O_EXCL` — covers the delivery itself, which is not instantaneous: downloading a sync-folder attachment can take seconds, and until the download finishes nothing has reached `seen-ids` for a sibling receiver to read. The first receiver to claim a ULID delivers it; the rest drop the envelope as a duplicate. The claim is released once the message is in `seen-ids`, on every path that ends without delivering, and if the process holding it dies, after `CLAIM_STALE_SECONDS` (300) — a receiver killed mid-delivery must not turn a duplicate into a lost message. Each daemon sweeps expired claims at startup.
+
 ### Storage services — attachments across clusters
 
 A remote carries the message; a **storage service** carries the bytes. Without one, a `FILE:` attachment is local-only — the sender's path does not exist on the receiving cluster. Register a service and a8s uploads each attachment, puts the resulting URLs in the envelope, and the receiver downloads them into its own `.files/`.
@@ -486,6 +488,7 @@ When `A8S_HOME` is set it is the a8s state root, whatever else exists on disk. U
 ├── network.json              remotes / services (non-secret)
 ├── secrets.json              remote secrets (`pass` / `password`; mode 0600)
 ├── seen-ids                  cluster-wide ULID ring for receive-side dedup
+├── claims/                   one file per delivery in flight (see below)
 ├── conversations.sqlite3     routed message archive (`a8s update` retains convo_max_rows)
 ├── transactions.sqlite3      routing breadcrumbs for `a8s tx` / `a8s trace` (retains txlog_max_rows)
 ├── log.txt                   process-scoped supervisor log

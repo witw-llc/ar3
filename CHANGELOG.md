@@ -10,6 +10,22 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.62]
+
+### Fixed
+- **One message, one delivery.** A machine running more than one a8s daemon
+  delivered every inbound message once per daemon: each runs its own subscriber
+  and resolves recipients from the same registry, so each one saw the envelope
+  and each one wrote it to the inbox. The `seen-ids` ring could not arbitrate
+  it — the ring is read when the envelope arrives and written only after
+  delivery finishes, and downloading a sync-folder attachment puts seconds
+  between the two. Observed as one send producing two delivery receipts, and
+  with an attachment, two inbox writes 7.3 seconds apart. A receiver now claims
+  the message ULID before it starts, with a single atomic filesystem
+  operation; the others drop the envelope as the duplicate it is. Claims
+  expire after five minutes and are swept at daemon startup, so a receiver
+  killed mid-delivery releases the message rather than stranding it.
+
 ## [0.1.61]
 
 ### Added

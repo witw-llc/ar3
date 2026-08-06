@@ -427,6 +427,87 @@ def detect_service_kind(url: str) -> str | None:
 
 # ---------- seen-ids ring ----------
 
+# How long a claim may sit before another receiver may take it over. The claim
+# covers one delivery attempt — a single download pass plus the inbox writes —
+# so this only has to outlast a network timeout, not the deferred retry window.
+# A process killed mid-delivery leaves a claim behind; past this it is assumed
+# dead and the message becomes deliverable again rather than lost.
+CLAIM_STALE_SECONDS = 300
+
+
+def _claims_dir() -> Path:
+    return seen_ids_path().parent / "claims"
+
+
+def claim_message(ulid: str) -> bool:
+    """Take exclusive responsibility for delivering `ulid`, cluster-wide.
+
+    Every daemon on a machine runs its own subscriber and resolves recipients
+    from the shared registry, so one envelope arrives at every one of them and
+    any of them will deliver it. The seen-ids ring alone cannot arbitrate that:
+    it is read on entry and written after delivery, and everything in between —
+    a download attempt above all — is time in which a second receiver reads a
+    ring that does not mention this message yet and starts delivering it too.
+
+    So the claim is taken up front and atomically. `O_CREAT | O_EXCL` is one
+    filesystem operation with one winner, which is what the process-local lock
+    around the ring cannot be.
+
+    False means somebody else has it; the caller drops the envelope silently,
+    exactly as it would for a duplicate.
+    """
+    d = _claims_dir()
+    path = d / ulid
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        return True
+    except FileExistsError:
+        pass
+    except OSError:
+        # Claiming is an optimisation over the ring, never a gate on delivery.
+        # If the directory cannot be written, deliver and accept the duplicate.
+        return True
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return True  # vanished between the two calls: the holder finished
+    if age <= CLAIM_STALE_SECONDS:
+        return False
+    # The holder is gone. Re-stamp before taking over so that two processes
+    # racing an expiry do not both conclude they won.
+    try:
+        prior = path.stat().st_mtime
+        os.utime(path, None)
+        return path.stat().st_mtime != prior
+    except OSError:
+        return False
+
+
+def release_claim(ulid: str) -> None:
+    """Give up a claim. Called once the message is durably recorded in the
+    ring, and on every path that ends without delivering."""
+    try:
+        (_claims_dir() / ulid).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def sweep_stale_claims() -> None:
+    """Drop claim files left behind by processes that died mid-delivery."""
+    cutoff = time.time() - CLAIM_STALE_SECONDS
+    try:
+        entries = list(_claims_dir().iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def seen_id_contains(ulid: str) -> bool:
     p = seen_ids_path()
     if not p.is_file():
@@ -556,18 +637,47 @@ def receive_envelope(
         return
     if seen_id_contains(msg_id):
         return  # already delivered — silent dedup
+    if not claim_message(msg_id):
+        return  # a sibling receiver has it in flight — same silent dedup
+    try:
+        _deliver_claimed_envelope(
+            msg, msg_id, all_agents, services, publish_control, remote_id
+        )
+    except BaseException:
+        # Nothing was recorded, so the message must stay deliverable — by this
+        # receiver's transport redelivery or by a sibling.
+        release_claim(msg_id)
+        raise
+
+
+def _deliver_claimed_envelope(
+    msg: dict,
+    msg_id: str,
+    all_agents: list[Participant],
+    services: list[StorageService] | None,
+    publish_control: Callable[[bytes], None] | None,
+    remote_id: str,
+) -> None:
+    """The body of `receive_envelope`, run while holding the claim on `msg_id`.
+
+    Every path out of here either records the message in the seen-ids ring and
+    releases the claim, or releases the claim so somebody can try again.
+    """
     if is_control_envelope(msg):
         _receive_control_envelope(msg, all_agents, remote_id)
         seen_id_append(msg_id)
+        release_claim(msg_id)
         return
     recipient_name = (msg.get("to") or "").strip()
     if not recipient_name:
+        release_claim(msg_id)
         return  # malformed; nothing to filter on
     by_name = {p.name.lower(): p for p in all_agents}
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
         _remote_drop_diagnostic(msg_id, recipient_name, "not in local registry", remote_id)
+        release_claim(msg_id)
         return
     recipients: list[Participant] = []
     for m in member_names:
@@ -584,6 +694,7 @@ def receive_envelope(
             f"{kind} resolved to zero local recipients",
             remote_id,
         )
+        release_claim(msg_id)
         return
     txlog.log(
         "RESOLVED_REMOTE",
@@ -639,6 +750,7 @@ def receive_envelope(
 
         convo.record(msg, recipients=delivered_names)
     seen_id_append(msg_id)
+    release_claim(msg_id)
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
     for recipient in deferred:

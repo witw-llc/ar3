@@ -87,6 +87,7 @@ from network import (
     load_services,
     make_publish_remotes,
     start_remotes,
+    sweep_stale_claims,
     stop_remotes,
 )
 from registry import participants_from_registry
@@ -1077,6 +1078,9 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # `a8s storage` cheerfully listed the service it was ignoring. Both sides
     # resolve at use time instead — `load_services` rebuilds only when the
     # config changes.
+    # A receiver killed mid-delivery leaves its claim behind. Startup is when
+    # that is most likely to be true, and the only moment nothing is in flight.
+    sweep_stale_claims()
     started_remotes = start_remotes(load_remotes(), participants_from_registry)
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]

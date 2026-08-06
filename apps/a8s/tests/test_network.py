@@ -588,3 +588,141 @@ class TestStartStop:
         good = StubTransport("good")
         started = start_remotes([BadTransport(), good], lambda: [])
         assert {r.id for r in started} == {"good"}
+
+
+class TestDeliveryClaim:
+    """One envelope reaches every daemon on the machine, because each runs its
+    own subscriber and resolves recipients from the shared registry. The
+    seen-ids ring cannot arbitrate that on its own: it is read on entry and
+    written after delivery, and a slow attachment turns the gap between into
+    seconds. Observed in production 2026-08-05 — one send, two delivery
+    receipts, and with a sync-folder attachment two inbox writes 7.3s apart.
+    """
+
+    def _envelope(self, msg_id, to="B"):
+        return json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": to,
+            "content": "hello", "files": [],
+        }).encode()
+
+    def test_a_claim_has_one_winner(self, fake_home):
+        from network import claim_message
+
+        u = new_ulid()
+        assert claim_message(u) is True
+        assert claim_message(u) is False
+
+    def test_releasing_makes_it_claimable_again(self, fake_home):
+        from network import claim_message, release_claim
+
+        u = new_ulid()
+        claim_message(u)
+        release_claim(u)
+        assert claim_message(u) is True
+
+    def test_a_dead_holder_does_not_strand_the_message(self, fake_home, monkeypatch):
+        # A receiver killed mid-delivery leaves its claim behind. Holding that
+        # forever would turn a duplicate-delivery bug into a lost-message bug.
+        u = new_ulid()
+        assert network.claim_message(u) is True
+        real_time = network.time.time
+        monkeypatch.setattr(
+            network.time, "time",
+            lambda: real_time() + network.CLAIM_STALE_SECONDS + 10,
+        )
+        assert network.claim_message(u) is True
+
+    def test_a_second_receiver_mid_delivery_is_turned_away(self, two_local_agents):
+        # The regression itself. The second receiver arrives while the first is
+        # still downloading — before anything has reached the ring.
+        msg_id = new_ulid()
+        envelope = self._envelope(msg_id)
+        seen: list[str] = []
+
+        real_write = network._write_to_inbox
+
+        def slow_write(msg_for_recipient, recipient, mid, *args, **kwargs):
+            # Stand in for the download: a sibling receiver gets its whole run
+            # in while this one is still working.
+            network.receive_envelope(envelope, two_local_agents)
+            seen.append(mid)
+            return real_write(msg_for_recipient, recipient, mid, *args, **kwargs)
+
+        network._write_to_inbox = slow_write
+        try:
+            network.receive_envelope(envelope, two_local_agents)
+        finally:
+            network._write_to_inbox = real_write
+
+        assert seen == [msg_id]  # the sibling never got as far as writing
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
+    def test_an_inbox_drained_between_writes_still_gets_one_copy(self, two_local_agents):
+        # Why the inbox-already-contains guard was not enough: a filedrop proxy
+        # empties the inbox within milliseconds, so the second writer finds no
+        # envelope there and lands a fresh copy.
+        msg_id = new_ulid()
+        envelope = self._envelope(msg_id)
+        real_write = network._write_to_inbox
+        reentered: list[str] = []
+
+        def write_then_drain(msg_for_recipient, recipient, mid, *args, **kwargs):
+            result = real_write(msg_for_recipient, recipient, mid, *args, **kwargs)
+            if not reentered:
+                reentered.append(mid)
+                for landed in inbox_dir("B").iterdir():
+                    landed.unlink()  # the proxy consumed it
+                network.receive_envelope(envelope, two_local_agents)
+            return result
+
+        network._write_to_inbox = write_then_drain
+        try:
+            network.receive_envelope(envelope, two_local_agents)
+        finally:
+            network._write_to_inbox = real_write
+
+        assert reentered == [msg_id]
+        assert list(inbox_dir("B").iterdir()) == []
+
+    def test_a_delivered_message_releases_its_claim(self, two_local_agents):
+        from network import _claims_dir
+
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        assert not (_claims_dir() / msg_id).exists()
+
+    def test_an_undeliverable_message_releases_its_claim(self, two_local_agents):
+        # Unknown recipient today can be a registered one tomorrow, and the
+        # ring never recorded it — so nothing may keep holding the claim.
+        from network import _claims_dir, claim_message
+
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id, to="NOBODY"), two_local_agents)
+        assert not (_claims_dir() / msg_id).exists()
+        assert claim_message(msg_id) is True
+
+    def test_a_crash_mid_delivery_releases_the_claim(self, two_local_agents):
+        msg_id = new_ulid()
+        boom = network._write_to_inbox
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("disk went away")
+
+        network._write_to_inbox = explode
+        try:
+            with pytest.raises(RuntimeError):
+                network.receive_envelope(self._envelope(msg_id), two_local_agents)
+        finally:
+            network._write_to_inbox = boom
+        assert network.claim_message(msg_id) is True
+
+    def test_sweep_drops_only_stale_claims(self, fake_home, monkeypatch):
+        import os as _os
+        fresh, dead = new_ulid(), new_ulid()
+        network.claim_message(fresh)
+        network.claim_message(dead)
+        old = __import__("time").time() - network.CLAIM_STALE_SECONDS - 60
+        _os.utime(network._claims_dir() / dead, (old, old))
+        network.sweep_stale_claims()
+        assert (network._claims_dir() / fresh).exists()
+        assert not (network._claims_dir() / dead).exists()
