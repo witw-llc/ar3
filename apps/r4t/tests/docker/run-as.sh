@@ -8,7 +8,8 @@
 # workplace dirs — then runs a REAL org-level `run_as` dispatch turn and asserts
 # the boundary holds from inside: the turn's effective user is the agent, env
 # survived sudoers env_reset, staging writes land group-owned, the agent cannot
-# sudo, and it cannot read the router's home. Functional checks throughout — a
+# sudo, it cannot read the router's home, and it can neither enumerate R4T_HOME
+# nor read the member's k7e store under it. Functional checks throughout — a
 # real user doing real writes, not trusting mode bits.
 #
 # The container is the only entry point; the same script runs locally (Docker

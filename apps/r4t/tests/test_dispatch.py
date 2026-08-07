@@ -3045,6 +3045,49 @@ class TestCli:
         assert "ops" not in out
         assert "warning: Gerry" not in out
 
+    def _knowledge_roster(self, root: Path) -> None:
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n"
+            "- **Knowledge:** on\n\n"
+            "### Phil\n- **Rig:** junior-dev\n",
+            encoding="utf-8",
+        )
+
+    def test_roster_check_flags_a_store_inside_the_workplace(
+        self, r4t_home, tmp_path, rig_config, monkeypatch, capsys
+    ):
+        """A container holds the stores by never mounting R4T_HOME, and mounts
+        the workplace read-write — so R4T_HOME under the workplace hands the
+        stores back to the member the cage was meant to keep them from."""
+        import knowledge
+
+        root = tmp_path / "store-inside-repo"
+        self._knowledge_roster(root)
+        monkeypatch.setenv("R4T_HOME", str(root / ".r4t"))
+        state.stamp_root(NODE, root)
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        # A warning, never a problem: the placement is legal, and on a bare org
+        # it costs nothing.
+        assert rc == 0
+        store = str(knowledge.store_home(NODE, "Gerry").resolve())
+        assert f"warning: Gerry: knowledge store {store} is inside the workplace" in out
+        assert "a container mounts read-write" in out
+        # Phil carries no Knowledge line, so there is no store to misplace.
+        assert "warning: Phil" not in out
+
+    def test_roster_check_is_quiet_when_the_store_is_outside_the_workplace(
+        self, r4t_home, tmp_path, rig_config, capsys
+    ):
+        root = tmp_path / "store-outside-repo"
+        self._knowledge_roster(root)
+        state.stamp_root(NODE, root)  # R4T_HOME stays at the fixture's own path
+        rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "knowledge store" not in out
+
     def test_roster_check_is_quiet_when_a8s_has_nothing_registered(
         self, r4t_home, tmp_path, rig_config, capsys
     ):

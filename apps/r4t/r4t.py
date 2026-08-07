@@ -1570,6 +1570,36 @@ def _name_shadow_warnings(roster) -> list[str]:
     return out
 
 
+def _store_in_workplace_warnings(roster, root: Path, workplace: Path) -> list[str]:
+    """Where a member's knowledge store sits inside the shared workplace.
+
+    A container holds the stores by never mounting `R4T_HOME`; it mounts the
+    workplace read-write at its real path. So `R4T_HOME` under the workplace
+    is the one placement that hands every store back to the member — its own
+    and its siblings'.
+    """
+    node = state.node_for_root(root)
+    if node is None:
+        rosters = state.known_rosters()
+        node = rosters[0] if len(rosters) == 1 else None
+    if node is None:
+        return []
+    work = workplace.expanduser().resolve()
+    out: list[str] = []
+    for m in roster.members:
+        if m.is_human or m.errors or not m.knowledge_on:
+            continue
+        store = knowledge.store_home(node, m.name).expanduser().resolve()
+        if not store.is_relative_to(work):
+            continue
+        out.append(
+            f"{m.name}: knowledge store {store} is inside the workplace "
+            f"{work}, which a container mounts read-write — the cage cannot "
+            f"hold a store it mounts (put R4T_HOME outside the workplace)"
+        )
+    return out
+
+
 def cmd_roster_check(args: argparse.Namespace) -> int:
     org = load_org(_resolve_root(args.root))
     root = org.dir
@@ -1654,6 +1684,9 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
             print(f"warning: {message}")
             warnings += 1
     for message in _name_shadow_warnings(roster):
+        print(f"warning: {message}")
+        warnings += 1
+    for message in _store_in_workplace_warnings(roster, root, org.workplace):
         print(f"warning: {message}")
         warnings += 1
     for severity, message in roster.tree_problems():

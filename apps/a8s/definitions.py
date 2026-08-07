@@ -16,7 +16,9 @@ nodes at the edges and a8s learns nothing about any node's protocol.
 
 A8s vars are NOT process environment variables — they live on the agent in
 the registry and expand only through this interpolator. A `$NAME` that is
-neither a built-in placeholder nor a set a8s var is a hard error.
+neither a built-in placeholder nor a set a8s var is a hard error. Process
+environment for a wake is a separate knob, `definition.env`, and the two never
+meet: a var reaches argv, an `env` entry reaches the child's environment.
 
 Strict opacity: the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
@@ -30,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +48,7 @@ from core import (
     user_definitions_dir,
 )
 from registry import load_registry, resolve_recipient
+from settings import get_setting
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
 ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "
@@ -665,6 +669,94 @@ def idle_timeout_seconds(definition: dict) -> float | None:
     except (TypeError, ValueError):
         return None
     return v if v > 0 else None
+
+
+WAKE_SHELL_LOGIN = "login"
+IS_WINDOWS = os.name == "nt"
+
+
+def definition_env(definition: dict) -> dict[str, str]:
+    """`definition.env` — process environment declared for every wake.
+
+    Literal strings only: no `$NAME` expansion, because these are OS variables
+    handed to the child, not argv the interpolator owns. `a8s vars` is the
+    other knob and stays argv-only.
+    """
+    raw = definition.get("env")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("definition env must be an object of NAME: value strings")
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k or "=" in k or "\0" in k:
+            raise ValueError(f"definition env name is not usable as a variable: {k!r}")
+        if not isinstance(v, str):
+            raise ValueError(f"definition env {k}: value must be a string")
+        out[k] = v
+    return out
+
+
+def wake_env(definition: dict) -> dict[str, str]:
+    """The environment a node declares, layered over the handler's own.
+
+    `definition.env` wins over what `a8s start`'s shell happened to carry; the
+    machine-wide `wake_path` fills in PATH for every node that does not name
+    one. An unset `wake_path` means inherit, which is the handler's PATH.
+
+    Routing variables are NOT in here. a8s injects those on top of this layer
+    so a definition cannot point its own outbox somewhere else.
+    """
+    env = definition_env(definition)
+    if "PATH" in env:
+        return env
+    fallback = str(get_setting("wake_path") or "").strip()
+    if not fallback:
+        return env
+    return {"PATH": fallback, **env}
+
+
+def wake_shell(definition: dict) -> str | None:
+    """`definition.wake_shell` — `"login"` or nothing.
+
+    One value, because it names one mechanism. Anything else is a typo the
+    operator needs to see rather than a word that quietly means nothing.
+    """
+    raw = definition.get("wake_shell")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError('definition wake_shell must be the string "login"')
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value != WAKE_SHELL_LOGIN:
+        raise ValueError(f'definition wake_shell must be "login", not {raw!r}')
+    return WAKE_SHELL_LOGIN
+
+
+def login_shell() -> str:
+    """The operator's own shell. Which startup files a wrap reads depends on
+    the shell, so hardcoding one would source the wrong rc on half the boxes
+    the suite runs on."""
+    return os.environ.get("SHELL", "").strip() or "/bin/sh"
+
+
+def wrap_wake_argv(definition: dict, argv: list[str]) -> list[str]:
+    """The argv a8s actually spawns, wrapped when the node opted in.
+
+    `-ilc` in that order: `-c` last, because a shell reads the first
+    non-option word after `-c` as the command and everything following it as
+    positional parameters — `-c -l "cmd"` runs `-l` and makes `cmd` `$0`.
+    """
+    if wake_shell(definition) is None:
+        return list(argv)
+    if IS_WINDOWS:
+        raise ValueError(
+            'definition wake_shell "login" is POSIX-only; Windows has no login '
+            "shell to wrap — declare definition.env.PATH or wake_path instead"
+        )
+    return [login_shell(), "-ilc", shlex.join(argv)]
 
 
 # Programs that run another program. A definition that wraps its harness in

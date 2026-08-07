@@ -240,7 +240,12 @@ The inverse is worth naming too: some separations exist *only* because a
 boundary is set. Per-member knowledge stores are files under `R4T_HOME`, and
 `R4T_HOME` is in the turn environment — so on a bare org a tool-capable member
 can read any member's store off disk, observed live in the K1 rig matrix. That
-is not a leak in the inject path; the inject path never claimed to own it. See
+is not a leak in the inject path; the inject path never claimed to own it.
+`run_as` alone does not close it either: the stores become another user's
+files, but the modes this boundary re-asserts are staging (2770) and the
+delivered bundle (2750), so the mode on the store is the operator's to set —
+`R4T_HOME` search-only for the shared work group, each store dir `0700`, as
+`tests/docker/inside.sh` provisions them. See
 [r4t-knowledge.md](r4t-knowledge.md#the-separation-is-prompt-path-only-until-the-os-enforces-it).
 
 ## Whole-node containment (a deployment choice, not a feature)
@@ -261,7 +266,8 @@ a shared work group, a scoped `visudo`-validated sudoers drop-in, and setgid
 `2770` staging/workplace dirs — then runs a real org-level `run_as` dispatch turn
 and asserts the boundary holds from inside (the turn's effective user is the
 agent user, `TELL_OUTBOX_DIR` survived `env_reset`, staging writes are
-group-writable, the agent cannot sudo, and it cannot read the router's home).
+group-writable, the agent cannot sudo, it cannot read the router's home, and it
+can neither enumerate `R4T_HOME` nor read the member's k7e store under it).
 Run it directly (`apps/r4t/tests/docker/run-as.sh`); CI runs it on r4t changes.
 It doubles as a copy-pasteable provisioning checklist for a real deployment.
 

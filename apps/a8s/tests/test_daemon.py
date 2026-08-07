@@ -397,6 +397,91 @@ class TestWakeOnce:
             assert "ALIAS:" not in log
 
 
+class TestDeclaredWakeEnv:
+    """`definition.env` and `wake_path` sit between the handler's own
+    environment and the routing variables a8s injects (#121). Both edges
+    matter: a node can override what the start shell happened to carry, and
+    nothing a node declares can move its own outbox."""
+
+    def _participant(self, tmp_path):
+        agent_root = tmp_path / "agent"
+        agent_root.mkdir()
+        return Participant("X", agent_root, outbox=tmp_path / "mail" / ".outbox")
+
+    def test_declared_env_reaches_the_wake(self, fake_home, tmp_path):
+        from daemon import _wake_env
+
+        p = self._participant(tmp_path)
+        env = _wake_env(p, {"env": {"PATH": "/node/bin", "LANG": "C"}})
+        assert env["PATH"] == "/node/bin"
+        assert env["LANG"] == "C"
+
+    def test_routing_env_wins_over_a_declared_override(self, fake_home, tmp_path):
+        from daemon import _wake_env
+
+        p = self._participant(tmp_path)
+        env = _wake_env(p, {"env": {TELL_OUTBOX_DIR_ENV: "/somewhere/else"}})
+        assert env[TELL_OUTBOX_DIR_ENV] == str(p.outbox_path().resolve())
+
+    def test_wake_path_is_the_fallback_when_no_node_declares_one(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        from daemon import _wake_env
+
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
+        p = self._participant(tmp_path)
+        assert _wake_env(p, {"invoke": ["x"]})["PATH"] == "/machine/bin"
+
+    def test_the_spawned_process_gets_the_declared_path(self, tmp_path, monkeypatch):
+        from daemon import _wake_env, run_with_prefix
+
+        captured: dict = {}
+
+        class FakeProc:
+            stdout = iter([])
+            returncode = 0
+
+            def wait(self):
+                return 0
+
+            def poll(self):
+                return 0
+
+        monkeypatch.setattr(
+            "daemon.subprocess.Popen",
+            lambda cmd, **kwargs: (captured.update(env=kwargs["env"]), FakeProc())[1],
+        )
+        p = self._participant(tmp_path)
+        run_with_prefix("X", ["true"], p.root, env=_wake_env(p, {"env": {"PATH": "/node/bin"}}))
+        assert captured["env"]["PATH"] == "/node/bin"
+        assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(p.outbox_path().resolve())
+
+    def test_a_malformed_env_aborts_the_wake_instead_of_crashing(
+        self, fake_home, tmp_path, fixtures_dir
+    ):
+        for n in ("A", "B"):
+            (tmp_path / n).mkdir()
+        bad = tmp_path / "bad-env.json"
+        bad.write_text(json.dumps({
+            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "MSG:$MESSAGE"],
+            "env": "PATH=/usr/bin",
+        }))
+        save_registry({
+            "A": {"root": str(tmp_path / "a"), "definition": str(fixtures_dir / "mock.json")},
+            "B": {"root": str(tmp_path / "b"), "definition": str(bad)},
+        })
+        a = Participant("A", tmp_path / "a")
+        b = Participant("B", tmp_path / "b")
+        ensure_mailboxes(a)
+        ensure_mailboxes(b)
+        _write_outbox("A", a.root, "B", "hi", [])
+
+        assert attached_loop(["A", "B"], 0.1, single_pass=True) == 0
+        assert "wake aborted" in _read_log("B")
+        # Requeued, never dropped: the operator fixes the knob and it delivers.
+        assert list(inbox_dir("B").glob("*.json"))
+
+
 class TestFilesDirContract:
     """PR #137 checklist — wake prompts and files_dir bootstrap."""
 

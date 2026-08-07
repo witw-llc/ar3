@@ -3,6 +3,8 @@ and auto-discovery."""
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,7 @@ from definitions import (
     _format_age,
     _message_body,
     build_command,
+    definition_env,
     harness_is_resolvable,
     harness_program,
     default_definition_path,
@@ -25,6 +28,9 @@ from definitions import (
     resolve_inbox_dir,
     resolve_outbox_dir,
     validate_var_name,
+    wake_env,
+    wake_shell,
+    wrap_wake_argv,
 )
 
 
@@ -932,3 +938,124 @@ class TestHarnessIsResolvable:
 
     def test_nothing_resolves_nothing(self):
         assert harness_is_resolvable("") is False
+
+
+class TestDefinitionEnv:
+    """`definition.env` is OS environment for the wake, and nothing else.
+
+    The knob it is constantly confused with is `a8s vars`, which substitutes
+    `$NAME` into argv and never reaches the child's environment. Keeping the
+    two apart is why nothing here expands.
+    """
+
+    def test_absent_is_empty(self):
+        assert definition_env({"invoke": ["x"]}) == {}
+
+    def test_pairs_come_through_literally(self):
+        env = definition_env({"env": {"PATH": "/opt/bin:/usr/bin", "LANG": "C"}})
+        assert env == {"PATH": "/opt/bin:/usr/bin", "LANG": "C"}
+
+    def test_a_dollar_name_is_a_value_not_a_placeholder(self):
+        assert definition_env({"env": {"PATH": "$HOME/bin"}}) == {"PATH": "$HOME/bin"}
+
+    def test_a_non_object_is_refused(self):
+        with pytest.raises(ValueError, match="object"):
+            definition_env({"env": ["PATH=/usr/bin"]})
+
+    def test_a_non_string_value_is_refused(self):
+        with pytest.raises(ValueError, match="string"):
+            definition_env({"env": {"TELL_FILE_MAX": 50}})
+
+    @pytest.mark.parametrize("key", ["", "A=B", "A\0B", 3])
+    def test_a_name_that_is_not_a_variable_name_is_refused(self, key):
+        with pytest.raises(ValueError):
+            definition_env({"env": {key: "x"}})
+
+
+class TestWakeEnv:
+    """`wake_path` is the fallback under `definition.env`, and both sit under
+    the routing variables a8s injects (see daemon `_wake_env`)."""
+
+    def test_no_knobs_means_inherit(self, fake_home):
+        assert wake_env({"invoke": ["x"]}) == {}
+
+    def test_wake_path_fills_in_a_missing_path(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_WAKE_PATH", "/opt/bin:/usr/bin")
+        assert wake_env({"invoke": ["x"]}) == {"PATH": "/opt/bin:/usr/bin"}
+
+    def test_a_declared_path_beats_wake_path(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
+        assert wake_env({"env": {"PATH": "/node/bin"}}) == {"PATH": "/node/bin"}
+
+    def test_wake_path_still_fills_in_beside_other_declared_vars(
+        self, fake_home, monkeypatch
+    ):
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
+        assert wake_env({"env": {"LANG": "C"}}) == {
+            "PATH": "/machine/bin",
+            "LANG": "C",
+        }
+
+    def test_a_blank_wake_path_is_inherit(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_WAKE_PATH", "   ")
+        assert wake_env({"invoke": ["x"]}) == {}
+
+
+class TestWakeShell:
+    def test_absent_is_none(self):
+        assert wake_shell({"invoke": ["x"]}) is None
+
+    @pytest.mark.parametrize("raw", ["login", "LOGIN", "  Login  "])
+    def test_login_is_the_one_value(self, raw):
+        assert wake_shell({"wake_shell": raw}) == "login"
+
+    def test_blank_is_none(self):
+        assert wake_shell({"wake_shell": "  "}) is None
+
+    @pytest.mark.parametrize("raw", ["interactive", "bash", "yes"])
+    def test_any_other_word_is_a_typo_not_a_meaning(self, raw):
+        with pytest.raises(ValueError, match="login"):
+            wake_shell({"wake_shell": raw})
+
+    def test_a_non_string_is_refused(self):
+        with pytest.raises(ValueError, match="login"):
+            wake_shell({"wake_shell": True})
+
+
+class TestWrapWakeArgv:
+    ARGV = ["claude", "-p", "hello world"]
+
+    def test_no_opt_in_leaves_argv_alone(self):
+        assert wrap_wake_argv({"invoke": ["x"]}, self.ARGV) == self.ARGV
+
+    def test_the_wrap_uses_the_operators_own_shell(self, monkeypatch):
+        monkeypatch.setenv("SHELL", "/usr/bin/zsh")
+        wrapped = wrap_wake_argv({"wake_shell": "login"}, self.ARGV)
+        assert wrapped[0] == "/usr/bin/zsh"
+
+    def test_the_flags_are_one_word_with_c_last(self, monkeypatch):
+        # `-c -l "cmd"` runs `-l` as the command and makes `cmd` `$0`.
+        monkeypatch.setenv("SHELL", "/bin/bash")
+        wrapped = wrap_wake_argv({"wake_shell": "login"}, self.ARGV)
+        assert wrapped == ["/bin/bash", "-ilc", "claude -p 'hello world'"]
+
+    def test_an_unset_shell_falls_back_to_sh(self, monkeypatch):
+        monkeypatch.delenv("SHELL", raising=False)
+        assert wrap_wake_argv({"wake_shell": "login"}, self.ARGV)[0] == "/bin/sh"
+
+    def test_windows_is_refused_not_ignored(self, monkeypatch):
+        monkeypatch.setattr("definitions.IS_WINDOWS", True)
+        with pytest.raises(ValueError, match="POSIX-only"):
+            wrap_wake_argv({"wake_shell": "login"}, self.ARGV)
+
+    def test_the_message_survives_the_shell_parse(self, monkeypatch):
+        # The wrap puts a shell parse where there is none today, so a message
+        # off the wire has to round-trip byte-exact through it.
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("no bash on this machine")
+        monkeypatch.setenv("SHELL", bash)
+        body = "quotes ' \" backtick ` dollar $HOME\nsecond line"
+        wrapped = wrap_wake_argv({"wake_shell": "login"}, ["printf", "%s", body])
+        out = subprocess.run(wrapped, capture_output=True, text=True).stdout
+        assert out.endswith(body)

@@ -210,12 +210,19 @@ You should see:
 ```
 added me -> /home/you/ark/me
 definition: /home/you/.ar3/apps/a8s/definitions/filedrop.json  (explicit)
+wake_path: recorded this shell's PATH for every node's wakes
 added solo -> /home/you/ark/solo
 definition: /home/you/ark/solo/solo.json  (explicit)
 NAME   STATUS    DEFINITION   ROOT
 me     stopped   filedrop     /home/you/ark/me
 solo   stopped   solo         /home/you/ark/solo
 ```
+
+That third line appears once, on the first `a8s add` on a machine. A woken
+agent gets the environment of whatever shell started its handler, which is
+right when you start from a terminal and wrong when cron or ssh does it — so
+a8s writes down the PATH of the shell you are typing in now and gives every
+wake that instead. `a8s config` shows it as `wake_path`.
 
 Registered but stopped: nothing routes until a **handler** process is
 attached. Start one for each:

@@ -83,6 +83,8 @@ Created when missing.
 
 When a8s wakes an agent, it sets `TELL_OUTBOX_DIR` in the invoke subprocess environment to the agent definition's resolved `outbox_dir` (default `<agent-root>/.outbox`). Use a separate absolute `outbox_dir` to keep outgoing tell traffic outside the agent workspace.
 
+a8s sets it last, over anything the node declares in `definition.env`, so a definition cannot redirect its own outbox. A definition that opts into `wake_shell: "login"` is the one way to lose that guarantee: the rc files run inside the wrapped shell, after a8s has handed the variable over, so an unguarded `export TELL_OUTBOX_DIR=...` in an rc file wins. See [Wake environment](a8s.md#wake-environment-optional).
+
 Does not affect `sender_from_cwd()`; the router still force-stamps `from` from outbox ownership.
 
 **Inherited-variable warning.** When `TELL_OUTBOX_DIR` names a registered agent's own outbox and CWD is neither that agent's root nor the outbox itself, `tell` prints a warning to stderr and sends anyway; `tell --check` reports the same line. That pair is the shape a stale variable makes when it leaks from a live seat into another shell — every check passes, and the mail leaves under the wrong name. A staging outbox is not registered and an agent in its own root matches, so neither warns.

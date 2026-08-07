@@ -81,12 +81,23 @@ nothing in the prompt, in half its trials. Other presets on the same condition
 could have looked and did not — which is the point. It is a choice the member
 makes, so nothing on the inject path can prevent it.
 
-Under `run_as` or container isolation the stores are another OS user's files
-and the cage holds. The isolation result that matters is an OS boundary; the
-prompt path was never the whole surface. Consistent with a8s doctrine — the
-filesystem is the identity boundary — but worth stating where someone is
-deciding whether an org needs isolation, because "each member has its own
-store" reads like a guarantee and on a bare org it is a convention.
+Under `container` the stores are outside the cage by construction: `R4T_HOME`
+is never mounted, so a member has no filesystem path to any store, its own
+included — unless `R4T_HOME` sits inside the workplace, which the container
+mounts read-write (`r4t roster check` warns on that placement). Under `run_as`
+the stores are another OS user's files, but their mode is whatever the
+operator's umask left: r4t sets modes on staging (2770) and the delivered
+bundle (2750) and on nothing else. So the wall stands where the operator put
+one — `R4T_HOME` search-only for the shared work group (it must stay
+traversable; staging and the delivered bundle live under it), each member's
+store dir `0700`. `tests/docker/inside.sh` provisions exactly that and asserts
+it from inside the cage.
+
+The isolation result that matters is an OS boundary; the prompt path was never
+the whole surface. Consistent with a8s doctrine — the filesystem is the
+identity boundary — but worth stating where someone is deciding whether an org
+needs isolation, because "each member has its own store" reads like a guarantee
+and on a bare org it is a convention.
 
 ## Inject on the way in
 

@@ -35,6 +35,9 @@ teaches them.
   page must not grow frontmatter.
 - **`requirements/`** — dependency groups (`a8s-test.txt`, `r4t.txt`). Per-app
   `tests/requirements.txt` files point here.
+- **`tools/`** — repo-local checkers, stdlib-only, run on demand at zero Actions
+  cost. They run in `release.yml` and never in the per-PR workflow. See
+  [`tools/README.md`](tools/README.md).
 
 The sibling layout under `apps/` is load-bearing: r4t resolves a8s at
 `apps/a8s/a8s.py` relative to its own file, and `apps/a8s/definitions/r4t.json`

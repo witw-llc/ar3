@@ -1085,6 +1085,158 @@ class TestHarnessWarningAtStart:
         _warn_unresolvable_harnesses(["no-such-agent"])
         assert capsys.readouterr().err == ""
 
+    def test_the_warning_names_the_knobs_that_fix_it(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, ["a8s-no-such-harness-xyz"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "definition.env" in err
+        assert "wake_path" in err
+
+    def test_a_declared_path_that_resolves_it_ends_the_warning(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        # The probe runs against the environment the wake will actually get,
+        # so a node fixed by the knob stops nagging.
+        harness_dir = tmp_path / "bin"
+        harness_dir.mkdir()
+        exe = harness_dir / "a8s-probe-harness"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        path = tmp_path / "probe-definition.json"
+        path.write_text(json.dumps({
+            "invoke": ["a8s-probe-harness", "-p", "$MESSAGE"],
+            "env": {"PATH": str(harness_dir)},
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_wake_path_alone_ends_the_warning(
+        self, fake_home, agent_root, tmp_path, capsys, monkeypatch
+    ):
+        harness_dir = tmp_path / "bin"
+        harness_dir.mkdir()
+        exe = harness_dir / "a8s-probe-harness"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        self._register(agent_root, tmp_path, ["a8s-probe-harness", "-p", "$MESSAGE"])
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert "a8s-probe-harness" in capsys.readouterr().err
+        from settings import set_setting
+
+        set_setting("wake_path", str(harness_dir))
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_a_login_shell_node_is_not_second_guessed(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        # The opt-in exists for a PATH that cannot be written down, so nothing
+        # here can predict what the rc will produce.
+        path = tmp_path / "probe-definition.json"
+        path.write_text(json.dumps({
+            "invoke": ["a8s-no-such-harness-xyz"],
+            "wake_shell": "login",
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+
+class _StartedProc:
+    pid = 99999
+
+
+def _fake_popen(*a, **k):
+    return _StartedProc()
+
+
+def _never_spawn(*a, **k):
+    raise AssertionError("start should have refused before spawning")
+
+
+class TestWakeShellAtStart:
+    """`wake_shell` is POSIX-only, and a knob that silently does nothing is the
+    failure it exists to end — so `a8s start` refuses rather than shrugs."""
+
+    def _register(self, agent_root, tmp_path, wake_shell):
+        path = tmp_path / "shell-definition.json"
+        path.write_text(json.dumps({
+            "invoke": ["python3", "-c", "pass"],
+            "wake_shell": wake_shell,
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+
+    def test_windows_refuses_the_start(
+        self, fake_home, agent_root, tmp_path, capsys, monkeypatch
+    ):
+        self._register(agent_root, tmp_path, "login")
+        monkeypatch.setattr("definitions.IS_WINDOWS", True)
+        monkeypatch.setattr("commands.subprocess.Popen", _never_spawn)
+        capsys.readouterr()
+        assert cmd_start(["probe"]) == 1
+        err = capsys.readouterr().err
+        assert "POSIX-only" in err
+        assert "wake_path" in err
+
+    def test_a_typo_refuses_the_start(
+        self, fake_home, agent_root, tmp_path, capsys, monkeypatch
+    ):
+        self._register(agent_root, tmp_path, "interactive")
+        monkeypatch.setattr("commands.subprocess.Popen", _never_spawn)
+        capsys.readouterr()
+        assert cmd_start(["probe"]) == 1
+        assert "login" in capsys.readouterr().err
+
+    def test_posix_starts_normally(
+        self, fake_home, agent_root, tmp_path, capsys, monkeypatch
+    ):
+        self._register(agent_root, tmp_path, "login")
+        monkeypatch.setattr("commands.subprocess.Popen", _fake_popen)
+        capsys.readouterr()
+        assert cmd_start(["probe"]) == 0
+
+
+class TestWakePathCapture:
+    """`a8s add` runs in the operator's own working shell, so that shell's PATH
+    is correct by construction at exactly that moment. Recording it there is
+    what stops the *start* shell's provenance from mattering (#121)."""
+
+    def test_the_first_add_records_this_shells_path(
+        self, fake_home, agent_root, monkeypatch
+    ):
+        from settings import get_setting
+
+        monkeypatch.setenv("PATH", "/operator/bin:/usr/bin")
+        assert cmd_add(["alpha", str(agent_root)]) == 0
+        assert get_setting("wake_path") == "/operator/bin:/usr/bin"
+
+    def test_a_later_add_never_overwrites(self, fake_home, agent_root, monkeypatch):
+        from settings import get_setting
+
+        monkeypatch.setenv("PATH", "/operator/bin")
+        assert cmd_add(["alpha", str(agent_root)]) == 0
+        monkeypatch.setenv("PATH", "/some/cron/path")
+        assert cmd_add(["beta", str(agent_root)]) == 0
+        assert get_setting("wake_path") == "/operator/bin"
+
+    def test_an_operator_set_value_outranks_the_capture(
+        self, fake_home, agent_root, monkeypatch
+    ):
+        from settings import get_setting, load_settings_file
+
+        monkeypatch.setenv("A8S_WAKE_PATH", "/chosen/bin")
+        monkeypatch.setenv("PATH", "/operator/bin")
+        assert cmd_add(["alpha", str(agent_root)]) == 0
+        assert "wake_path" not in load_settings_file()
+        assert get_setting("wake_path") == "/chosen/bin"
+
 
 class TestParseOptionTokens:
     """One parser behind `a8s add`, `a8s remote` and `a8s storage`.

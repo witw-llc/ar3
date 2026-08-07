@@ -108,6 +108,14 @@ KNOBS: tuple[Knob, ...] = (
         "A8S_TXLOG_MAX_ROWS",
         "Rows retained in transactions.sqlite3 when a8s update runs housekeeping",
     ),
+    Knob(
+        "wake_path",
+        "",
+        "machine",
+        True,
+        "A8S_WAKE_PATH",
+        "PATH every wake gets unless its definition.env names one; a8s add records the operator's PATH here (empty = inherit the handler's)",
+    ),
     # --- per-agent definition (a8s define) ---
     Knob("definition.invoke", None, "definition", False, note="Required argv template for message wakes"),
     Knob("definition.outbox_dir", ".outbox", "definition", False, note="Tell outbox under agent root (absolute OK); a8s injects TELL_OUTBOX_DIR on wake"),
@@ -121,6 +129,8 @@ KNOBS: tuple[Knob, ...] = (
     Knob("definition.idle.timeout", None, "definition", False, note="Seconds idle before idle.invoke (0 disables)"),
     Knob("definition.idle.invoke", None, "definition", False, note="Argv for idle/sync hooks"),
     Knob("definition.proxy", None, "definition", False, note='Set to "file" for file-proxy agents (no CLI wake)'),
+    Knob("definition.env", None, "definition", False, note="Literal NAME: value environment for every wake; a8s injects routing vars on top"),
+    Knob("definition.wake_shell", None, "definition", False, note='Set to "login" to run the invoke through $SHELL -ilc (POSIX only)'),
     # --- registry (a8s add / a8s alias) ---
     Knob("registry.agents.<name>.root", None, "registry", False, note="Agent workspace directory"),
     Knob("registry.agents.<name>.definition", None, "registry", False, note="Path to wake JSON (optional)"),
@@ -168,6 +178,7 @@ __all__ = [
     "ENV_VARS",
     "KNOBS",
     "Knob",
+    "capture_wake_path",
     "get_float",
     "get_int",
     "get_setting",
@@ -281,6 +292,10 @@ def _validate(key: str, value: Any) -> Any:
         if f <= 0:
             raise ValueError("loop_interval must be a positive number")
         return f
+    if key == "wake_path":
+        if not isinstance(value, str):
+            raise ValueError("wake_path must be a string")
+        return value
     return value
 
 
@@ -326,6 +341,24 @@ def set_setting(key: str, value: Any) -> None:
     data = load_settings_file()
     data[key] = value
     save_settings_file(data)
+
+
+def capture_wake_path() -> bool:
+    """Record this process's PATH as `wake_path` unless one is already set.
+
+    `a8s add` runs in the operator's own working shell, so that shell's PATH is
+    correct by construction at that moment. Recording it there is what stops the
+    provenance of the *start* shell from deciding whether a node can find its
+    harness hours later. Never overwrites — a value the operator set outranks
+    one a command noticed.
+    """
+    if str(get_setting("wake_path") or "").strip():
+        return False
+    path = os.environ.get("PATH", "")
+    if not path:
+        return False
+    set_setting("wake_path", path)
+    return True
 
 
 def unset_setting(key: str) -> bool:

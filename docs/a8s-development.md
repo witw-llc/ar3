@@ -134,20 +134,33 @@ Read [a8s.md](a8s.md) first for concept and usage.
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
-- **A node's `PATH` is the start shell's `PATH`, forever.** `a8s start` copies
-  its own environment into the handler and the handler copies it into every
-  wake; the only additions are `TELL_OUTBOX_DIR` and the size cap. Start from
-  an interactive login shell and the harness resolves; start from
-  `ssh host -- 'a8s start x'`, cron or CI and the rc-managed entries are
-  missing, so the first wake fails hours later while the operator's own shell
-  still resolves the binary fine. `_warn_unresolvable_harnesses` probes at
-  start, in exactly the environment the node will inherit. It resolves the
-  harness through wrappers (`harness_program` unwraps `flock`, `timeout`,
-  `env`, `nice` and friends) because the `FileNotFoundError` guard around the
-  spawn only ever sees `argv[0]` and a wrapped harness fails *inside* the
-  wrapper. It declines to guess inside `sh -c` and skips an unexpanded `$VAR`.
-  It warns and never refuses: the harness may be installed later, and an
-  attached node that cannot wake is still worth having.
+- **Wake environment is declared, not inherited from the start shell.**
+  Without a knob a node's `PATH` is whatever shell ran `a8s start`, forever —
+  fine from an interactive login shell, wrong from `ssh host -- 'a8s start x'`,
+  cron or CI, where the first wake fails hours later while the operator's own
+  shell still resolves the binary fine. `wake_env` composes the declared layer
+  (`definition.env` over the machine-wide `wake_path`) and `daemon._wake_env`
+  puts the routing variables on top of it, so a node can fix its own `PATH` and
+  still cannot move its own outbox. `a8s add` captures the operator's `PATH`
+  into `wake_path` once, which is the moment it is known to be right.
+  `_warn_unresolvable_harnesses` probes against that composed environment, so a
+  node the knob fixed stops warning. It resolves the harness through wrappers
+  (`harness_program` unwraps `flock`, `timeout`, `env`, `nice` and friends)
+  because the `FileNotFoundError` guard around the spawn only ever sees
+  `argv[0]` and a wrapped harness fails *inside* the wrapper. It declines to
+  guess inside `sh -c`, skips an unexpanded `$VAR`, and stays quiet for a
+  `wake_shell` node whose `PATH` an rc file decides. It warns and never
+  refuses: the harness may be installed later, and an attached node that
+  cannot wake is still worth having.
+- **`wake_shell: "login"` is opt-in for a reason.** No flag string is correct
+  on every box — `zsh -lc` and `bash -lc` read different startup files, and
+  `-ilc` is the only complete form on some accounts — so the wrap uses `$SHELL`
+  and the operator asks for it per node. `-c` goes last: `bash -c -l "cmd"`
+  runs `-l` as the command and makes `cmd` `$0`. The rc runs inside the wrapped
+  shell, after a8s hands over the environment, so an unguarded rc `export` beats
+  injection and rc stdout lands in the wake log ahead of the harness output.
+  Windows has no login-shell convention, so `a8s start` refuses rather than
+  ignoring the field.
 - **Receive-side dedup needs the claim as well as the ring.** `seen-ids` is read
   on entry and written after delivery, and the gap between the two is a whole
   download. Several daemons on one machine each subscribe and each resolve

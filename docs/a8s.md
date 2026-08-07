@@ -203,7 +203,7 @@ any prefixes pointing at it.
 
 |                    |                                                                                                                                                                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Warns first if a node's harness is not resolvable in this shell's environment, because that environment is what every wake gets.|
+| `a8s start <name>` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Warns first if a node's harness is not resolvable in the environment its wakes will get, and names the knobs that fix it (`definition.env`, `wake_path` — see [Wake environment](#wake-environment-optional)).|
 | `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
 | `a8s stop <name> [--force]` | SIGTERM the handler, then **wait** until it has detached. Idle stops immediately; a busy wake finishes first (like first Ctrl+C). `--force` / `-f` sends a second SIGTERM to kill the in-flight wake (like second Ctrl+C), then waits. |
@@ -402,7 +402,7 @@ Argv elements run through built-in substitutions plus any per-node **a8s vars**:
 - `$META` → the envelope's `meta` object as compact JSON (`{"class":"auto"}`), empty when the message carries none. Protocol metadata one node stamps for another; a8s carries and hands it over without reading a key, so the vocabulary belongs to the nodes at the edges (r4t's message class is the first user).
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
 - `$DEFINITION_PATH` → resolved path of this agent's definition file.
-- `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env. If the definition references `$KEY` and that var is unset, wake fails closed.
+- `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env; `definition.env` is the knob for that (see [Wake environment](#wake-environment-optional)). If the definition references `$KEY` and that var is unset, wake fails closed.
 
 `$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one). `$META` is empty unless the sending node stamped a `meta` object.
 
@@ -418,6 +418,45 @@ A shared definition can then use `"--model", "$MODEL"`; each node supplies its o
 Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare name (`filedrop`, `claude`, or a user template from `a8s defs add`). The file isn't moved or copied into the agent root; the registry stores the resolved path.
 
 Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies into `definitions/mine.json` under the a8s state root). Basename must not collide with a repo built-in. `a8s defs ls` lists both; `a8s defs rm <name>` removes user installs only.
+
+### Wake environment (optional)
+
+A wake inherits the environment of the process that started the handler, so a node's `PATH` is whatever the shell that ran `a8s start` happened to have — permanently, until restart. That is fine from an interactive login shell and wrong from `ssh host -- 'a8s start x'`, cron, launchd or CI, where the rc-managed entries are absent (`~/.local/bin`, nvm, Homebrew, and the `install.sh` line that puts `tell` on `PATH`). Two knobs make the start shell stop mattering.
+
+**`definition.env`** — literal `NAME: value` pairs handed to every wake of this node:
+
+```json
+{
+  "invoke": ["claude", "--continue", "-p", "$SENDER: $MESSAGE"],
+  "env": {"PATH": "/home/me/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"}
+}
+```
+
+Values are literal — no `$NAME` expansion, no `~`. This is OS environment, and it is a different knob from `a8s vars`: a var reaches argv and never the child's environment, an `env` entry reaches the environment and never argv.
+
+**`wake_path`** — machine-wide (`a8s config set wake_path "$PATH"`, or `A8S_WAKE_PATH`). The `PATH` for every node whose `definition.env` does not name one. `a8s add` records the PATH of the shell it ran in when there is no value yet — that shell is the operator's own and correct by construction at that moment — and never overwrites one already there. Empty means inherit, which is the behavior described above.
+
+Precedence, lowest first:
+
+1. the handler process's own environment
+2. `wake_path` — `PATH` only, and only when the definition does not name one
+3. `definition.env`
+4. `TELL_OUTBOX_DIR` and `TELL_FILE_MAX`, which a8s injects last
+
+a8s injecting last is deliberate: a node that declares `TELL_OUTBOX_DIR` in its own `env` still answers into the outbox a8s routes to, because a node writing into someone else's outbox is worse than a node that does not answer at all.
+
+`a8s start` probes each node's harness against this composed environment, so a node fixed by either knob stops warning.
+
+### wake_shell (optional)
+
+`"wake_shell": "login"` runs the invoke through the operator's own shell — `$SHELL -ilc <invoke>` — for the `PATH` that genuinely cannot be written down (nvm, direnv, asdf). `"login"` is the only value; anything else is refused at `a8s start`, as is the field on Windows, which has no login-shell convention to wrap.
+
+Two hazards come with it:
+
+- **rc output lands in the wake log.** Wakes run with stderr folded into stdout and every line logged, so a banner an rc file prints — or bash's `no job control in this shell` — arrives ahead of the harness output.
+- **an unguarded rc export overrides what a8s injects.** The composed environment above is handed to the shell, and the rc runs after that, inside it. A plain `export TELL_OUTBOX_DIR=...` in an rc file therefore wins, and the node answers into the wrong outbox. Write `${TELL_OUTBOX_DIR:-...}` in the rc, or use `definition.env` and leave the shell out of it.
+
+Which startup files a shell reads varies by shell and by machine — `zsh -lc` and `bash -lc` find different things on the same account — which is why this is opt-in and `definition.env` is the default answer.
 
 ### max_wake_seconds (optional)
 

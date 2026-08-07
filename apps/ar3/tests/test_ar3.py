@@ -345,8 +345,8 @@ def _path_check(name, detail):
 
 def test_doctor_links_an_invisible_harness_to_the_node_spawn_env(monkeypatch, capsys):
     # A harness this shell cannot see is one no node started from this shell
-    # can see either — the node inherits this PATH for the life of the process,
-    # so the failure lands hours later at a wake nobody is watching.
+    # can see either, unless the node was given a PATH of its own — otherwise
+    # the failure lands hours later at a wake nobody is watching.
     monkeypatch.setattr(ar3, "CHECKS", (
         _path_check("claude", "not on PATH"),
         _path_check("codex", "not on PATH"),
@@ -356,7 +356,7 @@ def test_doctor_links_an_invisible_harness_to_the_node_spawn_env(monkeypatch, ca
     out = capsys.readouterr().out
     assert "claude, codex not visible from this shell" in out
     assert "a8s start" in out
-    assert "login shell" in out
+    assert "wake_path" in out
 
 
 def test_a_harness_that_answered_badly_is_not_a_path_note(monkeypatch, capsys):

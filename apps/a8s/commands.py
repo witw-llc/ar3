@@ -51,6 +51,9 @@ from definitions import (
     load_definition,
     resolve_definition_arg,
     validate_var_name,
+    wake_env,
+    wake_shell,
+    wrap_wake_argv,
 )
 from daemon import (
     _clear_kill_request,
@@ -203,8 +206,13 @@ def cmd_add(args: list[str]) -> int:
         entry["vars"] = dict(sorted(initial_vars.items()))
     reg[name] = entry
     save_registry(reg)
+    from settings import capture_wake_path
+
+    captured_path = capture_wake_path()
     print(f"added {name} -> {root}")
     print(f"definition: {definition_path}  ({note})")
+    if captured_path:
+        print("wake_path: recorded this shell's PATH for every node's wakes")
     for k, v in sorted(initial_vars.items()):
         print(f"var: {k}={v}")
     return 0
@@ -1146,6 +1154,8 @@ def cmd_start(args: list[str]) -> int:
     if not members:
         print(f"start: {name!r} resolves to no agents", file=sys.stderr)
         return 1
+    if _refuse_bad_wake_shell(members):
+        return 1
     _warn_unresolvable_harnesses(members)
     # NOTE: the child must launch the entrypoint script (a8s.py), NOT this
     # commands.py module. That's why core.ENTRYPOINT exists.
@@ -1165,18 +1175,19 @@ def cmd_start(args: list[str]) -> int:
 
 
 def _warn_unresolvable_harnesses(members: list[str]) -> None:
-    """Say so at `a8s start` when a node's harness is not on this shell's PATH.
+    """Say so at `a8s start` when a node's harness is not on the PATH its wakes
+    will get.
 
-    `a8s start` hands its own environment to the handler and the handler hands
-    it to every wake, so a node's PATH is whatever the shell that started it
-    happened to have — permanently, until restart. Start from a login shell and
-    it works; start from `ssh host -- 'a8s start x'`, cron or CI and the rc-managed
-    entries are missing, so the harness is unresolvable hours later at the first
-    wake. The operator's own shell resolves it fine, which is what makes the
-    failure read as intermittent instead of as a PATH problem.
+    The probe runs against the spawn environment as a wake will see it —
+    `definition.env` and the machine-wide `wake_path` already applied — so a
+    node that has been given a PATH stops warning, and a node with neither
+    inherits the starting shell's PATH and is judged on that. That inheritance
+    is the whole footgun: start from `ssh host -- 'a8s start x'`, cron or CI and
+    the rc-managed entries are missing, so the harness is unresolvable hours
+    later at the first wake while the operator's own shell resolves it fine.
 
-    Probing here rather than at first wake is the point: this process holds
-    exactly the environment the node will get.
+    Probing here rather than at first wake is the point: this process can
+    compute exactly the environment the node will get.
 
     A warning, never a refusal. The definition may name a harness this machine
     installs later, and a node that cannot wake is still worth having attached.
@@ -1186,6 +1197,12 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
             definition = load_definition(member)
         except Exception:
             continue  # a broken definition has its own diagnostics
+        try:
+            if wake_shell(definition) is not None:
+                continue  # the rc decides PATH; nothing here can predict it
+            env = {**os.environ, **wake_env(definition)}
+        except ValueError:
+            continue  # `a8s start` reports a malformed knob separately
         for label, argv in (
             ("invoke", definition.get("invoke")),
             ("idle.invoke", (definition.get("idle") or {}).get("invoke")
@@ -1196,15 +1213,34 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
             program = harness_program([str(a) for a in argv])
             if program is None or "$" in program:
                 continue  # a shell string, or a var that expands per wake
-            if harness_is_resolvable(program):
+            if harness_is_resolvable(program, env):
                 continue
             print(
-                f"warning: {member}: {program!r} ({label}) is not on this "
-                f"shell's PATH, and the node inherits this PATH for every wake.\n"
-                f"         Start from a login shell, or give the definition an "
-                f"absolute path. `ar3 doctor` lists what it can find.",
+                f"warning: {member}: {program!r} ({label}) is not on the PATH "
+                f"this node's wakes will get.\n"
+                f"         Set `definition.env` `{{\"PATH\": ...}}` for this node, "
+                f"or `a8s config set wake_path \"$PATH\"` from a shell that "
+                f"resolves it. `ar3 doctor` lists what it can find.",
                 file=sys.stderr,
             )
+
+
+def _refuse_bad_wake_shell(members: list[str]) -> bool:
+    """True when a member's `wake_shell` cannot run here. Printed and refused at
+    `a8s start`, because a node started with a knob that silently does nothing
+    is the failure this knob exists to end."""
+    bad = False
+    for member in members:
+        try:
+            definition = load_definition(member)
+        except Exception:
+            continue
+        try:
+            wrap_wake_argv(definition, [])  # the argv is irrelevant; the wrap validates
+        except ValueError as e:
+            print(f"start: {member}: {e}", file=sys.stderr)
+            bad = True
+    return bad
 
 
 def cmd_step(args: list[str], interval: float) -> int:

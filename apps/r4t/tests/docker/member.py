@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "  # twin of apps/a8s/definitions.py
+R4T_HOME = "/var/lib/r4t"  # provisioned in inside.sh
+MEMBER_STORE = f"{R4T_HOME}/rosters/acme/agents/worker/k7e"  # knowledge.store_home
 
 
 def _effective_user() -> str:
@@ -89,6 +91,23 @@ def _can_write_router_home() -> bool:
         return False
 
 
+def _can_list_r4t_home() -> bool:
+    try:
+        os.listdir(R4T_HOME)
+        return True
+    except OSError:
+        return False
+
+
+def _can_read_member_store() -> bool:
+    """The knowledge store is r4t state the turn is never handed. Its files
+    carry the operator's umask, so the boundary is the store dir's own mode."""
+    try:
+        return bool(Path(MEMBER_STORE, "notes.md").read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
 def _delivered_checks(prompt: str) -> dict:
     """The prompt's ATTACHED FILE line must point at a delivered copy the agent
     can read but not write — dispatch marshals it across the boundary because
@@ -123,6 +142,8 @@ def main() -> int:
         "agent_can_sudo": _agent_can_sudo(),
         "can_read_router_home": _can_read_router_home(),
         "can_write_router_home": _can_write_router_home(),
+        "can_list_r4t_home": _can_list_r4t_home(),
+        "can_read_member_store": _can_read_member_store(),
         **_outbox_checks(),
         **_delivered_checks(sys.argv[1] if len(sys.argv) > 1 else ""),
     }

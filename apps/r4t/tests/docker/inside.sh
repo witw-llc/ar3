@@ -47,7 +47,22 @@ chmod 0440 /etc/sudoers.d/r4t-agent
 visudo -cf /etc/sudoers.d/r4t-agent   # fail loudly on a malformed drop-in
 
 # --- r4t state + the shared workplace ----------------------------------------
-install -d -o router -g router /var/lib/r4t                 # R4T_HOME (router-owned)
+# R4T_HOME: router-owned, search-only for the shared work group. 0700 is wrong
+# here — staging and the delivered bundle live under it and the agent must
+# traverse to both — so this mode stops enumeration and nothing more. What
+# stops a read is the mode on the state the agent is never handed, below.
+install -d -m 0710 -o router -g r4t-work /var/lib/r4t       # R4T_HOME
+# A member's k7e store, seeded the way a finished turn leaves it: 0644 files in
+# umask dirs. r4t sets a mode on staging (2770) and on the delivered bundle
+# (2750) and on nothing else, so this 0700 is the whole wall between the agent
+# user and every member's store — the operator's to set, and to re-set for a
+# member whose store r4t creates later.
+STORE=/var/lib/r4t/rosters/acme/agents/worker/k7e
+mkdir -p "$STORE"
+echo "the private note" > "$STORE/notes.md"
+chmod 644 "$STORE/notes.md"
+chmod 700 "$STORE"
+chown -R router:router /var/lib/r4t/rosters
 install -d -o router -g r4t-work -m 2770 /work             # workplace: setgid, group-writable
 # Portable org dir: router-readable ROSTER/MISSION + the run_as/repo pointer.
 install -d -o router -g router /etc/r4t-org
@@ -131,7 +146,18 @@ want(r["can_read_router_home"] is False,
 want(r["can_write_router_home"] is False,
      "the agent could write into the router's home (border leak)")
 
-# 6. the inbound attachment crossed as a delivered copy: rewritten out of the
+# 6. r4t's own state is not handed to the agent: it can neither enumerate
+#    R4T_HOME nor read the member's k7e store under it. R4T_HOME has to stay
+#    traversable (staging and delivered sit below it), so the store's own mode
+#    is what holds — and r4t never sets it
+want(r["can_list_r4t_home"] is False,
+     "the agent could list R4T_HOME (turn captures and the roster day log are "
+     "under it too — provision it router-owned, search-only for the work group)")
+want(r["can_read_member_store"] is False,
+     "the agent could read a member's k7e store (one store per member bounds "
+     "what a member is given, not what it can take — mode the store 0700)")
+
+# 7. the inbound attachment crossed as a delivered copy: rewritten out of the
 #    sealed home, readable by the agent, not writable (2750 read-side channel)
 want(bool(r["delivered_path"]),
      "no ATTACHED FILE line reached the member (marshalling dropped it)")

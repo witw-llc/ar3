@@ -60,7 +60,6 @@ from core import (
 )
 from definitions import (
     BatchEntry,
-    UndefinedVarsError,
     batch_limit,
     build_batch_command,
     build_command,
@@ -74,6 +73,8 @@ from definitions import (
     resolve_definition_path,
     max_wake_seconds,
     pause_seconds,
+    wake_env,
+    wrap_wake_argv,
 )
 from mailbox import (
     ensure_mailboxes,
@@ -311,6 +312,17 @@ def _tell_outbox_env(p: Participant) -> dict[str, str]:
     }
 
 
+def _wake_env(p: Participant, definition: dict) -> dict[str, str]:
+    """The layer `_start_wake_subprocess` puts over its own environment.
+
+    Declared node env underneath, routing variables on top: an operator who
+    writes `TELL_OUTBOX_DIR` into `definition.env` still gets the outbox a8s
+    routes to, because a node that answers into someone else's outbox is worse
+    than a node that does not answer.
+    """
+    return {**wake_env(definition), **_tell_outbox_env(p)}
+
+
 def _deliver_file_proxy(p: Participant) -> None:
     """Move ALL inbox files to the agent's file-proxy inbox dir."""
     dest = p.inbox_path()
@@ -489,14 +501,15 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
     out_agent(p.name, f"[{p.name}] waking from {trashed.name}: {_preview(msg.get('content', ''))}")
     p.files_path().mkdir(parents=True, exist_ok=True)
     try:
-        cmd = build_command(
+        cmd = wrap_wake_argv(definition, build_command(
             definition,
             msg,
             p.root,
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
-        )
-    except UndefinedVarsError as e:
+        ))
+        spawn_env = _wake_env(p, definition)
+    except ValueError as e:
         out_agent(p.name, f"[{p.name}] wake aborted: {e}")
         _settle_wake(p, [trashed], None, reason=str(e))
         return False
@@ -508,7 +521,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
             p.name,
             cmd,
             p.root,
-            env=_tell_outbox_env(p),
+            env=spawn_env,
             max_seconds=max_sec,
             on_complete=complete,
         )
@@ -519,7 +532,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
         p.name,
         cmd,
         p.root,
-        env=_tell_outbox_env(p),
+        env=spawn_env,
         max_seconds=max_sec,
         on_complete=complete,
     )
@@ -564,14 +577,15 @@ def wake_batch(
     )
     p.files_path().mkdir(parents=True, exist_ok=True)
     try:
-        cmd = build_batch_command(
+        cmd = wrap_wake_argv(definition, build_batch_command(
             definition,
             p.name,
             entries,
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
-        )
-    except UndefinedVarsError as e:
+        ))
+        spawn_env = _wake_env(p, definition)
+    except ValueError as e:
         out_agent(p.name, f"[{p.name}] batch wake aborted: {e}")
         _settle_wake(p, trashed, None, reason=str(e))
         return False
@@ -583,7 +597,7 @@ def wake_batch(
             p.name,
             cmd,
             p.root,
-            env=_tell_outbox_env(p),
+            env=spawn_env,
             max_seconds=max_sec,
             on_complete=complete,
         )
@@ -594,7 +608,7 @@ def wake_batch(
         p.name,
         cmd,
         p.root,
-        env=_tell_outbox_env(p),
+        env=spawn_env,
         max_seconds=max_sec,
         on_complete=complete,
     )
@@ -671,10 +685,12 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
         )
-    except UndefinedVarsError as e:
+        if cmd is None:
+            return False
+        cmd = wrap_wake_argv(definition, cmd)
+        spawn_env = _wake_env(p, definition)
+    except ValueError as e:
         out_agent(p.name, f"[{p.name}] idle aborted: {e}")
-        return False
-    if cmd is None:
         return False
     out_agent(
         p.name,
@@ -688,12 +704,12 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
                 p.name,
                 cmd,
                 p.root,
-                env=_tell_outbox_env(p),
+                env=spawn_env,
                 max_seconds=max_sec,
                 on_complete=lambda _rc: touch_last_active(p.name),
             )
         run_with_prefix(
-            p.name, cmd, p.root, env=_tell_outbox_env(p), max_seconds=max_sec
+            p.name, cmd, p.root, env=spawn_env, max_seconds=max_sec
         )
     finally:
         if not async_wake:

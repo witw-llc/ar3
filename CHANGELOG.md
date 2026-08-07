@@ -10,6 +10,78 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [Unreleased]
+
+### Removed
+- **The repo-root `ROSTER.md` / `MISSION.md` draft is gone.** The Ark's own
+  roster lives in a private org directory now; the 0.1.55 draft at the repo
+  root was superseded, shipped to the public mirror, and would dispatch a
+  stale seven-member roster to anyone registering an r4t node at the repo
+  root. (#122)
+
+### Added
+- **`org/AR3/` — the Ark's own roster, in the repo.** The AR3 org (roster,
+  mission, charter, node definition, rig snapshot) moves from a config
+  directory into the repo so it is reviewed like code and deployed by
+  `git pull`; `r4t-org.json` names the workplace as `../..`, so the enclosing
+  checkout is the workplace on any machine. The directory is excluded from the
+  public mirror alongside the experiments — the roster's internals are the
+  project's operations, not the product. (#122)
+
+### Added
+- **`tools/wiki-gardener.py` checks the private wiki against its gardening
+  charter.** Point it at a wiki checkout and it reports six defect classes —
+  pages with no category or no state, banners carrying neither a reason nor a
+  date, pages unreachable from `_Sidebar.md` within two link hops, sidebar
+  entries that are not index pages, and internal links to pages that do
+  not exist — one line each, or `--json` for a machine. It is stdlib-only,
+  reads nothing but the directory it is given, and runs on demand at no Actions
+  cost; the release workflow runs it over the wiki and reports without blocking
+  while the wiki is being gardened into shape. (#133)
+- **A node declares the environment its wakes get, instead of inheriting the
+  start shell's.** A wake used to run with whatever `PATH` the shell that ran
+  `a8s start` happened to have, permanently — right from an interactive login
+  shell, wrong from ssh, cron, launchd or CI, where the harness goes
+  unresolvable hours later at the first wake and the operator's own shell still
+  finds it. Three knobs: `definition.env` for literal `NAME: value` pairs a node
+  needs, machine-wide `wake_path` as the fallback `PATH` for every node that
+  does not name one, and `definition.wake_shell: "login"` to run the invoke
+  through `$SHELL -ilc` for the `PATH` that cannot be written down. `a8s add`
+  records the operator's own `PATH` into `wake_path` the first time, since that
+  shell is correct by construction at that moment, and never overwrites it. a8s
+  injects `TELL_OUTBOX_DIR` and `TELL_FILE_MAX` last, so a node can fix its own
+  `PATH` and still cannot move its own outbox. (#121)
+- **`r4t roster check` warns when a member's knowledge store sits inside the
+  workplace.** A container keeps the stores out by never mounting `R4T_HOME`,
+  and it mounts the workplace read-write at its real path — so an `R4T_HOME`
+  under the workplace rides into the cage and hands the member every store,
+  its own and its siblings'. The check names the member, the store path, the
+  workplace, and the consequence. It warns and blocks nothing: on a bare org
+  the placement costs nothing. (#54)
+
+### Fixed
+- **The `a8s start` harness warning names the fix.** It said "start from a login
+  shell", which was the only remedy that existed and the wrong one on half the
+  boxes the suite runs on. It now probes against the environment the wake will
+  actually get — `definition.env` and `wake_path` applied — and names both
+  knobs, so a node fixed by either stops warning. (#121)
+- **The reference `run_as` provisioning seals r4t's own state, and the docker
+  test proves it.** `R4T_HOME` was left at the umask, so on the reference
+  deployment the agent user could list it and read any member's k7e store —
+  the modes r4t re-asserts each turn cover staging and the delivered bundle
+  and nothing else. The provisioning now makes `R4T_HOME` router-owned and
+  search-only for the shared work group (it has to stay traversable: staging
+  and the delivered bundle live under it) and each store dir `0700`, and the
+  boundary test asserts from inside the cage that the agent can do neither.
+  (#54)
+
+### Documentation
+- **What `run_as` gives a knowledge store is another user's files, not a
+  mode.** The knowledge and isolation pages said the cage holds under either
+  isolation mode; under `run_as` that is true only where the operator set a
+  mode r4t does not set. Both pages now say which modes r4t re-asserts, which
+  one is the operator's, and what to provision. (#54)
+
 ## [0.1.63]
 
 ### Added
