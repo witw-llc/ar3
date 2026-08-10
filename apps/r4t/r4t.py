@@ -145,6 +145,12 @@ COMMAND_HELP = [
             ),
             Command("task list", "The roster's conversation threads", "task"),
             Command("task show <id>", "One thread, in full"),
+            Command(
+                "engine <id> quota",
+                "How much subscription an engine has left, and when it resets",
+                "engine",
+                "r4t engine list",
+            ),
         ],
     ),
     (
@@ -1321,6 +1327,37 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_engine(args: argparse.Namespace) -> int:
+    import engines
+
+    if args.target == "list":
+        width = max(len(name) for name in engines.MODULES)
+        for name in sorted(engines.MODULES):
+            presets = sorted(
+                [p for p, e in engines.PRESET_ENGINES.items() if e == name]
+                + ([name] if name in HARNESS_PRESETS else [])
+            )
+            verbs = ", ".join(engines.capabilities(name)) or "-"
+            served = f"  presets: {', '.join(presets)}" if presets else ""
+            print(f"  {name:<{width}}  [{verbs}]{served}")
+        print()
+        print("Ask one: r4t engine <id> quota")
+        return 0
+    if not args.action:
+        print("r4t engine: expected an action (quota)", file=sys.stderr)
+        return 2
+    try:
+        payload = engines.quota(args.target)
+    except engines.QuotaError as exc:
+        print(f"r4t engine: {exc}", file=sys.stderr)
+        return 1
+    if args.as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(engines.format_text(payload))
+    return 0
+
+
 def cmd_rig_add(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.rig_config)
     preset_key = args.preset.strip().lower()
@@ -2019,6 +2056,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
     )
     rig_unset_p.set_defaults(func=cmd_rig_unset)
+
+    engine_p = sub.add_parser(
+        "engine",
+        help=_cmd_help("engine"),
+        description="Talk to an engine directly. Actions: quota — remaining "
+        "subscription and reset time, without spending a turn. Accepts an "
+        "engine id or any rig preset id; `list` shows both.",
+    )
+    engine_p.add_argument(
+        "target",
+        help="Engine or preset id (see `r4t engine list`), or `list`.",
+    )
+    engine_p.add_argument(
+        "action",
+        nargs="?",
+        choices=["quota"],
+        help="What to ask the engine.",
+    )
+    engine_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Machine-readable JSON instead of the text lines.",
+    )
+    engine_p.set_defaults(func=cmd_engine)
 
     status_p = sub.add_parser("status", help=_cmd_help("status"))
     _add_common(status_p, with_node=True)

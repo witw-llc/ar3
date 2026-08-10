@@ -10,7 +10,28 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## [Unreleased]
+## [0.1.65]
+
+### Added
+- **`r4t engine <id> quota` — ask an engine how much subscription is left and
+  when it resets, without spending a turn.** One component per engine under
+  `apps/r4t/engines/`; accepts an engine id or any rig preset id, `--json`
+  for scripts, and `r4t engine list` to see both. Codex answers over its own
+  app-server protocol, Copilot over the entitlement endpoint the IDE
+  extensions use, Antigravity over its local language-server API, Cursor over
+  the dashboard's own call, Claude over the endpoint behind `/usage`;
+  OpenCode delegates to whichever provider backs it, and local ollama models
+  report no cloud quota at all. Live answers persist as snapshots that serve,
+  age-stamped, when the live check cannot. (#148)
+
+### Fixed
+- **The wake-PATH warning no longer misjudges relative harness paths.** A
+  definition whose invoke is `./name` is resolved the way a wake resolves it —
+  against the node's registered root, where the wake sets its CWD — instead of
+  against whatever directory `a8s start` happened to run from. Starting a node
+  from anywhere no longer warns about a harness that resolves fine.
+
+## [0.1.64]
 
 ### Removed
 - **The repo-root `ROSTER.md` / `MISSION.md` draft is gone.** The Ark's own
@@ -27,8 +48,6 @@ version when the batch is ready to merge.
   checkout is the workplace on any machine. The directory is excluded from the
   public mirror alongside the experiments — the roster's internals are the
   project's operations, not the product. (#122)
-
-### Added
 - **`tools/wiki-gardener.py` checks the private wiki against its gardening
   charter.** Point it at a wiki checkout and it reports six defect classes —
   pages with no category or no state, banners carrying neither a reason nor a

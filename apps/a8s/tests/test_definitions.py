@@ -939,6 +939,28 @@ class TestHarnessIsResolvable:
     def test_nothing_resolves_nothing(self):
         assert harness_is_resolvable("") is False
 
+    def test_a_relative_path_is_checked_against_the_wake_cwd(self, tmp_path):
+        # The reported failure: invoke `./curtis` with the node's root
+        # registered. A wake runs with CWD set to that root, so the probe
+        # must judge `./curtis` there — not in whatever directory the
+        # operator happened to run `a8s start` from.
+        exe = tmp_path / "curtis"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        assert harness_is_resolvable("./curtis", {"PATH": ""}, cwd=tmp_path) is True
+
+    def test_a_relative_path_missing_from_the_wake_cwd_does_not(self, tmp_path):
+        assert harness_is_resolvable("./curtis", {"PATH": ""}, cwd=tmp_path) is False
+
+    def test_a_relative_path_with_no_cwd_falls_back_to_process_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        exe = tmp_path / "curtis"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        monkeypatch.chdir(tmp_path)
+        assert harness_is_resolvable("./curtis", {"PATH": ""}) is True
+
 
 class TestDefinitionEnv:
     """`definition.env` is OS environment for the wake, and nothing else.

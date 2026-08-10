@@ -821,18 +821,26 @@ def harness_program(argv: list[str]) -> str | None:
     return None
 
 
-def harness_is_resolvable(program: str, env: dict[str, str] | None = None) -> bool:
+def harness_is_resolvable(
+    program: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> bool:
     """Whether `program` can be executed from `env`'s PATH.
 
-    A path with a separator in it is checked directly; a bare name goes
-    through PATH. `env` defaults to this process's environment, which is
-    exactly what `a8s start` hands the node — that equivalence is the whole
-    point of probing here rather than at first wake.
+    A path with a separator in it never goes through PATH: a wake runs with
+    its CWD set to the node's root, so a relative one (`./curtis`) is checked
+    against `cwd` — the caller passes the node's root, not the shell's own
+    working directory, which is irrelevant to what the wake will see. A bare
+    name goes through PATH. `env` defaults to this process's environment,
+    which is exactly what `a8s start` hands the node — that equivalence is
+    the whole point of probing here rather than at first wake.
     """
     if not program:
         return False
     if os.sep in program or (os.altsep and os.altsep in program):
-        return os.access(program, os.X_OK)
+        p = Path(program)
+        if not p.is_absolute() and cwd is not None:
+            p = Path(cwd) / p
+        return os.access(p, os.X_OK)
     path = (env or os.environ).get("PATH")
     return shutil.which(program, path=path) is not None
 

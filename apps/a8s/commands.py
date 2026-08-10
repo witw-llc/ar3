@@ -1192,6 +1192,7 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
     A warning, never a refusal. The definition may name a harness this machine
     installs later, and a node that cannot wake is still worth having attached.
     """
+    reg = load_registry()
     for member in members:
         try:
             definition = load_definition(member)
@@ -1203,6 +1204,8 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
             env = {**os.environ, **wake_env(definition)}
         except ValueError:
             continue  # `a8s start` reports a malformed knob separately
+        root = reg.get(member, {}).get("root")
+        wake_cwd = Path(root) if root else None
         for label, argv in (
             ("invoke", definition.get("invoke")),
             ("idle.invoke", (definition.get("idle") or {}).get("invoke")
@@ -1213,7 +1216,7 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
             program = harness_program([str(a) for a in argv])
             if program is None or "$" in program:
                 continue  # a shell string, or a var that expands per wake
-            if harness_is_resolvable(program, env):
+            if harness_is_resolvable(program, env, cwd=wake_cwd):
                 continue
             print(
                 f"warning: {member}: {program!r} ({label}) is not on the PATH "

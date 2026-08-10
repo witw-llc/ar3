@@ -72,6 +72,17 @@ The roster's reply arrives in `a8s convo me`. Full walkthrough, including
 what fails closed when the roster and rig config disagree:
 [r4t-tutorial.md](r4t-tutorial.md).
 
+Ask any engine how much subscription is left before pointing a roster at it:
+
+```bash
+r4t engine list           # every engine, and the presets each one serves
+r4t engine codex quota    # remaining fraction + reset time, no turn spent
+r4t engine claude quota --json
+```
+
+Live answers persist as snapshots, so a check still answers (age-stamped)
+when the engine's own surface cannot.
+
 ## How it works
 
 External mail always enters at the roster leader; inside the walls, members
