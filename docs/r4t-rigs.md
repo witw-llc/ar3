@@ -45,30 +45,25 @@ cleanly means pinning a session id per member (bin#256).
 
 Continuation is a price optimisation, not a memory mechanism. r4t carries the
 member's history in the prompt either way; `Continue:` only decides whether the
-CLI *also* replays its own. That replay is nearly free while the provider still
-holds the conversation's prefix in cache, and expensive the moment it does not:
+CLI *also* replays its own. That replay is nearly free while the provider
+serves the conversation's prefix from cache, and expensive when it does not:
 the entire conversation is sent again and charged at a premium to write back.
 
-Two separate things make it expensive, and only one is about time.
+Measured production telemetry (tables on the wiki's Engine pages) shows that
+miss is a **process-boundary phenomenon**: a resume seconds after a successful
+turn — inside every cache lifetime, on the same task — re-writes the whole
+conversation roughly 16× as often as staying in one process. No warmth window
+or size cap prevents it, so r4t has none. Writing `Continue:` on a member IS
+the acceptance of that risk; the default (no flag) founds fresh from durable
+state on every wake, which is the safe regime. Engines where continuation is
+observably cheap (cursor, local models) are the reasonable use.
 
-- **Age.** Cache lifetimes are minutes. Past that the whole prefix is new again.
-- **Size.** A large enough conversation is rewritten even during active use,
-  because the cache breakpoints move as it grows. Waking a member often enough
-  to keep it warm does not help — it keeps the liability alive.
-
-So a preset may carry three limits: `continue_warm_seconds`,
-`continue_max_context_tokens` and `continue_max_transcript_bytes`. Past any of
-them the turn silently drops its continue tokens and the CLI founds a fresh,
-small conversation, logged as `CONTINUE-CHILL`. Nothing is lost: that turn's
-prompt carries r4t's own bounded transcript, and later turns continue the new
-conversation cheaply. Every completed turn also logs a `CACHE` line — tokens
-read, tokens written, and the size of the context now in play — which is the
-signal to tune the limits against.
-
-The limits are per-harness because cache behaviour is, and they are set only
-for harnesses somebody has actually measured. An unmeasured preset is not
-gated, because guessing a window is a way to pay the premium on purpose.
-`claude` is measured today; the rest await their research page.
+What r4t does instead of gating is measure. Every completed turn on a probed
+harness logs a `CACHE` line — tokens read, tokens written, and the size of the
+context now in play. A continued turn that read only a stable prefix while
+re-creating most of its own history — the miss signature — logs `CACHE-MISS`
+with the same numbers. `claude` is probed today; the rest await their research
+page.
 
 A CLI keeps ONE conversation per directory, so two members running the same
 CLI from the same effective directory (the workplace root, or their resolved

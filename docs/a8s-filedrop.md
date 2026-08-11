@@ -57,6 +57,23 @@ When CWD is inside a unique registered filedrop root, `tell` / `tells` can
 infer the outbox without the env var (see below). Outside that root, set
 `TELL_OUTBOX_DIR`.
 
+## Shared mount (bridge principals)
+
+Bridges that register **several names on one Drive/sync mount** are intentional:
+
+```bash
+a8s add my-google /mnt/gdrive/a8s filedrop
+a8s add neil-email /mnt/gdrive/a8s filedrop
+```
+
+Inbound already shares `<root>/.inbox/` and preserves envelope `to`. Outbound
+shares `<root>/.outbox/`: when the router ingests that directory, a claimed
+`from` that names a **co-registered peer on the same outbox path** attributes
+the pending file and wire `from` to that peer — even when only one of the
+names is the handled sender (`a8s start my-google`). Unbacked or foreign
+claims keep force-stamp on the scanning handler. Unrelated roots cannot
+impersonate each other.
+
 ## Outbox resolution
 
 `tell` / `tells` pick an outbox in this order:

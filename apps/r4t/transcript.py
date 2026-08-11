@@ -1,30 +1,20 @@
-"""What a member's CLI conversation currently costs to continue.
+"""What a member's last CLI turn did to the provider's cache.
 
-`Continue: on` is worth money only while the provider still holds the
-conversation's prefix in cache. A warm continuation re-reads that prefix at a
-fraction of the input price; a cold one re-sends the whole conversation and
-pays a premium to write it back. The gap between those two is the difference
-between a cheap wake and a wake that eats a day's quota.
+A continuation re-reads the conversation's cached prefix at a fraction of the
+input price when it hits, and re-writes the whole conversation at a premium
+when it misses. Whether a member continues at all is the roster's `Continue:`
+flag — an explicit operator choice, never gated on these numbers — so the
+probe's job is measurement: `dispatch._log_cache_usage` turns each completed
+turn into a CACHE line, and a continued turn that re-created its own history
+into a CACHE-MISS.
 
-Two independent things make a continuation expensive, and only one of them is
-about time:
-
-- **Age.** The cache is a sliding window refreshed by each read. Past it, the
-  entire accumulated prefix is re-processed as new.
-- **Size.** A large conversation gets re-written even while it is being used,
-  because the cache breakpoints move as it grows. Waking a huge session often
-  enough to keep it warm does not help; it just keeps the liability alive.
-
-`dispatch` needs numbers for both, and the numbers live in files each CLI
-writes for its own purposes. Every harness does that differently, so each gets
-its own probe here and its own research page on the wiki. A harness with no
-probe reports nothing and its conversation is never gated — unmeasured is not
-the same as safe, so its knobs stay unset in `rig.HARNESS_PRESETS` until
-somebody does the reading.
+The numbers live in files each CLI writes for its own purposes. Every harness
+does that differently, so each gets its own probe here and its own research
+page on the wiki; a harness with no probe reports nothing.
 
 Probes are best-effort by design. A member behind `run_as` or inside a
 container writes its transcript in a home this process cannot read, so the
-probe returns None and dispatch keeps its existing behaviour.
+probe returns None and dispatch logs nothing.
 """
 from __future__ import annotations
 
@@ -59,21 +49,6 @@ class Conversation:
         """False when the file was found but carried no usage record — a
         conversation that has not completed a turn yet."""
         return self.context_tokens > 0
-
-    def over_limit(
-        self, max_tokens: int | None, max_bytes: int | None
-    ) -> str | None:
-        """Why this conversation is too expensive to continue, or None.
-
-        The token cap is the real guard. The byte cap is the fallback for a
-        transcript whose usage records are missing or unparseable, where size
-        on disk is the only signal left.
-        """
-        if max_tokens and self.context_tokens > max_tokens:
-            return f"context {self.context_tokens} tokens > {max_tokens}"
-        if max_bytes and self.size_bytes > max_bytes:
-            return f"transcript {self.size_bytes} bytes > {max_bytes}"
-        return None
 
 
 def _tail_lines(path: Path, limit: int = TAIL_BYTES) -> list[str]:
@@ -120,6 +95,12 @@ def _claude_conversation(workdir: Path) -> Conversation | None:
         read = int(usage.get("cache_read_input_tokens") or 0)
         created = int(usage.get("cache_creation_input_tokens") or 0)
         fresh = int(usage.get("input_tokens") or 0)
+        if read + created + fresh == 0:
+            # A failed or interrupted run appends a synthetic zero-usage
+            # record after the real ones; reading it as the turn's usage
+            # reports a large session as empty. Keep scanning for the newest
+            # record that measured anything.
+            continue
         split = usage.get("cache_creation")
         split = split if isinstance(split, dict) else {}
         return Conversation(

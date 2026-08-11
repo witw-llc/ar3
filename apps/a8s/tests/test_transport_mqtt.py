@@ -16,6 +16,8 @@ import pytest
 
 pytest.importorskip("paho.mqtt.client")
 
+import paho.mqtt.client as mqtt
+
 from transports.mqtt import MqttTransport
 from transports import TransportError
 
@@ -255,6 +257,73 @@ def test_persistent_session_replays_on_reconnect(mqtt_broker):
         sub2.stop()
 
 
+def test_publish_not_acknowledged_raises_after_ack_timeout(mqtt_broker):
+    """rc reports success but is_published() never flips True — the PUBACK
+    itself never lands (broker died mid-ack, a residential latency spike,
+    etc). This is the production failure mode: the envelope usually already
+    reached the broker, so publish() must raise and let the routing layer's
+    retry (absorbed by the receiver's ULID dedup) run rather than silently
+    calling it delivered."""
+    t = MqttTransport(
+        remote_id="hub",
+        broker=mqtt_broker,
+        topic="a8s/test-never-acked",
+        client_id="a8s-test-never-acked",
+        ack_timeout_s=0.3,
+    )
+    t.start(lambda _b: None)
+    try:
+        class _NeverAcked:
+            rc = mqtt.MQTT_ERR_SUCCESS
+
+            def wait_for_publish(self, timeout=None):
+                time.sleep(timeout)
+
+            def is_published(self):
+                return False
+
+        t._client.publish = lambda *a, **kw: _NeverAcked()  # type: ignore[method-assign]
+        start_time = time.monotonic()
+        with pytest.raises(TransportError, match="publish not acknowledged"):
+            t.publish(b"x")
+        elapsed = time.monotonic() - start_time
+        assert elapsed >= 0.25, "should have waited ~ack_timeout_s before giving up"
+    finally:
+        t.stop()
+
+
+def test_publish_ack_wait_uses_ack_timeout_not_connect_timeout(mqtt_broker):
+    """The PUBACK wait must key off ack_timeout_s, not connect_timeout_s —
+    those two waits mean different things and residential latency tails
+    made a shared 5s timeout too short for the ack side."""
+    t = MqttTransport(
+        remote_id="hub",
+        broker=mqtt_broker,
+        topic="a8s/test-ack-timeout-used",
+        client_id="a8s-test-ack-timeout-used",
+        connect_timeout_s=5.0,
+        ack_timeout_s=0.2,
+    )
+    t.start(lambda _b: None)
+    try:
+        seen = {}
+
+        class _Recorder:
+            rc = mqtt.MQTT_ERR_SUCCESS
+
+            def wait_for_publish(self, timeout=None):
+                seen["timeout"] = timeout
+
+            def is_published(self):
+                return True
+
+        t._client.publish = lambda *a, **kw: _Recorder()  # type: ignore[method-assign]
+        t.publish(b"x")
+        assert seen["timeout"] == 0.2
+    finally:
+        t.stop()
+
+
 # ---------- option-bag handling ----------
 
 # These don't need a broker — the constructor's option vocabulary lives
@@ -300,6 +369,14 @@ class TestMqttTransportOptions:
     def test_connect_timeout_coerced_from_string(self):
         t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", connect_timeout_s="0.5")
         assert t._connect_timeout_s == 0.5
+
+    def test_ack_timeout_defaults_to_30s(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t")
+        assert t._ack_timeout_s == 30.0
+
+    def test_ack_timeout_coerced_from_string(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", ack_timeout_s="1.5")
+        assert t._ack_timeout_s == 1.5
 
     def test_publish_qos_must_be_0_or_1(self):
         with pytest.raises(ValueError, match="publish_qos"):

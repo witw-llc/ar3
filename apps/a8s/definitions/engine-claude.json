@@ -1,0 +1,13 @@
+{
+  "description": "Claude Code as a bare stateless engine node — `r4t engine claude run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. To point another engine at this pattern, copy this file and change \"claude\" to one of claude, codex, agy, copilot, cursor.",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "claude",
+    "run",
+    "--agent",
+    "$RECIPIENT",
+    "$MESSAGE"
+  ]
+}

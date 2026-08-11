@@ -109,7 +109,10 @@ question: **is the resolved outbox a registered agent's own outbox?**
 
 `from` stamping does not follow this split: it still applies whenever CWD sits
 inside a registered agent root, and the router force-overwrites `from` from
-outbox ownership regardless — the filesystem is the unforgeable identity.
+outbox ownership — the filesystem is the unforgeable identity. One exception:
+when several registered agents share one physical outbox directory, a claimed
+`from` naming a co-registered peer on that path is honored (see
+[a8s-filedrop.md](a8s-filedrop.md#shared-mount-bridge-principals)).
 
 ## `tells` (receive side)
 

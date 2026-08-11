@@ -1535,57 +1535,47 @@ def _refound_turn(ctx: DispatchContext, member: Member, rig: Rig) -> bool:
     return not convo or bool(convo.get("retired"))
 
 
-def _too_cold_to_continue(
-    ctx: DispatchContext, member: Member, rig: Rig, workdir: Path
-) -> str | None:
-    """Why continuing this member's conversation would cost more than founding
-    a new one, or None to go ahead.
-
-    Continuation is a cache optimisation, not a memory mechanism: r4t carries
-    the member's history in the prompt either way, and `Continue:` only decides
-    whether the CLI ALSO replays its own. Once the provider has dropped the
-    prefix — or the conversation has grown big enough to be re-written on every
-    turn regardless — replaying it buys nothing and is charged at the premium
-    write rate on the whole thing.
-
-    A harness with no measured limits is never gated. Neither is one whose
-    transcript this process cannot read: behind `run_as` or inside a container
-    the file belongs to another user, and a guess is worse than the status quo.
-    """
-    warm = rig.continue_warm_seconds
-    if warm:
-        last = _last_completed(ctx.node, member.name)
-        if last is not None:
-            idle = time.time() - last
-            if idle > warm:
-                return f"last turn {int(idle)}s ago > {warm}s warm window"
-
-    max_tokens = rig.continue_max_context_tokens
-    max_bytes = rig.continue_max_transcript_bytes
-    if not (max_tokens or max_bytes):
-        return None
-    convo = transcript.probe(rig.preset, workdir)
-    return convo.over_limit(max_tokens, max_bytes) if convo else None
-
-
-def _log_cache_usage(ctx: DispatchContext, member: Member, rig: Rig, workdir: Path) -> None:
+def _log_cache_usage(
+    ctx: DispatchContext,
+    member: Member,
+    rig: Rig,
+    workdir: Path,
+    continued: bool,
+) -> None:
     """Record what the turn just did to the provider's cache.
 
     Reads are charged at a fraction of the input rate and writes at a premium,
-    so the ratio between them is the whole economics of a continuing member. A
-    write that stays large turn after turn means something is breaking the
-    prefix — the tool set, the model, the effort level, or simply a
-    conversation that has outgrown its cache.
+    so the ratio between them is the whole economics of a continuing member.
+    This is measurement, not gating: whether a member continues at all is the
+    roster's `Continue:` flag, an explicit operator acceptance of the miss
+    risk.
+
+    The failure signature worth shouting about is a continued turn that read
+    only a stable prefix while re-creating most of its own history — the
+    process-boundary breakpoint miss that makes automatic continuation
+    uneconomic. That gets a CACHE-MISS line with the same numbers.
     """
     convo = transcript.probe(rig.preset, workdir)
     if convo is None or not convo.measured:
         return
+    missed = (
+        continued
+        and convo.cache_creation_tokens > 10_000
+        and convo.cache_creation_tokens > convo.cache_read_tokens
+    )
     state.append_log(
         ctx.node,
-        f"r4t: CACHE {member.name.lower()} (rig {rig.name}) "
+        f"r4t: {'CACHE-MISS' if missed else 'CACHE'} "
+        f"{member.name.lower()} (rig {rig.name}) "
         f"read {convo.cache_read_tokens} wrote {convo.cache_creation_tokens} "
         f"(1h {convo.ephemeral_1h_tokens}, 5m {convo.ephemeral_5m_tokens}) — "
-        f"context {convo.context_tokens} tokens in {_kb(convo.size_bytes)}",
+        f"context {convo.context_tokens} tokens in {_kb(convo.size_bytes)}"
+        + (
+            " — the continued conversation re-wrote itself instead of reading "
+            "its cache"
+            if missed
+            else ""
+        ),
     )
 
 
@@ -1676,19 +1666,6 @@ def _run_turn(
     # the prompt (which then omits the history the CLI is already carrying), so
     # it is decided once, here, before the prompt is built.
     continuing = member.continue_conversation and rig.supports_continue and not refound
-    if continuing:
-        chill = _too_cold_to_continue(ctx, member, rig, workdir)
-        if chill:
-            # Founding here is the cheap path, not a failure: the CLI starts a
-            # small conversation that later turns continue warmly, and this
-            # turn's prompt carries r4t's own history instead.
-            continuing = False
-            state.append_log(
-                ctx.node,
-                f"r4t: CONTINUE-CHILL {member.name.lower()} (rig {rig.name}) "
-                f"{chill} — founding a fresh conversation instead of "
-                "re-sending this one",
-            )
 
     variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
@@ -1783,7 +1760,9 @@ def _run_turn(
         ctx.node,
         f"### Output ({member.name}, {outcome})\n\n{output.strip() or '(no output)'}",
     )
-    _log_cache_usage(ctx, member, rig, workdir)
+    # The CONTINUE-COLD retry deletes the marker, so this reads what actually
+    # ran: only a turn that resumed a prior conversation can be a MISS.
+    _log_cache_usage(ctx, member, rig, workdir, continued="R4T_CONTINUE" in env)
 
     _capture_turn(
         ctx,

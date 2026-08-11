@@ -233,6 +233,52 @@ class TestPublishWithBackoff:
         assert succeeded == ["r1"]
         assert r1.published == []  # not re-published
 
+    def test_success_reaches_global_log(self, fake_home, tmp_path, monkeypatch):
+        # Successes used to land only in the per-agent log; a healthy
+        # machine read that way as an outage during diagnosis.
+        a_root = tmp_path / "A"; a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        diagnostics = []
+        monkeypatch.setattr(network, "out", diagnostics.append)
+        r1 = StubTransport("r1")
+        publish = make_publish_remotes([r1])
+        msg = {"id": new_ulid(), "from": "A", "to": "X", "content": "hi", "files": []}
+        publish(msg, "A", [], 0)
+        assert any("published ->" in d and "r1" in d for d in diagnostics)
+
+    def test_false_ack_failure_then_retry_delivers_once(self, two_local_agents):
+        """Pins the false-failure recovery shape the ack-timeout fix exists
+        for: the first attempt raises 'publish not acknowledged' even though
+        the envelope already reached the broker, so the routing layer's
+        retry sends the identical envelope (same ULID) a second time. The
+        receiver must treat that as one delivery."""
+
+        class FlakyOnceTransport(StubTransport):
+            def __init__(self, remote_id: str):
+                super().__init__(remote_id)
+                self._raised = False
+
+            def publish(self, envelope: bytes) -> None:
+                if not self._raised:
+                    self._raised = True
+                    raise TransportError(f"{self._id}: publish not acknowledged")
+                self.published.append(envelope)
+
+        r1 = FlakyOnceTransport("r1")
+        publish = make_publish_remotes([r1])
+        msg = {"id": new_ulid(), "from": "A", "to": "B", "content": "once", "files": []}
+
+        succeeded = publish(msg, "A", [], 0)
+        assert succeeded == []  # false failure -> not marked succeeded
+
+        succeeded = publish(msg, "A", succeeded, 1)  # retry, identical envelope
+        assert succeeded == ["r1"]
+
+        envelope = json.dumps(msg).encode()
+        receive_envelope(envelope, two_local_agents)  # the copy that "failed" but landed
+        receive_envelope(envelope, two_local_agents)  # the retried copy
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
 
 # ---------- receive_envelope ----------
 

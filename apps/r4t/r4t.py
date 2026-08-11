@@ -46,6 +46,7 @@ from dispatch import (
 )
 from rig import (
     DEFAULT_CONCURRENCY,
+    DEFAULT_TIMEOUT_SECONDS,
     RigError,
     HARNESS_PRESETS,
     add_preset_rig,
@@ -150,6 +151,10 @@ COMMAND_HELP = [
                 "How much subscription an engine has left, and when it resets",
                 "engine",
                 "r4t engine list",
+            ),
+            Command(
+                "engine <id> run PROMPT",
+                "One headless turn as a bare stateless agent, outside any roster",
             ),
         ],
     ),
@@ -1341,11 +1346,13 @@ def cmd_engine(args: argparse.Namespace) -> int:
             served = f"  presets: {', '.join(presets)}" if presets else ""
             print(f"  {name:<{width}}  [{verbs}]{served}")
         print()
-        print("Ask one: r4t engine <id> quota")
+        print("Ask one: r4t engine <id> quota — or run a turn: r4t engine <id> run")
         return 0
     if not args.action:
-        print("r4t engine: expected an action (quota)", file=sys.stderr)
+        print("r4t engine: expected an action (quota, run)", file=sys.stderr)
         return 2
+    if args.action == "run":
+        return _cmd_engine_run(args)
     try:
         payload = engines.quota(args.target)
     except engines.QuotaError as exc:
@@ -1356,6 +1363,51 @@ def cmd_engine(args: argparse.Namespace) -> int:
     else:
         print(engines.format_text(payload))
     return 0
+
+
+def _cmd_engine_run(args: argparse.Namespace) -> int:
+    import engines
+    from engines import run as engine_run
+
+    engine = engines.engine_for(args.target)
+    if engine is None or engine not in engine_run.RUN_ENGINES:
+        supported = ", ".join(sorted(engine_run.RUN_ENGINES))
+        print(
+            f"r4t engine: {args.target!r} does not support run "
+            f"(engines: {supported})",
+            file=sys.stderr,
+        )
+        return 1
+
+    dir_path = Path(args.dir).expanduser().resolve() if args.dir else Path.cwd()
+    marker = dir_path / engine_run.IDLE_MARKER_NAME
+    if args.idle:
+        if marker.exists():
+            return 0
+        marker.touch()
+        prompt = args.prompt if args.prompt else engine_run.DEFAULT_IDLE_PROMPT
+    else:
+        marker.unlink(missing_ok=True)
+        if not args.prompt:
+            print("r4t engine run: PROMPT is required unless --idle", file=sys.stderr)
+            return 2
+        prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+
+    try:
+        return engine_run.execute(
+            engine,
+            prompt,
+            dir_path=dir_path,
+            model=args.model,
+            agent=args.agent,
+            timeout=args.timeout,
+            scaffold=not args.no_scaffold,
+        )
+    except engine_run.RunError as exc:
+        print(f"r4t engine: {exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_rig_add(args: argparse.Namespace) -> int:
@@ -2061,8 +2113,10 @@ def build_parser() -> argparse.ArgumentParser:
         "engine",
         help=_cmd_help("engine"),
         description="Talk to an engine directly. Actions: quota — remaining "
-        "subscription and reset time, without spending a turn. Accepts an "
-        "engine id or any rig preset id; `list` shows both.",
+        "subscription and reset time, without spending a turn; run — one "
+        "headless turn as a bare stateless agent, no roster or dispatcher "
+        "involved. Accepts an engine id or any rig preset id; `list` shows "
+        "both.",
     )
     engine_p.add_argument(
         "target",
@@ -2071,14 +2125,52 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "action",
         nargs="?",
-        choices=["quota"],
+        choices=["quota", "run"],
         help="What to ask the engine.",
+    )
+    engine_p.add_argument(
+        "prompt",
+        nargs="?",
+        metavar="PROMPT",
+        help="run: the message text ('-' reads stdin); required unless --idle.",
     )
     engine_p.add_argument(
         "--json",
         action="store_true",
         dest="as_json",
-        help="Machine-readable JSON instead of the text lines.",
+        help="quota: machine-readable JSON instead of the text lines.",
+    )
+    engine_p.add_argument(
+        "--dir",
+        metavar="DIR",
+        help="run: working directory for the turn (default: CWD).",
+    )
+    engine_p.add_argument(
+        "--model",
+        metavar="M",
+        help="run: model to pass through, in the preset's own flag pattern.",
+    )
+    engine_p.add_argument(
+        "--agent",
+        metavar="NAME",
+        help="run: adds an `a8s convo NAME` reconcile step to the scaffold.",
+    )
+    engine_p.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"run: turn timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).",
+    )
+    engine_p.add_argument(
+        "--no-scaffold",
+        action="store_true",
+        dest="no_scaffold",
+        help="run: send PROMPT unchanged, without the cold-boot scaffold.",
+    )
+    engine_p.add_argument(
+        "--idle",
+        action="store_true",
+        help="run: skip if the last turn was also idle, else run one and re-arm.",
     )
     engine_p.set_defaults(func=cmd_engine)
 

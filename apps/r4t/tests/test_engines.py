@@ -24,7 +24,13 @@ class TestResolution:
 
     def test_every_engine_answers_for_quota(self):
         for name in engines.MODULES:
-            assert engines.capabilities(name) == ["quota"]
+            assert "quota" in engines.capabilities(name)
+
+    def test_only_the_verified_five_also_answer_for_run(self):
+        run_engines = {"claude", "codex", "agy", "copilot", "cursor"}
+        for name in engines.MODULES:
+            expected = ["quota", "run"] if name in run_engines else ["quota"]
+            assert engines.capabilities(name) == expected
 
     def test_capability_resolves_through_presets(self):
         assert engines.capability("claude-ollama", "quota") is engines.ollama.quota

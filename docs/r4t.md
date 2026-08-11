@@ -72,16 +72,20 @@ The roster's reply arrives in `a8s convo me`. Full walkthrough, including
 what fails closed when the roster and rig config disagree:
 [r4t-tutorial.md](r4t-tutorial.md).
 
-Ask any engine how much subscription is left before pointing a roster at it:
+Ask any engine how much subscription is left before pointing a roster at it,
+or run one directly with no roster at all:
 
 ```bash
-r4t engine list           # every engine, and the presets each one serves
-r4t engine codex quota    # remaining fraction + reset time, no turn spent
+r4t engine list                       # every engine, and the presets each one serves
+r4t engine codex quota                # remaining fraction + reset time, no turn spent
 r4t engine claude quota --json
+r4t engine claude run --agent my-node "check the deploy and report"
 ```
 
 Live answers persist as snapshots, so a check still answers (age-stamped)
-when the engine's own surface cannot.
+when the engine's own surface cannot. `run` is the bare tier: one headless
+turn, no roster, memory is whatever `STATUS.md`/`LESSONS.md` say — see
+[Engine](r4t-engine.md).
 
 ## How it works
 
@@ -103,6 +107,8 @@ Full flow: [r4t-message-flow.md](r4t-message-flow.md).
 - [The Ark Raising](../guide/README.md) — the suite build-along; [chapter 2](../guide/02-the-founding.md) founds a governed roster of one
 - [Tutorial](r4t-tutorial.md) — first roster, step by step, fail-closed rules
 - [Rigs](r4t-rigs.md) — presets, `--model`, settings, the governance knob table
+- [Engine](r4t-engine.md) — talk to one CLI directly: `quota`, and the bare
+  stateless `run` (scaffold, idle latch, a8s definition recipe)
 - [Message flow](r4t-message-flow.md) — threads, queues, the stdout fallback
 - [Operations](r4t-operations.md) — `status`, `logs`, `chat`, the human seat
 - [Org design](r4t-org.md) — cells and leads, `MISSION.md`, portable orgs

@@ -30,7 +30,7 @@ import json
 import time
 from pathlib import Path
 
-from engines import agy, claude, codex, copilot, cursor, ollama, opencode
+from engines import agy, claude, codex, copilot, cursor, ollama, opencode, run
 from engines.base import QuotaError
 
 __all__ = ["QuotaError", "MODULES", "engine_for", "quota", "format_text"]
@@ -81,7 +81,14 @@ def capability(preset_or_engine: str, verb: str):
 
 
 def capabilities(preset_or_engine: str) -> list[str]:
-    return [v for v in CAPABILITY_VERBS if capability(preset_or_engine, v)]
+    """The verbs `r4t engine <id>` answers. `quota` dispatches through the
+    per-engine module (`capability` above); `run` is not — it is one shared
+    implementation (engines/run.py) gated on RUN_ENGINES, the subset with a
+    verified headless, unattended invocation (engine CLI fact sheet)."""
+    verbs = [v for v in CAPABILITY_VERBS if capability(preset_or_engine, v)]
+    if engine_for(preset_or_engine) in run.RUN_ENGINES:
+        verbs.append("run")
+    return verbs
 
 
 def snapshot_path(engine: str) -> Path:

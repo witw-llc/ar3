@@ -1,4 +1,4 @@
-"""Tests for the conversation probes and the continuation limits.
+"""Tests for the conversation probes behind the CACHE telemetry.
 
 The probe reads files another program wrote, so the fixtures here build those
 files in the shape that program actually uses. `_claude_session` mirrors a real
@@ -11,7 +11,6 @@ import json
 import pytest
 
 import transcript
-from rig import Rig
 
 
 def _claude_session(
@@ -116,7 +115,7 @@ class TestClaudeProbe:
         folder.mkdir(parents=True)
         (folder / "s.jsonl").write_text('{"type": "user"}\n', encoding="utf-8")
         convo = transcript.probe("claude", work)
-        # Found, sized, but nothing to report — the byte cap can still act.
+        # Found and sized, but nothing to report — dispatch logs no CACHE line.
         assert convo is not None and not convo.measured
         assert convo.size_bytes > 0
 
@@ -129,55 +128,44 @@ class TestClaudeProbe:
         assert transcript.probe(None, tmp_path) is None
 
 
-class TestOverLimit:
-    def _convo(self, tmp_path, tokens=0, size=0):
-        return transcript.Conversation(
-            path=tmp_path / "s.jsonl",
-            size_bytes=size,
-            context_tokens=tokens,
-            cache_read_tokens=0,
-            cache_creation_tokens=0,
-            ephemeral_1h_tokens=0,
-            ephemeral_5m_tokens=0,
-        )
-
-    def test_tokens_over_cap(self, tmp_path):
-        reason = self._convo(tmp_path, tokens=200_000).over_limit(180_000, None)
-        assert reason and "200000 tokens" in reason
-
-    def test_bytes_are_the_fallback_when_usage_is_missing(self, tmp_path):
-        # No usage rows means no token count; size on disk is all that is left.
-        reason = self._convo(tmp_path, tokens=0, size=9_000_000).over_limit(
-            180_000, 4 * 1024 * 1024
-        )
-        assert reason and "bytes" in reason
-
-    def test_under_both_caps_is_fine(self, tmp_path):
-        assert self._convo(tmp_path, tokens=50, size=50).over_limit(
-            180_000, 4 * 1024 * 1024
-        ) is None
-
-    def test_no_caps_never_trips(self, tmp_path):
-        assert self._convo(tmp_path, tokens=10**9, size=10**9).over_limit(
-            None, None
-        ) is None
+class TestSyntheticRecords:
+    def test_a_zero_usage_tail_does_not_hide_the_real_turn(
+        self, claude_home, tmp_path
+    ):
+        # A failed run appends a synthetic record whose usage is all zeros
+        # after the real ones; a naive last-record parse reads a large session
+        # as empty. The probe must report the newest record that measured
+        # anything — which, on a streamed message, is also its fullest record.
+        work = tmp_path / "repo"
+        path = _claude_session(claude_home, work, read=150_000, created=12_000)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            }) + "\n")
+        convo = transcript.probe("claude", work)
+        assert convo is not None and convo.measured
+        assert convo.cache_read_tokens == 150_000
+        assert convo.cache_creation_tokens == 12_000
 
 
-class TestPresetLimits:
-    def test_claude_carries_all_three(self):
-        rig = Rig(name="r", preset="claude")
-        assert rig.continue_warm_seconds == 270
-        assert rig.continue_max_context_tokens == 180_000
-        assert rig.continue_max_transcript_bytes == 4 * 1024 * 1024
+class TestPresets:
+    def test_no_preset_gates_continuation(self):
+        # The roster's Continue: flag is the only switch; presets carry no
+        # warmth or size knobs for dispatch to gate on.
+        from rig import HARNESS_PRESETS
 
-    @pytest.mark.parametrize("preset", ["agy", "codex", "cursor", "opencode"])
-    def test_an_unmeasured_preset_is_not_gated(self, preset):
-        # Continuation still works there; it is simply not priced yet, and a
-        # guessed window would cost money on purpose.
-        rig = Rig(name="r", preset=preset)
-        assert rig.continue_warm_seconds is None
-        assert rig.continue_max_context_tokens is None
-        assert rig.continue_max_transcript_bytes is None
+        for name, preset in HARNESS_PRESETS.items():
+            gates = [k for k in preset if k.startswith("continue_") and k not in
+                     ("continue_argv", "continue_anchor")]
+            assert not gates, f"{name} carries continuation gates: {gates}"
 
     def test_the_claude_preset_stabilizes_its_prefix(self):
         from rig import HARNESS_PRESETS

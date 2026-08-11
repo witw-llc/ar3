@@ -10,6 +10,51 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.66]
+
+### Added
+- **`r4t engine <id> run` — one headless turn of an engine CLI as a bare
+  stateless agent, invoked directly by an a8s node with no roster or
+  dispatcher.** Supports the five engines with a verified unattended
+  invocation (`claude`, `codex`, `agy`, `copilot`, `cursor`); argv composition
+  reuses `rig.build_preset_invoke`, the one source of preset argv truth. A
+  cache-stable "smart cold boot" scaffold (default on, `--no-scaffold` to
+  skip) points the CLI at `STATUS.md`/`LESSONS.md`/`AGENTS.md` as its only
+  memory across the fresh session every wake brings; `--idle` adds a
+  Cody-pattern debounce so a timer-woken node skips a wasted consolidation
+  turn when nothing changed since the last one. `apps/a8s/definitions/
+  engine-claude.json` wires the pattern into a8s. See `docs/r4t-engine.md`.
+
+### Changed
+- **r4t continuation is off unless the roster says otherwise — the warm/size
+  gate is gone.** Measured production telemetry (ar3-private#155) shows the
+  cache miss is a process-boundary phenomenon no warmth window or size cap can
+  prevent: a resume seconds into an alive task re-writes the conversation ~16×
+  as often as staying in-process. The `Continue:` flag (`on`, `off`, or an
+  idle duration) is now the only switch and writing it is an explicit
+  acceptance of the miss risk; the `continue_warm_seconds` /
+  `continue_max_context_tokens` / `continue_max_transcript_bytes` preset knobs
+  and the `CONTINUE-CHILL` founding path are removed. The cache telemetry
+  hardens instead: the probe skips synthetic zero-usage tail records, and a
+  continued turn that re-created its own history logs `CACHE-MISS` loudly.
+
+### Fixed
+- **Shared filedrop outboxes honor a co-registered `from`.** When several
+  agents share one physical `.outbox/` (GAS-style dual `a8s add … filedrop` on
+  one mount), ingest attributes each envelope to the claimed peer on that path
+  instead of whoever emptied the directory first; unbacked claims still
+  force-stamp. (#150)
+- **MQTT PUBACK wait no longer shares the 5s connect timeout.** Production
+  evidence across residential-network machines showed ~3-5% of publishes
+  failing with "publish not acknowledged" — the broker had already accepted
+  the message, but the 5s connect timeout was too short for the ack to catch
+  up on a residential latency tail, so the retry duplicated a publish the
+  receiver's ULID dedup then had to absorb. `MqttTransport` gains a separate
+  `ack_timeout_s` option (default 30.0) for the PUBACK wait; connection waits
+  are unchanged. Publish successes now also reach the global log (previously
+  per-agent log only), and the delivery-receipt publish-failure warning
+  states plainly that receipts are fire-and-forget and not retried.
+
 ## [0.1.65]
 
 ### Added

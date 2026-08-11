@@ -562,9 +562,11 @@ def seen_id_append(ulid: str) -> None:
 def make_publish_remotes(remotes: list[Transport]) -> Callable:
     """Build the `publish_remotes` callable that `route_outboxes` invokes.
     For each not-yet-succeeded remote, attempts a publish; on success logs to
-    the sender's per-agent log (and stdout under `a8s run`); on failure logs
-    a warning and leaves the remote in the `pending_remotes` set for the next
-    pass. Returns the updated `succeeded_remotes` list."""
+    the sender's per-agent log and the global log (so diagnosing an outage
+    doesn't require reading every agent's log to rule out a quiet success);
+    on failure logs a warning to the per-agent log and leaves the remote in
+    the `pending_remotes` set for the next pass. Returns the updated
+    `succeeded_remotes` list."""
 
     def publish_with_backoff(
         msg: dict,
@@ -586,6 +588,7 @@ def make_publish_remotes(remotes: list[Transport]) -> Callable:
                     sender_name,
                     f"remote {remote.id}: published -> {recipient}: {preview}",
                 )
+                out(f"{sender_name}: remote {remote.id}: published -> {recipient}")
             except TransportError as e:
                 out_agent(
                     sender_name,
@@ -981,7 +984,10 @@ def _publish_delivery_receipt(
             detail=f"receipt_id={receipt['id']}",
         )
     except Exception as e:
-        out(f"WARN: delivery receipt publish failed id={original.get('id', '?')} remote={remote_id}: {e}")
+        out(
+            f"WARN remote {remote_id} delivery receipt publish failed "
+            f"(fire-and-forget, not retried) id={original.get('id', '?')}: {e}"
+        )
 
 
 def make_receive_callback(

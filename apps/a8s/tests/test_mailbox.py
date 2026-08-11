@@ -371,6 +371,146 @@ class TestRouteOutboxes:
         )
 
 
+class TestSharedOutboxAttribution:
+    """Issue #150 — several filedrop names on one mount share `<root>/.outbox/`.
+    A claimed `from` naming a co-registered peer must attribute pending + wire
+    `from` to that peer; unbacked claims keep force-stamp on the first owner."""
+
+    @pytest.fixture
+    def shared_filedrop(self, fake_home, tmp_path):
+        mount = tmp_path / "gdrive" / "a8s"
+        mount.mkdir(parents=True)
+        recipient_root = tmp_path / "recipient"
+        recipient_root.mkdir()
+        save_registry({
+            "my-google": {"root": str(mount)},
+            "neil-email": {"root": str(mount)},
+            "B": {"root": str(recipient_root)},
+        })
+        command = Participant("my-google", mount)
+        email = Participant("neil-email", mount)
+        recipient = Participant("B", recipient_root)
+        for p in (command, email, recipient):
+            ensure_mailboxes(p)
+        return command, email, recipient
+
+    def _stage(self, mount: Path, claimed_from: str, to: str, content: str, name: str) -> Path:
+        outbox = outbox_dir(mount)
+        path = outbox / name
+        path.write_text(json.dumps({
+            "from": claimed_from,
+            "to": to,
+            "content": content,
+            "files": [],
+        }))
+        return path
+
+    def test_co_registered_from_is_honored(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        # First owner in the senders list would have stolen this before #150.
+        self._stage(command.root, "neil-email", "B", "from email principal", "01EMAIL.json")
+        route_outboxes(
+            [command, email, recipient],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "neil-email"
+        assert delivered["content"] == "from email principal"
+
+    def test_single_handler_honors_co_registered_peer(self, shared_filedrop):
+        # Daemon path: `a8s start my-google` handles one name; peers live in
+        # all_agents. Co-owners must come from the registry, not senders.
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "neil-email", "B", "from email principal", "01EMAIL.json")
+        n = route_outboxes(
+            [command],
+            all_agents=[command, email, recipient],
+        )
+        assert n == 1
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "neil-email"
+
+    def test_single_handler_spoof_stamps_the_scanning_handler(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "VICTIM", "B", "spoof", "01SPOOF.json")
+        route_outboxes(
+            [command],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "my-google"
+
+    def test_either_peer_claim_stands_regardless_of_sender_order(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "my-google", "B", "cmd", "01CMD.json")
+        self._stage(command.root, "neil-email", "B", "mail", "02MAIL.json")
+        # Email listed first — must not stamp the command message as neil-email.
+        route_outboxes(
+            [email, command, recipient],
+            all_agents=[command, email, recipient],
+        )
+        by_content = {
+            json.loads(p.read_text())["content"]: json.loads(p.read_text())["from"]
+            for p in inbox_dir("B").iterdir()
+        }
+        assert by_content == {"cmd": "my-google", "mail": "neil-email"}
+
+    def test_spoofed_claim_still_force_stamps_first_owner(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "VICTIM", "B", "spoof", "01SPOOF.json")
+        route_outboxes(
+            [command, email, recipient],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "my-google"
+
+    def test_foreign_agent_claim_is_not_honored(self, shared_filedrop):
+        # B is registered but does not share the mount — claiming B is a spoof.
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "B", "B", "loop", "01LOOP.json")
+        route_outboxes(
+            [command, email, recipient],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "my-google"
+
+    def test_case_insensitive_peer_match(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        self._stage(command.root, "Neil-Email", "B", "cased", "01CASE.json")
+        route_outboxes(
+            [command, email, recipient],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert delivered["from"] == "neil-email"
+
+    def test_attachment_bundle_follows_attributed_owner(self, shared_filedrop):
+        command, email, recipient = shared_filedrop
+        outbox = outbox_dir(command.root)
+        msg_id = "01ATTACH"
+        bundle = outbox / msg_id
+        bundle.mkdir()
+        (bundle / "note.txt").write_text("payload")
+        (outbox / f"{msg_id}.json").write_text(json.dumps({
+            "id": msg_id,
+            "from": "neil-email",
+            "to": "B",
+            "content": "with file",
+            "files": [{"filename": "note.txt"}],
+        }))
+        route_outboxes(
+            [command, email, recipient],
+            all_agents=[command, email, recipient],
+        )
+        delivered = json.loads((inbox_dir("B") / f"{msg_id}.json").read_text())
+        assert delivered["from"] == "neil-email"
+        assert (recipient.files_bundle_dir(msg_id) / "note.txt").read_text() == "payload"
+        assert not pending_bundle_dir("my-google", msg_id).exists()
+        assert not pending_bundle_dir("neil-email", msg_id).exists()
+
+
 class TestNamespaceRouting:
     """Issue #148 — a `<prefix>:<sub-address>` recipient delivers to the
     single agent bound to the prefix, with the full address preserved in

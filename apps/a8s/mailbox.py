@@ -259,20 +259,82 @@ def _commit_staged_inboxes(staged: list[tuple[Path, Path]]) -> None:
 
 # ---------- routing ----------
 
-def _ingest_outboxes(senders: list[Participant]) -> None:
-    """Phase 1: atomically move every `<root>/.outbox/<id>.json` and its
-    `<root>/.outbox/<id>/` attachment bundle into pending."""
+def _claimed_from_name(envelope: Path) -> str:
+    """Bare `from` claim on an outbox envelope, or "" when unreadable / absent.
+
+    Used only to attribute a shared-outbox file to a co-registered owner —
+    corrupt JSON falls through to the default owner and is trashed later."""
+    try:
+        with envelope.open("r", encoding="utf-8") as fp:
+            msg = json.load(fp)
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(msg, dict):
+        return ""
+    return str(msg.get("from") or "").strip()
+
+
+def _ingest_owner(
+    envelope: Path,
+    owners: list[Participant],
+    owners_by_name: dict[str, Participant],
+    default: Participant,
+) -> Participant:
+    """Who owns an outbox envelope on a (possibly shared) mount.
+
+    A single owner always claims every file. On a shared outbox, a claimed
+    `from` that names a co-registered peer attributes the file to that peer;
+    anything else keeps `default` (the handled agent that scanned this path)."""
+    if len(owners) == 1:
+        return owners[0]
+    claimed = _claimed_from_name(envelope)
+    if claimed:
+        peer = owners_by_name.get(claimed.lower())
+        if peer is not None:
+            return peer
+    return default
+
+
+def _ingest_outboxes(
+    senders: list[Participant],
+    all_agents: list[Participant],
+) -> list[Participant]:
+    """Phase 1: atomically move every handled `<root>/.outbox/<id>.json` and
+    its attachment bundle into pending.
+
+    Each physical outbox directory is scanned once (via handled senders only).
+    Co-owners are taken from `all_agents` so a daemon that handles one of
+    several names on a shared mount still attributes a claimed peer correctly.
+    Returns every participant whose pending received a file this pass — peers
+    included — so phase 2 can deliver without waiting for their handler."""
+    owners_by_outbox: dict[Path, list[Participant]] = {}
+    for agent in all_agents:
+        outbox = agent.outbox_path()
+        if not outbox.is_dir():
+            continue
+        owners_by_outbox.setdefault(outbox.resolve(), []).append(agent)
+
+    pending_owners: dict[str, Participant] = {}
+    scanned: set[Path] = set()
     for sender in senders:
         ensure_mailboxes(sender)
         outbox = sender.outbox_path()
         if not outbox.is_dir():
             continue
-        dest_dir = pending_dir(sender.name)
+        key = outbox.resolve()
+        if key in scanned:
+            continue
+        scanned.add(key)
+        owners = owners_by_outbox.get(key, [sender])
+        for peer in owners:
+            ensure_mailboxes(peer)
+        owners_by_name = {o.name.lower(): o for o in owners}
         for f in sorted(outbox.iterdir()):
             if not (f.is_file() and f.name.endswith(".json")):
                 continue
+            owner = _ingest_owner(f, owners, owners_by_name, sender)
             msg_id = _msg_id_from_pending_json(f.name)
-            dest = dest_dir / f.name
+            dest = pending_dir(owner.name) / f.name
             try:
                 os.rename(str(f), str(dest))
             except OSError:
@@ -280,14 +342,16 @@ def _ingest_outboxes(senders: list[Participant]) -> None:
                     shutil.copy2(str(f), str(dest))
                     f.unlink()
                 except OSError as e:
-                    out_agent(sender.name, f"ingest copy failed on {f.name}: {e}")
+                    out_agent(owner.name, f"ingest copy failed on {f.name}: {e}")
                     continue
+            pending_owners[owner.name.lower()] = owner
             bundle_src = outbox_bundle_dir(outbox, msg_id)
-            bundle_dest = pending_bundle_dir(sender.name, msg_id)
+            bundle_dest = pending_bundle_dir(owner.name, msg_id)
             try:
                 _move_dir(bundle_src, bundle_dest)
             except OSError as e:
-                out_agent(sender.name, f"ingest bundle move failed for {msg_id}: {e}")
+                out_agent(owner.name, f"ingest bundle move failed for {msg_id}: {e}")
+    return list(pending_owners.values())
 
 
 def _load_or_init_sidecar(pending_file: Path) -> dict:
@@ -967,13 +1031,17 @@ def route_outboxes(
 ) -> int:
     """Two-phase routing pass:
 
-      1. Ingest: move new outbox files out of every sender's `<root>/.outbox/`
-         and into `~/.config/a8s/agents/<sender>/pending/`. The agent's directory is
-         touched only by the rename — never read-modified-rewritten.
+      1. Ingest: move new outbox files out of every handled sender's
+         `<root>/.outbox/` into pending. Co-owners on a shared mount come from
+         `all_agents`, so a single-name handler still attributes a claimed peer.
+         The agent's directory is touched only by the rename — never
+         read-modified-rewritten.
       2. Process: deliver each pending message to local recipients (via
          `inbox.tmp/` → `inbox/` atomic stage→commit) and/or publish to any
          configured remote that hasn't yet accepted it. Per-message retry
-         state lives in `<f>.json.retry` alongside the pending file.
+         state lives in `<f>.json.retry` alongside the pending file. Phase 2
+         covers handled senders plus any co-registered peer that received
+         pending this pass.
 
     `publish_remotes` and `configured_remote_ids` are the daemon-wired
     hooks for cross-cluster routing; both default to None / [] so an
@@ -989,9 +1057,12 @@ def route_outboxes(
     by_name = {p.name.lower(): p for p in all_agents}
     if configured_remote_ids is None:
         configured_remote_ids = []
-    _ingest_outboxes(senders)
+    pending_owners = _ingest_outboxes(senders, all_agents)
+    process: dict[str, Participant] = {p.name.lower(): p for p in senders}
+    for owner in pending_owners:
+        process.setdefault(owner.name.lower(), owner)
     routed = 0
-    for sender in senders:
+    for sender in process.values():
         routed += _process_pending(
             sender, by_name, publish_remotes, configured_remote_ids, services,
         )

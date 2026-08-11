@@ -43,6 +43,7 @@ _KNOWN_OPTS: set[str] = {
     "client_id",
     "keepalive",
     "connect_timeout_s",
+    "ack_timeout_s",
     "publish_qos",
 }
 
@@ -64,7 +65,10 @@ class MqttTransport(Transport):
         **opts: per-remote options forwarded from `network.json`. Recognized:
             username / password (aliased from `user` / `pass`), client_id,
             keepalive (seconds, default 60), connect_timeout_s (default 5.0),
-            publish_qos (0 or 1, default 1). Subscribe stays at QoS 1.
+            ack_timeout_s (default 30.0, PUBACK wait — separate from
+            connect_timeout_s because a residential network's latency tail
+            can outlast a healthy connection), publish_qos (0 or 1,
+            default 1). Subscribe stays at QoS 1.
             a8s-android (Java Paho) publishes asynchronously and never waits
             for PUBACK; this client waits, and the broker echo runs through
             `on_message` on the same connection — see `_worker_loop`.
@@ -100,6 +104,7 @@ class MqttTransport(Transport):
         client_id: Optional[str] = opts.get("client_id")
         keepalive: int = int(opts.get("keepalive", 60))
         connect_timeout_s: float = float(opts.get("connect_timeout_s", 5.0))
+        ack_timeout_s: float = float(opts.get("ack_timeout_s", 30.0))
         publish_qos: int = int(opts.get("publish_qos", 1))
         if publish_qos not in (0, 1):
             raise ValueError(
@@ -110,6 +115,7 @@ class MqttTransport(Transport):
         self._topic = topic
         self._keepalive = keepalive
         self._connect_timeout_s = connect_timeout_s
+        self._ack_timeout_s = ack_timeout_s
         self._publish_qos = publish_qos
         parsed = urlparse(broker)
         if parsed.scheme not in ("mqtt", "mqtts"):
@@ -241,7 +247,7 @@ class MqttTransport(Transport):
         if self._publish_qos == 0:
             return
         try:
-            info.wait_for_publish(timeout=self._connect_timeout_s)
+            info.wait_for_publish(timeout=self._ack_timeout_s)
         except (RuntimeError, ValueError) as e:
             raise TransportError(f"{self._remote_id}: wait_for_publish: {e}") from e
         if not info.is_published():

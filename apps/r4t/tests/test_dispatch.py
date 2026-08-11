@@ -811,6 +811,68 @@ class TestContinueTurns:
         assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
 
 
+class TestCacheLog:
+    def _log(self, r4t_home, tmp_path, monkeypatch, *, read, created, continued):
+        import transcript
+        from dispatch import DispatchContext
+        from roster import Member
+
+        convo = transcript.Conversation(
+            path=tmp_path / "s.jsonl",
+            size_bytes=1_000,
+            context_tokens=read + created,
+            cache_read_tokens=read,
+            cache_creation_tokens=created,
+            ephemeral_1h_tokens=created,
+            ephemeral_5m_tokens=0,
+        )
+        monkeypatch.setattr(dispatch.transcript, "probe", lambda p, w: convo)
+        ctx = DispatchContext(
+            root=tmp_path,
+            node=NODE,
+            roster_path=tmp_path / "ROSTER.md",
+            config_path=tmp_path / "rigs.json",
+            tell_fn=lambda *a, **k: None,
+        )
+        dispatch._log_cache_usage(
+            ctx, Member(name="Ana"), Rig(name="r", preset="claude"),
+            tmp_path, continued=continued,
+        )
+
+    def test_a_continued_rewrite_logs_cache_miss(
+        self, r4t_home, tmp_path, monkeypatch
+    ):
+        # The measured failure shape: a resume that read only a stable prefix
+        # and re-created its own history at the premium write rate.
+        self._log(
+            r4t_home, tmp_path, monkeypatch,
+            read=18_479, created=146_656, continued=True,
+        )
+        assert "CACHE-MISS ana" in read_log()
+
+    def test_a_warm_continue_is_not_a_miss(
+        self, r4t_home, tmp_path, monkeypatch
+    ):
+        self._log(
+            r4t_home, tmp_path, monkeypatch,
+            read=160_000, created=4_000, continued=True,
+        )
+        log = read_log()
+        assert "CACHE ana" in log and "CACHE-MISS" not in log
+
+    def test_a_founding_write_is_not_a_miss(
+        self, r4t_home, tmp_path, monkeypatch
+    ):
+        # A fresh conversation writes its whole prompt by definition; only a
+        # continued turn can miss.
+        self._log(
+            r4t_home, tmp_path, monkeypatch,
+            read=0, created=150_000, continued=False,
+        )
+        log = read_log()
+        assert "CACHE ana" in log and "CACHE-MISS" not in log
+
+
 HISTORY_HEADER = "## Your conversation so far"
 IN_HARNESS = "This turn continues the session you are already in"
 
