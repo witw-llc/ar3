@@ -136,7 +136,7 @@ The conversation is keyed on the CLI that holds it. Swap a member's rig to a
 preset driving a different CLI and the conversation is retired — r4t logs
 CONTINUE-SWAP and the next turn refounds from STATUS.md.
 
-A swap that keeps the CLI (a model change, or opencode <-> opencode-ollama)
+A swap that keeps the CLI (a model change, or opencode <-> ollama-opencode)
 keeps the conversation.
 EOF
 find ~/.config/k7e
@@ -190,7 +190,7 @@ The conversation is keyed on the CLI that holds it. Swap a member's rig to a
 preset driving a different CLI and the conversation is retired — r4t logs
 CONTINUE-SWAP and the next turn refounds from STATUS.md.
 
-A swap that keeps the CLI (a model change, or opencode <-> opencode-ollama)
+A swap that keeps the CLI (a model change, or opencode <-> ollama-opencode)
 keeps the conversation.
 
 ## Edge Cases

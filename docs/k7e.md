@@ -15,10 +15,12 @@ Three commitments shape every design decision:
 - **Files are truth.** Knowledge lives as flat markdown on your disk. The search
   index (SQLite FTS5 + optional embeddings) is a cache you can delete and
   rebuild anytime. No database lock-in, no opaque blobs, no cloud.
-- **The core is dependency-free.** Storage and keyword search (FTS5) need
-  nothing but Python's standard library and work fully offline. Semantic search
-  uses ollama embeddings; knowledge *capture* (distill/recall/compile) uses
-  **explicit stdin→stdout CLI commands** you configure — no auto-detection.
+- **The core is stdlib, per the [suite doctrine](ark.md#1-dependencies).**
+  Storage and keyword search (FTS5) import nothing beyond Python's standard
+  library and work fully offline — k7e reaches for no dependency at all, in or
+  out of the foundation's tiers. Semantic search uses ollama embeddings;
+  knowledge *capture* (distill/recall/compile) uses **explicit stdin→stdout CLI
+  commands** you configure — no auto-detection.
 - **Relevance is earned, not assumed.** Knowledge you keep using stays fresh;
   knowledge you never touch fades in *ranking* — never in storage. The store
   accumulates; retrieval forgets.

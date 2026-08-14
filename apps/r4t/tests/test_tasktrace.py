@@ -17,7 +17,7 @@ from dispatch import drain_until_quiet, handle_message
 from r4t import main as r4t_main
 from rig import load_rig_config
 from roster import load_roster
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 from test_dispatch import dead_reasons, run_one
 

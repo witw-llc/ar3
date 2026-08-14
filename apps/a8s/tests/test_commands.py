@@ -1888,7 +1888,7 @@ class TestCmdLogs:
 class TestCmdTrace:
     def test_prints_correlated_boundaries(self, fake_home, capsys):
         from txlog import log
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         log("PUBLISHED", msg_id=msg_id, sender="alice", recipient="bob", remote="mqtt")
@@ -1913,7 +1913,7 @@ class TestCmdTrace:
         assert "usage: a8s trace <ULID>" in capsys.readouterr().err
 
     def test_reports_no_events(self, fake_home, capsys):
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         assert cmd_trace([msg_id]) == 1

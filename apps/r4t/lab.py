@@ -28,9 +28,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import ulid
 from rig import RigError, default_config_path, load_rig_config
-from state import r4t_home, utc_now
+from state import new_ulid, r4t_home, utc_now
 
 R4T_DIR = Path(__file__).resolve().parent
 EXPERIMENTS_DIR = R4T_DIR / "experiments"
@@ -603,7 +602,7 @@ def run_one_posthoc_trial(
     answers_truth = load_answers(manifest)
     prompt = build_judge_prompt(manifest, arm, questions)
 
-    trial_id = ulid.new()
+    trial_id = new_ulid()
     invoke = environment["roles"]["judge"]["invoke"]
     # Hermetic per-trial cwd: tool-enabled judge harnesses (observed live with
     # `opencode --auto`) can write scratch files into their working directory —

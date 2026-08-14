@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ulid import is_ulid, new as new_ulid
+from ark.ulid import is_ulid, new as new_ulid
 
 
 CONTROL_FIELD = "a8s_control"

@@ -245,5 +245,5 @@ class TestMissingBoto3:
         svc = S3Service("x", url="s3://my-bucket")
         src = tmp_path / "a.txt"
         src.write_text("x", encoding="utf-8")
-        with pytest.raises(StorageError, match="requirements/a8s-s3.txt"):
+        with pytest.raises(StorageError, match="ar3 deps a8s-s3"):
             svc.store(src)

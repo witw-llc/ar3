@@ -13,7 +13,7 @@
 - **Live sandbox (acceptance / eval):** `r4t sandbox` (no `--fake`) runs
   the same scenario with a real harness. Pick any named preset:
   `r4t sandbox --preset opencode` (default), or local models via Ollama:
-  `r4t sandbox --preset opencode-ollama --model qwen2.5-coder:7b`.
+  `r4t sandbox --preset ollama-opencode --model qwen2.5-coder:7b`.
   Other presets (`claude`, `codex`, `cursor`, `agy`, …) work the same
   way — see `r4t rig presets`. `live-agent.py` prepends explicit
   per-role steps and stages protocol tells if the model skips them.

@@ -5,9 +5,9 @@ qwen3.6:latest (23 GB) unless noted.
 
 `ollama launch <integration>` starts a coding-agent CLI pointed at the local
 ollama server instead of its cloud backend — no env vars or config files to
-hand-edit. r4t wraps it in the `claude-ollama`, `codex-ollama`, and
-`copilot-ollama` presets in [`rig.py`](../apps/r4t/rig.py), alongside the older
-`opencode-ollama`. Local models mean no cloud quota, which is what makes
+hand-edit. r4t wraps it in the `ollama-claude`, `ollama-codex`, and
+`ollama-copilot` presets in [`rig.py`](../apps/r4t/rig.py), alongside the older
+`ollama-opencode`. Local models mean no cloud quota, which is what makes
 whole-org experiments affordable.
 
 ## How the launcher works
@@ -29,7 +29,7 @@ ollama launch <integration> --model <tag> -y -- <the harness's own headless argv
   by spawning each wrapped integration with a cwd of its own and reading the
   OS-reported cwd of every descendant: launcher, harness, and the node/codex
   helpers underneath all sat in the spawn directory. That is what makes
-  `Workdir:` work on the `*-ollama` presets (bin#289). A harness that reads
+  `Workdir:` work on the `ollama-*` presets (bin#289). A harness that reads
   something other than its cwd needs more than the hop: opencode resolves
   `--dir` against `$PWD`, so r4t pins `PWD` to the turn directory and the
   opencode presets pass the workdir absolutely (bin#273).
@@ -59,9 +59,9 @@ with a given word, verified on disk).
 
 | Preset | One-shot | Tool-use | Wall time per turn |
 |---|---|---|---|
-| `claude-ollama` | pass | pass | 92–100 s |
-| `codex-ollama` | pass | pass | 10–24 s |
-| `copilot-ollama` | pass | pass | 18–25 s (qwen3:1.7b) |
+| `ollama-claude` | pass | pass | 92–100 s |
+| `ollama-codex` | pass | pass | 10–24 s |
+| `ollama-copilot` | pass | pass | 18–25 s (qwen3:1.7b) |
 
 Oddities worth knowing:
 
@@ -79,6 +79,16 @@ Oddities worth knowing:
   small: all three presets sit in the `small` text tier.
 - ollama recommends raising the server context length to at least 64k tokens
   for coding tools.
+- **`ollama-copilot` cannot back `r4t engine run`.** Every file write lands in
+  copilot's session-state mirror (`~/.copilot/session-state/<id>/files/`),
+  never the real working directory — `--allow-all-paths` and the rest of
+  `--help` were swept and nothing redirects it — so an engine whose writes
+  never reach the workdir cannot honor the scaffold's `STATUS.md` contract
+  and `RUN_ENGINES` excludes it (cloud `copilot` is unaffected).
+- **Small local models can miss codex's tool-calling schema.** `qwen3.5:4b`
+  under `ollama-codex` hallucinated a tool-less context and exited clean with
+  no file written — pick a model verified against the schema you need, not
+  just the smallest one that fits.
 
 ## Not-installed integrations (future candidates)
 

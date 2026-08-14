@@ -85,6 +85,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
+# into a container with no repo root, so `ark` is not always reachable there.
+try:
+    from ark.envseam import ROUTING_OWNED as _ROUTING_OWNED
+except ImportError:
+    _ROUTING_OWNED = ("TELL_OUTBOX_DIR", "TELL_FILE_MAX")
+
 from isolate import Isolation
 from roster import (
     KNOWLEDGE_DEFAULT_BUDGET,
@@ -231,7 +238,21 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_anchor": "run",
         "continue_argv": ["--continue"],
     },
-    "opencode-ollama": {
+    "ollama": {
+        "text_tier": "small",
+        "description": (
+            "Bare `ollama run` — tiny models with no tool use or big context; "
+            "replies ride the stdout fallback; requires --model"
+        ),
+        "headless": "run MODEL PROMPT (positional)",
+        "invoke": [
+            "ollama",
+            "run",
+            "{model}",
+            "{prompt}",
+        ],
+    },
+    "ollama-opencode": {
         "text_tier": "small",
         "description": (
             "OpenCode via `ollama launch` — local models, no cloud quota; "
@@ -258,7 +279,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         # against a local model: planted, resumed, and founded cold cleanly).
         "continue_argv": ["--continue"],
     },
-    "claude-ollama": {
+    "ollama-claude": {
         "text_tier": "small",
         "description": (
             "Claude Code via `ollama launch` — local models, no cloud quota; "
@@ -287,7 +308,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
     },
-    "codex-ollama": {
+    "ollama-codex": {
         "text_tier": "small",
         "description": (
             "Codex via `ollama launch` — local models, no cloud quota; "
@@ -310,7 +331,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{prompt}",
         ],
     },
-    "copilot-ollama": {
+    "ollama-copilot": {
         "text_tier": "small",
         "description": (
             "Copilot CLI via `ollama launch` — local models, no cloud quota; "
@@ -329,20 +350,6 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--",
             "--allow-all-tools",
             "-p",
-            "{prompt}",
-        ],
-    },
-    "ollama": {
-        "text_tier": "small",
-        "description": (
-            "Bare `ollama run` — tiny models with no tool use or big context; "
-            "replies ride the stdout fallback; requires --model"
-        ),
-        "headless": "run MODEL PROMPT (positional)",
-        "invoke": [
-            "ollama",
-            "run",
-            "{model}",
             "{prompt}",
         ],
     },
@@ -434,8 +441,8 @@ def text_defaults(preset: str | None) -> dict[str, int]:
 # with codex/claude. Anchored on `roster.KNOWLEDGE_SIZES`, so a `large` move
 # there moves these defaults too.
 KNOWLEDGE_TIER_LOW = frozenset({
-    "opencode", "ollama", "opencode-ollama",
-    "claude-ollama", "codex-ollama", "copilot-ollama",
+    "opencode", "ollama", "ollama-opencode",
+    "ollama-claude", "ollama-codex", "ollama-copilot",
 })
 KNOWLEDGE_TIER_MID = frozenset({"agy", "cursor", "copilot"})
 KNOWLEDGE_TIER_HIGH = frozenset({"codex", "claude"})
@@ -1052,7 +1059,7 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
 
     Three shapes, keyed off the preset's metadata:
 
-    - Inline `{model}` presets (ollama, opencode-ollama): --model is REQUIRED
+    - Inline `{model}` presets (ollama, ollama-opencode): --model is REQUIRED
       and substituted straight into the placeholder — the CLI has no default.
     - `model_argv` presets with a live resolver (agy): splice the flag pair but
       keep the `{model}` placeholder so dispatch re-resolves the friendly string
@@ -1312,12 +1319,14 @@ def remove_rig(path: Path, rig_name: str) -> str:
 # ENABLE_PROMPT_CACHING_1H). Doctrine is FRUGAL: an entry earns its place with a
 # documented reason, because this is the one rig key whose effect r4t cannot see.
 #
-# The turn environment is r4t's own channel: TELL_OUTBOX_DIR points at the
-# member's staging outbox, PWD is pinned to the member's workdir, and the R4T_*
-# family carries node, member, isolation and continue state. A rig naming one of
-# those would steer dispatch from a config file, so the name is refused where it
-# is written rather than silently losing to the turn.
-TURN_OWNED_ENV = ("TELL_OUTBOX_DIR", "PWD")
+# The turn environment is r4t's own channel: the ark.envseam reserved-env
+# contract (TELL_OUTBOX_DIR points at the member's staging outbox, TELL_FILE_MAX
+# the attachment cap — both computed and injected by a8s routing, same as the
+# other apps refuse to let a rig override) plus PWD, pinned to the member's
+# workdir, and the R4T_* family carrying node, member, isolation and continue
+# state. A rig naming one of those would steer dispatch from a config file, so
+# the name is refused where it is written rather than silently losing to the turn.
+TURN_OWNED_ENV = _ROUTING_OWNED + ("PWD",)
 TURN_OWNED_ENV_PREFIX = "R4T_"
 ENV_SETTING_PREFIX = "env."
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")

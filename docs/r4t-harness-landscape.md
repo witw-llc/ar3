@@ -44,11 +44,11 @@ behavior, cross-directory scope probe.
 | `codex` | `codex exec --full-auto … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
-| `opencode-ollama` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
-| `claude-ollama` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
-| `codex-ollama` | `ollama launch codex --model … -y -- exec --full-auto` | no | `codex-config` | Requires `--model` |
+| `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
+| `ollama-claude` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
+| `ollama-codex` | `ollama launch codex --model … -y -- exec --full-auto` | no | `codex-config` | Requires `--model` |
 | `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; wait for bin#256 |
-| `copilot-ollama` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
+| `ollama-copilot` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
 | `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | none | MCP only from `~/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
 | `ollama` | `ollama run {model} {prompt}` | no | none | No tools; stdout-fallback replies |
 
@@ -110,7 +110,7 @@ conversation.
 | claude (preset) | `--continue` | per-directory (CLI convention) | distinct `Workdir:` / CLI | yes |
 | codex (preset) | `exec resume --last` | last session | `resume <SESSION_ID>` (bin#256) | yes (`--last`) |
 | cursor (preset) | `--continue` | per-directory | distinct workdirs | yes |
-| opencode / opencode-ollama | `--continue` | per-directory store | distinct workdirs | yes |
+| opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
 | copilot (preset) | `--continue` exists | **machine-global** | needs `--resume=<id>` (bin#256) | **no** until pinned |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
@@ -134,10 +134,10 @@ should expose `a8s` tell the way current MCP presets do.
 
 | CLI / preset | Idiom | Per-invocation? | Notes |
 |---|---|---|---|
-| claude / claude-ollama | CLI flag (`claude-flag`) | yes | Default-on in r4t |
-| codex / codex-ollama | config file (`codex-config`) | yes | Default-on |
-| copilot / copilot-ollama | CLI flag (`copilot-flag`) | yes | Default-on |
-| opencode / opencode-ollama | env / config (`opencode-env`) | yes | Default-on |
+| claude / ollama-claude | CLI flag (`claude-flag`) | yes | Default-on in r4t |
+| codex / ollama-codex | config file (`codex-config`) | yes | Default-on |
+| copilot / ollama-copilot | CLI flag (`copilot-flag`) | yes | Default-on |
+| opencode / ollama-opencode | env / config (`opencode-env`) | yes | Default-on |
 | cursor | `.cursor/mcp.json` in worktree (`cursor-file`) | yes | Opt-in (writes into the repo) |
 | agy | `~/.gemini` settings only | **no** | Preset refuses MCP knob |
 | ollama (bare) | none | no | No tools |

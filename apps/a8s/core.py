@@ -32,6 +32,9 @@ except ImportError:
     def version_line(app: str) -> str:
         return f"{app} unknown (The Ark)"
 
+from ark import envseam  # noqa: E402
+from ark.home import app_home  # noqa: E402
+
 # ---------- constants ----------
 
 MARKER_FILES = {
@@ -63,8 +66,10 @@ MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
 SCRIPT_DIR = Path(__file__).resolve().parent
 BIN_ROOT = SCRIPT_DIR.parent.parent
 DEFINITIONS_DIR = SCRIPT_DIR / "definitions"
-TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"
-TELL_FILE_MAX_ENV = "TELL_FILE_MAX"
+# a8s owns this reserved-env contract; ark.envseam holds the canonical names
+# so r4t can refuse a rig config the same two vars without hand-listing them.
+TELL_OUTBOX_DIR_ENV = envseam.TELL_OUTBOX_DIR_ENV
+TELL_FILE_MAX_ENV = envseam.TELL_FILE_MAX_ENV
 # Explicit path for `cmd_start`'s re-exec. After the modular split, `__file__`
 # resolved inside any module would point at that module — not the entry script.
 ENTRYPOINT = SCRIPT_DIR / "a8s.py"
@@ -81,22 +86,16 @@ def resolve_a8s_home() -> Path:
 
     Resolution order:
       1. ``A8S_HOME`` if set (tests, sandboxes, explicit relocate)
-      2. ``~/.config/a8s`` if that directory already exists
+      2. ``XDG_CONFIG_HOME/a8s`` (or ``~/.config/a8s``) if that directory
+         already exists
       3. ``~/.a8s`` if that directory already exists (legacy)
-      4. ``~/.config/a8s`` (default for new installs)
+      4. ``XDG_CONFIG_HOME/a8s`` (or ``~/.config/a8s``, default for new
+         installs)
 
-    Does not create the directory — callers that write should mkdir.
+    Does not create the directory — callers that write should mkdir. See
+    ``ark.home.app_home`` — every app in the suite resolves through it.
     """
-    override = os.environ.get("A8S_HOME", "").strip()
-    if override:
-        return Path(override).expanduser()
-    config = Path.home() / ".config" / "a8s"
-    legacy = Path.home() / ".a8s"
-    if config.is_dir():
-        return config
-    if legacy.is_dir():
-        return legacy
-    return config
+    return app_home("a8s", os.environ.get("A8S_HOME"), legacy=Path.home() / ".a8s")
 
 
 def _a8s_dir() -> Path:

@@ -75,9 +75,9 @@ header fed by the same verdict engine as `r4t status`, a clickable member
 status panel (who is active, resting, or broken and how deep each queue is),
 a conversation pane beside a fly-on-the-wall activity pane, and an input line
 (`/to`, `/attach`, `/detach`, `/who`, `/threads`, `/help`, `/quit`). The TUI
-needs [textual](https://textual.textualize.io/) (`python3 -m pip install
-textual`); without it — or with `--plain`, or piped — chat falls back to
-a line UI over the same feed. While chat (or anything touching the
+needs [textual](https://textual.textualize.io/) (`ar3 deps r4t`); without it
+— or with `--plain`, or piped — chat falls back to a line UI over the same
+feed. While chat (or anything touching the
 presence file) is attached, dispatch skips the `Address:` doorbell;
 detach and the doorbell rings again.
 

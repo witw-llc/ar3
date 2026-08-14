@@ -38,7 +38,8 @@ from core import (
     TELL_OUTBOX_DIR_ENV,
 )
 from mailbox import _split_content_and_files
-from ulid import new as new_ulid
+from ark.fsio import atomic_write_text
+from ark.ulid import new as new_ulid
 
 DEFAULT_FILE_MAX_BYTES = 50 * 1024 * 1024
 
@@ -466,9 +467,7 @@ def write_outbox_envelope(
     if extra:
         msg.update(extra)
     dest = outbox / f"{envelope_id}.json"
-    tmp = outbox / f".{envelope_id}.tmp"
-    tmp.write_text(json.dumps(msg, indent=2), encoding="utf-8")
-    os.replace(tmp, dest)
+    atomic_write_text(dest, json.dumps(msg, indent=2))
     return msg
 
 

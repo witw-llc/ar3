@@ -11,6 +11,9 @@ import pytest
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
+# `ark` sits at the repo root, shared by every app. Put it on the path here
+# rather than relying on some r4t module having run first.
+sys.path.append(str(_PKG.parent.parent))
 
 
 def pytest_configure(config):

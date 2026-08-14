@@ -29,7 +29,7 @@ from core import (
 from daemon import _settle_wake, _wake_retry_ready, attached_loop
 from mailbox import ensure_mailboxes
 from registry import save_registry
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 
 def _read_log(name: str) -> str:

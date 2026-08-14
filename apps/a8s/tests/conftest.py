@@ -17,8 +17,20 @@ import pytest
 # `apps/a8s/tests/conftest.py` -> `apps/a8s/`
 _PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG_DIR))
+# `ark` sits at the repo root, shared by every app. Put it on the path here
+# rather than relying on some a8s module having run first.
+sys.path.append(str(_PKG_DIR.parent.parent))
 
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_xdg(monkeypatch):
+    """a8s honors XDG_CONFIG_HOME (ark.home), and CI runners export it. Every
+    test here fabricates state under a fake HOME, so an ambient XDG base would
+    silently point resolution somewhere else; XDG-order behavior itself is
+    covered by the foundation's own suite (test_ark_home.py)."""
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
 @pytest.fixture(autouse=True)

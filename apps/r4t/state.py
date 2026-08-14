@@ -57,7 +57,53 @@ if sys.platform == "win32":
 else:
     import fcntl
 
-from ulid import new as new_ulid
+# The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
+# container with no repo root, so `ark` is not always reachable — unlike
+# arkver's "unknown version" degrade, a ULID has no no-op fallback, so the
+# except branch carries a working minimal reimplementation instead of a stub.
+try:
+    from ark.ulid import new as new_ulid
+except ImportError:
+    import secrets
+
+    def new_ulid() -> str:
+        alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        ts_ms = int(time.time() * 1000) & ((1 << 48) - 1)
+        rnd = int.from_bytes(secrets.token_bytes(10), "big")
+        n = (ts_ms << 80) | rnd
+        chars = [alphabet[(n >> (5 * i)) & 0x1F] for i in range(25, -1, -1)]
+        return "".join(chars)
+
+# Same relocation concern as `new_ulid` above; r4t carries no legacy config
+# dir, so the fallback needs neither an override nor a migration path.
+try:
+    from ark.home import app_home as _app_home
+except ImportError:
+    def _app_home(app: str, env_override: str | None) -> Path:
+        override = (env_override or "").strip()
+        if override:
+            return Path(override).expanduser()
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+        return base / app
+
+# Same relocation concern again; the fallback keeps the same-dir-tmp +
+# os.replace + cleanup-on-failure contract, minus the fsync/mode knobs no
+# r4t call site needs.
+try:
+    from ark.fsio import atomic_write_text as _atomic_write
+except ImportError:
+    def _atomic_write(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{new_ulid()}.tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 _queue_seq = itertools.count()
 
@@ -72,12 +118,7 @@ def utc_now() -> str:
 
 
 def r4t_home() -> Path:
-    raw = os.environ.get("R4T_HOME", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return base / "r4t"
+    return _app_home("r4t", os.environ.get("R4T_HOME"))
 
 
 def rosters_dir() -> Path:
@@ -155,16 +196,7 @@ def node_for_root(cwd: Path) -> str | None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{new_ulid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+    _atomic_write(path, text)
 
 
 def atomic_write_json(path: Path, payload: dict) -> None:

@@ -853,7 +853,7 @@ class TestAttachedLoopIdleIntegration:
         # Drop a self-tell so there's an inbox message to drain. We can't
         # tell ourselves through routing (sender exclusion), so write the
         # routed message directly into the inbox.
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
         msg_id = new_ulid()
         (inbox_dir("X") / f"{msg_id}.json").write_text(json.dumps({
             "id": msg_id,
@@ -1209,7 +1209,7 @@ class TestAsyncAttachedLoop:
         ensure_mailboxes(a)
         ensure_mailboxes(b)
 
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir("A") / f"{msg_id}.json").write_text(
@@ -1267,7 +1267,7 @@ class TestAsyncAttachedLoop:
         save_registry({"A": {"root": str(d), "definition": str(defp)}})
         ensure_mailboxes(Participant("A", d))
 
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir("A") / f"{msg_id}.json").write_text(
@@ -1306,7 +1306,7 @@ class TestSharedHandlerStarvation:
     other agents a shared handler serves."""
 
     def _queue(self, name: str, content: str) -> str:
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir(name) / f"{msg_id}.json").write_text(
@@ -1409,7 +1409,7 @@ class TestSharedHandlerWakeFairness:
     (single_pass) stays index-0 ordered."""
 
     def _queue(self, name: str, content: str) -> None:
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir(name) / f"{msg_id}.json").write_text(

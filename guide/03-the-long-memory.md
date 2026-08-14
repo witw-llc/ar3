@@ -229,7 +229,7 @@ boundary on the strength of a markdown file. Swap back:
 **Run**
 
 ```bash
-r4t rig swap silo opencode-ollama --model qwen3.6
+r4t rig swap silo ollama-opencode --model qwen3.6
 r4t seat send --node silo "Back on the local rig. Codeword and cache location, one line."
 r4t seat inbox --node silo
 ```
@@ -237,7 +237,7 @@ r4t seat inbox --node silo
 You should see:
 
 ```
-swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to ollama-opencode in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 ── from silo:wren (2026-07-29T05:27:48.329830Z)
 Codeword: TIDEPOOL — Cache: grid square K-19
@@ -245,7 +245,7 @@ Codeword: TIDEPOOL — Cache: grid square K-19
 
 The log shows the same `CONTINUE-SWAP` event with the CLIs reversed. One
 subtlety the event teaches: a swap that keeps the CLI (a model change, or
-`opencode` ↔ `opencode-ollama`, which both drive `opencode`) keeps the
+`opencode` ↔ `ollama-opencode`, which both drive `opencode`) keeps the
 conversation — only a real CLI change retires it.
 
 (If a send comes back with `queued — Wren is resting (member budget ...)`,

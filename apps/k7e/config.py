@@ -32,6 +32,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ark.home import app_home
+
 LLM_FALLBACK_KEY = "llm_command"
 LLM_FALLBACK_ENV = "K7E_LLM_COMMAND"
 
@@ -45,12 +47,7 @@ LLM_PURPOSES = {
 
 
 def _k7e_home():
-    override = os.environ.get("K7E_HOME", "").strip()
-    if override:
-        return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return base / "k7e"
+    return app_home("k7e", os.environ.get("K7E_HOME"))
 
 
 def config_path():

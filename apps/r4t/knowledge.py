@@ -13,8 +13,8 @@ The semantic track follows the same rule. Dreaming pays for entry vectors
 on a budget short enough that an absent ollama costs the section its semantic
 half and the turn nothing.
 
-k7e is driven as a subprocess — the a8s/r4t `ulid` modules shadow an import,
-and the CLI is the stable surface anyway.
+k7e is driven as a subprocess — the CLI is the stable surface, and importing
+k7e in-process would couple r4t to k7e's internals for no reason.
 
 Dreaming's distill rig is the member's own turn rig by default (the K2
 verdict: least surprising, costs nothing extra, and not broken at 88%

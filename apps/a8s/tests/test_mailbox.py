@@ -181,7 +181,7 @@ class TestWriteOutbox:
         assert "date" in msg
 
     def test_filename_is_ulid_and_matches_id(self, fake_home, tmp_path):
-        from ulid import is_ulid
+        from ark.ulid import is_ulid
         path = _write_outbox("A", tmp_path, "B", "hi", [])
         # Filename = "<ulid>.json" — sortable, opaque, no sender leak in name.
         stem = path.stem
@@ -1049,7 +1049,7 @@ class TestNextInboxMessage:
         ensure_mailboxes(p)
         # Drop two ULID-named JSON files directly into the inbox; ULID
         # lex-order matches creation order, so first should sort first.
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
         first_id = new_ulid()
         first = inbox_dir("X") / f"{first_id}.json"
         first.write_text(json.dumps({"id": first_id, "to": "X", "content": "first"}))
@@ -1675,7 +1675,7 @@ class TestStorageDownload:
     def test_falls_through_to_second_url(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1709,7 +1709,7 @@ class TestStorageDownload:
     def test_all_urls_unsupported_drops_file_keeps_message(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1735,7 +1735,7 @@ class TestStorageDownload:
     def test_no_services_strips_files(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1756,7 +1756,7 @@ class TestStorageDownload:
         from _fake_storage import start_fake_tempfile_server
         from network import receive_envelope
         from registry import save_registry
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         server, base = start_fake_tempfile_server()
         try:
@@ -1785,7 +1785,7 @@ class TestStorageDownload:
     def test_rejects_path_traversal_filename(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ulid import new as new_ulid
+        from ark.ulid import new as new_ulid
 
         b_root = tmp_path / "B"
         b_root.mkdir()

@@ -76,7 +76,7 @@ message:
 **Run**
 
 ```bash
-r4t rig add helper opencode-ollama --model qwen3.6
+r4t rig add helper ollama-opencode --model qwen3.6
 r4t rig set helper echo true
 r4t rig unset silo echo
 cd ~/ark/silo
@@ -86,7 +86,7 @@ r4t roster check
 You should see:
 
 ```
-added rig 'helper' (opencode-ollama) to /home/you/.config/r4t/rigs.json
+added rig 'helper' (ollama-opencode) to /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 Reference it from ROSTER.md: `- **Rig:** helper`
 set helper echo = true in /home/you/.config/r4t/rigs.json

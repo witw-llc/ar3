@@ -16,19 +16,28 @@ echo "long prompt piped in" | r4t engine agy run -
 
 ```
 r4t engine <id> run [--dir DIR] [--model M] [--agent NAME] [--timeout S]
-                     [--no-scaffold] [--idle] [--] PROMPT
+                     [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
+                     [--] PROMPT
 ```
 
-Supported engines: `claude`, `codex`, `agy`, `copilot`, `cursor` — the five
-whose headless, unattended invocation is verified (an unsupported id, or a
-preset like `opencode` that resolves to one, is a clear error naming this
-set). Argv composition rides `rig.build_preset_invoke` — the same preset
-table `r4t rig add` reads — plus what an unattended, roster-less turn needs
-on top: agy gets an explicit `--print-timeout` matching `--timeout` (its own
-default silently undercuts a longer one), and copilot gets `--no-ask-user`
-if the preset does not already carry it (unattended, it otherwise hangs on
-its `ask_user` tool). No permission-bypass flags are added beyond what the
-preset itself already chooses.
+Supported engines: `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`,
+and the `ollama-claude` / `ollama-codex` / `ollama-opencode` local launchers —
+the ones whose headless, unattended invocation is verified (an unsupported id
+is a clear error naming this set). The `ollama-*` engines run local models
+through `ollama launch`: no cloud quota spent, but each needs `--model` (an
+ollama tag) since the launcher has no default. The bare `ollama` preset is
+not run-capable — `ollama run` has no file tools, and the scaffold below
+needs them. `ollama-copilot` is excluded too: every file write it makes lands
+in copilot's session-state mirror rather than the real working directory, so
+it cannot honor the scaffold's contract (cloud `copilot` is unaffected — see
+[r4t-harness-ollama-launch.md](r4t-harness-ollama-launch.md)). Argv
+composition rides `rig.build_preset_invoke` — the same preset table `r4t rig
+add` reads — plus what an unattended, roster-less turn needs on top: agy gets
+an explicit `--print-timeout` matching `--timeout` (its own default silently
+undercuts a longer one), and copilot gets `--no-ask-user` if the preset does
+not already carry it (unattended, it otherwise hangs on its `ask_user`
+tool). No permission-bypass flags are added beyond what the preset itself
+already chooses.
 
 - `PROMPT` is one positional string; `-` reads it from stdin.
 - `--dir DIR` — the turn's working directory (default: CWD).
@@ -38,6 +47,11 @@ preset itself already chooses.
 - `--timeout S` — default 900. On expiry the whole process group is killed
   (a harness CLI forks tool subprocesses `kill()` alone would leak) and the
   command exits 124, naming the timeout.
+- `--echo` — before spawning, print the composed argv and the exact prompt
+  (scaffold prelude included) to stderr; the turn still runs, stdout still
+  carries only the engine's own reply stream.
+- `--lessons-cap N` — the `LESSONS.md` rotation line cap for this turn
+  (default 200); see below.
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -76,9 +90,12 @@ Routed input:
 <PROMPT>
 ```
 
-If `LESSONS.md` exists and is over 200 lines when `run` starts, it prints a
-one-line warning to stderr. Consolidation policy is not built yet — the tool
-only warns.
+If `LESSONS.md` exists and is strictly over the line cap (`--lessons-cap`,
+default 200) when `run` starts, the oldest lines rotate out to
+`LESSONS-ARCHIVE.md` (created if absent, appended to in order) so the live
+file lands at exactly the cap — whole lines only, nothing deleted, no model
+ever touches either file. `run` prints one stderr line naming what moved:
+`r4t engine: rotated N lines from <DIR>/LESSONS.md to <DIR>/LESSONS-ARCHIVE.md`.
 
 r4t's own dispatcher (`dispatch.run_harness`) never uses this scaffold: it
 already builds the roster's own prompt, and stacking this one on top would
@@ -100,7 +117,8 @@ latch, so the next quiet tick gets exactly one consolidation pass again.
 claude run --agent $RECIPIENT $MESSAGE`, cwd already the node's own root (an
 a8s wake sets it, matching `run`'s `--dir`-less default). To point another
 supported engine at the same pattern, copy the file and change `"claude"` to
-`codex`, `agy`, `copilot`, or `cursor`:
+`codex`, `agy`, `copilot`, `cursor`, `opencode`, or one of the `ollama-*`
+launchers:
 
 ```bash
 cp apps/a8s/definitions/engine-claude.json apps/a8s/definitions/engine-codex.json

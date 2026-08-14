@@ -51,7 +51,8 @@ from registry import resolve_name
 from services import StorageService
 from transports import OnMessage, Transport, TransportError
 import txlog
-from ulid import is_ulid
+from ark.fsio import atomic_write_text
+from ark.ulid import is_ulid
 
 
 # Process-local lock guarding the seen-ids ring rotation. Multiple subscriber
@@ -149,20 +150,8 @@ def load_secrets_config() -> dict:
 
 def save_secrets_config(cfg: dict) -> None:
     """Atomic write of secrets.json with mode 0600."""
-    p = secrets_config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(cfg, indent=2) + "\n"
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(payload)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, p)
-    try:
-        p.chmod(0o600)
-    except OSError:
-        pass
+    atomic_write_text(secrets_config_path(), payload, fsync=True, mode=0o600)
 
 
 def split_secret_keys(spec: dict) -> tuple[dict, dict]:

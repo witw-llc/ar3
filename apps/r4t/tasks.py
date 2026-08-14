@@ -32,8 +32,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from state import atomic_write_json, roster_dir, utc_now
-from ulid import new as new_ulid
+from state import atomic_write_json, new_ulid, roster_dir, utc_now
 
 STATUS_OPEN = "open"
 STATUS_CLOSED = "closed"

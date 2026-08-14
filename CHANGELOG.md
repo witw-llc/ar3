@@ -10,6 +10,89 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [Unreleased]
+
+### Added
+- **The suite doctrine lands as [`docs/ark.md`](docs/ark.md).** One doctrine for
+  every app built on The Ark — dependencies, filesystem, CLI feel, processes,
+  integration, docs and release — stated as rules, so a user who has never
+  opened a new Ark app can navigate it because it feels like the ones already
+  learned. k7e's separate zero-dependency doctrine dissolves into it: the
+  suite-wide rule is stdlib at the core with anything more arriving only through
+  the foundation's two tiers, and k7e importing nothing beyond stdlib becomes a
+  fact about k7e rather than a doctrine k7e maintains alone. k7e's behavior is
+  unchanged.
+- **The `ark/` foundation package vendors paho-mqtt.** `ark/_vendor/paho`
+  ships an unmodified, sha256-verified copy of paho-mqtt 2.1.0
+  (`ark/_vendor/vendor.txt` carries the pin); `ark.vendor.ensure_vendor()`
+  prepends it to `sys.path` so `apps/a8s/transports/mqtt.py` resolves the
+  vendored copy first. a8s's MQTT transport now works under any `python3`
+  with zero `pip` — set `ARK_NO_VENDOR=1` to opt back into a system or venv
+  install instead.
+- **`r4t engine <id> run --echo`.** Prints the composed argv (shell-quoted)
+  and the exact prompt sent to the CLI — scaffold prelude included — to
+  stderr before spawning, so stdout stays only the engine's own reply
+  stream. The turn still runs.
+- **`ark/deps.py` and `ar3 deps` — tier 2 of the foundation's dependency
+  doctrine.** Tier 1 (`ark/vendor.py`) ships small pins inside the repo;
+  tier 2 fetches heavy, optional ones (boto3, textual) on demand into
+  `~/.local/share/ark/deps/<interpreter>/<group>`, one directory per Python
+  build so an interpreter upgrade misses cleanly instead of half-loading an
+  incompatible install. `ar3 deps` lists groups and their installed/missing
+  status; `ar3 deps <group>` installs one with `uv pip install --target` (or
+  plain `pip` without uv), swapping a tmp dir into place only once the
+  install succeeds so a failure never clobbers a working install. This is
+  the amendment to `ar3`'s charter: it still never mutates product state,
+  but it now owns and maintains this one piece of the suite's own substrate.
+  a8s's S3 storage and r4t's chat TUI both switch to it — replacing the
+  `pip install -r requirements/*.txt` instructions they shipped before,
+  which were broken on any PEP 668 (externally-managed) Python.
+
+### Changed
+- **One `ark/` foundation module per piece of duplicated code, shared by
+  every app.** `ark.ulid` (moved verbatim from `apps/a8s/ulid.py`), `ark.home`
+  (one `app_home()` resolver), `ark.fsio` (one `atomic_write_text()`), `ark.proc`
+  (one `spawn()` + `terminate_group()`), and `ark.envseam` (the
+  `TELL_OUTBOX_DIR` / `TELL_FILE_MAX` reserved-env contract a8s routing owns)
+  replace six-plus hand-rolled copies across a8s, r4t, and k7e. r4t's own
+  `apps/r4t/ulid.py` shadowing `apps/a8s/ulid.py` on `sys.path` — the reason
+  k7e has always been driven as a subprocess rather than imported in-process
+  — is gone for good: there is now exactly one `ulid` binding in the suite.
+- **a8s adopts `XDG_CONFIG_HOME` for its state root.** `resolve_a8s_home()`
+  now honors `XDG_CONFIG_HOME/a8s` the same way r4t and k7e always have,
+  ahead of the legacy `~/.a8s` fallback — a deliberate unification, not a
+  bug; pre-1.0 scorch-the-earth applies, so there is no migration path to
+  preserve for an operator who was relying on the old resolution order.
+- **`r4t engine <id> run`'s timeout kill and `r4t sandbox`'s orphan-process
+  cleanup now escalate SIGTERM before SIGKILL, with a grace period, instead
+  of killing immediately.** Both now share `ark.proc.terminate_group`, a
+  strict improvement: a harness that traps SIGTERM gets the chance to exit
+  cleanly before the group is force-killed.
+- **A rig's static `env` map can no longer name `TELL_FILE_MAX`, alongside
+  the existing `TELL_OUTBOX_DIR` refusal.** `rig.TURN_OWNED_ENV` now derives
+  from `ark.envseam.ROUTING_OWNED` — both env vars a8s routing computes and
+  injects on wake — instead of hand-listing only one of the two.
+- **`r4t engine <id> run` rotates an oversized `LESSONS.md` instead of just
+  warning.** Past the line cap (`--lessons-cap`, default 200), the oldest
+  whole lines move out to `LESSONS-ARCHIVE.md` — created if absent, appended
+  to in order — so the live file lands at exactly the cap. No model ever
+  touches either file; both writes are atomic (temp file + `os.replace`).
+- **The `ollama launch` presets rename to an `ollama-` prefix.**
+  `opencode-ollama` / `claude-ollama` / `codex-ollama` / `copilot-ollama` are
+  now
+  `ollama-opencode` / `ollama-claude` / `ollama-codex` / `ollama-copilot`, so
+  the local-model family sorts together in `r4t rig presets` and `r4t engine
+  list` next to the bare `ollama` preset.
+- **`r4t engine <id> run` supports `opencode` and three of the four
+  `ollama-*` local launchers.** The five original engines (`claude`, `codex`,
+  `agy`, `copilot`, `cursor`) are joined by `opencode`, `ollama-claude`,
+  `ollama-codex` and `ollama-opencode`, whose headless invocation is now
+  verified. Bare `ollama` stays excluded (no file tools for the run
+  scaffold to use), and so does `ollama-copilot` — every file write it makes
+  lands in copilot's session-state mirror rather than the real working
+  directory, which the scaffold's `STATUS.md` contract cannot survive; cloud
+  `copilot` is unaffected.
+
 ## [0.1.66]
 
 ### Added

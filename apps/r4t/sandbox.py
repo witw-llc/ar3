@@ -14,7 +14,7 @@ is written to stdout (pipe or redirect to save it).
 role-play that exercises dispatch, staging release, header stamping,
 delegation, and the final leader answer with zero LLM calls. Live mode uses
 `--preset` (any `r4t rig presets` entry; default `opencode`) and
-optional `--model` for presets like `opencode-ollama`. The chosen argv is
+optional `--model` for presets like `ollama-opencode`. The chosen argv is
 passed to live-agent.py via R4T_SANDBOX_INVOKE.
 
 `--break MEMBER[:SHAPE]` pins one member to a deliberately broken rig. Each
@@ -42,6 +42,38 @@ from pathlib import Path
 import state
 
 from rig import RigError, build_preset_invoke, format_preset_invoke, preset_names
+
+# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
+# into a container with no repo root, so `ark` is not always reachable there.
+try:
+    from ark.proc import terminate_group as _terminate_group
+except ImportError:
+    def _terminate_group(pid: int, *, grace_seconds: float = 0.5) -> None:
+        # Mirrors ark.proc.terminate_group: the pgid is resolved once, before
+        # SIGTERM, so a leader that exits during the grace period cannot
+        # strand SIGKILL with no pid left to resolve; pid stands in as the
+        # pgid when getpgid cannot answer (true for any start_new_session
+        # leader).
+        if os.name != "posix":
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            return
+        try:
+            pgid = os.getpgid(pid)
+        except OSError:
+            pgid = pid
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(pgid, sig)
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            if sig is signal.SIGTERM:
+                time.sleep(grace_seconds)
 
 R4T_DIR = Path(__file__).resolve().parent
 SANDBOX_DIR = R4T_DIR / "sandbox"
@@ -315,22 +347,7 @@ def _kill_sandbox_processes(tmp: Path) -> int:
     if not pids:
         return 0
     for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except OSError:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-    time.sleep(2)
-    for pid in pids:
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except OSError:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+        _terminate_group(pid, grace_seconds=2)
     return len(pids)
 
 

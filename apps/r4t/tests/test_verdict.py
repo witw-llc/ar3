@@ -10,7 +10,7 @@ import tasks
 import verdict
 from rig import load_rig_config
 from roster import load_roster
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 NODE = "acme"
 

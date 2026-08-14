@@ -1153,12 +1153,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
     _ensure_tell_outbox(ctx)
     attach = getattr(args, "attach", None)
     if not args.plain and sys.stdout.isatty():
+        from ark.deps import use_group
+        use_group("r4t")
         try:
             from chat_tui import run_chat_tui
         except ImportError:
             print(
                 "textual not installed — line UI instead"
-                " (try: python3 -m pip install textual)",
+                " (try: ar3 deps r4t)",
                 file=sys.stderr,
             )
         else:
@@ -1366,11 +1368,14 @@ def cmd_engine(args: argparse.Namespace) -> int:
 
 
 def _cmd_engine_run(args: argparse.Namespace) -> int:
-    import engines
     from engines import run as engine_run
 
-    engine = engines.engine_for(args.target)
-    if engine is None or engine not in engine_run.RUN_ENGINES:
+    # RUN_ENGINES holds preset ids directly (`ollama-claude`, not the quota
+    # engine `ollama` it shares with the other three launchers), so this
+    # checks the target itself rather than collapsing it through
+    # `engines.engine_for` the way `quota` does.
+    engine = args.target.strip().lower()
+    if engine not in engine_run.RUN_ENGINES:
         supported = ", ".join(sorted(engine_run.RUN_ENGINES))
         print(
             f"r4t engine: {args.target!r} does not support run "
@@ -1404,6 +1409,8 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             agent=args.agent,
             timeout=args.timeout,
             scaffold=not args.no_scaffold,
+            echo=args.echo,
+            lessons_cap=args.lessons_cap,
         )
     except engine_run.RunError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
@@ -1936,6 +1943,13 @@ def _add_older_than(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {raw!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="r4t",
@@ -2032,7 +2046,7 @@ def build_parser() -> argparse.ArgumentParser:
     rig_swap_p.add_argument(
         "--model",
         metavar="MODEL",
-        help="Model name for presets that need it (e.g. opencode-ollama).",
+        help="Model name for presets that need it (e.g. ollama-opencode).",
     )
     rig_swap_p.add_argument(
         "--rig-config",
@@ -2109,14 +2123,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rig_unset_p.set_defaults(func=cmd_rig_unset)
 
+    from engines.run import LESSONS_CAP_LINES
+
     engine_p = sub.add_parser(
         "engine",
         help=_cmd_help("engine"),
         description="Talk to an engine directly. Actions: quota — remaining "
         "subscription and reset time, without spending a turn; run — one "
-        "headless turn as a bare stateless agent, no roster or dispatcher "
-        "involved. Accepts an engine id or any rig preset id; `list` shows "
-        "both.",
+        "headless turn as a bare stateless agent (claude, codex, agy, "
+        "copilot, cursor, opencode, and the ollama-* local variants), no "
+        "roster or dispatcher involved. Accepts an engine id or any rig "
+        "preset id; `list` shows both.",
     )
     engine_p.add_argument(
         "target",
@@ -2171,6 +2188,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--idle",
         action="store_true",
         help="run: skip if the last turn was also idle, else run one and re-arm.",
+    )
+    engine_p.add_argument(
+        "--lessons-cap",
+        type=_positive_int,
+        default=LESSONS_CAP_LINES,
+        dest="lessons_cap",
+        help="run: line cap before rotating oldest LESSONS.md lines to "
+        f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_LINES}).",
+    )
+    engine_p.add_argument(
+        "--echo",
+        action="store_true",
+        help="run: print the composed argv and prompt to stderr before running.",
     )
     engine_p.set_defaults(func=cmd_engine)
 
@@ -2379,7 +2409,7 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_p.add_argument(
         "--model",
         metavar="MODEL",
-        help="Model name for presets that need it (e.g. opencode-ollama).",
+        help="Model name for presets that need it (e.g. ollama-opencode).",
     )
     sandbox_p.add_argument(
         "--break",

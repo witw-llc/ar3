@@ -7,7 +7,7 @@ from delivery_receipt import (
     is_control_envelope,
     parse_delivery_receipt,
 )
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 
 def test_build_receipt_is_extension_only_and_contains_no_message_content():

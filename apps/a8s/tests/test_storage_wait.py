@@ -6,7 +6,7 @@ import time
 
 from network import drain_attachment_retries
 from registry import save_registry
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 from test_mailbox import Participant, _StubStorage, inbox_dir
 

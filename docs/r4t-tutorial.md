@@ -69,7 +69,7 @@ Rig **names** are yours (`leader`, `member`, `reviewer`, `worker`, …).
 r4t rig presets                              # list presets + invoke lines
 r4t rig add reviewer claude                # add rig "reviewer" from preset
 r4t rig add worker opencode
-r4t rig add local opencode-ollama --model qwen2.5-coder:7b
+r4t rig add local ollama-opencode --model qwen2.5-coder:7b
 r4t rig add lead cursor --force            # replace an existing rig
 r4t rig swap lead agy                      # switch preset, keep settings
 ```
@@ -205,7 +205,7 @@ ordinary `tell` and release after the turn. Full walk-through:
 | `r4t roster check` | Lint roster and rig mappings |
 | `r4t status --node <roster>` | Member budgets, queue depths, threads, dead letters |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
-| `r4t sandbox --preset opencode-ollama --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
+| `r4t sandbox --preset ollama-opencode --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
 
 ## Example: existing repo
 

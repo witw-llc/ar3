@@ -49,10 +49,10 @@ MODULES = {
 # preset runs local models — the quota authority is ollama (none), not the
 # harness being launched.
 PRESET_ENGINES = {
-    "claude-ollama": "ollama",
-    "codex-ollama": "ollama",
-    "copilot-ollama": "ollama",
-    "opencode-ollama": "ollama",
+    "ollama-claude": "ollama",
+    "ollama-codex": "ollama",
+    "ollama-copilot": "ollama",
+    "ollama-opencode": "ollama",
 }
 
 
@@ -84,9 +84,14 @@ def capabilities(preset_or_engine: str) -> list[str]:
     """The verbs `r4t engine <id>` answers. `quota` dispatches through the
     per-engine module (`capability` above); `run` is not — it is one shared
     implementation (engines/run.py) gated on RUN_ENGINES, the subset with a
-    verified headless, unattended invocation (engine CLI fact sheet)."""
+    verified headless, unattended invocation (engine CLI fact sheet).
+    RUN_ENGINES holds preset ids directly rather than quota-engine ids, so
+    this checks the id itself instead of routing it through `engine_for` —
+    the four `ollama-*` launchers each have their own run entry even though
+    `engine_for` collapses all of them (and bare `ollama`) to the one quota
+    engine `ollama`."""
     verbs = [v for v in CAPABILITY_VERBS if capability(preset_or_engine, v)]
-    if engine_for(preset_or_engine) in run.RUN_ENGINES:
+    if (preset_or_engine or "").strip().lower() in run.RUN_ENGINES:
         verbs.append("run")
     return verbs
 

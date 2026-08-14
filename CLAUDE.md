@@ -19,8 +19,18 @@ teaches them.
 - **`apps/r4t/`** — The roster. Rigs, dispatch, verdicts, isolation.
   See [`docs/r4t.md`](docs/r4t.md) and the `docs/r4t-*.md` pages.
 - **`apps/k7e/`** — Knowledge accumulation engine. Flat markdown files +
-  SQLite FTS5 + optional ollama embeddings. Zero non-stdlib deps for core.
+  SQLite FTS5 + optional ollama embeddings. Its core imports nothing beyond
+  the standard library — the suite doctrine's dependency rule, which k7e
+  happens to satisfy with no dependencies at all.
   See [`docs/k7e.md`](docs/k7e.md) for usage and architecture.
+- **`ark/`** — The foundation package: the code every app shares. `ark.ulid`,
+  `ark.home` (config-home resolution), `ark.fsio` (`atomic_write_text`),
+  `ark.proc` (`spawn` / `terminate_group`), `ark.envseam` (the reserved-env
+  contract), `ark.vendor` (the vendoring hook). Beyond stdlib there are two
+  tiers and no third: `ark/_vendor/` carries pinned, sha256-verified PyPI
+  releases (tier 1); the foundation's deps mechanism fetches the rest (tier 2).
+  Apps import it via the same repo-root `sys.path` mechanics they already use
+  for `arkver`.
 - **`apps/ar3/`** — The front door. Reads suite state and probes prerequisites;
   it never mutates anything and never wraps another product's verbs. See
   [`docs/ar3.md`](docs/ar3.md).
@@ -65,6 +75,10 @@ and rename that heading to the version when the batch is ready to merge.
 Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
 
 ## Conventions
+
+Every app on the Ark shares one doctrine — dependencies, filesystem, CLI feel,
+processes, integration, docs and release. It is stated as rules in
+[`docs/ark.md`](docs/ark.md); read it before adding a convention here.
 
 ### Shebangs
 

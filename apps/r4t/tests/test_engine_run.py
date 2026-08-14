@@ -36,12 +36,16 @@ def fake_cli(tmp_path: Path, name: str = "fake-engine") -> Path:
 
 
 class TestBuildArgv:
-    def test_unsupported_engine_names_the_supported_set(self):
+    def test_unsupported_engine_names_the_supported_set(self, tmp_path):
+        # Bare `ollama` stays excluded: `ollama run` has no file tools, and
+        # the scaffold's read/write contract needs them.
         with pytest.raises(engine_run.RunError, match="claude"):
-            engine_run.build_argv("opencode", "hi", model=None, timeout=900)
+            engine_run.build_argv("ollama", "hi", model=None, timeout=900, workdir=tmp_path)
 
-    def test_claude_gets_model_flag_and_no_extras(self):
-        argv = engine_run.build_argv("claude", "do the thing", model="sonnet", timeout=900)
+    def test_claude_gets_model_flag_and_no_extras(self, tmp_path):
+        argv = engine_run.build_argv(
+            "claude", "do the thing", model="sonnet", timeout=900, workdir=tmp_path
+        )
         assert argv[0] == "claude"
         assert "--model" in argv
         assert argv[argv.index("--model") + 1] == "sonnet"
@@ -49,26 +53,34 @@ class TestBuildArgv:
         assert "--print-timeout" not in argv
         assert "--no-ask-user" not in argv
 
-    def test_codex_model_flag_uses_dash_m(self):
-        argv = engine_run.build_argv("codex", "fix it", model="o4", timeout=900)
+    def test_codex_model_flag_uses_dash_m(self, tmp_path):
+        argv = engine_run.build_argv(
+            "codex", "fix it", model="o4", timeout=900, workdir=tmp_path
+        )
         assert "-m" in argv
         assert argv[argv.index("-m") + 1] == "o4"
         assert argv[-1] == "fix it"
 
-    def test_cursor_model_flag(self):
-        argv = engine_run.build_argv("cursor", "go", model="opus", timeout=900)
+    def test_cursor_model_flag(self, tmp_path):
+        argv = engine_run.build_argv(
+            "cursor", "go", model="opus", timeout=900, workdir=tmp_path
+        )
         assert "--model" in argv
         assert argv[argv.index("--model") + 1] == "opus"
 
-    def test_copilot_gets_no_ask_user_and_rejects_model(self):
-        argv = engine_run.build_argv("copilot", "go", model=None, timeout=900)
+    def test_copilot_gets_no_ask_user_and_rejects_model(self, tmp_path):
+        argv = engine_run.build_argv(
+            "copilot", "go", model=None, timeout=900, workdir=tmp_path
+        )
         assert "--no-ask-user" in argv
         assert argv[-1] == "go"
         with pytest.raises(engine_run.RunError, match="--model"):
-            engine_run.build_argv("copilot", "go", model="anything", timeout=900)
+            engine_run.build_argv(
+                "copilot", "go", model="anything", timeout=900, workdir=tmp_path
+            )
 
     def test_copilot_does_not_double_no_ask_user_if_preset_already_carries_it(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         monkeypatch.setitem(
             engine_run.HARNESS_PRESETS,
@@ -77,29 +89,66 @@ class TestBuildArgv:
                 "copilot", "--no-ask-user", "--allow-all-tools", "-p", "{prompt}",
             ]},
         )
-        argv = engine_run.build_argv("copilot", "go", model=None, timeout=900)
+        argv = engine_run.build_argv(
+            "copilot", "go", model=None, timeout=900, workdir=tmp_path
+        )
         assert argv.count("--no-ask-user") == 1
 
-    def test_agy_always_gets_print_timeout_matching_the_run_timeout(self):
-        argv = engine_run.build_argv("agy", "go", model=None, timeout=45)
+    def test_agy_always_gets_print_timeout_matching_the_run_timeout(self, tmp_path):
+        argv = engine_run.build_argv(
+            "agy", "go", model=None, timeout=45, workdir=tmp_path
+        )
         assert "--print-timeout" in argv
         assert argv[argv.index("--print-timeout") + 1] == "45s"
 
-    def test_agy_model_resolves_live_against_agy_models(self, monkeypatch):
+    def test_agy_model_resolves_live_against_agy_models(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             engine_run, "resolve_agy_model", lambda query, **k: "Gemini 3.6 Flash Low"
         )
-        argv = engine_run.build_argv("agy", "go", model="flash", timeout=900)
+        argv = engine_run.build_argv(
+            "agy", "go", model="flash", timeout=900, workdir=tmp_path
+        )
         assert "Gemini 3.6 Flash Low" in argv
         assert "{model}" not in argv
 
-    def test_agy_model_resolution_failure_is_a_run_error(self, monkeypatch):
+    def test_agy_model_resolution_failure_is_a_run_error(self, monkeypatch, tmp_path):
         def boom(query, **k):
             raise RigError("no such model")
 
         monkeypatch.setattr(engine_run, "resolve_agy_model", boom)
         with pytest.raises(engine_run.RunError, match="no such model"):
-            engine_run.build_argv("agy", "go", model="nonsense", timeout=900)
+            engine_run.build_argv(
+                "agy", "go", model="nonsense", timeout=900, workdir=tmp_path
+            )
+
+    def test_opencode_substitutes_prompt_and_workdir(self, tmp_path):
+        argv = engine_run.build_argv(
+            "opencode", "do the thing", model=None, timeout=900, workdir=tmp_path
+        )
+        assert argv[0] == "opencode"
+        assert argv[argv.index("--dir") + 1] == str(tmp_path)
+        assert argv[-1] == "do the thing"
+
+    def test_ollama_opencode_requires_model(self, tmp_path):
+        with pytest.raises(engine_run.RunError, match="--model"):
+            engine_run.build_argv(
+                "ollama-opencode", "go", model=None, timeout=900, workdir=tmp_path
+            )
+
+    def test_ollama_opencode_materializes_model_and_workdir(self, tmp_path):
+        argv = engine_run.build_argv(
+            "ollama-opencode", "go", model="qwen3.6", timeout=900, workdir=tmp_path
+        )
+        assert argv[:5] == ["ollama", "launch", "opencode", "--model", "qwen3.6"]
+        assert argv[argv.index("--dir") + 1] == str(tmp_path)
+        assert argv[-1] == "go"
+
+    def test_ollama_claude_materializes_model(self, tmp_path):
+        argv = engine_run.build_argv(
+            "ollama-claude", "go", model="qwen3.6", timeout=900, workdir=tmp_path
+        )
+        assert argv[:5] == ["ollama", "launch", "claude", "--model", "qwen3.6"]
+        assert argv[-1] == "go"
 
 
 class TestScaffold:
@@ -138,24 +187,77 @@ class TestScaffold:
         assert str(tmp_path / "LESSONS.md") in text
 
 
-class TestLessonsWarning:
+class TestLessonsRotation:
     def test_short_lessons_is_silent(self, tmp_path, capsys):
         (tmp_path / "LESSONS.md").write_text("- one\n- two\n", encoding="utf-8")
-        engine_run.warn_if_lessons_oversized(tmp_path)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
         assert capsys.readouterr().err == ""
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
 
-    def test_long_lessons_warns_once_on_stderr(self, tmp_path, capsys):
-        (tmp_path / "LESSONS.md").write_text(
-            "\n".join(f"- lesson {i}" for i in range(250)) + "\n", encoding="utf-8"
+    def test_no_op_at_exactly_cap(self, tmp_path, capsys):
+        lessons = tmp_path / "LESSONS.md"
+        original = "\n".join(f"- lesson {i}" for i in range(200)) + "\n"
+        lessons.write_text(original, encoding="utf-8")
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
+        assert capsys.readouterr().err == ""
+        assert lessons.read_text(encoding="utf-8") == original
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
+
+    def test_rotation_triggers_at_cap_plus_one_and_lands_at_exactly_cap(
+        self, tmp_path, capsys
+    ):
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_text(
+            "\n".join(f"- lesson {i}" for i in range(201)) + "\n", encoding="utf-8"
         )
-        engine_run.warn_if_lessons_oversized(tmp_path)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
+        kept = lessons.read_text(encoding="utf-8").splitlines()
+        assert len(kept) == 200
+        assert kept[0] == "- lesson 1"  # oldest (lesson 0) moved out
+        assert kept[-1] == "- lesson 200"
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        assert archive.read_text(encoding="utf-8") == "- lesson 0\n"
+
+    def test_stderr_rotation_notice_format(self, tmp_path, capsys):
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_text(
+            "\n".join(f"- lesson {i}" for i in range(205)) + "\n", encoding="utf-8"
+        )
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
         err = capsys.readouterr().err
-        assert "LESSONS.md" in err
-        assert err.count("\n") == 1
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        assert err == (
+            f"r4t engine: rotated 5 lines from {lessons} to {archive}\n"
+        )
+
+    def test_archive_receives_lines_in_order_across_successive_rotations(
+        self, tmp_path, capsys
+    ):
+        lessons = tmp_path / "LESSONS.md"
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        lessons.write_text(
+            "\n".join(f"- lesson {i}" for i in range(203)) + "\n", encoding="utf-8"
+        )
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
+        assert archive.read_text(encoding="utf-8") == (
+            "- lesson 0\n- lesson 1\n- lesson 2\n"
+        )
+        capsys.readouterr()
+
+        for i in range(203, 206):
+            with lessons.open("a", encoding="utf-8") as f:
+                f.write(f"- lesson {i}\n")
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
+        assert archive.read_text(encoding="utf-8") == (
+            "- lesson 0\n- lesson 1\n- lesson 2\n"
+            "- lesson 3\n- lesson 4\n- lesson 5\n"
+        )
+        assert lessons.read_text(encoding="utf-8").splitlines()[0] == "- lesson 6"
 
     def test_missing_lessons_is_silent(self, tmp_path, capsys):
-        engine_run.warn_if_lessons_oversized(tmp_path)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
         assert capsys.readouterr().err == ""
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
 
 
 class TestExecuteAndSpawn:
@@ -228,6 +330,71 @@ class TestExecuteAndSpawn:
         with pytest.raises(engine_run.RunError, match="failed to spawn"):
             engine_run._spawn(["/no/such/binary-r4t-engine"], tmp_path, 5)
 
+    def test_echo_writes_argv_and_prompt_to_stderr(self, tmp_path, capsys):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        original = dict(rig_module.HARNESS_PRESETS.get("claude", {}))
+        rig_module.HARNESS_PRESETS["claude"] = {
+            **original, "invoke": [sys.executable, str(script), "{prompt}"],
+        }
+        try:
+            code = engine_run.execute(
+                "claude", "raw prompt text",
+                dir_path=tmp_path, model=None, agent=None, timeout=30,
+                scaffold=False, echo=True,
+            )
+        finally:
+            rig_module.HARNESS_PRESETS["claude"] = original
+        assert code == 0
+        [call] = sorted(calls.iterdir())  # the turn still ran
+        err = capsys.readouterr().err
+        assert sys.executable in err
+        assert str(script) in err
+        assert "raw prompt text" in err
+        argv_line = next(
+            line for line in err.splitlines() if line.startswith("r4t engine echo: argv:")
+        )
+        # The argv line keeps the literal placeholder — it is never
+        # value-matched against the prompt string — and the prompt itself
+        # appears only in the prompt block below it.
+        assert argv_line.count("{prompt}") == 1
+        assert "raw prompt text" not in argv_line
+
+    def test_print_echo_does_not_elide_argv_elements_equal_to_the_prompt(self, capsys):
+        # Regression: `_print_echo` used to replace every argv element equal
+        # to the prompt string, so a prompt identical to the executable name
+        # (e.g. "claude") elided the executable itself, not just the prompt
+        # slot. The fix threads the `{prompt}` placeholder through unchanged
+        # instead of value-matching.
+        template = ["claude", "--flag", "{prompt}"]
+        engine_run._print_echo(template, "claude")
+        err = capsys.readouterr().err
+        argv_line = next(
+            line for line in err.splitlines() if line.startswith("r4t engine echo: argv:")
+        )
+        assert argv_line == "r4t engine echo: argv: claude --flag '{prompt}'"
+        assert argv_line.count("{prompt}") == 1
+
+    def test_no_echo_by_default_is_silent_on_stderr(self, tmp_path, capsys):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        original = dict(rig_module.HARNESS_PRESETS.get("claude", {}))
+        rig_module.HARNESS_PRESETS["claude"] = {
+            **original, "invoke": [sys.executable, str(script), "{prompt}"],
+        }
+        try:
+            code = engine_run.execute(
+                "claude", "raw prompt text",
+                dir_path=tmp_path, model=None, agent=None, timeout=30,
+                scaffold=False,
+            )
+        finally:
+            rig_module.HARNESS_PRESETS["claude"] = original
+        assert code == 0
+        assert capsys.readouterr().err == ""
+
 
 class TestCapabilities:
     def test_run_engines_report_both_verbs(self):
@@ -249,7 +416,8 @@ def engine_cli(*args):
 
 class TestEngineRunCli:
     def test_unsupported_engine_errors_clearly(self, capsys):
-        assert engine_cli("opencode", "run", "hi") == 1
+        # Bare `ollama` stays excluded: `ollama run` has no file tools.
+        assert engine_cli("ollama", "run", "hi") == 1
         err = capsys.readouterr().err
         assert "does not support run" in err
         for name in sorted(engine_run.RUN_ENGINES):
@@ -339,3 +507,165 @@ class TestEngineRunCli:
         [call] = sorted(calls.iterdir())
         import json as jsonlib
         assert jsonlib.loads(call.read_text()) == ["from stdin"]
+
+    def test_lessons_cap_flag_reaches_execute(self, tmp_path, monkeypatch, capsys):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_text(
+            "\n".join(f"- lesson {i}" for i in range(6)) + "\n", encoding="utf-8"
+        )
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--lessons-cap", "5", "do work",
+        )
+        assert code == 0
+        assert len(list(calls.iterdir())) == 1  # the turn still ran
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        err = capsys.readouterr().err
+        assert err == f"r4t engine: rotated 1 lines from {lessons} to {archive}\n"
+        assert lessons.read_text(encoding="utf-8").splitlines() == [
+            f"- lesson {i}" for i in range(1, 6)
+        ]
+
+    @pytest.mark.parametrize("bad_value", ["-1", "0"])
+    def test_lessons_cap_rejects_non_positive_values(
+        self, tmp_path, monkeypatch, capsys, bad_value
+    ):
+        # A negative cap archives every line and a zero cap empties
+        # LESSONS.md on every turn — neither is meaningful, so argparse
+        # itself should refuse before `execute` (and thus rotation) ever
+        # runs.
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_text("- lesson 0\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc_info:
+            engine_cli(
+                "claude", "run", "--dir", str(tmp_path),
+                "--lessons-cap", bad_value, "do work",
+            )
+        assert exc_info.value.code == 2
+        assert "must be a positive integer" in capsys.readouterr().err
+        assert list(calls.iterdir()) == []  # the engine CLI never ran
+        assert lessons.read_text(encoding="utf-8") == "- lesson 0\n"
+
+    def test_lessons_cap_positive_value_still_passes_through(self, tmp_path, monkeypatch):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--lessons-cap", "3", "do work",
+        )
+        assert code == 0
+        assert len(list(calls.iterdir())) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+class TestRelocatedFallbackTeardown:
+    """The relocated-copy fallbacks (ark unimportable) must carry the same
+    capture-pgid-before-SIGTERM behavior as ark.proc: a leader that has
+    already been reaped when SIGKILL fires must not strand a SIGTERM-ignoring
+    grandchild in the still-live process group."""
+
+    SCENARIO = """
+import importlib.abc, os, pathlib, signal, sys, time
+
+
+class BlockArk(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "ark" or fullname.startswith("ark."):
+            raise ImportError("ark blocked (relocated-copy simulation)")
+        return None
+
+
+sys.meta_path.insert(0, BlockArk())
+sys.path.insert(0, {r4t_dir!r})
+
+{import_and_kill}
+
+pidfile = pathlib.Path({pidfile!r})
+child_script = pathlib.Path({child_script!r})
+import subprocess
+leader = subprocess.Popen(
+    ["/bin/sh", "-c", f"{{sys.executable}} {{child_script}} {{pidfile}} & exit 0"],
+    stdin=subprocess.DEVNULL,
+    start_new_session=True,
+)
+for _ in range(200):
+    if pidfile.exists() and pidfile.read_text().strip():
+        break
+    time.sleep(0.05)
+child_pid = int(pidfile.read_text())
+leader.wait()  # leader reaped: getpgid(leader.pid) now fails everywhere
+kill(leader, grace_seconds=0.3)
+time.sleep(0.2)
+try:
+    os.kill(child_pid, 0)
+    print("ALIVE")
+except ProcessLookupError:
+    print("DEAD")
+"""
+
+    CHILD = (
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    @pytest.mark.parametrize(
+        "import_and_kill",
+        [
+            (
+                "from engines import run as m\n"
+                "assert m._terminate_group.__module__ == 'engines.run'\n"
+                "kill = m._terminate_group"
+            ),
+            (
+                "import sandbox as m\n"
+                "assert m._terminate_group.__module__ == 'sandbox'\n"
+                "def kill(proc, *, grace_seconds):\n"
+                "    m._terminate_group(proc.pid, grace_seconds=grace_seconds)"
+            ),
+        ],
+        ids=["engines.run-fallback", "sandbox-fallback"],
+    )
+    def test_fallback_kills_grandchild_after_leader_is_reaped(
+        self, tmp_path, import_and_kill
+    ):
+        child_script = tmp_path / "child.py"
+        child_script.write_text(self.CHILD, encoding="utf-8")
+        scenario = tmp_path / "scenario.py"
+        r4t_dir = str(Path(__file__).resolve().parent.parent)
+        scenario.write_text(
+            self.SCENARIO.format(
+                r4t_dir=r4t_dir,
+                import_and_kill=import_and_kill,
+                pidfile=str(tmp_path / "child.pid"),
+                child_script=str(child_script),
+            ),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [sys.executable, str(scenario)],
+            capture_output=True, text=True, timeout=60, cwd=str(tmp_path),
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "DEAD", result.stdout + result.stderr

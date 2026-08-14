@@ -91,7 +91,7 @@ from registry import (
     save_namespace_options,
 )
 from txlog import read_events
-from ulid import is_ulid
+from ark.ulid import is_ulid
 
 
 # ---------- registry management commands ----------
@@ -2385,8 +2385,8 @@ user it runs as, and only backends with a known direct-download URL are
 accepted — Drive today — because storing a backend's preview page as the
 attachment would be silent corruption.
 
-s3 needs boto3 (pip install -r requirements/a8s-s3.txt) on the uploader only;
-uploads return presigned GET URLs.
+s3 needs boto3 (ar3 deps a8s-s3) on the uploader only; uploads return
+presigned GET URLs.
 
 --password is written to secrets.json (mode 0600), never network.json.
 Config is validated here — a bad option fails now, not at daemon start.

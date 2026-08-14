@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """ar3 — the front door to The Ark (a8s, r4t, k7e).
 
-ar3 orients and verifies. It reads state passively and probes prerequisites;
-it never mutates anything and never wraps another product's verbs. There is no
-`ar3 tell`, no `ar3 dispatch`, no passthrough: every action belongs to the CLI
-that owns it, and ar3's job is to tell you which command that is.
+ar3 never mutates product state; it owns and maintains the suite's own
+substrate instead. It reads a8s/r4t/k7e state passively and probes
+prerequisites — there is no `ar3 tell`, no `ar3 dispatch`, no passthrough:
+every action belongs to the CLI that owns it, and ar3's job is to tell you
+which command that is. The one exception is `ar3 deps`, which fetches
+on-demand heavy dependencies (boto3, textual) into `~/.local/share/ark/deps`:
+that directory is substrate ar3 itself owns, not product state, and it is the
+only thing ar3 ever writes.
 
-Home resolution mirrors each product exactly (A8S_HOME / R4T_HOME / K7E_HOME),
-so ark reports on the same state the products themselves would use.
+Home resolution imports the same `ark.home.app_home` resolver the products
+themselves call (A8S_HOME / R4T_HOME / K7E_HOME), so ar3's reporting can
+never go stale against a product's own resolution.
 """
 from __future__ import annotations
 
@@ -35,6 +40,9 @@ except ImportError:
 
     def update_note(timeout_s: float = 0) -> str:
         return "unknown (no VERSION file beside this copy)"
+
+from ark import deps as ark_deps  # noqa: E402
+from ark.home import app_home  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -131,16 +139,7 @@ def _first_line(text: str) -> str:
 # ---------- a8s ----------
 
 def a8s_home() -> Path:
-    override = os.environ.get("A8S_HOME", "").strip()
-    if override:
-        return Path(override).expanduser()
-    config = Path.home() / ".config" / "a8s"
-    legacy = Path.home() / ".a8s"
-    if config.is_dir():
-        return config
-    if legacy.is_dir():
-        return legacy
-    return config
+    return app_home("a8s", os.environ.get("A8S_HOME"), legacy=Path.home() / ".a8s")
 
 
 def _live_pid(path: Path) -> int | None:
@@ -190,12 +189,7 @@ def a8s_rows() -> list[Row]:
 # ---------- r4t ----------
 
 def r4t_home() -> Path:
-    raw = os.environ.get("R4T_HOME", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return base / "r4t"
+    return app_home("r4t", os.environ.get("R4T_HOME"))
 
 
 def r4t_rows() -> list[Row]:
@@ -236,12 +230,7 @@ def r4t_rows() -> list[Row]:
 # ---------- k7e ----------
 
 def k7e_home() -> Path:
-    raw = os.environ.get("K7E_HOME", "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    return base / "k7e"
+    return app_home("k7e", os.environ.get("K7E_HOME"))
 
 
 def k7e_rows() -> list[Row]:
@@ -443,6 +432,37 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- deps ----------
+
+def _deps_status_row(group: str) -> Row:
+    dir_ = ark_deps.ensure_group(group)
+    if dir_ is not None:
+        return (True, group, f"installed at {dir_}", None)
+    return (False, group, "not installed", f"ar3 deps {group}")
+
+
+def cmd_deps(args: argparse.Namespace) -> int:
+    group = getattr(args, "group", None)
+    groups = ark_deps.known_groups()
+    if not group:
+        interpreter_dir = ark_deps.deps_root() / ark_deps.interpreter_key()
+        print(f"ar3 deps — on-demand heavy dependencies  ({interpreter_dir})")
+        print()
+        _print_rows([_deps_status_row(g) for g in groups])
+        return 0
+    if group not in groups:
+        known = ", ".join(groups) if groups else "none defined"
+        print(f"ar3 deps: no such group {group!r} (known: {known})", file=sys.stderr)
+        return 2
+    try:
+        dest = ark_deps.install_group(group)
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"ar3 deps {group}: {e}", file=sys.stderr)
+        return 1
+    print(f"ar3 deps {group}: installed to {dest}")
+    return 0
+
+
 # ---------- cli ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -459,6 +479,21 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     doctor = sub.add_parser("doctor", help="Probe harness and tool prerequisites")
     doctor.set_defaults(func=cmd_doctor)
+    deps = sub.add_parser(
+        "deps",
+        help="List, or install, on-demand heavy dependency groups",
+        description=(
+            "ar3 deps lists known dependency groups (requirements/*.txt) with "
+            "installed/missing status for the running interpreter. ar3 deps "
+            "<group> installs that group into ~/.local/share/ark/deps — the "
+            "one thing ar3 ever writes."
+        ),
+    )
+    deps.add_argument(
+        "group", nargs="?",
+        help="Dependency group to install, e.g. a8s-s3 or r4t (see requirements/*.txt)",
+    )
+    deps.set_defaults(func=cmd_deps)
     args = parser.parse_args(argv)
     return args.func(args)
 

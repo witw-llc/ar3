@@ -45,7 +45,7 @@ from typing import Any
 
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 _KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
 

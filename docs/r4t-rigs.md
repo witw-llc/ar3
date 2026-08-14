@@ -11,8 +11,8 @@ exists see [r4t-governance.md](r4t-governance.md).
 Rig **names** are yours (`leader`, `member`, `reviewer`, …); **presets** are
 CLI templates aligned with [a8s definitions](../apps/a8s/definitions/):
 `claude`, `codex`, `cursor`, `opencode`, `copilot`, `agy`, plus the
-`ollama launch`-wrapped local variants (`opencode-ollama`, `claude-ollama`,
-`codex-ollama`, `copilot-ollama` — see
+`ollama launch`-wrapped local variants (`ollama-opencode`, `ollama-claude`,
+`ollama-codex`, `ollama-copilot` — see
 [r4t-harness-ollama-launch.md](r4t-harness-ollama-launch.md)).
 
 ```bash
@@ -33,7 +33,7 @@ A member with `- **Continue:** on` in the roster runs its turns inside its
 CLI's own conversation instead of a cold prompt every wake: the agent keeps
 its recent work, and the provider cache prices the wake as a continuation.
 It needs a rig whose preset supports it — `claude`, `codex`, `cursor`,
-`opencode`, `opencode-ollama`, `agy` (`r4t rig presets` marks them); anything
+`opencode`, `ollama-opencode`, `agy` (`r4t rig presets` marks them); anything
 else fails closed at `r4t roster check` and at dispatch. Most presets append a
 `--continue` flag; `codex` resumes through the `exec resume --last` subcommand,
 so its tokens are inserted after `exec` instead. `copilot` is the one
@@ -125,11 +125,11 @@ it.
 
 The `ollama launch`-wrapped presets inherit their parent's behavior and nothing
 worse: the launcher execs the integration in the directory r4t spawned it in,
-so an `*-ollama` member's harness runs in the workdir (measured on ollama
+so an `ollama-*` member's harness runs in the workdir (measured on ollama
 0.32.5 against all four wrapped integrations — the launcher, the harness, and
-every descendant report the workdir as their cwd). `opencode-ollama` therefore
-carries the same advertised-root caveat as `opencode`, and `claude-ollama` /
-`codex-ollama` / `copilot-ollama` stay in the workdir like their parents.
+every descendant report the workdir as their cwd). `ollama-opencode` therefore
+carries the same advertised-root caveat as `opencode`, and `ollama-claude` /
+`ollama-codex` / `ollama-copilot` stay in the workdir like their parents.
 
 So the prompt is the portable mitigation, and the only one that reaches every
 rig: the intro states the member's absolute working directory, tells it to

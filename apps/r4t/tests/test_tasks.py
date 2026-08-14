@@ -10,7 +10,7 @@ from tasks import (
     new_thread_id,
     save_task,
 )
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 NODE = "acme"
 

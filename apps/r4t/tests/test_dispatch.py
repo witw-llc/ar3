@@ -29,7 +29,7 @@ from dispatch import (
 from rig import McpPlan, Rig, RigError, build_preset_invoke, load_rig_config
 from roster import load_roster
 from r4t import main as r4t_main
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 NODE = "acme"
 
@@ -2245,8 +2245,8 @@ class TestRunHarness:
         workdir.mkdir(parents=True)
         rig = Rig(
             name="local",
-            preset="opencode-ollama",
-            invoke=build_preset_invoke("opencode-ollama", model="qwen3.6:latest"),
+            preset="ollama-opencode",
+            invoke=build_preset_invoke("ollama-opencode", model="qwen3.6:latest"),
             timeout_seconds=30,
         )
         code, out, _dur, timed_out = run_harness(rig, "x", workdir, env=dict(os.environ))

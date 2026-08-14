@@ -13,7 +13,7 @@ class TestResolution:
             assert engines.engine_for(name) == name
 
     def test_ollama_launcher_presets_resolve_to_ollama(self):
-        for preset in ("claude-ollama", "codex-ollama", "copilot-ollama", "opencode-ollama"):
+        for preset in ("ollama-claude", "ollama-codex", "ollama-copilot", "ollama-opencode"):
             assert engines.engine_for(preset) == "ollama"
 
     def test_unknown_is_none(self):
@@ -26,14 +26,14 @@ class TestResolution:
         for name in engines.MODULES:
             assert "quota" in engines.capabilities(name)
 
-    def test_only_the_verified_five_also_answer_for_run(self):
-        run_engines = {"claude", "codex", "agy", "copilot", "cursor"}
+    def test_only_the_verified_engines_also_answer_for_run(self):
+        run_engines = {"claude", "codex", "agy", "copilot", "cursor", "opencode"}
         for name in engines.MODULES:
             expected = ["quota", "run"] if name in run_engines else ["quota"]
             assert engines.capabilities(name) == expected
 
     def test_capability_resolves_through_presets(self):
-        assert engines.capability("claude-ollama", "quota") is engines.ollama.quota
+        assert engines.capability("ollama-claude", "quota") is engines.ollama.quota
 
     def test_unknown_verb_or_engine_is_none(self):
         assert engines.capability("codex", "prompt") is None

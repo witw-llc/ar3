@@ -1,11 +1,15 @@
-"""Tests for the pure-stdlib ULID module."""
+"""Tests for the pure-stdlib ULID module — The Ark's foundation layer.
+
+`ark` lives at the repo root because every app shares it (a8s and r4t both
+generated their own copy of this exact module before the extraction).
+"""
 from __future__ import annotations
 
 import time
 
 import pytest
 
-from ulid import ALPHABET, LENGTH, is_ulid, new, parse
+from ark.ulid import ALPHABET, LENGTH, is_ulid, new, parse
 
 
 class TestNew:

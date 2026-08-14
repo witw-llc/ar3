@@ -8,13 +8,18 @@ description: "Show whether The Ark is set up and working on this machine."
 The front door to The Ark: **a8s** (agent message router), **r4t**
 (the roster), **k7e** (knowledge engine).
 
-`ar3` orients and verifies. It reads state and probes prerequisites — it never
-changes anything, and it never runs another product's commands for you. When
-something is missing, `ar3` names the real command to fix it.
+`ar3` never mutates product state; it owns and maintains the suite's own
+substrate instead. It reads a8s/r4t/k7e state and probes prerequisites, and it
+never runs another product's commands for you — when something is missing,
+`ar3` names the real command to fix it. The one thing `ar3` ever writes is its
+own substrate: `ar3 deps` fetches on-demand heavy dependencies into
+`~/.local/share/ark/deps`, a directory `ar3` owns outright, not product state.
 
 ```
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
+ar3 deps       # list on-demand heavy dependency groups and their status
+ar3 deps r4t   # fetch one group (here, textual for r4t's chat TUI)
 ar3 --version  # the suite semver (every Ark CLI answers this)
 ```
 
@@ -71,9 +76,27 @@ configures anything.
 Exit code is 0 when the core prerequisites hold (git configured, and at least
 one agent harness answering), 1 otherwise — so it can gate a setup script.
 
+## `ar3 deps`
+
+A handful of features depend on a heavy package most installs never need —
+boto3 for a8s's S3 storage service, textual for r4t's chat TUI. Those
+packages are not vendored and not required at install time; the feature that
+needs one calls `ark.deps.use_group` and degrades to a WARN naming the fix
+when the group is not there.
+
+`ar3 deps` lists every group defined under `requirements/*.txt` with its
+installed/missing status for the running interpreter. `ar3 deps <group>`
+fetches that one group with `uv pip install --target` (or plain `pip` when
+`uv` is not on PATH) into `~/.local/share/ark/deps/<interpreter>/<group>` —
+one directory per Python build, so an interpreter upgrade or a machine move
+never half-loads an incompatible install. This is the only directory `ar3`
+ever writes to.
+
 ## What `ar3` is not
 
-`ar3` has exactly one subcommand. It does not wrap, alias, or pass through the
-products' own verbs: sending a message is still `tell`, running a roster is still
-`r4t dispatch`, storing knowledge is still `k7e`. Those commands appear in
-`ar3` output only as hints pointing you at the tool that owns them.
+`ar3` does not wrap, alias, or pass through the products' own verbs: sending a
+message is still `tell`, running a roster is still `r4t dispatch`, storing
+knowledge is still `k7e`. Those commands appear in `ar3` output only as hints
+pointing you at the tool that owns them. `ar3 deps` is the one exception to
+"ar3 never mutates" — it writes only its own substrate, never a product's
+state.

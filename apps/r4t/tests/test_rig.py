@@ -363,7 +363,7 @@ class TestWorkdirPlaceholder:
         # opencode resolves a RELATIVE --dir against $PWD (its real cwd only as
         # a fallback), and a spawned harness inherits the PWD of whoever started
         # r4t — so `--dir .` anchored the file tools outside the workdir.
-        for preset in ("opencode", "opencode-ollama"):
+        for preset in ("opencode", "ollama-opencode"):
             argv = HARNESS_PRESETS[preset]["invoke"]
             assert "--dir" in argv
             assert argv[argv.index("--dir") + 1] == "{workdir}"
@@ -383,7 +383,7 @@ class TestContinue:
         # recent session whatever the directory, which no working directory can
         # keep apart (#256).
         assert continue_presets() == [
-            "agy", "claude", "codex", "cursor", "opencode", "opencode-ollama",
+            "agy", "claude", "codex", "cursor", "ollama-opencode", "opencode",
         ]
 
     def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
@@ -435,7 +435,7 @@ class TestContinue:
         config = load_rig_config(write_config(tmp_path, {
             "direct": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
             "local": {
-                "preset": "claude-ollama",
+                "preset": "ollama-claude",
                 "invoke": ["ollama", "launch", "claude", "-y", "--", "-p", "{prompt}"],
             },
             "bare": {"preset": "ollama", "invoke": ["ollama", "run", "m", "{prompt}"]},
@@ -451,7 +451,7 @@ class TestContinue:
         # not `ollama launch` started it, so both rigs collide as one CLI.
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "cloud", "opencode")
-        add_preset_rig(path, "local", "opencode-ollama", model="qwen3")
+        add_preset_rig(path, "local", "ollama-opencode", model="qwen3")
         config = load_rig_config(path)
         assert config.rigs["local"].cli == config.rigs["cloud"].cli == "opencode"
         assert config.rigs["local"].supports_continue
@@ -524,7 +524,7 @@ COLLISION_CONFIG = {
     "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
     "cloud": {"preset": "opencode", "invoke": ["opencode", "run", "--dir", ".", "{prompt}"]},
     "launched": {
-        "preset": "opencode-ollama",
+        "preset": "ollama-opencode",
         "invoke": ["ollama", "launch", "opencode", "--model", "m", "--", "run", "{prompt}"],
     },
 }
@@ -619,8 +619,9 @@ class TestDefaultPayload:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "claude-ollama", "codex", "codex-ollama", "copilot",
-            "copilot-ollama", "cursor", "ollama", "opencode", "opencode-ollama",
+            "agy", "claude", "codex", "copilot", "cursor", "ollama",
+            "ollama-claude", "ollama-codex", "ollama-copilot", "ollama-opencode",
+            "opencode",
         ]
 
     def test_every_preset_declares_a_known_text_tier(self):
@@ -631,9 +632,9 @@ class TestHarnessPresets:
         assert tiers == {
             "agy": "big", "claude": "big", "codex": "big",
             "copilot": "moderate", "cursor": "moderate", "opencode": "moderate",
-            "ollama": "small", "opencode-ollama": "small",
-            "claude-ollama": "small", "codex-ollama": "small",
-            "copilot-ollama": "small",
+            "ollama": "small", "ollama-opencode": "small",
+            "ollama-claude": "small", "ollama-codex": "small",
+            "ollama-copilot": "small",
         }
 
     def test_text_tier_anchors(self):
@@ -709,15 +710,15 @@ class TestHarnessPresets:
         config = load_rig_config(path)
         assert config.rigs["worker"].argv("hi")[0] == "opencode"
 
-    def test_add_preset_rig_opencode_ollama_requires_model(self, tmp_path):
+    def test_add_preset_rig_ollama_opencode_requires_model(self, tmp_path):
         path = tmp_path / "rigs.json"
         with pytest.raises(RigError, match="requires --model"):
-            add_preset_rig(path, "worker", "opencode-ollama")
+            add_preset_rig(path, "worker", "ollama-opencode")
 
-    def test_add_preset_rig_opencode_ollama_materializes_model(self, tmp_path):
+    def test_add_preset_rig_ollama_opencode_materializes_model(self, tmp_path):
         path = tmp_path / "rigs.json"
         rig_key = add_preset_rig(
-            path, "worker", "opencode-ollama", model="qwen2.5-coder:7b"
+            path, "worker", "ollama-opencode", model="qwen2.5-coder:7b"
         )
         assert rig_key == "worker"
         config = load_rig_config(path)
@@ -795,13 +796,13 @@ class TestHarnessPresets:
     def test_swap_preset_rig_requires_model(self, tmp_path):
         path = write_config(tmp_path, {"worker": {"invoke": ["x", "{prompt}"]}})
         with pytest.raises(RigError, match="requires --model"):
-            swap_preset_rig(path, "worker", "opencode-ollama")
+            swap_preset_rig(path, "worker", "ollama-opencode")
 
     def test_swap_preset_rig_materializes_model(self, tmp_path):
         path = write_config(tmp_path, {
             "worker": {"invoke": ["x", "{prompt}"], "max_sends_per_turn": 4},
         })
-        swap_preset_rig(path, "worker", "opencode-ollama", model="qwen2.5-coder:7b")
+        swap_preset_rig(path, "worker", "ollama-opencode", model="qwen2.5-coder:7b")
         config = load_rig_config(path)
         argv = config.rigs["worker"].argv("hi")
         assert argv[4] == "qwen2.5-coder:7b"
@@ -831,29 +832,29 @@ class TestHarnessPresets:
         assert argv[0] == "opencode"
         assert "{prompt}" in argv
 
-    def test_build_preset_invoke_opencode_ollama_requires_model(self):
+    def test_build_preset_invoke_ollama_opencode_requires_model(self):
         with pytest.raises(RigError, match="requires --model"):
-            build_preset_invoke("opencode-ollama")
-        argv = build_preset_invoke("opencode-ollama", model="qwen2.5-coder:7b")
+            build_preset_invoke("ollama-opencode")
+        argv = build_preset_invoke("ollama-opencode", model="qwen2.5-coder:7b")
         assert argv[:4] == ["ollama", "launch", "opencode", "--model"]
         assert argv[4] == "qwen2.5-coder:7b"
         assert argv[5:8] == ["--", "run", "--auto"]
         assert "{prompt}" in argv
 
     def test_build_preset_invoke_launch_wrapped_presets_require_model(self):
-        for name in ("claude-ollama", "codex-ollama", "copilot-ollama"):
+        for name in ("ollama-claude", "ollama-codex", "ollama-copilot"):
             with pytest.raises(RigError, match="requires --model"):
                 build_preset_invoke(name)
 
     def test_build_preset_invoke_launch_wrapped_presets(self):
         parent_headless = {
-            "claude-ollama": HARNESS_PRESETS["claude"]["invoke"][:-1],
-            "codex-ollama": HARNESS_PRESETS["codex"]["invoke"][:-1],
-            "copilot-ollama": HARNESS_PRESETS["copilot"]["invoke"][:-1],
+            "ollama-claude": HARNESS_PRESETS["claude"]["invoke"][:-1],
+            "ollama-codex": HARNESS_PRESETS["codex"]["invoke"][:-1],
+            "ollama-copilot": HARNESS_PRESETS["copilot"]["invoke"][:-1],
         }
         for name, tail in parent_headless.items():
             argv = build_preset_invoke(name, model="qwen3.6:latest")
-            parent = name.removesuffix("-ollama")
+            parent = name.removeprefix("ollama-")
             assert argv[:7] == [
                 "ollama", "launch", parent, "--model", "qwen3.6:latest", "-y", "--",
             ]
@@ -1571,7 +1572,7 @@ class TestMcpInjection:
         assert "Bash(tell:*)" in allowed
 
     def test_claude_ollama_splices_after_the_launcher_separator(self, tmp_path):
-        rig = _mcp_rig(tmp_path, "claude-ollama", model="qwen3.6")
+        rig = _mcp_rig(tmp_path, "ollama-claude", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
         argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
 
@@ -1591,7 +1592,7 @@ class TestMcpInjection:
         assert f'TELL_OUTBOX_DIR = "{env["TELL_OUTBOX_DIR"]}"' in override
 
     def test_codex_ollama_splices_after_the_launcher_separator(self, tmp_path):
-        rig = _mcp_rig(tmp_path, "codex-ollama", model="qwen3.6")
+        rig = _mcp_rig(tmp_path, "ollama-codex", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
         argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv[argv.index("--") + 1] == "-c"
@@ -1605,7 +1606,7 @@ class TestMcpInjection:
         assert json.loads(argv[2])["mcpServers"]["a8s"]["command"]
 
     def test_copilot_ollama_splices_after_the_launcher_separator(self, tmp_path):
-        rig = _mcp_rig(tmp_path, "copilot-ollama", model="qwen3.6")
+        rig = _mcp_rig(tmp_path, "ollama-copilot", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
         argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv[argv.index("--") + 1] == "--additional-mcp-config"
@@ -1630,7 +1631,7 @@ class TestMcpInjection:
         assert server["environment"]["TELL_OUTBOX_DIR"] == env["TELL_OUTBOX_DIR"]
 
     def test_opencode_ollama_uses_the_same_file_idiom(self, tmp_path):
-        rig = _mcp_rig(tmp_path, "opencode-ollama", model="qwen3.6")
+        rig = _mcp_rig(tmp_path, "ollama-opencode", model="qwen3.6")
         env, cwd = self._turn(tmp_path)
         argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv == rig.argv("PROMPT")
@@ -1858,7 +1859,7 @@ class TestKnowledgeTiers:
         assert knowledge_tier_bytes("cursor") == KNOWLEDGE_SIZES["medium"]
         assert knowledge_tier_bytes("opencode") == KNOWLEDGE_SIZES["small"]
         assert knowledge_tier_bytes("ollama") == KNOWLEDGE_SIZES["small"]
-        assert knowledge_tier_bytes("opencode-ollama") == KNOWLEDGE_SIZES["small"]
+        assert knowledge_tier_bytes("ollama-opencode") == KNOWLEDGE_SIZES["small"]
 
     def test_unknown_or_absent_preset_gets_the_global_floor(self):
         assert knowledge_tier_bytes(None) == KNOWLEDGE_DEFAULT_BUDGET
@@ -1868,7 +1869,7 @@ class TestKnowledgeTiers:
     def test_floor_flags_only_the_low_tier(self):
         assert is_below_knowledge_floor("ollama") is True
         assert is_below_knowledge_floor("opencode") is True
-        assert is_below_knowledge_floor("claude-ollama") is True
+        assert is_below_knowledge_floor("ollama-claude") is True
         assert is_below_knowledge_floor("agy") is False
         assert is_below_knowledge_floor("cursor") is False
         assert is_below_knowledge_floor("claude") is False

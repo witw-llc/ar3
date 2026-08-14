@@ -111,14 +111,14 @@ walk through more of them), added by the same one-line command.
 **Run** (free path)
 
 ```bash
-r4t rig add silo opencode-ollama --model qwen3.6
+r4t rig add silo ollama-opencode --model qwen3.6
 r4t rig set silo echo true
 ```
 
 You should see:
 
 ```
-added rig 'silo' (opencode-ollama) to /home/you/.config/r4t/rigs.json
+added rig 'silo' (ollama-opencode) to /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 Reference it from ROSTER.md: `- **Rig:** silo`
 set silo echo = true in /home/you/.config/r4t/rigs.json
@@ -316,7 +316,7 @@ You should see:
 swapped rig 'silo' to ollama in /home/you/.config/r4t/rigs.json
   invoke: ollama run qwen3.6 {prompt}
 You: note — Human without an Address (roster cannot tell them)
-Wren: Wren has Continue: on but rig 'silo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, opencode, opencode-ollama) — try: r4t rig swap silo <preset>
+Wren: Wren has Continue: on but rig 'silo' does not support it (preset ollama; presets that continue: agy, claude, codex, cursor, ollama-opencode, opencode) — try: r4t rig swap silo <preset>
 1 problem(s)
 ```
 
@@ -336,7 +336,7 @@ Take the error's suggestion:
 **Run**
 
 ```bash
-r4t rig swap silo opencode-ollama --model qwen3.6
+r4t rig swap silo ollama-opencode --model qwen3.6
 r4t roster check
 ```
 
@@ -345,7 +345,7 @@ r4t roster check
 You should see:
 
 ```
-swapped rig 'silo' to opencode-ollama in /home/you/.config/r4t/rigs.json
+swapped rig 'silo' to ollama-opencode in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 You: note — Human without an Address (roster cannot tell them)
 /home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)

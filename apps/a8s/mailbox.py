@@ -71,7 +71,7 @@ from services import StorageError, StorageService
 from services.attachment_errors import ATTACHMENT_UNAVAILABLE
 from services.attachment_path import bundle_file_path
 import txlog
-from ulid import new as new_ulid
+from ark.ulid import new as new_ulid
 
 
 def _max_file_bytes() -> int:
