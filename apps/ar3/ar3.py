@@ -37,7 +37,9 @@ try:
     from arkver import update_note, version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
-        return f"{app} unknown (The Ark)"
+        import platform
+
+        return f"{app} unknown (The Ark, python {platform.python_version()})"
 
     def update_note(timeout_s: float = 0) -> str:
         return "unknown (no VERSION file beside this copy)"

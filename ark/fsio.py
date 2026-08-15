@@ -12,9 +12,35 @@ removed on any failure so a crash never leaves stray `.tmp` litter behind.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from ark.ulid import new as new_ulid
+
+# A rename fails on Windows while any process holds the source open, and a
+# freshly written file in a watched folder is opened immediately by whatever
+# watches it — a sync client, an antivirus scanner. The holder lets go in
+# milliseconds, so the fix is to wait rather than to fail the write.
+REPLACE_ATTEMPTS = 10
+REPLACE_BACKOFF_SECONDS = 0.01
+REPLACE_BACKOFF_CAP_SECONDS = 0.25
+
+
+def replace_with_retry(src: Path | str, dst: Path | str) -> None:
+    """`os.replace`, retried while another process holds `src` open.
+
+    Raises the last `PermissionError` when the holder never lets go — a
+    caller that cannot rename has not written, and must hear it.
+    """
+    delay = REPLACE_BACKOFF_SECONDS
+    for _ in range(REPLACE_ATTEMPTS - 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+            delay = min(delay * 2, REPLACE_BACKOFF_CAP_SECONDS)
+    os.replace(src, dst)
 
 
 def atomic_write_text(
@@ -44,7 +70,7 @@ def atomic_write_text(
                 os.fsync(f.fileno())
         finally:
             f.close()
-        os.replace(tmp, path)
+        replace_with_retry(tmp, path)
         if mode is not None:
             try:
                 path.chmod(mode)

@@ -113,3 +113,104 @@ def test_try_hints_point_at_visible_commands():
         with pytest.raises(SystemExit) as exc:
             r4t_main([*_argv_for(cmd.hint.removeprefix("r4t ")), "--help"])
         assert exc.value.code == 0
+
+
+class TestStrayPositionalAdoption:
+    """argparse before 3.12 abandons a positional that trails optionals when
+    earlier optional positionals matched empty; `_adopt_stray_positionals`
+    picks those up so `engine <id> run --flags PROMPT` parses on every
+    interpreter the suite deploys to."""
+
+    def _engine_ns(self, argv: list[str]):
+        args, extras = r4t.build_parser().parse_known_args(argv)
+        return args, extras
+
+    def _fabricated(self, **attrs):
+        import argparse
+
+        return argparse.Namespace(**attrs)
+
+    def test_prompt_after_flags_is_adopted(self):
+        ns = self._fabricated(action="run", prompt=None)
+        assert r4t._adopt_stray_positionals(ns, ["Test"]) == []
+        assert ns.prompt == "Test"
+
+    def test_stdin_dash_is_adopted_as_prompt(self):
+        ns = self._fabricated(action="run", prompt=None)
+        assert r4t._adopt_stray_positionals(ns, ["-"]) == []
+        assert ns.prompt == "-"
+
+    def test_action_then_prompt_adopted_in_order(self):
+        ns = self._fabricated(action=None, prompt=None)
+        assert r4t._adopt_stray_positionals(ns, ["run", "hello"]) == []
+        assert ns.action == "run"
+        assert ns.prompt == "hello"
+
+    def test_rig_run_namespace_adopts_prompt_without_action(self):
+        ns = self._fabricated(rig="ark-lead", prompt=None)
+        assert r4t._adopt_stray_positionals(ns, ["hello"]) == []
+        assert ns.prompt == "hello"
+
+    def test_quota_action_never_gains_a_prompt(self):
+        ns = self._fabricated(action="quota", prompt=None)
+        assert r4t._adopt_stray_positionals(ns, ["Test"]) == ["Test"]
+
+    def test_seat_send_message_keeps_taking_words(self):
+        ns = self._fabricated(action="send", message=[])
+        assert r4t._adopt_stray_positionals(ns, ["hello", "there"]) == []
+        assert ns.message == ["hello", "there"]
+
+    def test_task_id_after_flags_is_adopted(self):
+        ns = self._fabricated(action="show", id=None)
+        assert r4t._adopt_stray_positionals(ns, ["01ABC"]) == []
+        assert ns.id == "01ABC"
+
+    def test_rig_get_key_after_flags_is_adopted(self):
+        ns = self._fabricated(rig="cheap", key=None)
+        assert r4t._adopt_stray_positionals(ns, ["timeout"]) == []
+        assert ns.key == "timeout"
+
+    @pytest.mark.parametrize(
+        "argv,dest,expected",
+        [
+            (["seat", "send", "--to", "bob", "hi", "there"], "message", ["hi", "there"]),
+            (["task", "show", "--node", "n1", "01ABC"], "id", "01ABC"),
+            (["task", "trace", "--json", "01ABC"], "id", "01ABC"),
+            (["rig", "get", "cheap", "--rig-config", "x", "timeout"], "key", "timeout"),
+            (["flush", "--node", "n1", "amos", "bo"], "members", ["amos", "bo"]),
+        ],
+    )
+    def test_current_interpreter_parses_flags_before_the_positional(
+        self, argv, dest, expected
+    ):
+        """The same 3.10 shape aec755e fixed for engine/rig-run, verified for
+        every other parser with an optional positional that can trail flags.
+        `flush` rides along because its `members` is the only positional in
+        its parser, which 3.10 already places correctly."""
+        args, extras = self._engine_ns(argv)
+        if extras:
+            extras = r4t._adopt_stray_positionals(args, extras)
+        assert extras == []
+        assert getattr(args, dest) == expected
+
+    def test_flag_lookalikes_and_filled_namespaces_stay_unrecognized(self):
+        ns = self._fabricated(action="run", prompt="already")
+        assert r4t._adopt_stray_positionals(ns, ["--nope", "extra"]) == [
+            "--nope",
+            "extra",
+        ]
+
+    def test_namespace_without_prompt_adopts_nothing(self):
+        ns = self._fabricated(rigs=["a"])
+        assert r4t._adopt_stray_positionals(ns, ["stray"]) == ["stray"]
+
+    def test_current_interpreter_parses_flags_before_prompt(self):
+        args, extras = self._engine_ns(
+            ["engine", "codex", "run", "--agent", "amos", "Test"]
+        )
+        if extras:
+            extras = r4t._adopt_stray_positionals(args, extras)
+        assert extras == []
+        assert args.target == "codex"
+        assert args.action == "run"
+        assert args.prompt == "Test"

@@ -61,9 +61,14 @@ def fake_home(tmp_path, monkeypatch):
     """Redirect `Path.home()` to `tmp_path` so registry / agent / log files
     land in an isolated location. Resets module-level mutable state in core."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    # Some platforms also honor USERPROFILE / HOMEPATH. Set HOME and clear
-    # the others to be safe.
-    monkeypatch.delenv("USERPROFILE", raising=False)
+    # ntpath.expanduser never consults HOME: it reads USERPROFILE, then
+    # HOMEDRIVE+HOMEPATH. Deleting USERPROFILE therefore un-isolates Windows —
+    # resolution falls through to the real home and the suite clobbers the
+    # developer's live ~/.a8s (field-verified). Point USERPROFILE at the same
+    # tmp dir and clear the fallback pair.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
     # Don't let a globally-set A8S_HOME leak into tests.
     monkeypatch.delenv("A8S_HOME", raising=False)
     # Prefer legacy ~/.a8s when present so existing path assertions stay stable.

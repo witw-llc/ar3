@@ -35,7 +35,6 @@ answers False and the receiver's poll loop tries again.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import time
@@ -45,6 +44,7 @@ from typing import Any
 
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
+from ark.fsio import replace_with_retry
 from ark.ulid import new as new_ulid
 
 _KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
@@ -152,7 +152,7 @@ class SyncFolderService(StorageService):
         staging = path.with_name(f".{MANIFEST_NAME}.part")
         try:
             staging.write_text(json.dumps(entries), encoding="utf-8")
-            os.replace(staging, path)
+            replace_with_retry(staging, path)
         except OSError as e:
             staging.unlink(missing_ok=True)
             raise StorageError(f"sync folder manifest write failed: {e}") from e
@@ -174,7 +174,7 @@ class SyncFolderService(StorageService):
         try:
             shutil.copy2(src, staging)
             size = staging.stat().st_size
-            os.replace(staging, dest)
+            replace_with_retry(staging, dest)
         except OSError as e:
             staging.unlink(missing_ok=True)
             raise StorageError(f"sync folder copy failed for {filename}: {e}") from e

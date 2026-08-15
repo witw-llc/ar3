@@ -10,6 +10,97 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## [0.1.69]
+
+### Added
+- **Every bundled engine node ships an `-unrestricted` variant.**
+  `a8s add amos ~/agents/amos engine-cursor-unrestricted` is the same node as
+  `engine-cursor` with `--permissions bypass` on all three wakes — for an
+  agent on its own machine and its own account. The stance is chosen by
+  definition name at `add` time and lives visibly on the invoke lines; the
+  base variants never grow it.
+- **`a8s remote <name> <folder>` — a folder remote: messages cross through a
+  directory a sync client already watches (#169).** One `<ULID>.json` file
+  per envelope, the same bytes MQTT carries, beside the `<ULID>/` attachment
+  bundles — no broker, port, host or account, because the user's own
+  iCloud/OneDrive/Drive/Dropbox is the wire. The same command registers the
+  folder as a `sync_folder` storage service under the same name, so a
+  message's attachments travel with it. Options: `--poll-seconds` (15),
+  `--prefix` (none), `--retain-days` (off). Nothing is deleted on receive:
+  each machine keeps its own consumed-ULID ledger under
+  `~/.config/a8s/folder-remotes/`, registration stamps a `joined` cutoff so a
+  machine joining an old folder is not owed its backlog (with a one-hour skew
+  allowance so a slow-clock peer's new mail still lands), and `a8s health`
+  probes reachability without consuming a single waiting envelope.
+- **`r4t rig fuel <rig>` — how much tank a rig has left, as one number in
+  0..1 (#152).** `r4t engine <id> quota` reports every dial an account
+  carries; fuel keeps the ones the rig's own model burns and reports the
+  binding one, so an Opus rig and a Fable rig on the same subscription read
+  different numbers. A rig on a local engine reads 1.00, an unlimited seat
+  reads `null`, and `--json` carries the number, a `state` naming why it is or
+  is not one (`gauged` / `unlimited` / `unconstrained`), and the buckets it
+  came from. Nothing runs and no budget moves.
+
+### Changed
+- **The Ark Raising, chapter 1, is written around Claude Code.** The harness
+  choice is now the question "what software are you using?" — `claude` is the
+  spine, `cursor`/`codex`/`agy` are one-word swaps, and the ollama/OpenCode
+  free path runs alongside as before. The reader no longer hand-writes
+  `solo.json`: the hookup is `a8s add solo ~/ark/solo engine-claude`, the
+  bundled definition, read rather than typed. Every pasted output is a fresh
+  live capture on the claude spine, and a new `templates/01-solo-claude/`
+  carries the persona with no definition file, because none is needed.
+
+### Fixed
+- **A spaced sync path can no longer register as a broken broker remote.**
+  The broker form requires `mqtt://` or `mqtts://`, so an unquoted
+  `a8s remote box G:/My Drive/A8S` — which Git Bash splits into a "broker"
+  and a "topic" — is refused with the quoting fix echoed back instead of
+  saying "added" about a remote that can never connect.
+- **File writes wait out Windows file-holds.** OneDrive and Defender open
+  new files in watched folders immediately, which made the atomic
+  write-then-rename fail `WinError 32`. `ark.fsio.replace_with_retry`
+  (10 attempts, backoff to 250 ms) now rides under the folder remote's
+  publish, `atomic_write_text`, and the sync_folder service's writes.
+- **A folder remote that filters backlog says so.** One warning per process
+  names the count, the `joined` cutoff with its human UTC time, and the
+  re-join remedy — a clock that was ahead at registration used to make a
+  node silently deaf; now the condition reads in `a8s logs`, and
+  `a8s remote <name>` renders the cutoff as a timestamp.
+- **A claude engine node can no longer talk itself mute.** The claude and
+  ollama-claude presets' tool allowlist named `tell` but not `a8s`, so the
+  `--agent` scaffold's `a8s convo` step was silently denied under `dontAsk`;
+  claude concluded Bash itself was off and wrote that into LESSONS.md, where
+  every later wake inherited it and stopped replying. `Bash(a8s convo:*)` is
+  now on the allowlist — that one subcommand, since the cold boot needs
+  exactly it and a broad `a8s` grant would hand untrusted inbound mail the
+  router's control verbs. Found live during the chapter-1 recapture.
+- **The prompt parses after the flags on every Python the suite deploys to.**
+  `r4t engine codex run --permissions bypass --agent amos "hi"` died
+  "unrecognized arguments" on Python 3.10/3.11 (the interpreter Ubuntu 22.04
+  ships) while working on 3.12+: older argparse abandons a positional that
+  trails the options once the optional positionals matched empty. r4t now
+  adopts what old argparse abandoned — `engine … run`, `rig run`, `seat send`,
+  `task show`/`trace` and `rig get` take their trailing positionals on either
+  side of the flags, on every interpreter. Found live on a
+  deployed VM; `--version` also names the running Python
+  (`r4t 0.1.69 (The Ark, python 3.10.20)`) across all four CLIs, so the next
+  interpreter-dependent field report answers the question in its own paste.
+- **MQTT client identity is per node, and `a8s health` probes anonymously
+  (#168).** A remote's default client id hashes the host, the handler's
+  attached agent set, and the remote name, so two nodes on one machine hold
+  two broker sessions instead of taking turns evicting each other, and the id
+  stays the same across restarts so the broker replays each node's queued
+  QoS-1 messages. `a8s health` connects with a random one-shot id and a clean
+  session, so a connectivity check can neither inherit a node's session nor
+  consume the mail waiting in it. `A8S_CLIENT_TAG` replaces the node tag when
+  set, and a `client_id` in a remote's `network.json` spec still wins.
+- **Running the a8s test suite on Windows no longer writes to the real config
+  home.** The `fake_home` fixture set `HOME`, which Windows path expansion
+  never reads; it now points `USERPROFILE` at the per-test directory and
+  clears the `HOMEDRIVE`/`HOMEPATH` fallback, so an "isolated" test can no
+  longer clobber a developer's live `~/.a8s`.
+
 ## [0.1.68]
 
 ### Added

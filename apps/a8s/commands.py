@@ -22,7 +22,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
@@ -32,6 +32,7 @@ from core import (
     agent_dir,
     agent_log_path,
     canonical_name,
+    folder_ledger_path,
     inbox_dir,
     out,
     out_agent,
@@ -62,7 +63,9 @@ from daemon import (
     attached_loop,
 )
 from network import (
+    PAIRED_KEY,
     _build_service as build_service,
+    _build_transport as build_transport,
     configured_remote_ids,
     delete_remote_secrets,
     delete_spec_secrets,
@@ -91,7 +94,7 @@ from registry import (
     save_namespace_options,
 )
 from txlog import read_events
-from ark.ulid import is_ulid
+from ark.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
 
 # ---------- registry management commands ----------
@@ -2194,10 +2197,25 @@ _SECRET_KEYS = {"pass", "password"}
 
 def _remote_usage() -> int:
     print(
-        "usage: a8s remote                                         # list all\n"
-        "       a8s remote <name>                                  # show one\n"
-        "       a8s remote <name> <broker> <topic> [--<k> <v> ...]   # add or overwrite\n"
-        "       a8s unremote <name>                                # remove\n"
+        "usage: a8s remote                                          # list all\n"
+        "       a8s remote <name>                                   # show one\n"
+        "       a8s remote <name> <folder> [--<k> <v> ...]          # folder remote\n"
+        "       a8s remote <name> <broker> <topic> [--<k> <v> ...]  # broker remote\n"
+        "       a8s unremote <name>                                 # remove\n"
+        "\n"
+        'e.g.   a8s remote box "G:/My Drive/A8S"                    # quote the path\n'
+        "       a8s remote hub mqtt://broker.example:1883 a8s/team\n"
+        "\n"
+        "A folder remote carries envelopes through a directory some sync client\n"
+        "already watches; give a second machine the same folder and the messages\n"
+        "cross by themselves. Quote the path — a sync root with a space in it\n"
+        "splits into two words and reads as a broker and a topic. It takes\n"
+        "--poll-seconds (15), --prefix (none) and --retain-days (off), and the\n"
+        "same command registers the folder for attachments so a message's files\n"
+        "travel with it. Registration also stamps `joined`, the ULID this\n"
+        "machine joined the folder at; envelopes named below it are the backlog\n"
+        "it is not owed. It is written, never typed, and `a8s unremote` plus a\n"
+        "fresh `a8s remote` is how a machine re-joins at a new cutoff.\n"
         "\n"
         "Any option past the broker and topic is passed verbatim to the\n"
         "transport (e.g. --user / --pass for mqtt). Either spelling works,\n"
@@ -2212,17 +2230,36 @@ def _remote_usage() -> int:
 
 def _format_remote_summary(spec: dict) -> str:
     kind = spec.get("transport", "?")
-    broker = spec.get("broker", "?")
-    topic = spec.get("topic", "?")
+    if kind == "folder":
+        line = f"folder {spec.get('path', '?')}"
+        consumed = {"transport", "path", "joined"}
+    else:
+        line = f"{kind} {spec.get('broker', '?')} topic={spec.get('topic', '?')}"
+        consumed = {"transport", "broker", "topic"}
     extras = " ".join(
         f"--{k}=***" if k in _SECRET_KEYS else f"--{k}={v}"
         for k, v in spec.items()
-        if k not in {"transport", "broker", "topic"}
+        if k not in consumed
     )
-    line = f"{kind} {broker} topic={topic}"
     if extras:
         line += f" {extras}"
+    if kind == "folder" and spec.get("joined"):
+        line += f" joined={_joined_display(str(spec['joined']))}"
     return line
+
+
+def _joined_display(joined: str) -> str:
+    """The join cutoff as the ULID plus the moment it names.
+
+    The cutoff is the one thing that can make a folder remote deaf — a clock
+    an hour fast at registration stamps a future one — and a bare ULID hides
+    exactly the digits that would show it. It is also not an option anybody
+    types, so it is not printed as one.
+    """
+    if not is_ulid(joined):
+        return joined
+    stamped = datetime.fromtimestamp(parse_ulid(joined)[0] / 1000, tz=timezone.utc)
+    return f"{joined} ({stamped.strftime('%Y-%m-%d %H:%M:%SZ')})"
 
 
 def cmd_remote(args: list[str]) -> int:
@@ -2235,16 +2272,34 @@ def cmd_remote(args: list[str]) -> int:
     Forms (mirror `a8s alias`):
       a8s remote                                          list all
       a8s remote <name>                                   show one
-      a8s remote <name> <broker> <topic> [--<k> <v> ...]  add or overwrite
+      a8s remote <name> <folder> [--<k> <v> ...]          folder remote
+      a8s remote <name> <broker> <topic> [--<k> <v> ...]  broker remote
       a8s unremote <name>                                 remove (see `cmd_unremote`)
+
+    The two set forms are told apart by how many positional words precede the
+    first option: a folder is one place, a broker and a topic are two.
     """
-    if len(args) == 0:
-        return _cmd_remote_list()
-    if len(args) == 1:
-        return _cmd_remote_show(args[0])
-    if len(args) >= 3:
-        return _cmd_remote_set(args[0], args[1], args[2], args[3:])
-    return _remote_usage()
+    positionals, opt_tokens = _split_remote_positionals(args)
+    if len(positionals) >= 3:
+        return _cmd_remote_set(
+            positionals[0], positionals[1], positionals[2],
+            positionals[3:] + opt_tokens,
+        )
+    if len(positionals) == 2:
+        return _cmd_remote_set_folder(positionals[0], positionals[1], opt_tokens)
+    if opt_tokens:
+        return _remote_usage()
+    if len(positionals) == 1:
+        return _cmd_remote_show(positionals[0])
+    return _cmd_remote_list()
+
+
+def _split_remote_positionals(args: list[str]) -> tuple[list[str], list[str]]:
+    """Leading positional words, then everything from the first `--` token on."""
+    for i, tok in enumerate(args):
+        if tok.startswith("--"):
+            return args[:i], args[i:]
+    return list(args), []
 
 
 def _cmd_remote_list() -> int:
@@ -2274,9 +2329,33 @@ def _cmd_remote_show(name: str) -> int:
     return 0
 
 
+_BROKER_SCHEMES = ("mqtt", "mqtts")
+
+
 def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -> int:
     if not _REMOTE_NAME_RE.match(name):
         print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
+        return 2
+    # Three words means a broker and a topic, and a broker is a URL. Every
+    # sync root worth sharing has a space in its name, so an unquoted folder
+    # path arrives here split in two and would otherwise register as a broker
+    # remote that can never connect — and say "added".
+    scheme, sep, _rest = broker.partition("://")
+    if not sep:
+        print(
+            f"{broker!r} is not a broker URL — a broker remote needs "
+            f"{' or '.join(s + '://' for s in _BROKER_SCHEMES)}.\n"
+            f"If this is a folder path with a space in it, quote it: "
+            f'a8s remote {name} "{broker} {topic}"',
+            file=sys.stderr,
+        )
+        return 2
+    if scheme.lower() not in _BROKER_SCHEMES:
+        print(
+            f"unsupported broker scheme {scheme!r} "
+            f"(expected {' or '.join(_BROKER_SCHEMES)})",
+            file=sys.stderr,
+        )
         return 2
     try:
         extras = parse_option_tokens(opt_tokens)
@@ -2296,6 +2375,213 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
     return 0
 
 
+def _cmd_remote_set_folder(name: str, folder: str, opt_tokens: list[str]) -> int:
+    if "://" in folder:
+        print(
+            f"{folder!r} looks like a broker URL — a broker remote also needs a "
+            f"topic (a8s remote {name} {folder} <topic>)",
+            file=sys.stderr,
+        )
+        return 2
+    if not _REMOTE_NAME_RE.match(name):
+        print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
+        return 2
+    try:
+        extras = parse_option_tokens(opt_tokens)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return _remote_usage()
+    spec: dict = {"transport": "folder", "path": folder, **extras}
+    # This machine joins the folder now. The cutoff is a ULID rather than a
+    # reading of the folder because the folder may be absent, or half
+    # downloaded, for hours after this command returns — see `joined` in
+    # `transports/folder.py`. Each machine registers itself, so the stamp is
+    # per-machine even though it rides in a config both machines may share.
+    cfg = load_network_config()
+    prior = cfg["remotes"].get(name)
+    overwriting = name in cfg["remotes"]
+    prior_path = (
+        str(prior.get("path", ""))
+        if isinstance(prior, dict)
+        and (prior.get("transport") or "").strip().lower() == "folder"
+        else None
+    )
+    # Overwriting the same mailbox is an option tweak, not a re-join: a fresh
+    # cutoff would skip mail that arrived but was not yet polled. Only a new
+    # mailbox starts a new membership — and the mailbox is the path plus the
+    # prefix, since that is the directory the transport actually reads.
+    if (
+        prior_path
+        and isinstance(prior, dict)
+        and _folder_mailbox(prior_path, prior) == _folder_mailbox(folder, extras)
+        and prior.get("joined")
+    ):
+        spec.setdefault("joined", prior["joined"])
+    spec.setdefault("joined", new_ulid())
+    # Build it now so a typo'd option or a relative path fails here rather
+    # than as a skipped remote at daemon start.
+    try:
+        transport = build_transport(name, spec)
+    except (ValueError, TypeError) as e:
+        print(f"invalid remote config: {e}", file=sys.stderr)
+        return 2
+    public, secrets = split_secret_keys(spec)
+    cfg["remotes"][name] = public
+    save_network_config(cfg)
+    put_remote_secrets(name, secrets)
+    transport.touch_ledger()
+    verb = "updated" if overwriting else "added"
+    print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
+    root = Path(folder).expanduser()
+    if not root.is_dir():
+        print(f"{folder} does not exist yet; a8s creates it on the first publish")
+    print(_sync_client_note(root))
+    _register_folder_storage(name, folder, extras, prior_path)
+    return 0
+
+
+def _folder_mailbox(path: str, spec: dict) -> Path:
+    """The directory a folder remote's envelopes actually land in.
+
+    `prefix` is part of the address, not a tuning knob: the transport reads
+    `<path>/<prefix>`, so two specs agreeing on `path` and differing on
+    `prefix` name two different mailboxes. The strip matches the transport's
+    own normalization.
+    """
+    prefix = str(spec.get("prefix") or "").strip("/")
+    root = Path(path).expanduser()
+    return root / prefix if prefix else root
+
+
+def _is_paired_storage(spec: object, remote_name: str, remote_path: str | None) -> bool:
+    """True when `spec` is the storage service `a8s remote` created for this one.
+
+    Pairing is read off the marker `_register_folder_storage` writes, never
+    inferred from the shape of the spec: a hand-created `a8s storage` service
+    can match this remote's kind and path exactly, and moving or deleting it
+    would break the promise that operator-owned services stay untouched. The
+    kind and path still have to agree — a marker whose service has since been
+    re-pointed by hand no longer describes this remote.
+
+    Pre-v1, a service auto-created before the marker existed carries none, so
+    it reads as the operator's and is left alone. That is the safe direction,
+    and `a8s remote <name> <same folder>` re-stamps it.
+    """
+    if not remote_path or not isinstance(spec, dict):
+        return False
+    if spec.get(PAIRED_KEY) != remote_name:
+        return False
+    if spec.get("service") != "sync_folder":
+        return False
+    return Path(str(spec.get("url", ""))).expanduser() == Path(remote_path).expanduser()
+
+
+def _register_folder_storage(
+    name: str, folder: str, extras: dict, prior_path: str | None = None
+) -> None:
+    """Point attachments at the same folder the envelopes travel through.
+
+    A message and its files are one thing to the person who sent it. A folder
+    remote whose attachments have nowhere to go is a trap the operator only
+    springs on the first `FILE:`, so one command configures both — and when
+    the remote moves, its paired service moves with it, or the envelopes land
+    in the new folder while the attachments keep landing in the old one.
+    """
+    root = Path(folder).expanduser()
+    cfg = load_network_config()
+    paired = _is_paired_storage(cfg["services"].get(name), name, prior_path)
+    if not paired:
+        for existing, spec in cfg["services"].items():
+            if not isinstance(spec, dict) or spec.get("service") != "sync_folder":
+                continue
+            covered = Path(str(spec.get("url", ""))).expanduser()
+            if covered == root or covered in root.parents:
+                print(f"storage {existing} already carries attachments for {folder}")
+                return
+        if name in cfg["services"]:
+            print(
+                f"storage {name} is configured for something else; attachments for "
+                f"{folder} are not set up",
+                file=sys.stderr,
+            )
+            return
+    kind = detect_service_kind(folder)
+    if kind is None:
+        return
+    # The marker says who created this service, so `unremote` and the next
+    # overwrite can tell it apart from a hand-created one that happens to
+    # match. It rides in the network.json spec and never reaches the service
+    # class: `network._RESERVED_SERVICE_SPEC_KEYS` strips it before the
+    # constructor, whose option vocabulary would reject it.
+    spec = {"service": kind, "url": folder, PAIRED_KEY: name}
+    for key in ("prefix", "retain_days"):
+        if key in extras:
+            spec[key] = extras[key]
+    try:
+        build_service(name, spec)
+    except (ValueError, TypeError) as e:
+        print(f"attachments not configured for {folder}: {e}", file=sys.stderr)
+        return
+    cfg["services"][name] = spec
+    save_network_config(cfg)
+    verb = "updated" if paired else "added"
+    print(f"{verb} storage {name} ({_format_storage_summary(spec)})")
+
+
+def _sync_client_note(root: Path) -> str:
+    """What appears to be syncing this folder, said once at registration.
+
+    a8s moves nothing itself. An operator who points a folder remote at a
+    plain local directory and then waits for a second machine to answer is
+    waiting forever, and the only moment to say so is now.
+    """
+    parts = [root.name, *(p.name for p in root.parents)]
+    lowered = [p.lower() for p in parts]
+    if "com~apple~clouddocs" in lowered:
+        return "looks like iCloud Drive"
+    if "dropbox" in lowered or (Path.home() / ".dropbox" / "info.json").is_file():
+        return "looks like Dropbox"
+    if any(p.startswith("onedrive") for p in lowered):
+        return "looks like OneDrive"
+    if any(
+        p == "google drive" or p == "my drive" or p.startswith("googledrive-")
+        for p in lowered
+    ):
+        return "looks like Google Drive"
+    # OneDrive names its own root in the environment, which says the client is
+    # installed and nothing about this path. A folder outside that root is not
+    # synced by it, and the whole point of this note is to say so.
+    onedrive_roots = [
+        v
+        for v in (
+            os.environ.get(k, "")
+            for k in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer")
+        )
+        if v.strip()
+    ]
+    if onedrive_roots:
+        if any(_is_within(root, Path(v).expanduser()) for v in onedrive_roots):
+            return "looks like OneDrive"
+        return (
+            "OneDrive is installed but this path is not inside it — a8s syncs "
+            "nothing itself"
+        )
+    return "no known sync client detected — a8s syncs nothing itself"
+
+
+def _is_within(path: Path, base: Path) -> bool:
+    """True when `path` is `base` or lives under it. Case-folds where the
+    platform does, and never touches the disk — the folder may not be mounted
+    yet."""
+    try:
+        Path(os.path.normcase(str(path))).relative_to(
+            Path(os.path.normcase(str(base)))
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def cmd_unremote(args: list[str]) -> int:
     """`a8s unremote <name>` — remove a configured remote. Mirrors `unalias`'s
     shape so the surface stays uniform across registry primitives."""
@@ -2307,10 +2593,29 @@ def cmd_unremote(args: list[str]) -> int:
     if name not in cfg["remotes"]:
         print(f"no remote named {name!r}", file=sys.stderr)
         return 1
+    spec = cfg["remotes"][name]
     del cfg["remotes"][name]
+    is_folder = (
+        isinstance(spec, dict)
+        and (spec.get("transport") or "").strip().lower() == "folder"
+    )
+    # The service `a8s remote` created goes with the remote that created it.
+    # Left behind it points attachments at a folder nothing reads any more,
+    # and it blocks a clean re-add under the same name.
+    unpaired = is_folder and _is_paired_storage(
+        cfg["services"].get(name), name, str(spec.get("path", ""))
+    )
+    if unpaired:
+        del cfg["services"][name]
     save_network_config(cfg)
     delete_remote_secrets(name)
+    if is_folder:
+        # The ledger records what this machine already read from the folder.
+        # Keeping it would silence the backlog if the remote is added back.
+        folder_ledger_path(name).unlink(missing_ok=True)
     print(f"removed remote {name}")
+    if unpaired:
+        print(f"removed storage {name}")
     return 0
 
 
@@ -2345,7 +2650,7 @@ configured path when that path is already dedicated to a8s.
                                                  --prefix (a8s) --timeout_s (60)
   rclone        rclone://<remote>/<path>         --prefix (a8s) --timeout_s (300)
                                                  --rclone_path (rclone)
-  sync_folder   <a local folder path>            --prefix (none) --retain_days (off)
+  sync_folder   <a local folder path>            --prefix (none) --retain-days (off)
 
 URLs must be https. A peer picks the URL your node downloads from, and these
 links carry their own authorization in the query string. A download follows at
@@ -2358,7 +2663,7 @@ for a store on your own network with no certificate.
   a8s storage fm webdav://webdav.fastmail.com/dav/fs/user@domain/a8s \\
       --base-url https://files.example.com/a8s --user user@domain --password ...
   a8s storage drive rclone://gdrive/A8S
-  a8s storage onedrive "~/OneDrive - Contoso/A8S" --retain_days 30
+  a8s storage onedrive "~/OneDrive - Contoso/A8S" --retain-days 30
 
 sync_folder is the desktop and laptop answer: point it at a folder your sync
 client already watches, point a second machine at the same folder, and the
@@ -2366,7 +2671,7 @@ bytes cross by themselves. Nothing is published — no host, no credential, and
 no URL that resolves for anyone outside the folder. The marker that rides in
 the envelope names neither the service nor the path, so configure two folders
 and whichever syncs first delivers the file. Attachments are keyed by message
-ULID, so one message's files stay together. Set --retain_days to sweep old
+ULID, so one message's files stay together. Set --retain-days to sweep old
 bundles; it is off by default because deleting from one machine deletes from
 all of them. Use rclone instead on headless and VM machines, which have no
 sync client to ride along with.
@@ -2413,10 +2718,12 @@ _HELP_FLAGS = {"-h", "--help", "help"}
 def _format_storage_summary(spec: dict) -> str:
     kind = spec.get("service", "?")
     url = spec.get("url", "?")
+    # `paired` is provenance, not an option anyone typed, so it does not get
+    # rendered back as a flag the operator could believe in.
     extras = " ".join(
         f"--{k}=***" if k in _SECRET_KEYS else f"--{k}={v}"
         for k, v in spec.items()
-        if k not in {"service", "url"}
+        if k not in {"service", "url", PAIRED_KEY}
     )
     line = f"{kind} {url}"
     if extras:
@@ -2480,6 +2787,12 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return _storage_usage()
+    if PAIRED_KEY in extras:
+        # A hand-created service that could claim the marker could also be
+        # moved or deleted by `a8s remote` / `a8s unremote`, which is the
+        # whole thing the marker exists to prevent.
+        print(f"--{PAIRED_KEY} is written by `a8s remote`, not by hand", file=sys.stderr)
+        return 2
     kind = detect_service_kind(url)
     if kind is None:
         print(
@@ -2535,7 +2848,19 @@ def cmd_health() -> int:
 
     errors = 0
 
-    remotes = load_remotes()
+    # A probe that shares a node's client id takes over its persistent session
+    # (MQTT 3.1.1 §3.1.4-2) and eats the queued QoS-1 envelopes on the way out.
+    # The ULID tail is the random half, trimmed to keep the id inside the 23
+    # characters a 3.1.1 broker is required to accept. `probe` says the same
+    # thing in terms no transport has to translate: this client answers one
+    # question and consumes nothing.
+    remotes = load_remotes(
+        overrides={
+            "client_id": f"a8s-health-{new_ulid()[-12:]}",
+            "clean_session": True,
+            "probe": True,
+        }
+    )
     if not remotes:
         print("remotes: (none configured)")
     for t in remotes:

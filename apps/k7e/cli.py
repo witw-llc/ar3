@@ -17,7 +17,9 @@ try:
     from arkver import version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
-        return f"{app} unknown (The Ark)"
+        import platform
+
+        return f"{app} unknown (The Ark, python {platform.python_version()})"
 
 import config
 import engine

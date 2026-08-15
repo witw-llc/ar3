@@ -4,7 +4,8 @@ Uses MQTT 3.1.1 with `clean_session=False` and QoS 1 so the broker holds
 messages for an offline subscriber until reconnect — this is the persistent-
 session shape remote routing needs. The client_id needs to be stable
 across runs (same machine, same a8s install) for the broker to recognize the
-session and replay; we default to `a8s-<machine-hash>-<remote_id>`.
+session and replay; we default to a hash of (host, node tag, remote id) so
+each node on a host keeps its own session.
 
 Today the implementation is paho-mqtt. A pure-stdlib mini-MQTT fallback is
 deferred to a follow-up PR; when it lands, this module will auto-select
@@ -19,6 +20,7 @@ anything left over so an obvious typo in `network.json` fails loud.
 from __future__ import annotations
 
 import hashlib
+import os
 import queue
 import socket
 import threading
@@ -57,13 +59,28 @@ _KNOWN_OPTS: set[str] = {
     "connect_timeout_s",
     "ack_timeout_s",
     "publish_qos",
+    "clean_session",
+    # `a8s health` sets this on every remote it builds. A throwaway client id
+    # and a clean session already make this client a probe, so there is
+    # nothing further to do with it here.
+    "probe",
 }
 
+# Replaces the node tag in the default client id when set.
+_CLIENT_TAG_ENV = "A8S_CLIENT_TAG"
 
-def _default_client_id(remote_id: str) -> str:
-    """Stable per-(host, remote) id. The hash is deterministic so the broker
-    re-attaches us to the same persistent session on every restart."""
-    h = hashlib.sha256(f"{socket.gethostname()}::{remote_id}".encode()).hexdigest()[:16]
+
+def _default_client_id(remote_id: str, node_tag: str = "") -> str:
+    """Stable per-(host, node, remote) id. The hash is deterministic so the
+    broker re-attaches us to the same persistent session on every restart."""
+    # MQTT 3.1.1 §3.1.4-2 has the broker disconnect whoever already holds a
+    # client id, handing the newcomer the persistent session and its queued
+    # QoS-1 messages — so the node tag has to be in the hash, or two a8s
+    # processes on one host silently steal each other's mail.
+    tag = os.environ.get(_CLIENT_TAG_ENV) or node_tag
+    h = hashlib.sha256(
+        f"{socket.gethostname()}::{tag}::{remote_id}".encode()
+    ).hexdigest()[:16]
     return f"a8s-{h}"
 
 
@@ -80,7 +97,9 @@ class MqttTransport(Transport):
             ack_timeout_s (default 30.0, PUBACK wait — separate from
             connect_timeout_s because a residential network's latency tail
             can outlast a healthy connection), publish_qos (0 or 1,
-            default 1). Subscribe stays at QoS 1.
+            default 1), clean_session (default False — short-lived probe
+            clients set True so they neither inherit nor orphan a durable
+            session). Subscribe stays at QoS 1.
             a8s-android (Java Paho) publishes asynchronously and never waits
             for PUBACK; this client waits, and the broker echo runs through
             `on_message` on the same connection — see `_worker_loop`.
@@ -96,6 +115,7 @@ class MqttTransport(Transport):
         topic: str,
         **opts: Any,
     ) -> None:
+        node_tag: str = str(opts.pop("node_tag", "") or "")
         # Normalize alias keys (user → username, etc.). If both alias and
         # canonical are present, canonical wins and the alias is dropped
         # silently — the user might have set both during a config edit; we
@@ -118,6 +138,7 @@ class MqttTransport(Transport):
         connect_timeout_s: float = float(opts.get("connect_timeout_s", 5.0))
         ack_timeout_s: float = float(opts.get("ack_timeout_s", 30.0))
         publish_qos: int = int(opts.get("publish_qos", 1))
+        clean_session: bool = bool(opts.get("clean_session", False))
         if publish_qos not in (0, 1):
             raise ValueError(
                 f"remote {remote_id!r}: publish_qos must be 0 or 1, got {publish_qos!r}"
@@ -138,11 +159,11 @@ class MqttTransport(Transport):
         self._host = parsed.hostname or "localhost"
         self._port = parsed.port or (8883 if parsed.scheme == "mqtts" else 1883)
         self._tls = parsed.scheme == "mqtts"
-        self._client_id = client_id or _default_client_id(remote_id)
+        self._client_id = client_id or _default_client_id(remote_id, node_tag)
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=self._client_id,
-            clean_session=False,
+            clean_session=clean_session,
         )
         if username is not None:
             self._client.username_pw_set(username, password)

@@ -157,6 +157,85 @@ class TestLoadRemotes:
         remotes = load_remotes()
         assert remotes == []
 
+    def test_folder_remote_built(self, fake_home, tmp_path):
+        shared = tmp_path / "Dropbox" / "A8S"
+        shared.mkdir(parents=True)
+        save_network_config({
+            "remotes": {"box": {"transport": "folder", "path": str(shared)}}
+        })
+        remotes = load_remotes()
+        assert [r.id for r in remotes] == ["box"]
+        assert remotes[0]._base == shared
+
+    def test_folder_missing_path_skipped(self, fake_home):
+        save_network_config({"remotes": {"box": {"transport": "folder"}}})
+        assert load_remotes() == []
+
+    def test_folder_accepts_the_broker_option_bag(self, fake_home, tmp_path):
+        """`load_remotes` hands every remote the node tag and, for a health
+        run, the probe overrides. A folder has no broker session to name, so
+        those keys have to land somewhere rather than skipping the remote."""
+        shared = tmp_path / "A8S"
+        shared.mkdir()
+        save_network_config({
+            "remotes": {"box": {"transport": "folder", "path": str(shared)}}
+        })
+        probe = load_remotes(
+            node="node-a",
+            overrides={"client_id": "a8s-health-0000", "clean_session": True, "probe": True},
+        )
+        assert [r.id for r in probe] == ["box"]
+        assert probe[0]._probe is True
+
+
+class TestRemoteIdentity:
+    """`node` and `overrides` decide which broker session a process claims."""
+
+    @pytest.fixture
+    def mqtt_home(self, fake_home, monkeypatch):
+        pytest.importorskip("paho.mqtt.client")
+        monkeypatch.delenv("A8S_CLIENT_TAG", raising=False)
+        save_network_config({
+            "remotes": {
+                "hub": {
+                    "transport": "mqtt",
+                    "broker": "mqtt://localhost:1883",
+                    "topic": "t",
+                }
+            }
+        })
+
+    def test_node_tag_separates_nodes_on_one_host(self, mqtt_home):
+        a = load_remotes(node="node-a")[0]
+        b = load_remotes(node="node-b")[0]
+        assert a._client_id != b._client_id
+        assert load_remotes(node="node-a")[0]._client_id == a._client_id
+
+    def test_probe_overrides_take_a_throwaway_identity(self, mqtt_home):
+        node = load_remotes(node="node-a")[0]
+        probe = load_remotes(
+            overrides={"client_id": "a8s-health-0000", "clean_session": True}
+        )[0]
+        assert probe._client_id == "a8s-health-0000"
+        assert probe._client_id != node._client_id
+        assert probe._client._clean_session is True
+        assert node._client._clean_session is False
+
+    def test_spec_client_id_wins_over_node_tag(self, fake_home, monkeypatch):
+        pytest.importorskip("paho.mqtt.client")
+        monkeypatch.delenv("A8S_CLIENT_TAG", raising=False)
+        save_network_config({
+            "remotes": {
+                "hub": {
+                    "transport": "mqtt",
+                    "broker": "mqtt://localhost:1883",
+                    "topic": "t",
+                    "client_id": "a8s-pinned",
+                }
+            }
+        })
+        assert load_remotes(node="node-a")[0]._client_id == "a8s-pinned"
+
 
 # ---------- seen-ids ring ----------
 

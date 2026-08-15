@@ -81,7 +81,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),
     ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),
     ("logs",     "<name>... [--tail N] [-f]", "Show per-agent logs."),
-    ("remote",   "[<name> [<broker> <topic> [--<k> <v> ...]]]", "List, show, or set a cross-machine remote."),
+    ("remote",   "[<name> [<folder> | <broker> <topic>] [--<k> <v> ...]]", "List, show, or set a cross-machine remote."),
     ("unremote", "<name>",                    "Remove a configured remote."),
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),

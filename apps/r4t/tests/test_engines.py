@@ -267,7 +267,16 @@ class TestSnapshotRoundTrip:
         engines.save_snapshot("codex", {"engine": "codex", "origin": "live", "buckets": []})
         loaded = engines.load_snapshot("codex")
         assert loaded["origin"] == "snapshot"
-        assert loaded["age"] == "0m"
+        assert "age" not in loaded
+        assert isinstance(loaded["age_seconds"], float)
+        assert loaded["age_seconds"] < 5
+
+    def test_the_human_age_string_belongs_to_the_renderer(self):
+        assert engines.format_age(0) == "0m"
+        assert engines.format_age(125) == "2m"
+        assert engines.format_age(7500) == "2h 5m"
+        assert engines.format_age(200000) == "2d 7h"
+        assert engines.format_age(None) == "?"
 
     def test_missing_snapshot_is_none(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

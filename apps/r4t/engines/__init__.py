@@ -23,6 +23,12 @@ Every check returns the same shape so callers can route on it:
 (unlimited seats, unknown pools). A check that cannot answer raises
 QuotaError with remediation in the message; `quota()` turns the last good
 snapshot into an aged answer before giving up.
+
+`fuel()` reduces that spread of dials to one number for one model. It is a
+selection over the bucket shape above and nothing more — no engine's endpoint
+is visible from here, so endpoint churn stays inside the engine modules. Its
+`fuel` is the rig-level answer; the bucket-level readings it selects among
+keep their own name, `remaining_fraction`.
 """
 from __future__ import annotations
 
@@ -33,7 +39,16 @@ from pathlib import Path
 from engines import agy, claude, codex, copilot, cursor, ollama, opencode, run
 from engines.base import QuotaError
 
-__all__ = ["QuotaError", "MODULES", "engine_for", "quota", "format_text"]
+__all__ = [
+    "QuotaError",
+    "MODULES",
+    "engine_for",
+    "quota",
+    "fuel",
+    "binding_index",
+    "format_age",
+    "format_text",
+]
 
 MODULES = {
     "claude": claude,
@@ -121,14 +136,20 @@ def load_snapshot(engine: str) -> dict | None:
         payload = dict(data["payload"])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    mins = max(0, round((time.time() - saved_at) / 60))
+    payload["origin"] = "snapshot"
+    payload["age_seconds"] = max(0.0, round(time.time() - saved_at, 3))
+    return payload
+
+
+def format_age(seconds: float | None) -> str:
+    """A duration in seconds as the one human string the renderers print.
+    Machine surfaces carry `age_seconds` and nothing else."""
+    if not isinstance(seconds, (int, float)):
+        return "?"
+    mins = max(0, round(seconds / 60))
     hours, mins = divmod(mins, 60)
     days, hours = divmod(hours, 24)
-    payload["origin"] = "snapshot"
-    payload["age"] = (
-        f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
-    )
-    return payload
+    return f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
 
 
 def quota(preset_or_engine: str) -> dict:
@@ -146,12 +167,105 @@ def quota(preset_or_engine: str) -> dict:
         snapshot = load_snapshot(engine)
         if snapshot is None:
             raise
+        snapshot["engine"] = engine
         snapshot["note"] = f"live check failed: {exc}"
         return snapshot
     payload["engine"] = engine
     if payload.get("origin") == "live":
         save_snapshot(engine, payload)
     return payload
+
+
+# Which buckets constrain which models. A bucket whose label names a model
+# family is a dial only that family turns — claude's model-scoped weeklies,
+# antigravity's per-pool limits; every other bucket constrains everything the
+# engine runs. The key is the token an engine writes into such a label, the
+# value the tokens a model name carries when it belongs to that family.
+SCOPED_BUCKETS = {
+    "claude/gpt": ("claude", "opus", "sonnet", "haiku", "gpt", "codex"),
+    "gemini": ("gemini",),
+    "fable": ("fable",),
+    "opus": ("opus",),
+    "sonnet": ("sonnet",),
+    "haiku": ("haiku",),
+}
+
+
+def _constrains(bucket: dict, model: str | None) -> bool:
+    """Whether this bucket empties when `model` runs. An unscoped bucket
+    always does. A scoped one does when the model belongs to ANY family its
+    label names — the label is server-supplied text, and one bucket may be
+    shared ("Sonnet & Opus shared weekly"), so the scopes union rather than
+    the first one winning. A scoped bucket never constrains a rig that pins
+    no model, since counting a Fable weekly against a rig that may not be
+    running Fable reports an empty tank that is not empty."""
+    label = str(bucket.get("label", "")).lower()
+    families = [
+        token
+        for scope, models in SCOPED_BUCKETS.items()
+        if scope in label
+        for token in models
+    ]
+    if not families:
+        return True
+    return bool(model) and any(token in model.lower() for token in families)
+
+
+def binding_index(buckets: list[dict]) -> int | None:
+    """Which bucket runs out first: the lowest fraction among those that
+    express one, ties going to the first declared. One rule, so the JSON's
+    `binding_label` and the text renderer's star can never disagree — even
+    when two buckets carry the same label."""
+    gauged = [
+        i
+        for i, bucket in enumerate(buckets)
+        if isinstance(bucket.get("remaining_fraction"), (int, float))
+    ]
+    if not gauged:
+        return None
+    return min(gauged, key=lambda i: buckets[i]["remaining_fraction"])
+
+
+def fuel(preset_or_engine: str, model: str | None = None) -> dict:
+    """How much tank is left for one model on one engine: the engine's quota,
+    narrowed to the buckets that model burns, reduced to the binding one.
+
+    `state` is what a dispatcher branches on, because `fuel` alone cannot tell
+    an empty account from an unmeasured one:
+
+      gauged         a bucket answered — `fuel` is 0.0-1.0 (a local engine's
+                     1.0 included).
+      unlimited      buckets constrain this model but none expresses a
+                     fraction (an unlimited seat, an engine with no gauge).
+      unconstrained  no bucket constrains this model at all — every dial the
+                     account carries is scoped to some other family, or the
+                     rig pins no model and every dial is scoped.
+
+    `fuel` is None for the last two. Buckets that cannot express a fraction
+    are dropped rather than counted as empty. `preset` is the id the caller
+    asked for, the same value `rig run --json` calls `engine`; `quota_engine`
+    is the engine that actually answered. Raises QuotaError exactly where
+    `quota` does."""
+    payload = quota(preset_or_engine)
+    buckets = [b for b in payload.get("buckets") or [] if _constrains(b, model)]
+    index = binding_index(buckets)
+    binding = buckets[index] if index is not None else None
+    return {
+        "preset": preset_or_engine,
+        "quota_engine": payload.get("engine"),
+        "model": model,
+        "fuel": binding["remaining_fraction"] if binding else None,
+        "state": (
+            "gauged" if binding else "unlimited" if buckets else "unconstrained"
+        ),
+        "binding_label": binding["label"] if binding else None,
+        "binding_reset": binding.get("reset_time") if binding else None,
+        "origin": payload.get("origin"),
+        "age_seconds": payload.get("age_seconds"),
+        "plan": payload.get("plan"),
+        "buckets": buckets,
+        "note": payload.get("note"),
+    }
 
 
 def format_text(payload: dict) -> str:
@@ -162,7 +276,9 @@ def format_text(payload: dict) -> str:
         head += f" — {plan}"
     lines = [head]
     if payload.get("origin") == "snapshot":
-        lines.append(f"  source: snapshot from {payload.get('age', '?')} ago")
+        lines.append(
+            f"  source: snapshot from {format_age(payload.get('age_seconds'))} ago"
+        )
     for bucket in payload.get("buckets") or []:
         fraction = bucket.get("remaining_fraction")
         if isinstance(fraction, (int, float)):

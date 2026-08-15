@@ -110,6 +110,98 @@ carrying `rig`, `engine`, `dir`, `ran`, `reason` (`ran`, `resting`,
 ungated rig, else `max`, `earn_per_hour`, `level_before`, `level_after`,
 `waited_seconds`, `forced`, plus `seconds_until` on a refusal.
 
+## `rig fuel` — the tank as one number
+
+```bash
+r4t rig fuel ark-eng          # 0.00-1.00, the dial the next turn hits first
+r4t rig fuel ark-eng --json
+```
+
+```
+r4t rig fuel <rig> [--json] [--rig-config PATH]
+```
+
+An engine has dials; only a rig has a tank. [`r4t engine <id>
+quota`](r4t-engine.md) reports every bucket an account carries, and no two
+engines' panels are shaped alike. `rig fuel` narrows that answer to the
+buckets the rig's **model** burns and reports the lowest of them.
+
+**Which buckets count.** A bucket whose label names a model family is a dial
+only that family turns; every other bucket constrains everything the engine
+runs. A claude rig on Opus reads `min(five-hour, weekly, weekly-Opus)`, and the
+same account's Fable rig reads `min(five-hour, weekly, weekly-Fable)` — two rigs
+on one subscription, two different numbers, and neither counts the other's
+weekly. A label may name more than one family, and then it counts for each of
+them. An `agy` rig reads the pool its model belongs to. An `ollama` rig reads
+1.00, because a local model has no cloud tank to empty. The mapping is one
+table, `SCOPED_BUCKETS` in `apps/r4t/engines/__init__.py`, beside the bucket
+shape it selects over.
+
+**A rig that pins no model** counts only the unscoped buckets, and its JSON
+says so with `"model": null`. Charging a model-scoped weekly against a rig
+that may not run that model reports an empty tank that is not empty, so the
+number is deliberately optimistic: a reading that is wrongly low halts dispatch
+for a rig with fuel to burn, while one that is wrongly high costs a single
+failed turn. Pin the model when the number has to be exact.
+
+**Read `state`, not `fuel` alone.** `fuel` is the rig-level answer — one number
+selected from the bucket-level `remaining_fraction` readings under it — and it
+is `null` in two different situations that must not be treated alike:
+
+| `state` | `fuel` | means |
+| --- | --- | --- |
+| `gauged` | 0.00-1.00 | a bucket answered (a local engine's `1.00` included) |
+| `unlimited` | `null` | buckets constrain this model, none expresses a fraction |
+| `unconstrained` | `null` | no bucket constrains this model at all |
+
+`unconstrained` is the normal answer for an `agy` rig that pins no model: every
+dial that account carries is scoped to a family, so none of them applies. A
+dispatcher that reads `null` as "unlimited seat" will keep sending turns into
+an account that may be empty. Branch on `state`.
+
+A bucket that cannot express a fraction is dropped rather than read as empty.
+The answer rides `quota`'s snapshot fallback, so a live check that fails yields
+an aged number that says its age instead of nothing at all.
+
+Nothing runs and nothing is charged. The rig's budget bucket is a separate
+thing entirely — [that gate](#the-budget-gate) is how often this rig may spend,
+fuel is how much subscription is left to spend. `--json` prints to **stdout**
+(there is no engine reply stream to protect):
+
+```json
+{
+  "rig": "ark-eng",
+  "preset": "claude",
+  "quota_engine": "claude",
+  "model": "opus",
+  "fuel": 0.15,
+  "state": "gauged",
+  "binding_label": "Weekly Limit (Opus)",
+  "binding_reset": "2026-08-20T00:00:00+00:00",
+  "origin": "live",
+  "age_seconds": null,
+  "plan": "Personal (max)",
+  "buckets": [
+    {"label": "Five Hour Limit", "remaining_fraction": 0.9,
+     "reset_time": "2026-08-15T18:00:00+00:00"},
+    {"label": "Weekly Limit", "remaining_fraction": 0.4,
+     "reset_time": "2026-08-20T00:00:00+00:00"},
+    {"label": "Weekly Limit (Opus)", "remaining_fraction": 0.15,
+     "reset_time": "2026-08-20T00:00:00+00:00"}
+  ],
+  "note": null
+}
+```
+
+`preset` is the rig's preset id — the same value [`rig run
+--json`](#rig-run--one-headless-turn-as-a-rig) reports under `engine` — and
+`quota_engine` is the engine component that answered, which differs whenever a
+launcher preset rides another engine's quota (`ollama-claude` → `ollama`).
+`origin` is `live` or `snapshot`; `age_seconds` is `null` on a live answer and
+the snapshot's age in seconds otherwise. `binding_reset` is the binding
+bucket's own `reset_time`, lifted out so nothing has to match `binding_label`
+back against the `buckets` list.
+
 ## Continuing a conversation
 
 A member with `- **Continue:** on` in the roster runs its turns inside its

@@ -288,6 +288,26 @@ The three `ollama-*` definitions additionally need `--model` — set the a8s var
 --model=qwen3.6`, or `a8s vars my-bare-node set MODEL qwen3.6` after the
 fact) — since the launcher has no default model of its own.
 
+Each of the nine also ships an `engine-<id>-unrestricted` variant: the same
+three wakes invoked with `--permissions bypass`. What that buys differs by
+engine, and each variant's own description says which — codex trades its
+sandbox for `--dangerously-bypass-approvals-and-sandbox`, claude moves to
+`--permission-mode bypassPermissions` with settings.json deny rules still in
+force, copilot moves to `--allow-all`, while cursor, opencode,
+ollama-opencode and agy already run at their strongest mode in the base
+preset, so those four variants compose the same argv as the base today:
+
+```bash
+a8s add amos ~/agents/amos engine-codex-unrestricted
+```
+
+An unrestricted node acts on untrusted inbound mail — anyone who can reach its
+inbox, including over a broker or a shared folder, is driving a CLI that will
+not ask. Only for an agent on its own machine and its own account.
+
+The stance lives on the definition's own invoke lines, chosen by name at `add`
+time — the base variants never grow it.
+
 A custom node beyond these nine is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for
 recipes.
@@ -332,4 +352,12 @@ r4t engine claude quota --json
 ```
 
 One component per engine under `apps/r4t/engines/`; live answers persist as
-snapshots that still answer, age-stamped, when the live check cannot.
+snapshots that still answer when the live check cannot. A snapshot answer
+carries `"origin": "snapshot"` and `age_seconds` — its age as a number, like
+every other duration r4t reports; the text lines render the human string.
+
+This is every dial the account carries, raw. Each bucket's own reading is
+`remaining_fraction`. One number for one rig is [`r4t rig fuel
+<rig>`](r4t-rigs.md#rig-fuel--the-tank-as-one-number), which reads this same
+answer, keeps the buckets the rig's model burns, and reports the lowest of them
+as `fuel`.

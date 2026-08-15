@@ -830,6 +830,21 @@ class TestHarnessPresets:
         assert "--mode" in agy and "accept-edits" in agy
         assert "--print" in agy
 
+    def test_both_claude_presets_allow_exactly_the_a8s_convo_command(self):
+        # The --agent scaffold's cold boot runs `a8s convo` and nothing else
+        # (engines/run.py). Under dontAsk a missing tool is silently denied
+        # and the node writes "Bash is off" into LESSONS.md, then stays mute
+        # — so the grant must exist. It must also stay narrow: a broad
+        # `Bash(a8s:*)` auto-approves every router verb, which hands
+        # untrusted inbound mail stop, kill, remove, drain and the
+        # remote/storage mutations.
+        for name in ("claude", "ollama-claude"):
+            invoke = HARNESS_PRESETS[name]["invoke"]
+            allowed = invoke[invoke.index("--allowedTools") + 1]
+            assert "Bash(tell:*)" in allowed
+            assert "Bash(a8s convo:*)" in allowed
+            assert "Bash(a8s:*)" not in allowed
+
     def test_build_preset_invoke_opencode(self):
         argv = build_preset_invoke("opencode")
         assert argv[0] == "opencode"

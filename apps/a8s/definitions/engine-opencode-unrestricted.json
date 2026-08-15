@@ -1,0 +1,44 @@
+{
+  "description": "OpenCode as a bare stateless engine node — the same three wakes as engine-opencode, invoked with --permissions bypass. OpenCode's strongest mode is auto and the base preset already composes it, so this definition is identical to engine-opencode today; the name states the intent, and it picks up any stronger mode opencode grows. An unrestricted node acts on untrusted inbound mail — anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account.",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "opencode",
+    "run",
+    "--permissions",
+    "bypass",
+    "--agent",
+    "$RECIPIENT",
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "opencode",
+      "run",
+      "--permissions",
+      "bypass",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "opencode",
+      "run",
+      "--permissions",
+      "bypass",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

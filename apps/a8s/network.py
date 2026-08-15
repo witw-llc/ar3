@@ -16,8 +16,8 @@ e.g. `transports.mqtt` when it sees a `transport: mqtt` entry in the
 config; an a8s install with no remotes never imports paho-mqtt or any
 other transport library.
 
-`_build_transport` forwards every key past `transport`/`broker`/`topic`
-to the transport constructor as `**opts`, so adding a new transport
+`_build_transport` forwards every key past `transport`/`broker`/`topic`/
+`path` to the transport constructor as `**opts`, so adding a new transport
 option doesn't require touching this dispatcher — only the transport's
 own option-bag handling.
 """
@@ -216,35 +216,51 @@ def delete_remote_secrets(name: str) -> None:
 
 # Top-level keys in a network.json entry that are not transport options
 # (they're consumed by the dispatcher itself before forwarding the rest).
-_RESERVED_SPEC_KEYS = {"transport", "broker", "topic"}
+_RESERVED_SPEC_KEYS = {"transport", "broker", "topic", "path"}
 
 
 def _build_transport(name: str, spec: dict) -> Transport:
     """Instantiate one Transport from a network.json entry. Forwards every
-    key past `transport` / `broker` / `topic` as `**opts` to the transport
-    constructor — each transport handles its own option vocabulary,
-    aliases (e.g. `user` → `username`), and rejects unknowns."""
+    key past `transport` / `broker` / `topic` / `path` as `**opts` to the
+    transport constructor — each transport handles its own option vocabulary,
+    aliases (e.g. `user` → `username`), and rejects unknowns.
+
+    Each kind states its own required fields: a broker and a topic name a
+    server, a path names a folder, and neither is a requirement of the other."""
     kind = (spec.get("transport") or "").strip().lower()
-    broker = spec.get("broker")
-    topic = spec.get("topic")
-    if not broker or not topic:
-        raise ValueError(f"remote {name!r}: every transport requires `broker` and `topic`")
     opts = {k: v for k, v in spec.items() if k not in _RESERVED_SPEC_KEYS}
     if kind == "mqtt":
+        broker = spec.get("broker")
+        topic = spec.get("topic")
+        if not broker or not topic:
+            raise ValueError(f"remote {name!r}: an mqtt transport requires `broker` and `topic`")
         # Lazy import — keeps paho out of the import graph for users with no
         # remotes configured.
         from transports.mqtt import MqttTransport
 
         return MqttTransport(remote_id=name, broker=broker, topic=topic, **opts)
+    if kind == "folder":
+        path = spec.get("path")
+        if not path:
+            raise ValueError(f"remote {name!r}: a folder transport requires `path`")
+        from transports.folder import FolderTransport
+
+        return FolderTransport(remote_id=name, path=path, **opts)
     raise ValueError(f"remote {name!r}: unsupported transport {kind!r}")
 
 
-def load_remotes() -> list[Transport]:
+def load_remotes(node: str | None = None, overrides: dict | None = None) -> list[Transport]:
     """Return Transport instances for every configured remote.
 
     Merges ``secrets.json`` secret keys into each network.json spec before
     building the transport. Failures are logged and skipped — never block
     a8s startup.
+
+    ``node`` names the caller's node identity (the attached agent set) and
+    becomes part of each transport's default client id, so two nodes on one
+    host never contend for the same broker session. ``overrides`` is merged
+    into every spec last; a short-lived probe uses it to take a throwaway
+    identity instead of a node's durable one.
     """
     cfg = load_network_config()
     out_list: list[Transport] = []
@@ -253,7 +269,12 @@ def load_remotes() -> list[Transport]:
             out(f"WARN: remote {name!r} config is not an object; skipping")
             continue
         try:
-            out_list.append(_build_transport(name, merge_remote_secrets(name, spec)))
+            merged = merge_remote_secrets(name, spec)
+            if node:
+                merged = {**merged, "node_tag": node}
+            if overrides:
+                merged = {**merged, **overrides}
+            out_list.append(_build_transport(name, merged))
         except Exception as e:
             out(f"WARN: remote {name!r} skipped: {e}")
     return out_list
@@ -268,9 +289,15 @@ def configured_remote_ids() -> list[str]:
 
 # ---------- storage services ----------
 
+# Provenance written by `a8s remote`: the name of the folder remote whose
+# registration created this service. It is config-layer bookkeeping rather than
+# a service option — nothing a StorageService can act on — so it is reserved
+# here and stripped before the constructor sees the spec.
+PAIRED_KEY = "paired"
+
 # Top-level keys in a network.json `services` entry that the dispatcher
 # consumes itself before forwarding the rest to the StorageService constructor.
-_RESERVED_SERVICE_SPEC_KEYS = {"service", "url"}
+_RESERVED_SERVICE_SPEC_KEYS = {"service", "url", PAIRED_KEY}
 
 
 def _normalize_opt_key(key: str) -> str:

@@ -3,8 +3,11 @@ and auto-discovery."""
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -703,6 +706,63 @@ RUN_ENGINE_IDS = (
 )
 OLLAMA_ENGINE_IDS = tuple(e for e in RUN_ENGINE_IDS if e.startswith("ollama-"))
 
+# What `--permissions bypass` changes in the engine's OWN argv, per engine:
+# (tokens the base loses, tokens bypass adds). Empty on both sides means the
+# composed argv is identical to the base's, because the base preset already
+# carries that engine's strongest mode — the state each -unrestricted
+# description states in words. Mirrors apps/r4t/rig.py's PERMISSION_TRANSLATION
+# for the same reason RUN_ENGINE_IDS mirrors RUN_ENGINES: a8s tests cannot
+# import r4t in-process.
+BYPASS_ARGV_DELTA = {
+    "claude": (("dontAsk",), ("bypassPermissions",)),
+    "ollama-claude": (("dontAsk",), ("bypassPermissions",)),
+    "codex": (
+        ("--sandbox", "workspace-write"),
+        ("--dangerously-bypass-approvals-and-sandbox",),
+    ),
+    "ollama-codex": (
+        ("--sandbox", "workspace-write"),
+        ("--dangerously-bypass-approvals-and-sandbox",),
+    ),
+    "copilot": (("--allow-all-tools",), ("--allow-all",)),
+    "agy": ((), ()),
+    "cursor": ((), ()),
+    "opencode": ((), ()),
+    "ollama-opencode": ((), ()),
+}
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_R4T_DIR = _REPO_ROOT / "apps" / "r4t"
+
+_PERMISSION_PROBE = """
+import json, sys
+import rig
+out = {}
+for engine in json.loads(sys.argv[1]):
+    try:
+        base = rig.build_preset_invoke(engine, model="MODEL")
+    except rig.RigError:
+        base = rig.build_preset_invoke(engine)
+    bypass, _ = rig.apply_permissions(base, engine, "bypass")
+    out[engine] = [base, bypass]
+print(json.dumps(out))
+"""
+
+
+@pytest.fixture(scope="session")
+def engine_argv_pairs():
+    """`{engine: [base argv, bypass argv]}` composed by r4t's own permission
+    table, in a subprocess: r4t's modules shadow a8s's inside this process."""
+    proc = subprocess.run(
+        [sys.executable, "-c", _PERMISSION_PROBE, json.dumps(list(RUN_ENGINE_IDS))],
+        cwd=_R4T_DIR,
+        env={**os.environ, "PYTHONPATH": f"{_R4T_DIR}{os.pathsep}{_REPO_ROOT}"},
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
 
 class TestBundledEngineDefinitions:
     """Every RUN_ENGINES id ships its own `engine-<id>.json`, usable as-is —
@@ -719,6 +779,13 @@ class TestBundledEngineDefinitions:
     def _definition(self, engine_id):
         return json.loads(
             default_definition_path(f"engine-{engine_id}").read_text(encoding="utf-8")
+        )
+
+    def _unrestricted(self, engine_id):
+        return json.loads(
+            default_definition_path(f"engine-{engine_id}-unrestricted").read_text(
+                encoding="utf-8"
+            )
         )
 
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
@@ -775,6 +842,78 @@ class TestBundledEngineDefinitions:
         for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
             assert "--model" in block
             assert "$MODEL" in block
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_unrestricted_variant_lifts_permissions_on_every_wake(
+        self, engine_id, agent_root
+    ):
+        # `a8s add amos ~/agents/amos engine-cursor-unrestricted`: the same
+        # node as engine-<id>, invoked at --permissions bypass. The stance
+        # belongs on the invoke line, visible in the definition the operator
+        # chose by name — never a default the base variant grows.
+        from definitions import BatchEntry, build_batch_command, build_idle_command
+
+        defn = self._unrestricted(engine_id)
+        node_vars = {"MODEL": "qwen3.6"} if engine_id in OLLAMA_ENGINE_IDS else None
+        entries = [
+            BatchEntry(
+                {"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"
+            ),
+        ]
+        composed = (
+            build_command(
+                defn, {"from": "neil", "to": "node1", "content": "hi"}, agent_root,
+                vars=node_vars,
+            ),
+            build_batch_command(defn, "node1", entries, vars=node_vars),
+            build_idle_command(defn, "node1", vars=node_vars),
+        )
+        for argv in composed:
+            assert argv[2:5] == ["engine", engine_id, "run"]
+            assert argv[argv.index("--permissions") + 1] == "bypass"
+        assert defn["invoke"][-1] == "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_unrestricted_description_states_the_cost(self, engine_id):
+        # The trigger, not just the flag: an unrestricted node runs on mail
+        # from anyone who can reach its inbox.
+        description = self._unrestricted(engine_id)["description"]
+        assert "untrusted inbound mail" in description
+        assert "its own machine and its own account" in description
+
+    @pytest.mark.parametrize("engine_id", OLLAMA_ENGINE_IDS)
+    def test_unrestricted_ollama_descriptions_keep_the_model_prerequisite(
+        self, engine_id
+    ):
+        # The variant interpolates $MODEL too, so dropping the prerequisite
+        # leaves an UndefinedVarsError with nothing pointing at the fix.
+        assert "MODEL" in self._unrestricted(engine_id)["description"]
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_base_definition_carries_no_permission_stance(self, engine_id):
+        # The other half of the -unrestricted promise: the stance is something
+        # the operator chooses by name, so the base variants never grow it.
+        defn = self._definition(engine_id)
+        for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+            assert "--permissions" not in block
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_bypass_changes_the_engine_argv_exactly_as_described(
+        self, engine_id, engine_argv_pairs
+    ):
+        # `--permissions bypass` reaches the engine CLI as different flags per
+        # engine, and for four of the nine as no flags at all. Each variant's
+        # description states its own case, so pin both: a real-flag engine
+        # against its documented token swap, a no-op engine against argv
+        # identity — which turns a future PermissionRule change into a failure
+        # here rather than a description that has quietly stopped being true.
+        base, bypass = engine_argv_pairs[engine_id]
+        removed, added = BYPASS_ARGV_DELTA[engine_id]
+        if not removed and not added:
+            assert bypass == base
+        else:
+            assert Counter(base) - Counter(bypass) == Counter(removed)
+            assert Counter(bypass) - Counter(base) == Counter(added)
 
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
     def test_description_names_no_copy_this_file_instruction(self, engine_id):

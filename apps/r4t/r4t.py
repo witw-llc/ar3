@@ -28,7 +28,9 @@ try:
     from arkver import version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
-        return f"{app} unknown (The Ark)"
+        import platform
+
+        return f"{app} unknown (The Ark, python {platform.python_version()})"
 from typing import NamedTuple
 
 import knowledge
@@ -164,6 +166,10 @@ COMMAND_HELP = [
             Command(
                 "rig run <rig> PROMPT",
                 "The same turn as a named rig: its model, its tuning, its budget",
+            ),
+            Command(
+                "rig fuel <rig>",
+                "One number, 0 to 1: how much tank this rig's model has left",
             ),
         ],
     ),
@@ -1269,6 +1275,7 @@ RIG_COMMAND_HELP = [
     ("rig list", "Rigs, limits, and roster rig resolution (alias: ls; --wide)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig run <rig> PROMPT", "One headless turn as this rig (--wait / --now on budget)"),
+    ("rig fuel <rig>", "How much subscription this rig's model has left, 0..1"),
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
     ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
     ("rig remove <rig>...", "Remove one or more rigs from the config (alias: rm)"),
@@ -1503,7 +1510,7 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
 RIG_BUDGET_POLL_SECONDS = 5.0
 
 
-def _rig_run_model(rig) -> str | None:
+def _rig_pinned_model(rig) -> str | None:
     """The model this rig runs, in the form `build_preset_invoke` takes. Only
     the live-resolver presets (agy) record `model` as a setting; every other
     preset bakes the value into the invoke at `rig add --model` time, so the
@@ -1548,10 +1555,12 @@ def _wait_for_rig_budget(rig) -> float:
         time.sleep(min(remaining, RIG_BUDGET_POLL_SECONDS))
 
 
-def _rig_run_engine(rig, config_path: Path, name: str) -> tuple[str | None, str | None]:
-    """The run-capable engine this rig rides, or the reason it has none."""
-    from engines import run as engine_run
-
+def _rig_engine_preset(
+    rig, config_path: Path, name: str
+) -> tuple[str | None, str | None]:
+    """The preset naming this rig's engine, or the reason it has none. Every
+    verb that reaches past the config to the engine behind a rig fails closed
+    on the same three: no such rig, an invalid one, one with no preset."""
     if rig is None:
         return None, (
             f"rig {name!r} not found in {config_path} (fail closed) — "
@@ -1561,12 +1570,22 @@ def _rig_run_engine(rig, config_path: Path, name: str) -> tuple[str | None, str 
         return None, f"rig {rig.name!r} is invalid: {rig.error}"
     if not rig.preset:
         return None, (
-            f"rig {rig.name!r} has no preset, so there is no engine to compose "
-            f"a turn from — try: r4t rig swap {rig.name} <preset>"
+            f"rig {rig.name!r} has no preset, so there is no engine behind it "
+            f"— try: r4t rig swap {rig.name} <preset>"
         )
-    if rig.preset not in engine_run.RUN_ENGINES:
+    return rig.preset, None
+
+
+def _rig_run_engine(rig, config_path: Path, name: str) -> tuple[str | None, str | None]:
+    """The run-capable engine this rig rides, or the reason it has none."""
+    from engines import run as engine_run
+
+    preset, problem = _rig_engine_preset(rig, config_path, name)
+    if preset is None:
+        return None, problem
+    if preset not in engine_run.RUN_ENGINES:
         return None, (
-            f"rig {rig.name!r} rides preset {rig.preset!r}, which does not "
+            f"rig {rig.name!r} rides preset {preset!r}, which does not "
             f"support run (engines: {', '.join(sorted(engine_run.RUN_ENGINES))}) — "
             f"try: r4t rig swap {rig.name} <preset>"
         )
@@ -1686,7 +1705,7 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             engine,
             prompt,
             dir_path=dir_path,
-            model=resolve_override(args.model, _rig_run_model(rig)),
+            model=resolve_override(args.model, _rig_pinned_model(rig)),
             agent=args.agent,
             timeout=(
                 args.timeout if args.timeout is not None else int(rig.timeout_seconds)
@@ -1704,6 +1723,74 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
         print(f"r4t rig run: {exc}", file=sys.stderr)
         return finish(1, "error")
     return finish(exit_code, "ran", ran=True)
+
+
+def _format_fuel(report: dict) -> str:
+    import engines
+
+    level = report["fuel"]
+    lines = [
+        f"{report['rig']} — fuel "
+        + (f"{level:.2f}" if level is not None else f"unknown ({report['state']})")
+    ]
+    model = report["model"] or "the preset's default"
+    lines.append(f"  engine: {report['preset']} (model: {model})")
+    if report["quota_engine"] != report["preset"]:
+        lines.append(f"  quota engine: {report['quota_engine']}")
+    if report.get("plan"):
+        lines.append(f"  plan: {report['plan']}")
+    if report.get("origin") == "snapshot":
+        age = engines.format_age(report.get("age_seconds"))
+        lines.append(f"  source: snapshot from {age} ago")
+    binding = engines.binding_index(report["buckets"])
+    for position, bucket in enumerate(report["buckets"]):
+        fraction = bucket.get("remaining_fraction")
+        mark = "*" if position == binding else " "
+        value = (
+            f"{round(fraction * 100)}% remaining"
+            if isinstance(fraction, (int, float))
+            else "unknown"
+        )
+        reset = bucket.get("reset_time")
+        lines.append(
+            f" {mark}{bucket.get('label', 'Quota')}: {value}"
+            + (f" · resets {reset}" if reset else "")
+        )
+    if not report["buckets"]:
+        lines.append("  no bucket constrains this model")
+    if report.get("note"):
+        lines.append(f"  note: {report['note']}")
+    return "\n".join(lines)
+
+
+def cmd_rig_fuel(args: argparse.Namespace) -> int:
+    """How much of this rig's tank is left, as one number in 0..1: the
+    engine's quota narrowed to the buckets its model burns, reduced to the
+    binding one. Reads only — no turn runs and no budget moves."""
+    import engines
+
+    config_path = resolve_config_path(args.rig_config)
+    try:
+        config = load_rig_config(config_path)
+    except RigError as exc:
+        print(f"r4t rig fuel: {exc}", file=sys.stderr)
+        return 1
+    name = args.rig.strip().lower()
+    rig = None if config.missing else config.rigs.get(name)
+    preset, problem = _rig_engine_preset(rig, config_path, args.rig.strip())
+    if preset is None:
+        print(f"r4t rig fuel: {problem}", file=sys.stderr)
+        return 1
+    try:
+        report = {
+            "rig": rig.name,
+            **engines.fuel(preset, _rig_pinned_model(rig)),
+        }
+    except engines.QuotaError as exc:
+        print(f"r4t rig fuel: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2) if args.as_json else _format_fuel(report))
+    return 0
 
 
 def cmd_rig_add(args: argparse.Namespace) -> int:
@@ -2399,6 +2486,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rig_run_p.set_defaults(func=cmd_rig_run)
 
+    rig_fuel_p = rig_sub.add_parser(
+        "fuel",
+        help="How much subscription this rig's model has left, as 0..1.",
+        description="The rig's tank as one number in 0..1. `r4t engine <id> "
+        "quota` reports every dial an engine has; fuel keeps the ones the "
+        "rig's own model burns and reports the binding one, since that is the "
+        "constraint the next turn hits. Nothing runs and no budget moves.",
+    )
+    rig_fuel_p.add_argument("rig", help="Symbolic rig name (see `r4t rig list`).")
+    rig_fuel_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Machine-readable JSON instead of the text lines.",
+    )
+    rig_fuel_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_fuel_p.set_defaults(func=cmd_rig_fuel)
+
     rig_add_p = rig_sub.add_parser(
         "add",
         help="Add a symbolic rig from a named CLI preset.",
@@ -2899,9 +3007,47 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> list[str]:
+    """argparse before 3.12 hands a positional chunk that follows optionals to
+    nothing once earlier optional positionals matched empty: on the 3.10 that
+    Ubuntu 22.04 ships, `engine codex run --agent amos "hi"` leaves "hi"
+    unparsed and dies "unrecognized arguments". Adopt what old argparse
+    abandoned, in declaration order; 3.12+ never produces these extras.
+
+    Every parser whose optional positional can trail its flags is covered
+    here, one branch per dest: `engine`'s action/prompt, `rig run`'s prompt,
+    `task show|trace`'s id, `rig get`'s key, and `seat send`'s message, which
+    is a list and so keeps taking. `flush` needs no branch — its `members` is
+    the parser's only positional, and 3.10 places it correctly."""
+    remaining = []
+    for tok in extras:
+        if tok != "-" and tok.startswith("-"):
+            remaining.append(tok)
+        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check"):
+            args.action = tok
+        elif (
+            getattr(args, "prompt", "") is None
+            and getattr(args, "action", "run") == "run"
+        ):
+            args.prompt = tok
+        elif getattr(args, "id", "") is None:
+            args.id = tok
+        elif getattr(args, "key", "") is None:
+            args.key = tok
+        elif isinstance(getattr(args, "message", None), list):
+            args.message.append(tok)
+        else:
+            remaining.append(tok)
+    return remaining
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args, extras = parser.parse_known_args(argv)
+    if extras:
+        extras = _adopt_stray_positionals(args, extras)
+    if extras:
+        parser.error(f"unrecognized arguments: {' '.join(extras)}")
     return int(args.func(args))
 
 

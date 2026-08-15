@@ -7,9 +7,12 @@ from __future__ import annotations
 import json
 import os
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+
+from ark.ulid import new as new_ulid, parse as parse_ulid
 
 from commands import (
     cmd_add,
@@ -1475,6 +1478,403 @@ class TestCmdRemote:
         cmd_unremote(["hub"])
         assert "hub" not in load_network_config()["remotes"]
         assert "hub" not in load_secrets_config()["remotes"]
+
+
+def _ulid_at(prefix: str) -> str:
+    """A valid ULID whose sort position is fixed by its leading characters.
+
+    Real ULIDs minted this decade start `01M`, so `01A` is history and `01Z`
+    is the future no matter when the suite runs.
+    """
+    return (prefix + "0" * 26)[:26]
+
+
+class TestCmdRemoteFolder:
+    """`a8s remote <name> <folder>` — one positional place instead of two.
+
+    The folder form and the broker form share a verb, so the count of
+    positional words before the first option is what tells them apart."""
+
+    @pytest.fixture
+    def shared(self, tmp_path):
+        d = tmp_path / "Dropbox" / "A8S"
+        d.mkdir(parents=True)
+        return d
+
+    def test_registers_remote_storage_and_ledger(self, fake_home, shared, capsys):
+        from ark.ulid import is_ulid
+        from core import folder_ledger_path
+
+        rc = cmd_remote(["box", str(shared)])
+        assert rc == 0
+        cfg = load_network_config()
+        spec = cfg["remotes"]["box"]
+        assert is_ulid(spec.pop("joined"))
+        assert spec == {"transport": "folder", "path": str(shared)}
+        # The same folder carries the attachments, marked as this remote's.
+        assert cfg["services"]["box"] == {
+            "service": "sync_folder",
+            "url": str(shared),
+            "paired": "box",
+        }
+        assert folder_ledger_path("box").read_text() == ""
+        out = capsys.readouterr().out
+        assert "added remote box (folder" in out
+        assert "added storage box (sync_folder" in out
+
+    def test_same_path_overwrite_keeps_the_join_cutoff(self, fake_home, shared):
+        # An option tweak is not a re-join: a fresh cutoff would skip mail
+        # that arrived but was not yet polled. Only a new path re-stamps.
+        assert cmd_remote(["box", str(shared)]) == 0
+        first = load_network_config()["remotes"]["box"]["joined"]
+        assert cmd_remote(["box", str(shared), "--poll-seconds", "30"]) == 0
+        assert load_network_config()["remotes"]["box"]["joined"] == first
+        elsewhere = shared.parent / "Elsewhere"
+        elsewhere.mkdir()
+        assert cmd_remote(["box", str(elsewhere)]) == 0
+        assert load_network_config()["remotes"]["box"]["joined"] != first
+
+    def test_registration_stamps_a_cutoff_the_backlog_cannot_pass(
+        self, fake_home, tmp_path
+    ):
+        """The folder may be absent now and full of history later — a sync
+        client downloads on its own schedule. The cutoff is a ULID, not a
+        reading of the folder, so late arrivals are still history."""
+        from network import load_remotes
+
+        target = tmp_path / "not-mounted-yet"
+        assert cmd_remote(["box", str(target)]) == 0
+
+        target.mkdir(parents=True)
+        history = _ulid_at("01A")
+        (target / f"{history}.json").write_text(
+            json.dumps({"id": history, "to": "TARGET", "content": "backlog"})
+        )
+        fresh = _ulid_at("01Z")
+        (target / f"{fresh}.json").write_text(
+            json.dumps({"id": fresh, "to": "TARGET", "content": "new"})
+        )
+
+        seen: list[bytes] = []
+        transport = load_remotes()[0]
+        transport._on_message = seen.append
+        transport._poll_once()
+        assert [json.loads(raw)["content"] for raw in seen] == ["new"]
+
+    def test_options_reach_the_spec(self, fake_home, shared):
+        rc = cmd_remote(["box", str(shared), "--poll-seconds", "30", "--prefix", "mail"])
+        assert rc == 0
+        spec = load_network_config()["remotes"]["box"]
+        assert spec["poll_seconds"] == "30"
+        assert spec["prefix"] == "mail"
+        # sync_folder understands prefix too, so the attachments follow.
+        assert load_network_config()["services"]["box"]["prefix"] == "mail"
+
+    def test_poll_seconds_option_does_not_reach_storage(self, fake_home, shared):
+        cmd_remote(["box", str(shared), "--poll-seconds", "30"])
+        assert "poll_seconds" not in load_network_config()["services"]["box"]
+
+    def test_broker_url_without_a_topic_says_so(self, fake_home, capsys):
+        rc = cmd_remote(["box", "mqtt://broker:1883"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "looks like a broker URL" in err
+        assert "topic" in err
+        assert "box" not in load_network_config()["remotes"]
+
+    def test_relative_path_rejected_before_the_config_is_written(self, fake_home, capsys):
+        rc = cmd_remote(["box", "Dropbox/A8S"])
+        assert rc == 2
+        assert "must be absolute" in capsys.readouterr().err
+        assert "box" not in load_network_config()["remotes"]
+
+    def test_missing_folder_warns_but_registers(self, fake_home, tmp_path, capsys):
+        target = tmp_path / "not-mounted-yet"
+        rc = cmd_remote(["box", str(target)])
+        assert rc == 0
+        assert "does not exist yet" in capsys.readouterr().out
+        assert load_network_config()["remotes"]["box"]["path"] == str(target)
+
+    def test_existing_storage_for_the_folder_is_left_alone(self, fake_home, shared, capsys):
+        from commands import cmd_storage
+
+        cmd_storage(["drop", str(shared), "--retain_days", "30"])
+        capsys.readouterr()
+        cmd_remote(["box", str(shared)])
+        cfg = load_network_config()
+        assert "box" not in cfg["services"]
+        assert cfg["services"]["drop"]["retain_days"] == "30"
+        assert "storage drop already carries attachments" in capsys.readouterr().out
+
+    def test_list_and_show_render_the_folder_spec(self, fake_home, shared, capsys):
+        cmd_remote(["box", str(shared), "--poll-seconds", "30"])
+        capsys.readouterr()
+        cmd_remote([])
+        listed = capsys.readouterr().out
+        assert f"folder {shared}" in listed
+        assert "--poll_seconds=30" in listed
+        cmd_remote(["box"])
+        assert f"box: folder {shared}" in capsys.readouterr().out
+
+    def test_show_renders_the_join_cutoff_as_a_moment(self, fake_home, shared, capsys):
+        """A future `joined` is the one thing that makes this remote deaf, and
+        a bare ULID hides it. It is also not an option anyone types."""
+        cmd_remote(["box", str(shared)])
+        capsys.readouterr()
+        cmd_remote(["box"])
+        shown = capsys.readouterr().out
+        joined = load_network_config()["remotes"]["box"]["joined"]
+        assert f"joined={joined} (" in shown
+        assert "--joined=" not in shown
+        stamped = datetime.fromtimestamp(
+            parse_ulid(joined)[0] / 1000, tz=timezone.utc
+        )
+        assert stamped.strftime("%Y-%m-%d %H:%M:%SZ") in shown
+
+    def test_envelopes_and_bundles_land_in_one_directory(
+        self, fake_home, shared, tmp_path
+    ):
+        """`<folder>/<ULID>.json` beside `<folder>/<ULID>/` is what every page
+        promises, so the paired storage service may not add a prefix of its
+        own."""
+        from network import _build_service, load_remotes
+
+        assert cmd_remote(["box", str(shared)]) == 0
+        msg_id = new_ulid()
+        load_remotes()[0].publish(
+            json.dumps({"id": msg_id, "to": "TARGET", "content": "hi"}).encode()
+        )
+        src = tmp_path / "note.txt"
+        src.write_text("payload")
+        service = _build_service("box", load_network_config()["services"]["box"])
+        service.store(src, msg_id=msg_id)
+        assert (shared / f"{msg_id}.json").is_file()
+        assert (shared / msg_id / "note.txt").is_file()
+
+    def test_overwrite_moves_the_paired_storage_too(self, fake_home, tmp_path, capsys):
+        """Carlos's repro: envelopes in the new folder, attachments in the old
+        one is the exact split this one-command setup exists to prevent."""
+        one = tmp_path / "one"
+        two = tmp_path / "two"
+        one.mkdir()
+        two.mkdir()
+        cmd_remote(["box", str(one)])
+        capsys.readouterr()
+        assert cmd_remote(["box", str(two)]) == 0
+        cfg = load_network_config()
+        assert cfg["remotes"]["box"]["path"] == str(two)
+        assert cfg["services"]["box"] == {
+            "service": "sync_folder",
+            "url": str(two),
+            "paired": "box",
+        }
+        assert "updated storage box (sync_folder" in capsys.readouterr().out
+
+    def test_overwrite_leaves_a_hand_pointed_service_alone(
+        self, fake_home, tmp_path, capsys
+    ):
+        from commands import cmd_storage
+
+        one = tmp_path / "one"
+        two = tmp_path / "two"
+        elsewhere = tmp_path / "elsewhere"
+        for d in (one, two, elsewhere):
+            d.mkdir()
+        cmd_remote(["box", str(one)])
+        cmd_storage(["box", str(elsewhere)])
+        capsys.readouterr()
+        assert cmd_remote(["box", str(two)]) == 0
+        cfg = load_network_config()
+        assert cfg["services"]["box"]["url"] == str(elsewhere)
+        assert "configured for something else" in capsys.readouterr().err
+
+    def test_unremote_drops_the_ledger(self, fake_home, shared):
+        from core import folder_ledger_path
+
+        cmd_remote(["box", str(shared)])
+        assert folder_ledger_path("box").is_file()
+        assert cmd_unremote(["box"]) == 0
+        assert not folder_ledger_path("box").exists()
+
+    def test_unremote_drops_the_paired_storage(self, fake_home, shared, capsys):
+        cmd_remote(["box", str(shared)])
+        capsys.readouterr()
+        assert cmd_unremote(["box"]) == 0
+        cfg = load_network_config()
+        assert "box" not in cfg["remotes"]
+        assert "box" not in cfg["services"]
+        out = capsys.readouterr().out
+        assert "removed remote box" in out
+        assert "removed storage box" in out
+        # And the name is clean for a re-add.
+        assert cmd_remote(["box", str(shared)]) == 0
+        assert load_network_config()["services"]["box"]["url"] == str(shared)
+
+    def test_unremote_leaves_a_hand_pointed_service_alone(
+        self, fake_home, tmp_path, capsys
+    ):
+        from commands import cmd_storage
+
+        shared = tmp_path / "shared"
+        elsewhere = tmp_path / "elsewhere"
+        shared.mkdir()
+        elsewhere.mkdir()
+        cmd_remote(["box", str(shared)])
+        cmd_storage(["box", str(elsewhere)])
+        capsys.readouterr()
+        assert cmd_unremote(["box"]) == 0
+        cfg = load_network_config()
+        assert cfg["services"]["box"]["url"] == str(elsewhere)
+        assert "removed storage" not in capsys.readouterr().out
+
+    def test_unremote_leaves_a_hand_created_service_at_the_same_path(
+        self, fake_home, shared, capsys
+    ):
+        """Carlos's repro: same name, same kind, same path, and still not ours.
+
+        Kind and path cannot tell who created a service, so pairing is read off
+        the marker `a8s remote` writes and nothing else."""
+        from commands import cmd_storage
+
+        assert cmd_storage(["box", str(shared), "--retain_days", "7"]) == 0
+        assert cmd_remote(["box", str(shared)]) == 0
+        capsys.readouterr()
+        assert cmd_unremote(["box"]) == 0
+        cfg = load_network_config()
+        assert cfg["services"]["box"] == {
+            "service": "sync_folder",
+            "url": str(shared),
+            "retain_days": "7",
+        }
+        assert "removed storage" not in capsys.readouterr().out
+
+    def test_overwrite_leaves_a_hand_created_service_at_the_same_path(
+        self, fake_home, tmp_path, capsys
+    ):
+        from commands import cmd_storage
+
+        one = tmp_path / "one"
+        two = tmp_path / "two"
+        one.mkdir()
+        two.mkdir()
+        assert cmd_storage(["box", str(one), "--retain_days", "7"]) == 0
+        assert cmd_remote(["box", str(one)]) == 0
+        capsys.readouterr()
+        assert cmd_remote(["box", str(two)]) == 0
+        cfg = load_network_config()
+        assert cfg["services"]["box"]["url"] == str(one)
+        assert cfg["services"]["box"]["retain_days"] == "7"
+        assert "configured for something else" in capsys.readouterr().err
+
+    def test_the_pairing_marker_cannot_be_typed(self, fake_home, shared, capsys):
+        from commands import cmd_storage
+
+        assert cmd_storage(["box", str(shared), "--paired", "box"]) == 2
+        assert "not by hand" in capsys.readouterr().err
+        assert "box" not in load_network_config()["services"]
+
+    def test_a_prefix_change_is_a_new_mailbox(self, fake_home, shared):
+        """`prefix` is part of the address: `<path>/one` and `<path>/two` are
+        two folders, so the second registration is a join, not a tweak."""
+        assert cmd_remote(["box", str(shared), "--prefix", "one"]) == 0
+        first = load_network_config()["remotes"]["box"]["joined"]
+        assert cmd_remote(["box", str(shared), "--prefix", "one", "--poll-seconds", "30"]) == 0
+        assert load_network_config()["remotes"]["box"]["joined"] == first
+        assert cmd_remote(["box", str(shared), "--prefix", "two"]) == 0
+        assert load_network_config()["remotes"]["box"]["joined"] != first
+
+    def test_health_reports_ok_and_consumes_nothing(self, fake_home, shared, capsys):
+        from ark.ulid import new as new_ulid
+        from commands import cmd_health
+
+        cmd_remote(["box", str(shared)])
+        waiting = new_ulid()
+        envelope = shared / f"{waiting}.json"
+        envelope.write_text(json.dumps({"id": waiting, "to": "TARGET", "content": "hi"}))
+        capsys.readouterr()
+        cmd_health()
+        assert "remote box: OK" in capsys.readouterr().out
+        assert envelope.is_file()
+
+    def test_health_fails_when_the_folder_is_gone(self, fake_home, tmp_path, capsys):
+        from commands import cmd_health
+
+        cmd_remote(["box", str(tmp_path / "unmounted")])
+        capsys.readouterr()
+        cmd_health()
+        assert "remote box: FAIL" in capsys.readouterr().out
+
+    def test_broker_form_is_untouched(self, fake_home):
+        rc = cmd_remote(["hub", "mqtt://broker:1883", "a8s/test", "--user", "alice"])
+        assert rc == 0
+        spec = load_network_config()["remotes"]["hub"]
+        assert spec == {
+            "transport": "mqtt",
+            "broker": "mqtt://broker:1883",
+            "topic": "a8s/test",
+            "user": "alice",
+        }
+        assert "hub" not in load_network_config()["services"]
+
+    def test_a_spaced_path_registers_the_folder_when_quoted(
+        self, fake_home, tmp_path, capsys
+    ):
+        """The Windows case: every business sync root has a space in it, and a
+        quoted one is one word, so it takes the folder form."""
+        spaced = tmp_path / "My Drive" / "A8S"
+        spaced.mkdir(parents=True)
+        assert cmd_remote(["box", str(spaced)]) == 0
+        spec = load_network_config()["remotes"]["box"]
+        assert spec["transport"] == "folder"
+        assert spec["path"] == str(spaced)
+        assert load_network_config()["services"]["box"]["url"] == str(spaced)
+
+    def test_an_unquoted_spaced_path_is_refused_with_the_quoting_hint(
+        self, fake_home, tmp_path, capsys
+    ):
+        """Unquoted, the shell hands us three words and the count says broker
+        plus topic. A garbage MQTT remote registered with 'added' is the worst
+        answer available, so the broker has to look like one."""
+        head, tail = str(tmp_path / "My Drive" / "A8S").split(" ", 1)
+        rc = cmd_remote(["box", head, tail])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "not a broker URL" in err
+        assert "quote it" in err
+        assert "box" not in load_network_config()["remotes"]
+
+    def test_broker_form_rejects_a_scheme_mqtt_cannot_speak(self, fake_home, capsys):
+        rc = cmd_remote(["hub", "https://broker:1883", "a8s/test"])
+        assert rc == 2
+        assert "unsupported broker scheme" in capsys.readouterr().err
+        assert "hub" not in load_network_config()["remotes"]
+
+
+class TestSyncClientNote:
+    """The note says what appears to be syncing this folder. It is the only
+    moment a8s gets to tell an operator that nothing is."""
+
+    def test_a_name_in_the_path_names_the_client(self, monkeypatch, tmp_path):
+        from commands import _sync_client_note
+
+        for k in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        assert "OneDrive" in _sync_client_note(tmp_path / "OneDrive - Contoso" / "A8S")
+
+    def test_the_env_var_only_claims_paths_inside_it(self, monkeypatch, tmp_path):
+        """`%OneDrive%` says the client is installed, not that this folder is
+        in it — a machine-wide arm claims every path on every Windows box."""
+        from commands import _sync_client_note
+
+        for k in ("OneDriveCommercial", "OneDriveConsumer"):
+            monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("OneDrive", str(tmp_path / "cloud"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        inside = _sync_client_note(tmp_path / "cloud" / "Team" / "A8S")
+        assert inside == "looks like OneDrive"
+        outside = _sync_client_note(tmp_path / "elsewhere" / "A8S")
+        assert "not inside it" in outside
 
 
 class TestCmdUnremote:

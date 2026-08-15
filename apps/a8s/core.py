@@ -30,7 +30,9 @@ try:
     from arkver import version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
-        return f"{app} unknown (The Ark)"
+        import platform
+
+        return f"{app} unknown (The Ark, python {platform.python_version()})"
 
 from ark import envseam  # noqa: E402
 from ark.home import app_home  # noqa: E402
@@ -442,6 +444,18 @@ def seen_ids_path() -> Path:
     per-agent) because a duplicate envelope can target any local agent and we
     only need to know whether we've ever delivered it."""
     return _a8s_dir() / "seen-ids"
+
+
+def folder_ledger_path(remote_id: str) -> Path:
+    """Per-remote record of which folder envelopes this machine has read.
+
+    A folder remote reads a directory every other machine sharing it also
+    reads, so nobody may delete an envelope on receive. This ledger is what
+    makes a read one-time per machine, and it lives here rather than in the
+    shared folder — writing it beside the envelopes would publish this node's
+    consumption record to everyone else's sync client.
+    """
+    return _a8s_dir() / "folder-remotes" / f"{remote_id}.consumed"
 
 
 # Receive-side dedup ring cap. 26 chars per ULID + newline = 27 bytes per row;

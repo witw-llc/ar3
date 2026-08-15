@@ -167,7 +167,14 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            # The --agent scaffold's cold boot runs `a8s convo`; grant that
+            # prefix and nothing wider. Under dontAsk a missing tool is
+            # silently denied, claude concludes Bash itself is off, and writes
+            # that conclusion into LESSONS.md — a node that trips it stays
+            # mute permanently. A broad `Bash(a8s:*)` would auto-approve every
+            # router verb, handing untrusted inbound mail stop, kill, remove,
+            # drain and the remote/storage mutations.
+            "Bash(tell:*) Bash(a8s convo:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
             # Moves cwd, environment, memory paths and git status out of the
             # system prompt and into the first user message. Those change per
             # machine and per commit, and they sit at the very front of the
@@ -322,7 +329,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
+            "Bash(tell:*) Bash(a8s convo:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
             # Kept in step with the `claude` preset. A local runner reuses a
             # stable prefix too, so moving the per-machine facts out of the
             # system prompt is worth the same here as it is against the API.

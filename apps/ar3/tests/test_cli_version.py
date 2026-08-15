@@ -7,6 +7,7 @@ its documented escape hatch.
 """
 from __future__ import annotations
 
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -47,7 +48,10 @@ def test_cli_reports_the_suite_version(name, argv, real_subprocess, tmp_path):
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "A8S_HOME": str(tmp_path)},
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == f"{name} {arkver.suite_version()} (The Ark)"
+    assert (
+        proc.stdout.strip()
+        == f"{name} {arkver.suite_version()} (The Ark, python {platform.python_version()})"
+    )
 
 
 def test_every_top_level_shim_has_an_entry_point_covered():
@@ -75,4 +79,7 @@ def test_a_relocated_entry_point_still_runs(real_subprocess, tmp_path):
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "R4T_HOME": str(tmp_path / "r4t")},
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "r4t unknown (The Ark)"
+    assert (
+        proc.stdout.strip()
+        == f"r4t unknown (The Ark, python {platform.python_version()})"
+    )

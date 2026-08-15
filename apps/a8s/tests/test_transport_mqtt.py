@@ -383,3 +383,52 @@ class TestMqttTransportOptions:
             MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", publish_qos=2)
         t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", publish_qos="0")
         assert t._publish_qos == 0
+
+
+# ---------- default client identity ----------
+
+
+class TestDefaultClientId:
+    @pytest.fixture(autouse=True)
+    def _no_tag_env(self, monkeypatch):
+        monkeypatch.delenv("A8S_CLIENT_TAG", raising=False)
+
+    def test_distinct_node_tags_never_collide(self):
+        a = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        b = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-b")
+        assert a._client_id != b._client_id
+
+    def test_same_node_tag_is_stable_across_instantiations(self):
+        first = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        second = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        assert first._client_id == second._client_id
+
+    def test_distinct_remotes_never_collide(self):
+        a = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        b = MqttTransport(remote_id="spare", broker="mqtt://x", topic="t", node_tag="node-a")
+        assert a._client_id != b._client_id
+
+    def test_env_tag_replaces_node_tag(self, monkeypatch):
+        default = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        monkeypatch.setenv("A8S_CLIENT_TAG", "override-tag")
+        overridden = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", node_tag="node-a")
+        assert overridden._client_id != default._client_id
+
+    def test_explicit_client_id_wins(self, monkeypatch):
+        monkeypatch.setenv("A8S_CLIENT_TAG", "override-tag")
+        t = MqttTransport(
+            remote_id="hub",
+            broker="mqtt://x",
+            topic="t",
+            node_tag="node-a",
+            client_id="a8s-explicit",
+        )
+        assert t._client_id == "a8s-explicit"
+
+    def test_clean_session_defaults_false(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t")
+        assert t._client._clean_session is False
+
+    def test_clean_session_opt_in(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", clean_session=True)
+        assert t._client._clean_session is True

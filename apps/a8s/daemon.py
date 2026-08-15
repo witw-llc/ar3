@@ -1097,7 +1097,9 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # A receiver killed mid-delivery leaves its claim behind. Startup is when
     # that is most likely to be true, and the only moment nothing is in flight.
     sweep_stale_claims()
-    started_remotes = start_remotes(load_remotes(), participants_from_registry)
+    started_remotes = start_remotes(
+        load_remotes(node=",".join(sorted(names))), participants_from_registry
+    )
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
