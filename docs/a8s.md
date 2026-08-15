@@ -66,6 +66,8 @@ Three concepts:
 
 The router doesn't trust the sender. The `from` field is force-overwritten to the actual enclosing agent at routing time. An agent can't impersonate another by hand-writing JSON.
 
+The network is opaque. A recipient name is a claim, not a lookup: only a local-only cluster can reject an unknown name at send time, and the moment one remote is configured that check is gone by design — an unknown-locally name publishes to every remote, and no sender can know whether any cluster holds it. Exit 0 means the envelope entered the network, never that the name resolves or that anyone read the message. Evidence of delivery is a reply or `a8s trace <ULID>`; nothing else is owed and nothing else is knowable.
+
 ## Quickstart
 
 ```bash
@@ -325,12 +327,13 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | File            | Purpose                                                                                                                                                                                                                                            |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude.json`   | Claude Code with `--permission-mode dontAsk` allowlist. One fresh session per wake, and `--exclude-dynamic-system-prompt-sections` so cwd and git state do not fragment the prompt cache — see the note below.                                       |
-| `agy.json`      | Antigravity (agy) with `--dangerously-skip-permissions` + `--continue` for headless operation (no `--sandbox`: it confines child writes to CWD, blocking `tell`'s staging outbox)                                                                  |
-| `codex.json`    | Codex CLI with `--full-auto` workspace-write sandbox + `resume --last`                                                                                                                                                                             |
-| `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode) + `--continue`. Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
-| `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps --continue` for headless tool use. Marker is `CURSOR.md`.                                                                                                                       |
-| `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --continue --dangerously-skip-permissions`. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
+| `agy.json`      | Antigravity (agy) with `--dangerously-skip-permissions` for headless operation, fresh session every wake (no `--sandbox`: it confines child writes to CWD, blocking `tell`'s staging outbox)                                                                  |
+| `codex.json`    | Codex CLI with `--sandbox workspace-write`, fresh session every wake                                                                                                                                                                             |
+| `copilot.json`  | GitHub Copilot CLI with `--allow-all-tools` (required for non-interactive `-p` mode). No `--continue`: it is machine-global, not per-agent (#17). Marker is `.github/copilot-instructions.md` (Copilot's native repo-instructions location).                                                    |
+| `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps` for headless tool use, fresh session every wake. Marker is `CURSOR.md`.                                                                                                                       |
+| `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --auto`, fresh session every wake. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `ollama-opencode.json` | OpenCode via `ollama launch` — requires a8s var `MODEL`. Example: `a8s add bob ./ ollama-opencode --model=qwen3.6`. |
+| `engine-<id>.json`     | Nine bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake. Usable as shipped: `a8s add bob ./ engine-cursor`. See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](r4t.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
@@ -347,15 +350,13 @@ a conversation large enough gets rewritten even while it is in active use, so
 waking an agent often enough to keep it warm does not save you.
 
 a8s wakes an agent whenever a message arrives, and it does not decide how long
-ago that was — so `claude.json` no longer resumes. Each wake is a fresh
+ago that was — so none of the bundled definitions resume. Each wake is a fresh
 session, and the agent's memory is its own repo: `CLAUDE.md`, its notes, and
 the message it just received.
 
-[r4t](r4t.md) governs this properly, because a roster turn knows when the
-member last ran and how big its conversation has become. Use `Continue:` there
-if you want continuation with a cost ceiling. The remaining definitions still
-carry their resume flag; they have not been measured, and the wiki's
-per-engine research pages are where that work lands.
+[r4t](r4t.md) governs continuation properly, because a roster turn knows when
+the member last ran and how big its conversation has become. Use `Continue:`
+there if you want continuation with a cost ceiling.
 
 ### Marker files & auto-discovery
 
@@ -554,7 +555,7 @@ When `A8S_HOME` is set it is the a8s state root, whatever else exists on disk. U
                               read-modify-writes — to ~/.config/a8s/agents/<NAME>/pending/
 ```
 
-The outbox lives in the agent's own dir because some sandboxes (codex `--full-auto`) only let the agent write inside its workspace. Inbox/trash/pending live under the a8s state root where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in the a8s state root.
+The outbox lives in the agent's own dir because some sandboxes (codex `--sandbox workspace-write`) only let the agent write inside its workspace. Inbox/trash/pending live under the a8s state root where the agent can't see them — and per the agent-directory invariant, a8s never sidecars or rewrites in `.outbox/`. New outbox files are atomically renamed to `pending/` on every routing pass; everything from there (sidecars, retries, trash, remote publishes) happens in the a8s state root.
 
 `from` is force-overwritten at routing time. An agent that hand-writes a JSON with `from: "VICTIM"` doesn't get to spoof — the file's outbox location is the unforgeable identity. A namespace binding can change what the identity *presents as* (`--opaque`), never whose it is: see [Namespaces](#namespaces).
 
@@ -692,7 +693,7 @@ Per-agent `opencode.json` then just picks the model: `{"model": "ollama/gpt-oss:
 The most common causes:
 
 - **Codex without `stdin=DEVNULL`.** Codex CLI hangs reading stdin in headless mode. a8s already passes `stdin=subprocess.DEVNULL` for every wake (`daemon.run_with_prefix`), so this only bites if you're running the underlying CLI manually.
-- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--dangerously-skip-permissions`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<name>.json` files include the required flag for each CLI definition; only worry if you write a custom definition.
+- **Headless permission denial.** Gemini without `--yolo`, Claude without `--permission-mode dontAsk`, Copilot without `--allow-all-tools`, OpenCode without `--auto`, Cursor without `-p --force` — all silently deny tool calls in non-interactive mode and the wake stalls. The bundled `definitions/<name>.json` files include the required flag for each CLI definition; only worry if you write a custom definition.
 - **Ollama model still loading.** A cold-start of a 20B model can take 10–30s before any output. `ps aux | grep ollama` should show a `runner` process consuming RAM proportional to the model size.
 
 ## Remote delivery receipts

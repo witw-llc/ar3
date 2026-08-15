@@ -1,9 +1,8 @@
 {
-  "description": "Antigravity (agy) default — skip-permissions for headless operation.",
+  "description": "Antigravity (agy) default — skip-permissions for headless operation. Fresh session every wake.",
   "invoke": [
     "agy",
     "--dangerously-skip-permissions",
-    "--continue",
     "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

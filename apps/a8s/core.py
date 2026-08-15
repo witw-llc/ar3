@@ -34,6 +34,7 @@ except ImportError:
 
 from ark import envseam  # noqa: E402
 from ark.home import app_home  # noqa: E402
+from ark.proc import pid_alive as ark_pid_alive  # noqa: E402
 
 # ---------- constants ----------
 
@@ -175,11 +176,14 @@ def detach_request_path(name: str) -> Path:
 
 
 def kill_request_path(name: str) -> Path:
-    """Per-agent kill-request file. `a8s kill <name>` writes its pid here and
-    SIGUSR1s the holder. The holder's iteration top releases just <name>;
-    its SIGUSR1 handler additionally kills the in-flight wake subprocess
-    group iff the current wake target matches — so a long-running LLM call
-    for <name> dies immediately while siblings keep running."""
+    """Per-agent kill-request file. `a8s kill <name>` writes its pid here
+    and, on POSIX, SIGUSR1s the holder as a latency optimisation (Windows
+    has no user-definable signal). The holder's iteration top is the
+    mechanism on every platform: it releases just <name> and, iff the
+    current wake target matches, kills the in-flight wake subprocess group
+    too — so a long-running LLM call for <name> dies within one loop
+    interval (immediately on POSIX, via the SIGUSR1 nudge) while siblings
+    keep running."""
     return agent_dir(name) / "kill-request"
 
 
@@ -481,13 +485,7 @@ def unique_path(p: Path) -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+    return ark_pid_alive(pid)
 
 
 # ---------- logging ----------

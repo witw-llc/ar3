@@ -37,10 +37,23 @@ State:
 """
 from __future__ import annotations
 
+import io
 import sys
 
 from cli import main
 
 
 if __name__ == "__main__":
+    # stderr already defaults to backslashreplace, so only stdout needs the
+    # floor — an unencodable glyph (e.g. on a redirected Windows console)
+    # gets a lossless, reversible escape instead of crashing the process.
+    # The isinstance/errors=="strict" guard is mypy's own (PR 18292): it
+    # never fires once a caller has set a deliberate error handler, and
+    # skips a replaced sys.stdout (e.g. io.StringIO under embedding) cleanly
+    # instead of raising AttributeError. Every --json path in the suite is
+    # ensure_ascii, and `out_agent` mirrors console lines into a UTF-8 log,
+    # so the durable record keeps the real characters — only the console
+    # degrades.
+    if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.errors == "strict":
+        sys.stdout.reconfigure(errors="backslashreplace")
     sys.exit(main(sys.argv[1:]))

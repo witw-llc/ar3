@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -589,6 +590,21 @@ class TestAttachedLoopLifecycle:
         assert not pid_path("MOCK").is_file()
 
 
+class TestAttachedLoopWithoutSigusr1:
+    """Windows has no SIGUSR1. attached_loop must not crash registering or
+    restoring a handler for a signal that doesn't exist on the platform —
+    simulate that by deleting the attribute, the same way Windows lacks it."""
+
+    def test_attaches_and_detaches_without_sigusr1(self, mock_agent, monkeypatch):
+        monkeypatch.delattr(signal, "SIGUSR1", raising=False)
+        rc = attached_loop(["MOCK"], 0.1, single_pass=True)
+        assert rc == 0
+        log = _read_log("MOCK")
+        assert f"[a8s] MOCK: attached (PID {os.getpid()})" in log
+        assert "[a8s] MOCK: detached" in log
+        assert not pid_path("MOCK").is_file()
+
+
 class TestAttachedLoopDetachRequest:
     """Issue #68 — per-agent take-over. A detach-request file under one of
     our handled agents causes that agent (and only that agent) to be
@@ -702,6 +718,68 @@ class TestAttachedLoopKillRequest:
         rc = attached_loop(["X"], 0.1, single_pass=True)
         assert rc == 0
         assert "killed by" not in _read_log("X")
+
+    def test_polled_branch_kills_inflight_wake_without_sigusr1(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        """#2/amendment 2: the group kill must happen from the iteration-top
+        kill-request branch itself, not only from the SIGUSR1 handler — that
+        is the only path Windows has, since it has no SIGUSR1 to nudge with.
+        No signal is sent here (monkeypatching `threading.Event.wait`, same
+        as `test_max_wake_seconds_kills_hung_subprocess` above, only ever
+        writes the kill-request *file*), so a subprocess that dies proves
+        the polled branch performs the kill on its own."""
+        import daemon as daemon_mod
+
+        monkeypatch.setenv("MOCK_SLEEP", "5")
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": str(fixtures_dir / "mock-slow.json")}})
+        ensure_mailboxes(Participant("A", d))
+
+        from ark.ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        (inbox_dir("A") / f"{msg_id}.json").write_text(
+            json.dumps({
+                "id": msg_id,
+                "date": "2026-04-29T12:00:00Z",
+                "from": "Y",
+                "to": "A",
+                "content": "hang",
+                "files": [],
+            })
+        )
+
+        foreign_pid = os.getppid()
+        captured: dict[str, int] = {}
+        written = False
+
+        def write_kill_request_once(self, timeout=None):
+            nonlocal written
+            if not written and daemon_mod._CURRENT_WAKE_PROC is not None:
+                written = True
+                captured["pid"] = daemon_mod._CURRENT_WAKE_PROC.pid
+                _write_kill_request("A", foreign_pid)
+            return False
+
+        monkeypatch.setattr(threading.Event, "wait", write_kill_request_once)
+
+        started = time.monotonic()
+        rc = attached_loop(["A"], 0.05, single_pass=False)
+        elapsed = time.monotonic() - started
+
+        assert rc == 0
+        assert "pid" in captured
+        assert f"killed by PID {foreign_pid}" in _read_log("A")
+        # The kill actually reaped the subprocess rather than merely
+        # releasing the pid file — os.kill(pid, 0) on an already-waited-on
+        # pid raises ProcessLookupError once the kernel has nothing left.
+        with pytest.raises(ProcessLookupError):
+            os.kill(captured["pid"], 0)
+        # And it happened well inside the 5s MOCK_SLEEP, not because the
+        # mock CLI ran to completion on its own.
+        assert elapsed < 3.0
 
     def test_multi_agent_share_one_pid(self, fake_home, tmp_path, fixtures_dir):
         # Two agents, one process — both pid files point at this pytest process.

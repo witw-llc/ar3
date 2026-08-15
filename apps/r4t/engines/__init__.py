@@ -82,9 +82,11 @@ def capability(preset_or_engine: str, verb: str):
 
 def capabilities(preset_or_engine: str) -> list[str]:
     """The verbs `r4t engine <id>` answers. `quota` dispatches through the
-    per-engine module (`capability` above); `run` is not — it is one shared
-    implementation (engines/run.py) gated on RUN_ENGINES, the subset with a
-    verified headless, unattended invocation (engine CLI fact sheet).
+    per-engine module (`capability` above); `run` and `check` are not — they
+    are shared implementations (engines/run.py, engines/check.py) gated on
+    RUN_ENGINES, the subset with a verified headless, unattended invocation
+    (engine CLI fact sheet). `check` rides RUN_ENGINES because what it probes
+    is exactly the argv `run` composes.
     RUN_ENGINES holds preset ids directly rather than quota-engine ids, so
     this checks the id itself instead of routing it through `engine_for` —
     the four `ollama-*` launchers each have their own run entry even though
@@ -92,7 +94,7 @@ def capabilities(preset_or_engine: str) -> list[str]:
     engine `ollama`."""
     verbs = [v for v in CAPABILITY_VERBS if capability(preset_or_engine, v)]
     if (preset_or_engine or "").strip().lower() in run.RUN_ENGINES:
-        verbs.append("run")
+        verbs += ["run", "check"]
     return verbs
 
 

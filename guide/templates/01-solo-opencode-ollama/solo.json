@@ -1,5 +1,20 @@
 {
-  "description": "solo — a local agent: a harness CLI behind a8s",
-  "invoke": ["bash", "reply.sh", "$SENDER", "$MESSAGE"],
-  "max_wake_seconds": 600
+  "description": "solo — a bare engine node: one r4t engine turn per wake",
+  "max_wake_seconds": 900,
+  "invoke": ["r4t", "engine", "ollama-opencode", "run",
+             "--model", "qwen3.6", "--timeout", "600",
+             "--agent", "$RECIPIENT",
+             "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+  "batch": {
+    "limit": 20,
+    "invoke": ["r4t", "engine", "ollama-opencode", "run",
+               "--model", "qwen3.6", "--timeout", "600",
+               "--agent", "$RECIPIENT"]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": ["r4t", "engine", "ollama-opencode", "run",
+               "--model", "qwen3.6", "--timeout", "600",
+               "--idle", "--agent", "$RECIPIENT"]
+  }
 }

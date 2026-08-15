@@ -1,10 +1,12 @@
 Chapter 1's agent on the subscription path (Cursor agent CLI, the
-subscription's default model — `--model auto`).
+subscription's default model), backed by `r4t engine cursor run` — one
+headless turn per wake, with STATUS.md/LESSONS.md as its memory.
 Copy both files into your agent directory (e.g. `~/ark/solo/`), then:
 
     a8s add solo ~/ark/solo ~/ark/solo/solo.json
     a8s start solo
 
-The persona is the `prompt=` string in reply.sh — the chapter's customize
-step swaps that one line.
+The persona is the opening paragraph of AGENTS.md — the chapter's customize
+step swaps that paragraph. STATUS.md and LESSONS.md appear on their own, on
+the first turn.
 Used by [guide/01-hello-agent.md](../../01-hello-agent.md).

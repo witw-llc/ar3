@@ -44,6 +44,22 @@ explicit on. Each idiom rides a different channel, so `apply_mcp` states what an
 org's isolation boundary has to carry across (`McpPlan`) and the wrapper in
 isolate.py honours it.
 
+`permissions` — the rig's permission stance in the Ark's own three words:
+`ask` (the CLI's own default, no auto-approval), `auto` (approve tool use
+without prompting; the engine's deny rules still apply), `bypass` (its
+strongest auto-approval). Unset is the preset's own flags. Each word is
+translated into the engine's spelling by PERMISSION_TRANSLATION; a mode below
+the engine's floor fails the rig closed by name, and one above its ceiling
+resolves to the strongest the engine has. The stance lives HERE and never on a
+roster line, so an in-repo edit can raise nobody's permissions —
+docs/r4t-security.md draws the same boundary for argv.
+
+`allowed_tools` — the engine's own tool-allowlist string, replacing the
+preset's list for every turn on this rig. Opaque to r4t (it is the CLI's
+syntax, not r4t's), and only claude and ollama-claude take one per invocation;
+the rest fail closed with the reason. This is the knob a repo-developing member
+needs when the preset's default list has no `git`.
+
 `echo` — the rig's members never see `tell` or any messaging instructions:
 they are simply prompted with the message content and their cleaned stdout is
 staged as the one reply, through the same release gates every send passes.
@@ -180,7 +196,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         "invoke": [
             "codex",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--skip-git-repo-check",
             "{prompt}",
         ],
@@ -188,6 +205,12 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_anchor": "exec",
         "continue_argv": ["resume", "--last"],
         "continue_anchor": "exec",
+        # `codex exec resume` is its own clap subcommand and takes no
+        # -s/--sandbox (verified against codex-cli 0.147.0: "unexpected
+        # argument '--sandbox' found"), so the flag comes out when the turn
+        # resumes. It keeps --skip-git-repo-check and the bypass flag, both of
+        # which resume does accept.
+        "continue_drop_pair": ["--sandbox"],
     },
     "cursor": {
         "text_tier": "moderate",
@@ -315,7 +338,7 @@ HARNESS_PRESETS: dict[str, dict] = {
             "requires --model (the launcher owns -m)"
         ),
         "a8s_definition": "codex.json",
-        "headless": "ollama launch codex --model MODEL -y -- exec --full-auto",
+        "headless": "ollama launch codex --model MODEL -y -- exec --sandbox workspace-write",
         "mcp": "codex-config",
         "invoke": [
             "ollama",
@@ -326,7 +349,8 @@ HARNESS_PRESETS: dict[str, dict] = {
             "-y",
             "--",
             "exec",
-            "--full-auto",
+            "--sandbox",
+            "workspace-write",
             "--skip-git-repo-check",
             "{prompt}",
         ],
@@ -397,6 +421,334 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
 }
+
+# --- the permission vocabulary: one table, three words, nine spellings -------
+#
+# `ask` / `auto` / `bypass` are the Ark's words for a stance every engine CLI
+# spells differently. This table is the ONLY place those spellings live, so
+# flag drift is a one-place fix instead of a hunt through presets, a8s
+# definitions and docs (the codex `--full-auto` and opencode
+# `--dangerously-skip-permissions` breakages are what the single table exists
+# to prevent). Unset is not a fourth value: a caller who names no mode gets the
+# preset's own flags, byte for byte.
+#
+# The asymmetry is deliberate. Asking for a WEAKER mode than the engine can
+# express is a safety request that would go unmet, so it is a hard error with
+# the reason. Asking for a STRONGER mode than the engine offers is not a safety
+# failure — the argv is the most permissive one available, which is what was
+# asked for — so it proceeds with one note.
+#
+# `anchor` is the argv token the tokens go immediately after (None = right
+# after the binary). A CLI whose real flags sit behind a subcommand (`codex
+# exec`, `opencode run`) or behind an `ollama launch ... --` separator would
+# otherwise read them as the launcher's own.
+
+PERMISSION_MODES = ("ask", "auto", "bypass")
+
+
+@dataclass(frozen=True)
+class PermissionRule:
+    """One engine's argv for one mode. `drop` removes bare flags, `drop_pair`
+    removes a flag and the value token after it, `add` is spliced at the
+    engine's anchor. `error` refuses the mode (below the engine's floor);
+    `note` is the one stderr line a caller-requested mode earns."""
+
+    add: tuple[str, ...] = ()
+    drop: tuple[str, ...] = ()
+    drop_pair: tuple[str, ...] = ()
+    error: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class EnginePermissions:
+    anchor: str | None
+    modes: dict[str, PermissionRule]
+
+
+_CLAUDE_PERMISSIONS = EnginePermissions(
+    anchor=None,
+    modes={
+        # `ask` returns claude to its own default: r4t's two permission flags
+        # both go, including the allowlist that pairs with dontAsk.
+        "ask": PermissionRule(drop_pair=("--permission-mode", "--allowedTools")),
+        "auto": PermissionRule(),
+        # The allowlist stays: `permissions` says whether the engine prompts,
+        # `allowed-tools` says what it may run, and the two compose.
+        "bypass": PermissionRule(
+            drop_pair=("--permission-mode",),
+            add=("--permission-mode", "bypassPermissions"),
+            note=(
+                "claude 'bypass' is --permission-mode bypassPermissions; "
+                "deny rules in settings.json still apply"
+            ),
+        ),
+    },
+)
+
+_CODEX_PERMISSIONS = EnginePermissions(
+    anchor="exec",
+    modes={
+        "ask": PermissionRule(
+            error=(
+                "codex exec hard-codes its approval policy to `never` and "
+                "exposes no -a/--ask-for-approval"
+            )
+        ),
+        "auto": PermissionRule(),
+        "bypass": PermissionRule(
+            drop_pair=("--sandbox",),
+            add=("--dangerously-bypass-approvals-and-sandbox",),
+            note=(
+                "codex 'bypass' drops the sandbox too — "
+                "--dangerously-bypass-approvals-and-sandbox fuses approvals "
+                "and isolation into one flag"
+            ),
+        ),
+    },
+)
+
+_CURSOR_PERMISSIONS = EnginePermissions(
+    anchor=None,
+    modes={
+        "ask": PermissionRule(drop=("--trust", "--force", "--approve-mcps")),
+        "auto": PermissionRule(),
+        "bypass": PermissionRule(
+            note="cursor's strongest mode is 'auto'; 'bypass' means the same here"
+        ),
+    },
+)
+
+_OPENCODE_PERMISSIONS = EnginePermissions(
+    anchor="run",
+    modes={
+        "ask": PermissionRule(drop=("--auto",)),
+        "auto": PermissionRule(),
+        "bypass": PermissionRule(
+            note="opencode's strongest mode is 'auto'; 'bypass' means the same here"
+        ),
+    },
+)
+
+_AGY_FLOOR = (
+    "agy 1.1.3+ auto-denies command tools in headless --print runs, so "
+    "anything below 'bypass' is a turn that cannot run tell or git"
+)
+_AGY_PERMISSIONS = EnginePermissions(
+    anchor=None,
+    modes={
+        "ask": PermissionRule(error=_AGY_FLOOR),
+        "auto": PermissionRule(error=_AGY_FLOOR),
+        "bypass": PermissionRule(
+            note="agy already runs at 'bypass'; the preset's own flags are unchanged"
+        ),
+    },
+)
+
+_COPILOT_PERMISSIONS = EnginePermissions(
+    anchor=None,
+    modes={
+        "ask": PermissionRule(
+            error="copilot requires --allow-all-tools for -p (headless) mode at all"
+        ),
+        "auto": PermissionRule(),
+        "bypass": PermissionRule(
+            drop=("--allow-all-tools",),
+            add=("--allow-all",),
+            note="copilot 'bypass' is --allow-all — tools, paths and URLs",
+        ),
+    },
+)
+
+PERMISSION_TRANSLATION: dict[str, EnginePermissions] = {
+    "claude": _CLAUDE_PERMISSIONS,
+    "codex": _CODEX_PERMISSIONS,
+    "cursor": _CURSOR_PERMISSIONS,
+    "opencode": _OPENCODE_PERMISSIONS,
+    "agy": _AGY_PERMISSIONS,
+    "copilot": _COPILOT_PERMISSIONS,
+    # The launchers carry the wrapped engine's own tokens after `--`, so they
+    # take the wrapped engine's rules; only the anchor differs.
+    "ollama-claude": EnginePermissions(anchor="--", modes=_CLAUDE_PERMISSIONS.modes),
+    "ollama-codex": EnginePermissions(anchor="exec", modes=_CODEX_PERMISSIONS.modes),
+    "ollama-opencode": EnginePermissions(anchor="run", modes=_OPENCODE_PERMISSIONS.modes),
+    "ollama-copilot": EnginePermissions(anchor="--", modes=_COPILOT_PERMISSIONS.modes),
+}
+
+# Engines that take a tool allowlist for ONE invocation, and the flag they
+# spell it with. copilot has --allow-tool/--deny-tool per tool rather than one
+# list; cursor, opencode and agy express tool policy only in config files.
+ALLOWED_TOOLS_FLAG = {
+    "claude": "--allowedTools",
+    "ollama-claude": "--allowedTools",
+}
+
+_ALLOWED_TOOLS_REASONS = {
+    "codex": "codex takes no per-invocation tool allowlist; its policy lives in ~/.codex/config.toml",
+    "cursor": "cursor takes permissions only from cli-config.json / .cursor/cli.json, never per invocation",
+    "opencode": "opencode takes its `permission` map only from opencode.json, never per invocation",
+    "agy": "agy takes toolPermission only from settings.json, never per invocation",
+    "copilot": "copilot takes --allow-tool/--deny-tool per tool, not one allowlist",
+    "ollama": "bare `ollama run` has no tool use at all",
+}
+
+_CONTINUE_REASONS = {
+    # #17: verified live — a codeword planted in one directory came back in a
+    # virgin one. A user reading `copilot --help` will see --continue there, so
+    # the refusal has to say why r4t will not pass it.
+    "copilot": (
+        "copilot --continue resumes the machine's most recent session whatever "
+        "the directory, so it crosses members and workdirs (#17)"
+    ),
+    "ollama-claude": "continuation through `ollama launch claude` is not verified",
+    "ollama-codex": "continuation through `ollama launch codex` is not verified",
+    "ollama": "bare `ollama run` keeps no conversation to continue",
+}
+
+
+def _wrapped_engine(preset: str) -> str:
+    """The CLI an `ollama-*` launcher preset drives, else the preset itself."""
+    return preset[len("ollama-"):] if preset.startswith("ollama-") else preset
+
+
+def allowed_tools_unsupported_reason(preset: str | None) -> str:
+    if not preset:
+        return "the rig records no preset, so there is no allowlist flag to set"
+    reason = _ALLOWED_TOOLS_REASONS.get(_wrapped_engine(preset))
+    if reason:
+        return reason
+    return f"preset {preset!r} takes no per-invocation tool allowlist"
+
+
+def continue_unsupported_reason(preset: str | None) -> str:
+    if not preset:
+        return "the rig records no preset, so there are no continuation tokens"
+    reason = _CONTINUE_REASONS.get(preset)
+    if reason:
+        return reason
+    return f"preset {preset!r} declares no verified way to continue"
+
+
+def _anchor_index(argv: list[str], anchor: str | None, preset: str, where: str) -> int:
+    """Where translated tokens go. A hand-edited invoke that lost its anchor
+    fails closed rather than building an argv the CLI reads as something
+    else — the same rule `Rig.supports_continue` applies to continuation."""
+    if anchor is None:
+        return 1
+    if anchor not in argv:
+        raise RigError(
+            f"{where}cannot translate permissions for preset {preset!r}: "
+            f"its invoke no longer carries the {anchor!r} anchor the flags go after"
+        )
+    return argv.index(anchor) + 1
+
+
+def _strip_tokens(argv: list[str], rule: PermissionRule) -> list[str]:
+    out: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in rule.drop_pair:
+            skip_next = True
+            continue
+        if token in rule.drop:
+            continue
+        out.append(token)
+    return out
+
+
+def permission_rule(preset: str | None, mode: str, *, where: str = "") -> PermissionRule:
+    """The rule for one preset and mode. Raises for an unknown mode, a preset
+    with no permission concept, or a mode below the engine's floor."""
+    key = (mode or "").strip().lower()
+    if key not in PERMISSION_MODES:
+        raise RigError(
+            f"{where}unknown permissions mode {mode!r}; choose one of: "
+            f"{', '.join(PERMISSION_MODES)}"
+        )
+    table = PERMISSION_TRANSLATION.get(preset or "")
+    if table is None:
+        raise RigError(
+            f"{where}preset {preset or 'none'!r} has no permission flags to "
+            f"translate (presets that do: {', '.join(sorted(PERMISSION_TRANSLATION))})"
+        )
+    return table.modes[key]
+
+
+def apply_permissions(
+    argv: list[str], preset: str | None, mode: str | None, *, where: str = ""
+) -> tuple[list[str], str | None]:
+    """`argv` rewritten for `mode`, plus the one note a caller-requested mode
+    earns (None when it earns none). `mode` None leaves argv untouched — unset
+    means the preset's own flags. `where` prefixes errors with the rig or
+    engine that asked, so a failure at rig load names itself."""
+    if mode is None:
+        return list(argv), None
+    rule = permission_rule(preset, mode, where=where)
+    if rule.error:
+        raise RigError(
+            f"{where}preset {preset!r} cannot run at --permissions "
+            f"{mode.strip().lower()}: {rule.error}"
+        )
+    table = PERMISSION_TRANSLATION[preset or ""]
+    out = _strip_tokens(argv, rule)
+    if rule.add:
+        at = _anchor_index(out, table.anchor, preset or "", where)
+        out[at:at] = rule.add
+    return out, rule.note
+
+
+def apply_allowed_tools(
+    argv: list[str], preset: str | None, spec: str | None, *, where: str = ""
+) -> list[str]:
+    """`argv` with the engine's tool allowlist replaced by `spec`. Unsupported
+    engines are a hard error, the way an explicit `mcp` on a preset with no
+    idiom is: a tool allowlist that silently does not apply is a safety
+    request that went unmet."""
+    if spec is None:
+        return list(argv)
+    flag = ALLOWED_TOOLS_FLAG.get(preset or "")
+    if flag is None:
+        raise RigError(
+            f"{where}preset {preset or 'none'!r} takes no --allowed-tools: "
+            f"{allowed_tools_unsupported_reason(preset)} "
+            f"(engines that do: {', '.join(sorted(ALLOWED_TOOLS_FLAG))})"
+        )
+    out = list(argv)
+    if flag in out:
+        out[out.index(flag) + 1] = spec
+        return out
+    table = PERMISSION_TRANSLATION[preset or ""]
+    at = _anchor_index(out, table.anchor, preset or "", where)
+    out[at:at] = [flag, spec]
+    return out
+
+
+def splice_continue(
+    argv: list[str],
+    *,
+    tokens: list[str],
+    anchor: str | None,
+    drop_pair: tuple[str, ...] | list[str] = (),
+) -> list[str]:
+    """`argv` resuming its own conversation: the preset's tokens at its anchor,
+    minus any flag the continuation subcommand does not accept. Both paths that
+    continue — the roster's `Rig.argv` and the roster-less `engine run` — go
+    through here so one CLI's idiom is spelled once."""
+    out = _strip_tokens(argv, PermissionRule(drop_pair=tuple(drop_pair)))
+    at = out.index(anchor) + 1 if anchor else len(out)
+    out[at:at] = tokens
+    return out
+
+
+def resolve_override(flag: str | None, rig_value: str | None) -> str | None:
+    """Precedence for `permissions` and `allowed_tools` alike: an explicit
+    per-invocation value wins, then the rig's own, then unset — and unset is
+    the preset's own flags, the same tri-state shape `mcp_enabled` resolves."""
+    return flag if flag is not None else rig_value
+
 
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_CONCURRENCY = 1
@@ -541,6 +893,8 @@ class Rig:
     echo: bool = False
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
     mcp: bool | None = None
+    permissions: str | None = None
+    allowed_tools: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     framing: FramingSpec | None = None
     error: str | None = None
@@ -570,6 +924,14 @@ class Rig:
         flag-shaped CLI) means append at the end; codex needs one because
         `resume --last` is a subcommand and only reads in that position."""
         return HARNESS_PRESETS.get(self.preset or "", {}).get("continue_anchor")
+
+    @property
+    def continue_drop_pair(self) -> list[str]:
+        """Flags (and their values) the continuation subcommand does not
+        accept — codex's `exec resume` takes no --sandbox."""
+        return list(
+            HARNESS_PRESETS.get(self.preset or "", {}).get("continue_drop_pair", ())
+        )
 
     @property
     def supports_continue(self) -> bool:
@@ -621,6 +983,13 @@ class Rig:
     ) -> list[str]:
         pool = self.pool()
         chosen = pool[index % len(pool)]
+        # The rig's own stance is translated BEFORE any substitution: the
+        # tokens are spliced at an anchor near the binary, and a prompt that
+        # happens to read like a flag must never be mistaken for one. Both
+        # keys are validated at load (`_parse_rig`), so a rig that reaches a
+        # turn cannot raise here.
+        chosen, _ = apply_permissions(chosen, self.preset, self.permissions)
+        chosen = apply_allowed_tools(chosen, self.preset, self.allowed_tools)
         # {workdir} goes in first: the prompt carries message text, so
         # substituting it last keeps a `{workdir}` a member typed from being
         # read as a placeholder.
@@ -628,9 +997,12 @@ class Rig:
             chosen = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in chosen]
         argv = [a.replace(PROMPT_PLACEHOLDER, prompt) for a in chosen]
         if continue_conversation and self.continue_argv:
-            anchor = self.continue_anchor
-            at = argv.index(anchor) + 1 if anchor else len(argv)
-            argv[at:at] = self.continue_argv
+            argv = splice_continue(
+                argv,
+                tokens=self.continue_argv,
+                anchor=self.continue_anchor,
+                drop_pair=self.continue_drop_pair,
+            )
         return argv
 
     def distill_command(self, workdir: str | Path) -> str | None:
@@ -1277,6 +1649,16 @@ def swap_preset_rig(
         )
     entry = HARNESS_PRESETS[preset_key]
     invoke = build_preset_invoke(preset_key, model=model)
+    # A swap keeps every other key, which is the point of #136 — a tuned
+    # `allowed_tools` must survive it. What it must not do is carry a stance
+    # onto a harness that cannot express it, so the retained keys are
+    # translated against the new preset before anything is written.
+    checked, _ = apply_permissions(
+        invoke, preset_key, existing.get("permissions"), where=f"rig {rig_key!r}: "
+    )
+    apply_allowed_tools(
+        checked, preset_key, existing.get("allowed_tools"), where=f"rig {rig_key!r}: "
+    )
     note = f"Swapped to preset {preset_key!r} by `r4t rig swap`."
     if model:
         note += f" model={model.strip()}."
@@ -1361,6 +1743,10 @@ CONFIGURABLE_INT_KEYS = (
 )
 CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
 CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
+# Free-text keys handed to the harness as written. `permissions` is validated
+# against the preset's translation table; `allowed_tools` is the engine's own
+# syntax and stays opaque to r4t.
+CONFIGURABLE_STR_KEYS = ("permissions", "allowed_tools")
 CONFIGURABLE_RIG_KEYS = (
     "concurrency",
     "rig_budget_max",
@@ -1372,6 +1758,8 @@ CONFIGURABLE_RIG_KEYS = (
     "echo",
     "echo_max_chars",
     "mcp",
+    "permissions",
+    "allowed_tools",
 )
 
 
@@ -1453,6 +1841,26 @@ def _rig_entry(path: Path, rig_name: str) -> tuple[str, dict, dict]:
     return rig_key, entry, payload
 
 
+def _entry_pool(entry: dict) -> list[list[str]]:
+    """A rig entry's argvs, the same one-or-a-pool shape `Rig.pool` returns.
+    An entry whose invoke does not parse yields nothing: the invoke's own
+    validation owns that error."""
+    invoke, err = _normalize_invoke(entry.get("invoke"))
+    if err or not invoke:
+        return []
+    return invoke if isinstance(invoke[0], list) else [invoke]
+
+
+def permission_ceiling_note(preset: str | None, mode: str | None) -> str | None:
+    """The one line a caller-requested mode earns — an engine answering above
+    the tier asked for, or a `bypass` saying what it actually buys. None when
+    the mode is unset or earns no note. Never printed for a preset's own
+    baked-in flags: only a caller who asked for the stance hears about it."""
+    if mode is None:
+        return None
+    return permission_rule(preset, mode).note
+
+
 def _entry_preset(entry: dict) -> str | None:
     preset = entry.get("preset")
     if isinstance(preset, str) and preset.strip():
@@ -1481,6 +1889,14 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
             f"from preset {preset}" if preset else "built-in default",
             False,
         )
+    if key in CONFIGURABLE_STR_KEYS:
+        if entry.get(key):
+            return RigSetting(key, str(entry[key]), "explicit", True)
+        # Unset is not a value of its own: it is whatever the preset's argv
+        # already says, which `r4t rig show` prints in full.
+        return RigSetting(
+            key, None, f"from preset {preset}" if preset else "built-in default", False
+        )
     if key in CONFIGURABLE_BOOL_KEYS:
         if key in entry:
             return RigSetting(key, bool(entry[key]), "explicit", True)
@@ -1498,6 +1914,12 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
     if preset and HARNESS_PRESETS.get(preset, {}).get("text_tier"):
         return RigSetting(key, text_defaults(preset)[key], f"from preset {preset}", False)
     return RigSetting(key, text_defaults(None)[key], "built-in default", False)
+
+
+def rig_preset(path: Path, rig_name: str) -> str | None:
+    """The preset a rig was created from, or None for a hand-written one."""
+    _, entry, _ = _rig_entry(path, rig_name)
+    return _entry_preset(entry)
 
 
 def rig_settings(path: Path, rig_name: str) -> list[RigSetting]:
@@ -1591,6 +2013,22 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
         model = str(value).strip()
         set_rig_model(path, rig_key, model)
         return RigSetting("model", model, "explicit", True)
+    if key in CONFIGURABLE_STR_KEYS:
+        text = str(value).strip() if key == "permissions" else str(value)
+        rig_key, entry, payload = _rig_entry(path, rig_name)
+        preset = _entry_preset(entry)
+        where = f"rig {rig_key!r}: "
+        # The write is validated against the rig's own invoke, so a stance the
+        # preset cannot reach is refused at the keyboard rather than at the
+        # next turn.
+        for argv in _entry_pool(entry):
+            if key == "permissions":
+                apply_permissions(argv, preset, text, where=where)
+            else:
+                apply_allowed_tools(argv, preset, text, where=where)
+        entry[key] = text
+        atomic_write_json(path, payload)
+        return RigSetting(key, text, "explicit", True)
     if key in CONFIGURABLE_BOOL_KEYS:
         flag = _parse_setting_bool(key, value)
         rig_key, entry, payload = _rig_entry(path, rig_name)
@@ -1770,6 +2208,29 @@ def _parse_rig(name: str, raw: object) -> Rig:
             )
         else:
             rig.mcp = raw_mcp
+
+    # The permission stance and tool allowlist are translated against the
+    # rig's own invoke at load, so a mode the preset cannot reach — or an
+    # allowlist the CLI takes only from a config file — fails the rig closed
+    # by name, at `rig get` / `roster check` / the first turn, rather than
+    # composing an argv that quietly means something else.
+    for key in ("permissions", "allowed_tools"):
+        raw_value = raw.get(key)
+        if raw_value is None:
+            continue
+        if not isinstance(raw_value, str):
+            problems.append(f"{key}: expected a string, got {raw_value!r}")
+            continue
+        setattr(rig, key, raw_value.strip() if key == "permissions" else raw_value)
+    where = f"rig {rig.name!r}: "
+    try:
+        for argv in rig.pool():
+            argv, _ = apply_permissions(argv, rig.preset, rig.permissions, where=where)
+            apply_allowed_tools(argv, rig.preset, rig.allowed_tools, where=where)
+    except RigError as exc:
+        problems.append(str(exc))
+        rig.permissions = None
+        rig.allowed_tools = None
 
     # A rig env entry the turn owns, or a value that is not a plain string,
     # fails the rig closed here — the operator hears about it at `rig get` /

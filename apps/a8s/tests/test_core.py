@@ -1,6 +1,8 @@
 """Tests for core helpers added for the remote-routing PR (issue #63)."""
 from __future__ import annotations
 
+import os
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from core import (
     MAX_ATTEMPTS,
     MAX_SEEN_IDS,
     _a8s_dir,
+    _pid_alive,
     agent_dir,
     last_active_path,
     network_config_path,
@@ -19,6 +22,28 @@ from core import (
     seen_ids_path,
     touch_last_active,
 )
+
+
+class TestPidAlive:
+    """_pid_alive gained a Windows branch (ctypes OpenProcess/GetExitCodeProcess)
+    guarded by `os.name == "nt"`. This machine is POSIX, so `os.name` never
+    takes that branch — these tests pin down that the POSIX path (os.kill(pid, 0))
+    is unchanged."""
+
+    def test_alive_for_current_process(self):
+        assert _pid_alive(os.getpid()) is True
+
+    def test_dead_pid_returns_false(self, monkeypatch):
+        def fake_kill(pid, sig):
+            raise ProcessLookupError()
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        assert _pid_alive(12345) is False
+
+    def test_permission_error_counts_as_alive(self, monkeypatch):
+        def fake_kill(pid, sig):
+            raise PermissionError()
+        monkeypatch.setattr("core.os.kill", fake_kill)
+        assert _pid_alive(1) is True
 
 
 class TestPendingDir:

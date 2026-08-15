@@ -9,6 +9,7 @@ through the roster.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -47,6 +48,7 @@ from dispatch import (
 from rig import (
     DEFAULT_CONCURRENCY,
     DEFAULT_TIMEOUT_SECONDS,
+    PERMISSION_MODES,
     RigError,
     HARNESS_PRESETS,
     add_preset_rig,
@@ -57,9 +59,12 @@ from rig import (
     format_preset_invoke,
     is_below_knowledge_floor,
     load_rig_config,
+    permission_ceiling_note,
     preset_names,
     remove_rig,
     resolve_config_path,
+    resolve_override,
+    rig_preset,
     rig_setting,
     rig_settings,
     set_rig_value,
@@ -155,6 +160,10 @@ COMMAND_HELP = [
             Command(
                 "engine <id> run PROMPT",
                 "One headless turn as a bare stateless agent, outside any roster",
+            ),
+            Command(
+                "rig run <rig> PROMPT",
+                "The same turn as a named rig: its model, its tuning, its budget",
             ),
         ],
     ),
@@ -1259,6 +1268,7 @@ def cmd_seat(args: argparse.Namespace) -> int:
 RIG_COMMAND_HELP = [
     ("rig list", "Rigs, limits, and roster rig resolution (alias: ls; --wide)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
+    ("rig run <rig> PROMPT", "One headless turn as this rig (--wait / --now on budget)"),
     ("rig add <rig> <preset>", "Add a rig (creates the config if needed; --model M, --force)"),
     ("rig swap <rig> <preset>", "Switch an existing rig to a preset, keeping its settings"),
     ("rig remove <rig>...", "Remove one or more rigs from the config (alias: rm)"),
@@ -1337,6 +1347,8 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
 def cmd_engine(args: argparse.Namespace) -> int:
     import engines
 
+    if args.target == "check":
+        return _cmd_engine_check(args, None)
     if args.target == "list":
         width = max(len(name) for name in engines.MODULES)
         for name in sorted(engines.MODULES):
@@ -1351,10 +1363,12 @@ def cmd_engine(args: argparse.Namespace) -> int:
         print("Ask one: r4t engine <id> quota — or run a turn: r4t engine <id> run")
         return 0
     if not args.action:
-        print("r4t engine: expected an action (quota, run)", file=sys.stderr)
+        print("r4t engine: expected an action (quota, run, check)", file=sys.stderr)
         return 2
     if args.action == "run":
         return _cmd_engine_run(args)
+    if args.action == "check":
+        return _cmd_engine_check(args, args.target.strip().lower())
     try:
         payload = engines.quota(args.target)
     except engines.QuotaError as exc:
@@ -1365,6 +1379,73 @@ def cmd_engine(args: argparse.Namespace) -> int:
     else:
         print(engines.format_text(payload))
     return 0
+
+
+def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
+    """`r4t engine <id> check`, or `r4t engine check` for every run-capable
+    engine. Exits 1 when any composed argv is rejected; a CLI that is not
+    installed is unverifiable, not a failure."""
+    from engines import check as engine_check
+    from engines import run as engine_run
+
+    if engine is not None and engine not in engine_run.RUN_ENGINES:
+        supported = ", ".join(sorted(engine_run.RUN_ENGINES))
+        print(
+            f"r4t engine: {args.target!r} does not support check "
+            f"(engines: {supported})",
+            file=sys.stderr,
+        )
+        return 1
+    options = dict(
+        model=args.model,
+        permissions=args.permissions,
+        allowed_tools=args.allowed_tools,
+        continue_conversation=args.continue_conversation,
+        workdir=Path(args.dir).expanduser().resolve() if args.dir else Path.cwd(),
+    )
+    reports = (
+        engine_check.check_all(**options)
+        if engine is None
+        else [engine_check.check_engine(engine, **options)]
+    )
+    if args.as_json:
+        print(json.dumps([r.as_dict() for r in reports], indent=2))
+    else:
+        print(engine_check.format_text(reports))
+        print()
+        print("No turn is spent: a check drives each CLI's own --help/--version.")
+    return 1 if any(r.verdict == engine_check.REJECTED for r in reports) else 0
+
+
+def _turn_dir(args: argparse.Namespace) -> Path:
+    return Path(args.dir).expanduser().resolve() if args.dir else Path.cwd()
+
+
+def _turn_prompt(
+    args: argparse.Namespace, dir_path: Path, where: str
+) -> tuple[str | None, int]:
+    """The routed input for one headless turn — the `--idle` latch, the `-`
+    stdin read, and the required positional — shared by `engine run` and
+    `rig run` so both spell the latch the same way. Returns (prompt, 0) with
+    the latch armed, or (None, exit code) when no turn should run: 0 when the
+    latch already fired, 2 when PROMPT is missing."""
+    from engines import run as engine_run
+
+    marker = dir_path / engine_run.IDLE_MARKER_NAME
+    if args.idle:
+        if marker.exists():
+            return None, 0
+        marker.touch()
+        prompt = args.prompt if args.prompt else engine_run.DEFAULT_IDLE_PROMPT
+    else:
+        marker.unlink(missing_ok=True)
+        if not args.prompt:
+            print(f"{where}: PROMPT is required unless --idle", file=sys.stderr)
+            return None, 2
+        prompt = args.prompt
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    return prompt, 0
 
 
 def _cmd_engine_run(args: argparse.Namespace) -> int:
@@ -1384,21 +1465,20 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
         )
         return 1
 
-    dir_path = Path(args.dir).expanduser().resolve() if args.dir else Path.cwd()
-    marker = dir_path / engine_run.IDLE_MARKER_NAME
-    if args.idle:
-        if marker.exists():
-            return 0
-        marker.touch()
-        prompt = args.prompt if args.prompt else engine_run.DEFAULT_IDLE_PROMPT
-    else:
-        marker.unlink(missing_ok=True)
-        if not args.prompt:
-            print("r4t engine run: PROMPT is required unless --idle", file=sys.stderr)
-            return 2
-        prompt = args.prompt
-    if prompt == "-":
-        prompt = sys.stdin.read()
+    # #155 rule 4 — an idle wake is a cold wake by definition, so the pair is
+    # refused here rather than left to every definition author to remember.
+    if args.idle and args.continue_conversation:
+        print(
+            "r4t engine run: --idle and --continue contradict — an idle wake is "
+            "a cold start and never continues",
+            file=sys.stderr,
+        )
+        return 2
+
+    dir_path = _turn_dir(args)
+    prompt, code = _turn_prompt(args, dir_path, "r4t engine run")
+    if prompt is None:
+        return code
 
     try:
         return engine_run.execute(
@@ -1411,10 +1491,219 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             scaffold=not args.no_scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
+            continue_conversation=args.continue_conversation,
+            permissions=args.permissions,
+            allowed_tools=args.allowed_tools,
         )
     except engine_run.RunError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
         return 1
+
+
+RIG_BUDGET_POLL_SECONDS = 5.0
+
+
+def _rig_run_model(rig) -> str | None:
+    """The model this rig runs, in the form `build_preset_invoke` takes. Only
+    the live-resolver presets (agy) record `model` as a setting; every other
+    preset bakes the value into the invoke at `rig add --model` time, so the
+    argv is the second place to look and `-` means the CLI's own default."""
+    found = _rig_model(rig)
+    return None if found == "-" else found
+
+
+def _rig_budget_status(rig) -> tuple[float, float]:
+    """The rig's machine-global bucket right now: (level, seconds until it
+    holds one turn again). Both keys are validated together at load, so a
+    budgeted rig always earns and the wait is always finite."""
+    return (
+        state.rig_budget_level(
+            rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+        ),
+        state.rig_budget_seconds_until(
+            rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+        ),
+    )
+
+
+def _wait_for_rig_budget(rig) -> float:
+    """Block until the bucket holds one turn, and return the seconds spent.
+    One stderr line states the wait up front; the poll after it is silent, so
+    a `--wait` in a pipeline is one line of noise rather than a ticker. The
+    bucket is machine-global, so another node finishing can end the wait early
+    — hence a poll rather than a single sleep."""
+    started = time.time()
+    _level, seconds = _rig_budget_status(rig)
+    if seconds <= 0:
+        return 0.0
+    print(
+        f"r4t rig run: rig {rig.name} is resting — waiting {seconds:.0f}s "
+        f"(~{seconds / 60:.0f} min) for one turn's budget",
+        file=sys.stderr,
+    )
+    while True:
+        _level, remaining = _rig_budget_status(rig)
+        if remaining <= 0:
+            return time.time() - started
+        time.sleep(min(remaining, RIG_BUDGET_POLL_SECONDS))
+
+
+def _rig_run_engine(rig, config_path: Path, name: str) -> tuple[str | None, str | None]:
+    """The run-capable engine this rig rides, or the reason it has none."""
+    from engines import run as engine_run
+
+    if rig is None:
+        return None, (
+            f"rig {name!r} not found in {config_path} (fail closed) — "
+            f"try: r4t rig presets, then r4t rig add {name} <preset>"
+        )
+    if rig.error:
+        return None, f"rig {rig.name!r} is invalid: {rig.error}"
+    if not rig.preset:
+        return None, (
+            f"rig {rig.name!r} has no preset, so there is no engine to compose "
+            f"a turn from — try: r4t rig swap {rig.name} <preset>"
+        )
+    if rig.preset not in engine_run.RUN_ENGINES:
+        return None, (
+            f"rig {rig.name!r} rides preset {rig.preset!r}, which does not "
+            f"support run (engines: {', '.join(sorted(engine_run.RUN_ENGINES))}) — "
+            f"try: r4t rig swap {rig.name} <preset>"
+        )
+    return rig.preset, None
+
+
+def cmd_rig_run(args: argparse.Namespace) -> int:
+    """One headless turn as a named rig: `engine run`'s composition with the
+    rig's own engine, model, stance and env already applied, gated on the
+    rig's machine-global budget. The engine layer is bare metal; this layer is
+    what the rig has been tuned to."""
+    from engines import run as engine_run
+
+    config_path = resolve_config_path(args.rig_config)
+    try:
+        config = load_rig_config(config_path)
+    except RigError as exc:
+        print(f"r4t rig run: {exc}", file=sys.stderr)
+        return 1
+    name = args.rig.strip().lower()
+    rig = None if config.missing else config.rigs.get(name)
+    engine, problem = _rig_run_engine(rig, config_path, args.rig.strip())
+    if engine is None:
+        print(f"r4t rig run: {problem}", file=sys.stderr)
+        return 1
+
+    # #155 rule 4, as `engine run` enforces it: an idle wake is a cold wake.
+    if args.idle and args.continue_conversation:
+        print(
+            "r4t rig run: --idle and --continue contradict — an idle wake is "
+            "a cold start and never continues",
+            file=sys.stderr,
+        )
+        return 2
+    if args.wait and args.now:
+        print(
+            "r4t rig run: --wait and --now contradict — one holds for the "
+            "budget, the other spends past it",
+            file=sys.stderr,
+        )
+        return 2
+
+    dir_path = _turn_dir(args)
+    report: dict = {
+        "rig": rig.name,
+        "engine": engine,
+        "dir": str(dir_path),
+        "ran": False,
+        "reason": "ran",
+        "exit_code": 0,
+        "budget": None,
+    }
+
+    def finish(code: int, reason: str, ran: bool = False) -> int:
+        report.update(exit_code=code, reason=reason, ran=ran)
+        if args.as_json:
+            # stderr, not stdout: `engine run` keeps stdout the engine's own
+            # reply stream byte for byte, and a summary object printed into
+            # the middle of it would corrupt whatever reads the reply.
+            print(json.dumps(report), file=sys.stderr)
+        return code
+
+    # Peeked before the gate so `--wait` never blocks for a turn the latch
+    # would skip anyway; `_turn_prompt` is what actually arms it.
+    if args.idle and (dir_path / engine_run.IDLE_MARKER_NAME).exists():
+        return finish(0, "idle-latched")
+
+    budgeted = rig.rig_budget_max is not None
+    if budgeted:
+        level, seconds = _rig_budget_status(rig)
+        report["budget"] = {
+            "max": rig.rig_budget_max,
+            "earn_per_hour": rig.rig_budget_earn_per_hour,
+            "level_before": round(level, 4),
+            "level_after": round(level, 4),
+            "waited_seconds": 0.0,
+            "forced": bool(args.now),
+        }
+        if seconds > 0 and not args.now:
+            if not args.wait:
+                report["budget"]["seconds_until"] = round(seconds, 3)
+                print(
+                    f"r4t rig run: rig {rig.name} is resting — budget "
+                    f"{state.fmt_budget(level)}/"
+                    f"{state.fmt_budget(rig.rig_budget_max)}, one turn back in "
+                    f"~{seconds / 60:.0f} min ({seconds:.0f}s). Hold for it "
+                    f"with --wait, or spend past it with --now.",
+                    file=sys.stderr,
+                )
+                # Exit 1, not a code of its own: docs/ark.md reserves exit-code
+                # meanings to the foundation. `--json`'s `reason` is where a
+                # caller tells a resting rig from a failed turn.
+                return finish(1, "resting")
+            waited = _wait_for_rig_budget(rig)
+            report["budget"]["waited_seconds"] = round(waited, 3)
+            report["budget"]["level_before"] = round(_rig_budget_status(rig)[0], 4)
+
+    prompt, code = _turn_prompt(args, dir_path, "r4t rig run")
+    if prompt is None:
+        return finish(code, "idle-latched" if code == 0 else "usage")
+
+    # Charged inside execute, immediately before the spawn: a turn refused at
+    # composition (a bad per-run override) costs nothing, while a harness that
+    # fails to start has already paid — dispatch's own boundary. The bucket
+    # clamps at zero, so `--now` on an empty one spends to the floor and stops
+    # there rather than running up a debt.
+    def _charge() -> None:
+        report["budget"]["level_after"] = round(
+            state.rig_budget_charge(
+                rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
+            ),
+            4,
+        )
+
+    try:
+        exit_code = engine_run.execute(
+            engine,
+            prompt,
+            dir_path=dir_path,
+            model=resolve_override(args.model, _rig_run_model(rig)),
+            agent=args.agent,
+            timeout=(
+                args.timeout if args.timeout is not None else int(rig.timeout_seconds)
+            ),
+            scaffold=not args.no_scaffold,
+            echo=args.echo,
+            lessons_cap=args.lessons_cap,
+            continue_conversation=args.continue_conversation,
+            permissions=resolve_override(args.permissions, rig.permissions),
+            allowed_tools=resolve_override(args.allowed_tools, rig.allowed_tools),
+            env={**os.environ, **rig.env} if rig.env else None,
+            charge_hook=_charge if budgeted else None,
+        )
+    except engine_run.RunError as exc:
+        print(f"r4t rig run: {exc}", file=sys.stderr)
+        return finish(1, "error")
+    return finish(exit_code, "ran", ran=True)
 
 
 def cmd_rig_add(args: argparse.Namespace) -> int:
@@ -1563,6 +1852,12 @@ def cmd_rig_set(args: argparse.Namespace) -> int:
         print(str(e), file=sys.stderr)
         return 1
     print(f"set {rig_key} {s.key} = {s.display()} in {config_path}")
+    if s.key == "permissions":
+        # The rig is where the stance lives, so this is where the operator
+        # hears what it actually buys — the engine-run flag says it per turn.
+        note = permission_ceiling_note(rig_preset(config_path, rig_key), s.value)
+        if note:
+            print(f"r4t rig: {note}", file=sys.stderr)
     return 0
 
 
@@ -1974,6 +2269,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(roster_check_p)
     roster_check_p.set_defaults(func=cmd_roster_check)
 
+    from engines.run import LESSONS_CAP_LINES
+
     rig_p = sub.add_parser(
         "rig",
         aliases=["rigs"],
@@ -2000,6 +2297,107 @@ def build_parser() -> argparse.ArgumentParser:
         help="List named CLI presets aligned with a8s definitions.",
     )
     rig_presets_p.set_defaults(func=cmd_rig_presets)
+
+    rig_run_p = rig_sub.add_parser(
+        "run",
+        help="One headless turn as this rig: its engine, model and budget.",
+        description="One headless turn as a named rig — the same composition "
+        "`r4t engine <id> run` makes, with the rig's own preset, model, "
+        "permission stance, tool allowlist, timeout and env map already "
+        "applied, and gated on the rig's machine-global budget. Per-invocation "
+        "flags win over the rig, and the rig wins over the preset. Continuation "
+        "is a per-invocation choice (`--continue`), never a rig key.",
+    )
+    rig_run_p.add_argument("rig", help="Symbolic rig name (see `r4t rig list`).")
+    rig_run_p.add_argument(
+        "prompt",
+        nargs="?",
+        metavar="PROMPT",
+        help="The message text ('-' reads stdin); required unless --idle.",
+    )
+    rig_run_p.add_argument(
+        "--wait",
+        action="store_true",
+        help="Hold until the rig's budget allows a turn, then run it.",
+    )
+    rig_run_p.add_argument(
+        "--now",
+        action="store_true",
+        help="Run even with the budget empty; the bucket still pays, to its floor.",
+    )
+    rig_run_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Print one JSON object about the turn to stderr (stdout stays "
+        "the engine's own reply stream).",
+    )
+    rig_run_p.add_argument(
+        "--dir", metavar="DIR", help="Working directory for the turn (default: CWD)."
+    )
+    rig_run_p.add_argument(
+        "--model", metavar="M", help="Model for this turn, overriding the rig's."
+    )
+    rig_run_p.add_argument(
+        "--agent",
+        metavar="NAME",
+        help="Adds an `a8s convo NAME` reconcile step to the scaffold.",
+    )
+    rig_run_p.add_argument(
+        "--timeout",
+        type=int,
+        help="Turn timeout in seconds (default: the rig's timeout_seconds).",
+    )
+    rig_run_p.add_argument(
+        "--no-scaffold",
+        action="store_true",
+        dest="no_scaffold",
+        help="Send PROMPT unchanged, without the cold-boot scaffold.",
+    )
+    rig_run_p.add_argument(
+        "--idle",
+        action="store_true",
+        help="Skip if the last turn was also idle, else run one and re-arm.",
+    )
+    rig_run_p.add_argument(
+        "--lessons-cap",
+        type=_positive_int,
+        default=LESSONS_CAP_LINES,
+        dest="lessons_cap",
+        help="Line cap before rotating oldest LESSONS.md lines to "
+        f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_LINES}).",
+    )
+    rig_run_p.add_argument(
+        "--echo",
+        action="store_true",
+        help="Print the composed argv and prompt to stderr before running.",
+    )
+    rig_run_p.add_argument(
+        "--continue",
+        action="store_true",
+        dest="continue_conversation",
+        help="Resume the conversation this CLI already has in --dir. The "
+        "caller asserts this turn continues live work; an idle or independent "
+        "wake must not pass it.",
+    )
+    rig_run_p.add_argument(
+        "--permissions",
+        metavar="MODE",
+        choices=list(PERMISSION_MODES),
+        help="Permission stance for this turn, overriding the rig's: ask, "
+        "auto or bypass.",
+    )
+    rig_run_p.add_argument(
+        "--allowed-tools",
+        metavar="SPEC",
+        dest="allowed_tools",
+        help="Tool-allowlist string for this turn, overriding the rig's.",
+    )
+    rig_run_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_run_p.set_defaults(func=cmd_rig_run)
 
     rig_add_p = rig_sub.add_parser(
         "add",
@@ -2123,8 +2521,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rig_unset_p.set_defaults(func=cmd_rig_unset)
 
-    from engines.run import LESSONS_CAP_LINES
-
     engine_p = sub.add_parser(
         "engine",
         help=_cmd_help("engine"),
@@ -2132,17 +2528,19 @@ def build_parser() -> argparse.ArgumentParser:
         "subscription and reset time, without spending a turn; run — one "
         "headless turn as a bare stateless agent (claude, codex, agy, "
         "copilot, cursor, opencode, and the ollama-* local variants), no "
-        "roster or dispatcher involved. Accepts an engine id or any rig "
-        "preset id; `list` shows both.",
+        "roster or dispatcher involved; check — ask the installed CLI whether "
+        "the argv r4t composes for it still parses, spending no turn. "
+        "Accepts an engine id or any rig preset id; `list` shows both, and "
+        "bare `check` probes every run-capable engine.",
     )
     engine_p.add_argument(
         "target",
-        help="Engine or preset id (see `r4t engine list`), or `list`.",
+        help="Engine or preset id (see `r4t engine list`), `list`, or `check`.",
     )
     engine_p.add_argument(
         "action",
         nargs="?",
-        choices=["quota", "run"],
+        choices=["quota", "run", "check"],
         help="What to ask the engine.",
     )
     engine_p.add_argument(
@@ -2201,6 +2599,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--echo",
         action="store_true",
         help="run: print the composed argv and prompt to stderr before running.",
+    )
+    engine_p.add_argument(
+        "--continue",
+        action="store_true",
+        dest="continue_conversation",
+        help="run: resume the conversation this CLI already has in --dir, in "
+        "the preset's own idiom. The caller asserts this turn continues live "
+        "work; an idle or independent wake must not pass it. An engine with no "
+        "verified continuation errors, naming the engines that can.",
+    )
+    engine_p.add_argument(
+        "--permissions",
+        metavar="MODE",
+        choices=list(PERMISSION_MODES),
+        help="run/check: the engine's permission stance — ask (the CLI's own "
+        "default, no auto-approval), auto (approve tool use without "
+        "prompting; deny rules still apply), bypass (the engine's strongest "
+        "auto-approval). Unset keeps the preset's own flags. A mode below the "
+        "engine's floor errors; above its ceiling it proceeds with a note.",
+    )
+    engine_p.add_argument(
+        "--allowed-tools",
+        metavar="SPEC",
+        dest="allowed_tools",
+        help="run/check: the engine's own tool-allowlist string, replacing the "
+        "preset's list (claude and ollama-claude only; other engines error).",
     )
     engine_p.set_defaults(func=cmd_engine)
 
@@ -2482,4 +2906,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # stderr already defaults to backslashreplace, so only stdout needs the
+    # floor — an unencodable glyph (e.g. on a redirected Windows console)
+    # gets a lossless, reversible escape instead of crashing the process.
+    # The isinstance/errors=="strict" guard is mypy's own (PR 18292): it
+    # never fires once a caller has set a deliberate error handler, and
+    # skips a replaced sys.stdout (e.g. io.StringIO under embedding) cleanly
+    # instead of raising AttributeError. Every --json path in the suite is
+    # ensure_ascii, so machine-readable output is unaffected either way.
+    if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.errors == "strict":
+        sys.stdout.reconfigure(errors="backslashreplace")
     raise SystemExit(main())

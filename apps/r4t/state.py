@@ -252,18 +252,23 @@ def archive_history(node: str, name: str) -> Path | None:
 
 # ---------- locks ----------
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+# Same relocation concern as the ark imports at the top; the container copy
+# is POSIX-only, so the fallback keeps only the POSIX probe.
+try:
+    from ark.proc import pid_alive as _pid_alive
+except ImportError:
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
         return True
-    except OSError:
-        return False
-    return True
 
 
 class AgentLock:

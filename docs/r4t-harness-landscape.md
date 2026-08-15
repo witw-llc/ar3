@@ -41,13 +41,13 @@ behavior, cross-directory scope probe.
 | Preset | Headless shape | Continue | MCP idiom | Notes |
 |---|---|---|---|---|
 | `claude` | `claude … -p {prompt}` with `--permission-mode dontAsk` | `--continue` | `claude-flag` | |
-| `codex` | `codex exec --full-auto … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
+| `codex` | `codex exec --sandbox workspace-write … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
 | `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
 | `ollama-claude` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
-| `ollama-codex` | `ollama launch codex --model … -y -- exec --full-auto` | no | `codex-config` | Requires `--model` |
-| `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; wait for bin#256 |
+| `ollama-codex` | `ollama launch codex --model … -y -- exec --sandbox workspace-write` | no | `codex-config` | Requires `--model` |
+| `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; `--session-id <id>` at creation and `-r, --resume=<id>` under `-p` are the pin path (#17) |
 | `ollama-copilot` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
 | `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | none | MCP only from `~/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
 | `ollama` | `ollama run {model} {prompt}` | no | none | No tools; stdout-fallback replies |
@@ -108,11 +108,11 @@ conversation.
 | CLI | Continue mechanism | Scope | Pin path | Roster continue? |
 |---|---|---|---|---|
 | claude (preset) | `--continue` | per-directory (CLI convention) | distinct `Workdir:` / CLI | yes |
-| codex (preset) | `exec resume --last` | last session | `resume <SESSION_ID>` (bin#256) | yes (`--last`) |
+| codex (preset) | `exec resume --last` | last **interactive** session in this cwd — cwd-filtered, and excludes `codex exec` sessions unless `--include-non-interactive` is passed | `resume <SESSION_ID>` (bin#256) | yes (`--last`) |
 | cursor (preset) | `--continue` | per-directory | distinct workdirs | yes |
 | opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
-| copilot (preset) | `--continue` exists | **machine-global** | needs `--resume=<id>` (bin#256) | **no** until pinned |
+| copilot (preset) | `--continue` exists | **machine-global** | `--session-id <id>` at creation, `-r, --resume=<id>` under `-p` (#17) | **no** until the pin path replaces `--continue` in the preset |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
 | Cline | `--continue` | current directory’s latest task | `--taskId` (unverified) / workdirs | candidate |
 | Qwen Code | `--continue` / `--resume` | project hash under `~/.qwen/projects/` | session id | candidate (best contract) |

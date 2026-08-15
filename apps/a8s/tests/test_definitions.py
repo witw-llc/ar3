@@ -634,6 +634,158 @@ class TestMaxWakeSeconds:
         assert max_wake_seconds({"invoke": ["x"], "max_wake_seconds": "soon"}) is None
 
 
+class TestBundledEngineNode:
+    """`engine-claude.json` — the template every engine-backed bare node is
+    copied from, so its three wake paths are asserted rather than assumed."""
+
+    @pytest.fixture
+    def agent_root(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        return root
+
+    def _definition(self):
+        return json.loads(
+            default_definition_path("engine-claude").read_text(encoding="utf-8")
+        )
+
+    def test_a_single_message_rides_the_prompt_positional(self, agent_root):
+        argv = build_command(
+            self._definition(),
+            {"from": "neil", "to": "node1", "content": "check the deploy"},
+            agent_root,
+        )
+        assert argv[2:6] == ["engine", "claude", "run", "--agent"]
+        # #157's chapter-1 field test: a bare $MESSAGE gives the node no way
+        # to know who to answer, so the prompt states the sender too.
+        assert argv[-1].endswith("check the deploy")
+        assert argv[-1].startswith("neil tells node1")
+
+    def test_a_batch_of_n_becomes_one_invocation(self):
+        # #159's third bullet: three messages must not cost three cold context
+        # loads. a8s composes the N envelopes into one prompt and `engine run`
+        # takes it as its PROMPT positional — no dispatcher, no new entry
+        # point, one turn.
+        from definitions import BatchEntry, batch_format, build_batch_command, pause_seconds
+
+        defn = self._definition()
+        entries = [
+            BatchEntry({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "first"}, "a.json"),
+            BatchEntry({"from": "B", "date": "2026-04-28T14:31:00Z", "content": "second"}, "b.json"),
+        ]
+        argv = build_batch_command(defn, "node1", entries, "/defs/engine-claude.json")
+        assert argv[2:] == ["engine", "claude", "run", "--agent", "node1", argv[-1]]
+        prompt = argv[-1]
+        assert prompt.index("first") < prompt.index("second")  # arrival order
+        # The prose form, not `envelopes`: a bare node has no queue to ingest
+        # a JSON array into.
+        assert batch_format(defn) == "prompt"
+        assert pause_seconds(defn) == 3.0  # declaring batch debounces by default
+
+    def test_the_idle_wake_carries_the_latch_flag_and_no_prompt(self):
+        from definitions import build_idle_command, idle_timeout_seconds
+
+        defn = self._definition()
+        argv = build_idle_command(defn, "node1", "/defs/engine-claude.json")
+        assert argv[-3:] == ["--idle", "--agent", "node1"]
+        assert idle_timeout_seconds(defn) > 0
+        # No message and no prompt: `--idle` picks r4t's own consolidation
+        # text, and the latch means only the first quiet tick spends a turn.
+        assert "$MESSAGE" not in argv and "" not in argv[2:]
+
+
+# Mirrors RUN_ENGINES in apps/r4t/engines/run.py. a8s tests do not import r4t
+# (its ulid module shadows a8s's own — see apps/r4t/tests/run's separate
+# invocation), so the source of truth is duplicated here rather than imported.
+RUN_ENGINE_IDS = (
+    "claude", "codex", "agy", "copilot", "cursor", "opencode",
+    "ollama-claude", "ollama-codex", "ollama-opencode",
+)
+OLLAMA_ENGINE_IDS = tuple(e for e in RUN_ENGINE_IDS if e.startswith("ollama-"))
+
+
+class TestBundledEngineDefinitions:
+    """Every RUN_ENGINES id ships its own `engine-<id>.json`, usable as-is —
+    the owner ruling behind #157's follow-up: a built-in living in a hidden
+    directory must work with `a8s add name ./dir engine-<id>` unedited, not
+    tell the user to copy-and-edit claude's."""
+
+    @pytest.fixture
+    def agent_root(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        return root
+
+    def _definition(self, engine_id):
+        return json.loads(
+            default_definition_path(f"engine-{engine_id}").read_text(encoding="utf-8")
+        )
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_bundled_definition_exists(self, engine_id):
+        assert default_definition_path(f"engine-{engine_id}").is_file()
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_definition_parses_through_the_loader(self, engine_id, agent_root):
+        defn = self._definition(engine_id)
+        # ollama-* engines have no default model: the a8s var must be
+        # supplied, same as a real `a8s add ... --model=...` node.
+        node_vars = {"MODEL": "qwen3.6"} if engine_id in OLLAMA_ENGINE_IDS else None
+
+        # A single-message wake — proves `invoke` interpolates cleanly.
+        argv = build_command(
+            defn, {"from": "neil", "to": "node1", "content": "hi"}, agent_root,
+            vars=node_vars,
+        )
+        assert argv[2:5] == ["engine", engine_id, "run"]
+
+        # A batch wake — proves `batch.invoke` interpolates with no message.
+        from definitions import BatchEntry, build_batch_command, build_idle_command
+
+        entries = [
+            BatchEntry(
+                {"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"
+            ),
+        ]
+        batch_argv = build_batch_command(defn, "node1", entries, vars=node_vars)
+        assert batch_argv[2:5] == ["engine", engine_id, "run"]
+
+        # An idle wake — proves `idle.invoke` interpolates with no message.
+        idle_argv = build_idle_command(defn, "node1", vars=node_vars)
+        assert idle_argv[2:5] == ["engine", engine_id, "run"]
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_single_invoke_ends_with_the_sender_carrying_prompt(self, engine_id):
+        # #157's chapter-1 field test: a bare `$MESSAGE` gives the node no
+        # way to know who to answer. Every bundled definition's single-wake
+        # prompt states the sender, same shape as codex.json / cursor.json.
+        defn = self._definition(engine_id)
+        assert defn["invoke"][-1] == "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_batch_and_idle_invokes_carry_no_prompt(self, engine_id):
+        defn = self._definition(engine_id)
+        for block in (defn["batch"]["invoke"], defn["idle"]["invoke"]):
+            assert "$MESSAGE" not in block
+            assert not any("$SENDER" in a for a in block)
+
+    @pytest.mark.parametrize("engine_id", OLLAMA_ENGINE_IDS)
+    def test_ollama_engines_carry_model_on_every_wake(self, engine_id):
+        defn = self._definition(engine_id)
+        for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+            assert "--model" in block
+            assert "$MODEL" in block
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_description_names_no_copy_this_file_instruction(self, engine_id):
+        # The owner ruling this test enforces: templates must ALSO be usable
+        # as-is, so a built-in's own description must not tell the reader to
+        # copy it before it will work.
+        description = self._definition(engine_id)["description"].lower()
+        assert "copy this file" not in description
+        assert "copy the file" not in description
+
+
 class TestBatchInvoke:
     def test_has_batch_invoke_false_when_missing(self):
         from definitions import has_batch_invoke

@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core
+from ark.proc import terminate_group
 from core import (
     MAX_WAKE_ATTEMPTS,
     Participant,
@@ -232,6 +233,8 @@ def _start_wake_subprocess(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             start_new_session=True,
         )
@@ -930,24 +933,17 @@ _SIGNAL_COUNT = 0
 
 def _kill_wake_subprocess_group() -> None:
     """SIGTERM-then-SIGKILL the current wake's subprocess group. Targets the
-    whole process tree so the LLM CLI dies along with our wake wrapper."""
+    whole process tree on POSIX so the LLM CLI dies along with our wake
+    wrapper; on Windows, where there is no process group to target,
+    `ark.proc.terminate_group` falls back to a plain SIGTERM of the wake
+    process itself. Delegated to the foundation rather than reimplemented
+    here — `os.getpgid`/`os.killpg` don't exist on `nt`, and this helper now
+    runs from the iteration-top kill-request branch on every platform, not
+    only from the POSIX-only SIGUSR1 handler."""
     proc = _CURRENT_WAKE_PROC
     if proc is None or proc.poll() is not None:
         return
-    try:
-        pgid = os.getpgid(proc.pid)
-    except OSError:
-        return
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except OSError:
-        pass
-    _time.sleep(0.5)
-    if proc.poll() is None:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except OSError:
-            pass
+    terminate_group(proc)
 
 
 def _make_signal_handler(label: str):
@@ -1078,7 +1074,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     handler = _make_signal_handler(label)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
-    prev_sigusr1 = signal.signal(signal.SIGUSR1, _on_kill_signal)
+    prev_sigusr1 = (
+        signal.signal(signal.SIGUSR1, _on_kill_signal)
+        if hasattr(signal, "SIGUSR1")
+        else None
+    )
 
     pid = os.getpid()
     for n in names:
@@ -1117,12 +1117,19 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 break
             try:
                 # Honor kill-requests and detach-requests at the iteration
-                # top. Kill takes precedence (SIGUSR1 may have already killed
-                # the subprocess group, but the release happens here so the
-                # iteration body skips that agent for the rest of the pass).
+                # top. This is the mechanism on every platform: SIGUSR1
+                # (POSIX only — Windows has no user-definable signal, and no
+                # console-control substitute that can target a background
+                # process, see docs/ark.md's process doctrine) is a latency
+                # optimisation on top, killing the subprocess group early
+                # via `_on_kill_signal`. The group kill also happens here so
+                # a Windows `a8s kill` — or a POSIX one that raced the signal
+                # — still reaps the in-flight wake instead of orphaning it.
                 for name in list(names):
                     kill_req = _read_kill_request(name)
                     if kill_req is not None and kill_req != pid:
+                        if name == _CURRENT_WAKE_NAME:
+                            _kill_wake_subprocess_group()
                         out_agent(name, f"[a8s] {name}: killed by PID {kill_req}")
                         release(name)
                         _clear_kill_request(name)
@@ -1268,6 +1275,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
-        signal.signal(signal.SIGUSR1, prev_sigusr1)
+        if hasattr(signal, "SIGUSR1"):
+            signal.signal(signal.SIGUSR1, prev_sigusr1)
         _STOP_EVENT = None
     return 0

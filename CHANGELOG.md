@@ -10,7 +10,144 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## [Unreleased]
+## [0.1.68]
+
+### Added
+- **`r4t rig run <rig> PROMPT` — one headless turn as a named rig (#157).**
+  The same turn `r4t engine <id> run` composes, with the rig's own preset,
+  model, permission stance, tool allowlist, timeout and `env` map already
+  applied, and gated on the rig's machine-global spend bucket. An engine is
+  bare metal; a rig is that engine plus its tuning plus its budget. Precedence
+  is flag > rig > preset, and every engine-layer flag (`--dir`, `--agent`,
+  `--idle`, `--echo`, `--no-scaffold`, `--lessons-cap`, `--continue`,
+  `--permissions`, `--allowed-tools`) means what it means there. A rig with no
+  budget keys runs with no gate; an exhausted one refuses by default naming
+  the wait, holds for the refill under `--wait`, or spends to its floor under
+  `--now`. `--json` reports the turn, the reason and the budget on stderr, so
+  stdout stays the engine's own reply stream. There is no rig-level continue
+  key: the preset declares capability and a roster member declares policy, and
+  a third setting between them would lose to the member every time it mattered.
+  See [`docs/r4t-rigs.md`](docs/r4t-rigs.md).
+- **One vocabulary for permissions, tools and continuation (#159, #160,
+  #136).** `r4t engine <id> run` takes `--continue`, `--permissions
+  ask|auto|bypass` and `--allowed-tools SPEC`, and a rig takes the last two as
+  the keys `permissions` and `allowed_tools` (`r4t rig set <rig> permissions
+  bypass`). Each is unset by default, and unset means the preset's own flags,
+  byte for byte. r4t translates the word into each CLI's own spelling from one
+  table: a mode below an engine's floor is a hard error naming the reason, one
+  above its ceiling proceeds with a note, and `--echo` prints exactly what will
+  run. `--allowed-tools` is the answer to the claude preset's narrow allowlist,
+  and as a rig key it survives `rig swap`. The stance is a rig key and never a
+  roster field, so an in-repo edit cannot raise a member's permissions.
+  `--idle --continue` is refused: an idle wake is a cold start.
+  See [`docs/r4t-engine.md`](docs/r4t-engine.md).
+- **`r4t engine check` — the argv probe that spends no turn.** `r4t engine
+  check` (or `r4t engine <id> check`) composes the argv `run` would spend a
+  turn on and asks the installed CLI whether it still parses, reporting each
+  engine's binary, version and verdict, and exiting 1 if any composed argv is
+  rejected. It drives only `--help` and `--version` — never a turn, never a
+  token. This is the durable answer to the drift that broke two shipped presets
+  at once.
+- **The bare engine node wakes three ways.**
+  `apps/a8s/definitions/engine-claude.json` now carries a `batch` block, so a
+  burst of N messages is one invocation and one context load instead of N,
+  and an `idle` block, so a quiet node runs one consolidation pass per quiet
+  period and no more. [`docs/r4t-engine.md`](docs/r4t-engine.md) documents
+  how a definition's parameters map onto `engine run`.
+- **All nine `RUN_ENGINES` ship a bundled, add-and-go engine node.** Every
+  engine `r4t engine run` supports now has its own
+  `apps/a8s/definitions/engine-<id>.json` — `a8s add name ./dir engine-cursor`
+  works unedited, no copy-and-tweak required. Each single-message wake states
+  the sender (`$SENDER tells $RECIPIENT ($AGE): $MESSAGE`), the same shape
+  every other bundled definition already uses, so a bare node can tell who it
+  is answering — the gap #157's chapter-1 field test found in a bare
+  `$MESSAGE`. The `ollama-*` engines additionally require the a8s var `MODEL`.
+  Built-ins in `apps/a8s/definitions/` stay usable as shipped; a custom
+  definition belongs to `a8s defs add`, not an edit of the hidden directory.
+
+### Changed
+- **The Ark Raising, chapter 1, now opens on the engine turn (#157).** The
+  first win is supercharging the agent instructions a reader already has —
+  their `AGENTS.md` or `CLAUDE.md` run through `r4t engine <id> run`, with
+  the smart cold-boot scaffold (`STATUS.md` / `LESSONS.md`) giving a
+  stateless CLI a memory that survives the process. The a8s hookup follows
+  the win instead of preceding it: one definition with `invoke` / `batch` /
+  `idle` pointed at the same engine command, so `tell` wakes the same
+  softened agent. The hand-rolled `reply.sh` wrapper is gone from the
+  chapter and its templates; `--echo` and `r4t engine <id> check` are taught
+  as the see-what-runs tools. Rosters, rigs and budgets stay in chapter 2.
+
+### Fixed
+- **`get.sh` on Windows adds the suite to the Windows user Path.** The rc line
+  only reaches Git Bash shells, so the `.cmd`/`.ps1` shims were unreachable
+  from PowerShell and cmd.exe until the user edited Path by hand. The
+  installer detects a Windows uname and writes it into `HKCU\Environment`
+  directly: read raw with `DoNotExpandEnvironmentNames`, appended, and
+  written back as `REG_EXPAND_SZ`, broadcasting `WM_SETTINGCHANGE` itself —
+  the pattern rustup, scoop, uv/cargo-dist and winget all converged on
+  independently. Never `setx` (1024-char truncation, flattens the
+  user/system split), and never a plain `[Environment]::…` round-trip
+  either — that reads Path already *expanded* and writes it back as
+  `REG_SZ`, permanently flattening every `%USERPROFILE%`-style entry and
+  downgrading the value's type on the very first install; new terminal
+  windows pick up the change either way.
+- **Three Windows bugs found live on Windows 11, Git Bash, Microsoft Store
+  Python 3.13 (#2).** `a8s`'s `_pid_alive` used `os.kill(pid, 0)` to probe a
+  pid file — signal 0 on Windows **is** `CTRL_C_EVENT`, and a thirteen-year-
+  old CPython bug (bpo-14484/gh-128932, fixed 2025-01-17, backported to
+  3.12/3.13) let a failed `GenerateConsoleCtrlEvent` fall through into
+  `TerminateProcess` instead of returning, so probing a live holder on an
+  unpatched interpreter could kill it; probing a dead one raised `OSError`
+  instead of `ProcessLookupError` either way, crashing every command that
+  reads a pid file (`a8s ls`, acquire). It now asks
+  `OpenProcess`/`WaitForSingleObject` via ctypes on Windows — immune to the
+  `STILL_ACTIVE` (259) exit-code collision `GetExitCodeProcess` alone can't
+  rule out — with an access-denied probe reading as alive, mirroring the
+  POSIX branch's own `PermissionError` handling; the POSIX path is
+  unchanged. `apps/a8s/daemon.py`'s `attached_loop` registered
+  `signal.SIGUSR1`, which doesn't exist on Windows — `AttributeError` at
+  startup killed every `a8s start` child silently (stderr is discarded).
+  Registration, restoration, and `cmd_kill`'s signal send are now guarded by
+  `hasattr(signal, "SIGUSR1")`, demoted to a latency optimisation: the
+  iteration-top kill-request branch that used to wait for it now kills the
+  in-flight wake's subprocess group itself, on every platform, so `a8s kill`
+  can no longer ack success while the woken CLI keeps running. Windows
+  Python's console is UTF-8 by default; the crash is on **redirected**
+  streams (`> file`, `| tee`, CI capture), where `ar3`'s checkmarks raised
+  `UnicodeEncodeError`. `ar3`, `a8s`, `r4t` and `k7e`'s entry points now
+  guard `sys.stdout` with `errors="backslashreplace"` — mypy's own pattern,
+  `isinstance(..., TextIOWrapper) and .errors == "strict"` — so an
+  unencodable glyph is escaped losslessly instead of crashing the process;
+  stderr is untouched, since its default handler is already
+  `backslashreplace`. Confirmed against a full a8s filedrop loop on the
+  reporting machine.
+- **`codex exec resume` takes no `--sandbox`.** Every codex continuation — a
+  roster member with `Continue: on` and `r4t engine codex run --continue`
+  alike — composed an argv codex refuses to parse ("unexpected argument
+  '--sandbox' found", codex-cli 0.147.0). The flag now comes out when the turn
+  resumes.
+- **Shipped presets drifted from the installed CLIs (#162).** `codex exec
+  --full-auto` no longer parses on codex-cli 0.147.0 — `r4t engine codex run`
+  and any `codex`/`ollama-codex` rig now pass `--sandbox workspace-write`
+  instead, the argv `codex exec` needs since it hard-codes approval policy to
+  `never`. `apps/a8s/definitions/opencode.json` and `ollama-opencode.json`
+  carried `--dangerously-skip-permissions`, a claude-only flag opencode's
+  lenient parser silently ignores — those agents ran with auto-approval off;
+  both now pass opencode's own `--auto`. `apps/a8s/definitions/copilot.json`
+  dropped the machine-global `--continue` that #17 ruled against. Five bundled
+  a8s definitions (`codex.json`, `cursor.json`, `agy.json`, `opencode.json`,
+  `ollama-opencode.json`) resumed the previous conversation unconditionally on
+  every wake, against #155's fresh-session ruling; none of the bundled
+  definitions resume now.
+
+### Changed
+- **The opacity principle is stated in [`docs/a8s.md`](docs/a8s.md).** A
+  recipient name is a claim, not a lookup: only a local-only cluster rejects
+  an unknown name at send time; with any remote configured, no sender can know
+  whether a name resolves anywhere. Exit 0 means the envelope entered the
+  network — evidence of delivery is a reply or `a8s trace`.
+
+## [0.1.67]
 
 ### Added
 - **The suite doctrine lands as [`docs/ark.md`](docs/ark.md).** One doctrine for

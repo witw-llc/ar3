@@ -1,9 +1,8 @@
 {
-  "description": "GitHub Copilot CLI default — --allow-all-tools (required for non-interactive --prompt mode), resumes most recent session.",
+  "description": "GitHub Copilot CLI default — --allow-all-tools (required for non-interactive --prompt mode). No --continue: it is machine-global, not per-agent (#17).",
   "invoke": [
     "copilot",
     "--allow-all-tools",
-    "--continue",
     "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

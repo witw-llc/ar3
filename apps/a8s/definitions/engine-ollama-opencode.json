@@ -1,0 +1,44 @@
+{
+  "description": "OpenCode via `ollama launch`, as a bare stateless engine node — `r4t engine ollama-opencode run`, one headless turn per wake with no roster or dispatcher, local model, no cloud quota; STATUS.md/LESSONS.md in the node's own root are its only memory. Requires a8s var MODEL (`a8s add ... --model=...` or `a8s vars <name> set MODEL ...`); tune it further with --permissions on the invoke lines below; `r4t engine ollama-opencode check` proves the argv still parses.",
+  "invoke": [
+    "python3",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "ollama-opencode",
+    "run",
+    "--agent",
+    "$RECIPIENT",
+    "--model",
+    "$MODEL",
+    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "ollama-opencode",
+      "run",
+      "--agent",
+      "$RECIPIENT",
+      "--model",
+      "$MODEL"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "python3",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "ollama-opencode",
+      "run",
+      "--idle",
+      "--agent",
+      "$RECIPIENT",
+      "--model",
+      "$MODEL"
+    ]
+  }
+}

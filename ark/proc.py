@@ -25,14 +25,67 @@ import time
 from pathlib import Path
 
 
-def spawn(argv: list[str], *, cwd: Path | str, stdin_devnull: bool = True) -> subprocess.Popen:
-    """Start `argv` in its own process group on POSIX."""
+def spawn(
+    argv: list[str],
+    *,
+    cwd: Path | str,
+    stdin_devnull: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen:
+    """Start `argv` in its own process group on POSIX. `env` is the child's
+    WHOLE environment when given, the way `subprocess` reads it — a caller
+    adding one variable passes `{**os.environ, ...}`; None inherits."""
     return subprocess.Popen(
         argv,
         cwd=str(cwd),
         stdin=subprocess.DEVNULL if stdin_devnull else None,
         start_new_session=(os.name == "posix"),
+        env=env,
     )
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether `pid` names a live process, without disturbing it.
+
+    On Windows, signal 0 IS `CTRL_C_EVENT` — not a probe CPython declined to
+    add (bpo-14480, rejected). `os.kill(pid, 0)` used to be able to
+    terminate the target anyway: a thirteen-year-old bug (bpo-14484 /
+    gh-128932, fixed 2025-01-17, backported to 3.12/3.13) let a failed
+    `GenerateConsoleCtrlEvent` fall through into `OpenProcess` +
+    `TerminateProcess` instead of returning. Ask the kernel directly
+    instead: `OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION)`,
+    then `WaitForSingleObject(handle, 0)` — `GetExitCodeProcess` alone can't
+    tell a running process from one that exited with code 259
+    (`STILL_ACTIVE`). A NULL handle from `OpenProcess` reads as dead only for
+    `ERROR_INVALID_PARAMETER`; any other error (including access denied)
+    reads as alive, mirroring the POSIX branch's `PermissionError` → True."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        ERROR_INVALID_PARAMETER = 87
+        WAIT_TIMEOUT = 0x102
+
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+        )
+        if not handle:
+            return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def _signal_pgid(pgid: int, pid: int, sig: int) -> None:

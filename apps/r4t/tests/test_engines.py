@@ -29,7 +29,7 @@ class TestResolution:
     def test_only_the_verified_engines_also_answer_for_run(self):
         run_engines = {"claude", "codex", "agy", "copilot", "cursor", "opencode"}
         for name in engines.MODULES:
-            expected = ["quota", "run"] if name in run_engines else ["quota"]
+            expected = ["quota", "run", "check"] if name in run_engines else ["quota"]
             assert engines.capabilities(name) == expected
 
     def test_capability_resolves_through_presets(self):

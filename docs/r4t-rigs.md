@@ -27,6 +27,89 @@ r4t rig remove worker                 # drop a rig (alias: rm)
 if a roster member or pin still references the rig, naming what does; pass
 `--force` to remove anyway.
 
+## `rig run` — one headless turn as a rig
+
+```bash
+r4t rig run ark-eng "summarize what changed on this branch"
+r4t rig run ark-eng --dir ~/work/proj --agent my-node --wait "check the deploy"
+r4t rig run cheap --idle          # the quiet-tick consolidation pass
+```
+
+```
+r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M]
+                  [--agent NAME] [--timeout S] [--no-scaffold] [--idle]
+                  [--echo] [--lessons-cap N] [--continue]
+                  [--permissions MODE] [--allowed-tools SPEC]
+                  [--rig-config PATH] [--] PROMPT
+```
+
+Same turn as [`r4t engine <id> run`](r4t-engine.md) — the same preset table,
+the same smart cold-boot scaffold, the same `--idle` latch, the same
+`LESSONS.md` rotation, the same exit code (the CLI's own, 124 on a timeout
+kill) and the same stdout, which stays the engine's own reply stream byte for
+byte. `engine` is the bare metal; `rig` is that engine with the rig's tuning
+already on it and the rig's budget in front of it. No roster and no
+`ROSTER.md` are involved either way.
+
+**What the rig supplies.** The `preset` is the engine, and it must be one the
+`run` verb supports (a rig with no preset, or one riding `ollama` /
+`ollama-copilot`, is refused with the engines that can). On top of it the rig
+supplies `model`, `permissions`, `allowed_tools`, `timeout_seconds` and the
+`env` map. **Precedence is flag > rig > preset**: a per-invocation flag wins,
+then the rig's own key, then unset — which is the preset's own flags, byte for
+byte. `--echo` prints the composed argv so the resolution is readable in one
+command.
+
+Three things the rig carries that this verb does not read, each for a reason
+worth knowing:
+
+- **`invoke`** — the argv is recomposed from the rig's `preset` rather than
+  replayed from its stored array, so a hand-edited invoke or a rotation pool
+  does not reach the turn. The model is the one value read back out of the
+  array, since only the live-resolver presets record `model` as a setting.
+- **`echo` / `echo_max_chars`** — those stage a member's stdout as a reply to
+  whoever sent the message. A bare turn has no sender and no staging outbox;
+  its stdout goes to the caller's terminal. (`--echo` on this verb is the
+  engine layer's own flag: print the argv, then run.)
+- **`mcp`** — the `a8s_tell` idioms write their config beside a member's
+  per-turn staging outbox, which only a dispatched turn has.
+
+There is **no rig-level continue key**, deliberately. The preset declares
+whether a CLI can resume at all and a roster member declares whether it
+should; a third setting between them would have to lose to the member flag
+every time the two disagreed. Continuation stays a per-invocation
+`--continue`, and `--idle --continue` is refused here exactly as it is on
+`engine run`.
+
+### The budget gate
+
+A rig that declares `rig_budget_max` / `rig_budget_earn_per_hour` charges its
+[machine-global bucket](#the-economics-budgets-not-cuts) one unit per turn —
+the same bucket, the same charge, and the same refill arithmetic dispatch
+uses, so a roster and a bare `rig run` on the same rig spend one subscription
+between them. A rig with neither key runs immediately with no gate at all,
+which is bare-metal parity.
+
+When the bucket holds less than one turn:
+
+- **Default: refuse.** Nothing runs, nothing is charged, and stderr names the
+  level, the wait until one turn is back, and both flags below. The exit code
+  is 1, since [ark.md](ark.md) reserves exit-code meanings to the foundation;
+  `--json`'s `reason` is `resting`, which is how a caller tells a rig that
+  needs retrying later from a turn that failed.
+- **`--wait`** holds for the refill and then runs. One stderr line states the
+  wait up front; the poll after it is silent. The bucket is machine-global, so
+  another process finishing early ends the wait early.
+- **`--now`** is the ripcord: run regardless. The turn still charges, and
+  since the charge clamps at zero the bucket rests at its floor rather than
+  going into debt.
+
+`--json` prints one JSON object to **stderr** — stdout belongs to the engine —
+carrying `rig`, `engine`, `dir`, `ran`, `reason` (`ran`, `resting`,
+`idle-latched`, `usage`, `error`), `exit_code`, and `budget`: `null` on an
+ungated rig, else `max`, `earn_per_hour`, `level_before`, `level_after`,
+`waited_seconds`, `forced`, plus `seconds_until` on a refusal.
+
 ## Continuing a conversation
 
 A member with `- **Continue:** on` in the roster runs its turns inside its
@@ -174,7 +257,8 @@ other r4t preset, agy is trusted with normal filesystem permissions.
 Rig settings never need hand-edited JSON. The configurable keys are
 `concurrency`, `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
 `history_max_bytes` / `history_body_max` / `prompt_body_max`, `model`, `mcp`,
-the echo keys `echo` / `echo_max_chars`, and `env.<NAME>` for a
+the echo keys `echo` / `echo_max_chars`, the harness stance keys
+`permissions` / `allowed_tools`, and `env.<NAME>` for a
 [harness env knob](#harness-env-knobs-env)
 (each detailed in the [knob table](#governance-knobs) below).
 
@@ -205,6 +289,36 @@ recorded preset, exactly like `rig add --model` (agy keeps its live fuzzy match
 per turn). A rig with no recorded preset errors, pointing at
 `r4t rig swap <rig> <preset> --model ...`. Raw `invoke` arrays are never
 exposed through this surface; use `rig add`/`swap` to change the harness.
+
+## Permission stance and tool allowlist (`permissions` / `allowed_tools`)
+
+```bash
+r4t rig set ark-eng permissions bypass
+r4t rig set ark-eng allowed_tools "Bash(git:*) Bash(gh:*) Read Edit Write"
+```
+
+`permissions` takes `ask`, `auto` or `bypass` — the Ark's three words for a
+stance each CLI spells its own way. r4t translates the word into the harness's
+own flags for every turn on the rig; the table, the asymmetry rule (a mode
+below the engine's floor errors, one above its ceiling proceeds with a note),
+and what `bypass` costs per engine are in
+[r4t-engine.md](r4t-engine.md#the-three-translated-parameters). Unset is the
+preset's own flags, byte for byte.
+
+`allowed_tools` is the engine's own allowlist string, replacing the preset's
+list. claude's preset ships a deliberately narrow one, so a rig whose members
+develop a repo sets `git` and `gh` here; only claude and `ollama-claude` take
+an allowlist per invocation, and the rest error with the reason.
+
+Both keys survive `rig swap` — and are re-validated against the incoming
+preset, so a swap onto a harness that cannot express the stance is refused
+rather than silently dropped.
+
+**Neither is a roster field, deliberately.** A rig lives out-of-repo in
+`~/.config/r4t/rigs.json`, and `ROSTER.md` may only NAME a rig. A member
+editing the repo therefore cannot raise its own permissions — the same
+boundary [r4t-security.md](r4t-security.md) draws for argv. Choosing the rig
+is choosing the stance, and `r4t rig get <rig> permissions` says what it is.
 
 ## Echo rigs
 
@@ -326,6 +440,8 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
 | `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo) and for agy / bare ollama (no per-turn idiom) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on agy and bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
+| `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance that lives out-of-repo, where a member editing ROSTER.md cannot raise it |
+| `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
 | `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |

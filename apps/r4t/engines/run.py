@@ -28,9 +28,22 @@ import shlex
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from rig import DEFAULT_TIMEOUT_SECONDS, HARNESS_PRESETS, RigError, build_preset_invoke, resolve_agy_model
+from rig import (
+    DEFAULT_TIMEOUT_SECONDS,
+    HARNESS_PRESETS,
+    PERMISSION_MODES,
+    RigError,
+    apply_allowed_tools,
+    apply_permissions,
+    build_preset_invoke,
+    continue_presets,
+    continue_unsupported_reason,
+    resolve_agy_model,
+    splice_continue,
+)
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
 # into a container with no repo root, so `ark` is not always reachable there.
@@ -47,10 +60,12 @@ except ImportError:
 try:
     from ark.proc import spawn as _proc_spawn, terminate_group as _terminate_group
 except ImportError:
-    def _proc_spawn(argv: list[str], *, cwd: Path) -> subprocess.Popen:
+    def _proc_spawn(
+        argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
+    ) -> subprocess.Popen:
         return subprocess.Popen(
             argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-            start_new_session=(os.name == "posix"),
+            start_new_session=(os.name == "posix"), env=env,
         )
 
     def _terminate_group(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
@@ -81,6 +96,7 @@ except ImportError:
 
 __all__ = [
     "RUN_ENGINES",
+    "PERMISSION_MODES",
     "DEFAULT_TIMEOUT_SECONDS",
     "IDLE_MARKER_NAME",
     "LESSONS_CAP_LINES",
@@ -199,18 +215,50 @@ def _run_extras(engine: str, base_invoke: list[str], timeout: int) -> list[str]:
     return extras
 
 
+def _splice_continue(engine: str, argv: list[str]) -> list[str]:
+    """The preset's own continuation tokens at its own anchor — the roster
+    path's rule (`Rig.argv`), applied to a roster-less turn. An engine with no
+    verified continuation, or an anchor its invoke no longer carries, fails
+    closed and names the engines that can, because a turn that silently starts
+    cold when the caller asked to continue is the failure that costs a whole
+    context reload."""
+    preset = HARNESS_PRESETS[engine]
+    tokens = list(preset.get("continue_argv", ()))
+    anchor = preset.get("continue_anchor")
+    if not tokens or (anchor is not None and anchor not in argv):
+        raise RunError(
+            f"{engine} cannot continue: {continue_unsupported_reason(engine)} "
+            f"(engines that can: "
+            f"{', '.join(e for e in continue_presets() if e in RUN_ENGINES)})"
+        )
+    return splice_continue(
+        argv,
+        tokens=tokens,
+        anchor=anchor,
+        drop_pair=preset.get("continue_drop_pair", ()),
+    )
+
+
 def _build_argv_template(
-    engine: str, *, model: str | None, timeout: int, workdir: Path
-) -> list[str]:
-    """The final argv for one turn with `{prompt}` still unsubstituted: the
-    preset's own composition (rig.build_preset_invoke — the one source of
-    argv truth) plus this module's unattended-turn additions, with
-    `{workdir}` substituted — opencode and ollama-opencode carry `--dir
-    {workdir}`. `{prompt}` is left as a literal placeholder so a caller that
-    only wants to display the argv (`--echo`) never has to guess which
-    element was the prompt — value-matching a prompt equal to some other
-    argv element (e.g. an engine literally named "claude") would otherwise
-    elide the wrong one."""
+    engine: str,
+    *,
+    model: str | None,
+    timeout: int,
+    workdir: Path,
+    continue_conversation: bool = False,
+    permissions: str | None = None,
+    allowed_tools: str | None = None,
+) -> tuple[list[str], str | None]:
+    """The final argv for one turn with `{prompt}` still unsubstituted, plus
+    the one stderr note a requested permissions mode earns: the preset's own
+    composition (rig.build_preset_invoke — the one source of argv truth), the
+    permission/allowlist translation the caller asked for, this module's
+    unattended-turn additions, and `{workdir}` substituted — opencode and
+    ollama-opencode carry `--dir {workdir}`. `{prompt}` is left as a literal
+    placeholder so a caller that only wants to display the argv (`--echo`)
+    never has to guess which element was the prompt — value-matching a prompt
+    equal to some other argv element (e.g. an engine literally named "claude")
+    would otherwise elide the wrong one."""
     if engine not in RUN_ENGINES:
         raise RunError(
             f"r4t engine run supports {', '.join(sorted(RUN_ENGINES))}, "
@@ -218,6 +266,8 @@ def _build_argv_template(
         )
     try:
         argv = build_preset_invoke(engine, model=model)
+        argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")
+        argv = apply_allowed_tools(argv, engine, allowed_tools, where="r4t engine: ")
     except RigError as exc:
         raise RunError(str(exc)) from exc
     if HARNESS_PRESETS[engine].get("model_resolver") == "agy-live" and "{model}" in argv:
@@ -226,17 +276,35 @@ def _build_argv_template(
         except RigError as exc:
             raise RunError(f"agy --model {model!r} did not resolve: {exc}") from exc
         argv = [resolved if a == "{model}" else a for a in argv]
+    if continue_conversation:
+        argv = _splice_continue(engine, argv)
     extras = _run_extras(engine, argv, timeout)
     argv = argv[:1] + extras + argv[1:]
-    return [str(workdir) if a == "{workdir}" else a for a in argv]
+    return [str(workdir) if a == "{workdir}" else a for a in argv], note
 
 
 def build_argv(
-    engine: str, prompt: str, *, model: str | None, timeout: int, workdir: Path
+    engine: str,
+    prompt: str,
+    *,
+    model: str | None,
+    timeout: int,
+    workdir: Path,
+    continue_conversation: bool = False,
+    permissions: str | None = None,
+    allowed_tools: str | None = None,
 ) -> list[str]:
     """The final, fully-substituted argv for one turn — `_build_argv_template`
     plus `{prompt}` substitution."""
-    template = _build_argv_template(engine, model=model, timeout=timeout, workdir=workdir)
+    template, _ = _build_argv_template(
+        engine,
+        model=model,
+        timeout=timeout,
+        workdir=workdir,
+        continue_conversation=continue_conversation,
+        permissions=permissions,
+        allowed_tools=allowed_tools,
+    )
     return [prompt if a == "{prompt}" else a for a in template]
 
 
@@ -253,14 +321,16 @@ def _print_echo(template: list[str], prompt: str) -> None:
     print("r4t engine echo: --- end prompt ---", file=sys.stderr)
 
 
-def _spawn(argv: list[str], cwd: Path, timeout: int) -> int:
+def _spawn(
+    argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
+) -> int:
     """Run `argv`, streaming its stdout/stderr through unchanged (no
     capture — the caller's fds are inherited). On timeout, terminate the
     whole process group (SIGTERM, a grace period, then SIGKILL): a harness
     CLI commonly forks tool subprocesses that `proc.kill()` alone would
     leak, and a grace period lets one that traps SIGTERM exit cleanly."""
     try:
-        proc = _proc_spawn(argv, cwd=cwd)
+        proc = _proc_spawn(argv, cwd=cwd, env=env)
     except OSError as exc:
         raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
     try:
@@ -284,17 +354,42 @@ def execute(
     scaffold: bool,
     echo: bool = False,
     lessons_cap: int = LESSONS_CAP_LINES,
+    continue_conversation: bool = False,
+    permissions: str | None = None,
+    allowed_tools: str | None = None,
+    env: dict[str, str] | None = None,
+    charge_hook: Callable[[], None] | None = None,
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
-    prompt to stderr before spawning — the turn still runs."""
+    prompt to stderr before spawning — the turn still runs. A requested
+    `permissions` mode the engine answers above the asked-for tier prints one
+    note; a mode below its floor never gets here (RunError). `env` is the
+    child's whole environment when given (None inherits this process's) —
+    `r4t rig run` passes the rig's `env` map layered over `os.environ`.
+    `charge_hook` runs after composition succeeds and immediately before the
+    spawn: a turn refused at composition costs the caller nothing, while a
+    harness that fails to start has already paid — the same boundary a
+    dispatched turn's budget draws."""
     if scaffold:
         rotate_lessons_if_oversized(dir_path, lessons_cap)
         prompt = scaffold_prompt(dir_path, message, agent=agent)
     else:
         prompt = message
-    template = _build_argv_template(engine, model=model, timeout=timeout, workdir=dir_path)
+    template, note = _build_argv_template(
+        engine,
+        model=model,
+        timeout=timeout,
+        workdir=dir_path,
+        continue_conversation=continue_conversation,
+        permissions=permissions,
+        allowed_tools=allowed_tools,
+    )
+    if note:
+        print(f"r4t engine: {note}", file=sys.stderr)
     if echo:
         _print_echo(template, prompt)
     argv = [prompt if a == "{prompt}" else a for a in template]
-    return _spawn(argv, dir_path, timeout)
+    if charge_hook is not None:
+        charge_hook()
+    return _spawn(argv, dir_path, timeout, env)

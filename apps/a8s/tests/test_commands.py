@@ -580,6 +580,38 @@ class TestCmdKillPerAgent:
         out = capsys.readouterr().out
         assert "not running" in out
 
+    def test_windows_without_sigusr1_skips_signal_and_falls_back_to_poll(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        """Windows has no SIGUSR1. cmd_kill must not try to send it — the
+        kill-request file it already wrote is the whole mechanism there, so
+        it should fall straight through to the poll-then-SIGTERM-escalation
+        path instead of crashing with AttributeError."""
+        d = tmp_path / "x"; d.mkdir()
+        save_registry({"claude": {"root": str(d)}})
+        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        pid_path("claude").write_text(str(os.getppid()))
+
+        monkeypatch.delattr(signal, "SIGUSR1", raising=False)
+        monkeypatch.setattr("commands.KILL_TIMEOUT_S", 0.2)
+        monkeypatch.setattr("commands.KILL_POLL_S", 0.05)
+
+        signaled = []
+        def fake_kill(pid, sig):
+            if sig == 0:
+                return  # liveness probe (_pid_alive) — not a real signal
+            signaled.append((pid, sig))
+        monkeypatch.setattr("commands.os.kill", fake_kill)
+        monkeypatch.setattr("daemon.os.kill", fake_kill)
+        monkeypatch.setattr("core.os.kill", fake_kill)
+
+        rc = cmd_kill(["claude"])
+        assert rc == 1
+        # Only the SIGTERM escalation was sent — no attempt at SIGUSR1.
+        assert signaled == [(os.getppid(), signal.SIGTERM)]
+        assert not kill_request_path("claude").is_file()
+        assert "did not honor kill" in capsys.readouterr().err
+
 
 class TestCmdStopAndRestart:
     def test_stop_waits_until_pid_gone(self, fake_home, tmp_path, monkeypatch, capsys):

@@ -1,5 +1,5 @@
 {
-  "description": "OpenCode via `ollama launch` — local models, no cloud quota. Requires a8s var MODEL (`a8s add ... --model=...` or `a8s vars <name> set MODEL ...`).",
+  "description": "OpenCode via `ollama launch` — local models, no cloud quota. Fresh session every wake; --auto for headless tool use. Requires a8s var MODEL (`a8s add ... --model=...` or `a8s vars <name> set MODEL ...`).",
   "invoke": [
     "ollama",
     "launch",
@@ -8,8 +8,7 @@
     "$MODEL",
     "--",
     "run",
-    "--continue",
-    "--dangerously-skip-permissions",
+    "--auto",
     "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

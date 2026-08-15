@@ -105,6 +105,47 @@ main() {
     echo "Added to $RC: $SOURCE_LINE"
   fi
 
+  # On Windows the rc line only reaches Git Bash shells. PowerShell and
+  # cmd.exe resolve the .cmd/.ps1 shims through the Windows user Path, so
+  # add the suite dir there too. Never setx (1024-char truncation, flattens
+  # the user/system split) and never a plain [Environment]::…("User") R/W
+  # either — that pair reads Path *expanded* and writes it back as REG_SZ,
+  # permanently flattening every %USERPROFILE%-style entry and downgrading
+  # its registry type on the very first install. Read HKCU\Environment raw
+  # (DoNotExpandEnvironmentNames), write back as REG_EXPAND_SZ, and broadcast
+  # WM_SETTINGCHANGE ourselves — the pattern rustup, scoop, uv/cargo-dist and
+  # winget all converged on independently.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1 && command -v powershell.exe >/dev/null 2>&1; then
+        AR3_WIN_DIR="$(cygpath -w "$AR3_DIR")"
+        export AR3_WIN_DIR
+        powershell.exe -NoProfile -Command '
+          $d = $env:AR3_WIN_DIR
+          $regPath = "registry::HKEY_CURRENT_USER\Environment"
+          $raw = (Get-Item -LiteralPath $regPath).GetValue("Path", "", "DoNotExpandEnvironmentNames")
+          $entries = $raw -split ";" -ne ""
+          if ($entries -contains $d) {
+            Write-Host "Windows user Path already has: $d"
+          } else {
+            $new = ($raw.TrimEnd(";") + ";" + $d).TrimStart(";")
+            Set-ItemProperty -Type ExpandString -LiteralPath $regPath Path $new
+            Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition "
+              [DllImport(`"user32.dll`", SetLastError = true, CharSet = CharSet.Auto)]
+              public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+            "
+            $result = [UIntPtr]::Zero
+            [Win32.NativeMethods]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+            Write-Host "Added to the Windows user Path: $d"
+          }' </dev/null
+        echo "PowerShell and cmd.exe pick it up in NEW windows (shims: a8s.cmd, a8s.ps1, ...)."
+      else
+        echo "Windows detected but cygpath or powershell.exe is missing —"
+        echo "add $AR3_DIR to the Windows user Path yourself for PowerShell/cmd."
+      fi
+    ;;
+  esac
+
   echo
   echo "Done. Open a new shell (or run the source line above), then:"
   echo "  $AR3_DIR/ar3 doctor"

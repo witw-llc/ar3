@@ -21,7 +21,7 @@ spine is the build order itself.
 
 | # | Chapter | Teaches | What you raise |
 |---|---------|---------|----------------|
-| 01 | [Hello, Agent](01-hello-agent.md) | a8s | `solo` — a thinking agent on your own hardware that answers what you tell it. |
+| 01 | [Hello, Agent](01-hello-agent.md) | r4t + a8s | `solo` — the agent instructions you already have, run through r4t's engine so they remember, and answering mail on a8s. |
 | 02 | [The Founding](02-the-founding.md) | r4t | solo joins a roster and becomes Wren: budgets, a queue, a persistent conversation, your seat. |
 | 03 | [The Long Memory](03-the-long-memory.md) | r4t | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
 | 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | r4t | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |

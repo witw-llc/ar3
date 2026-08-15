@@ -151,6 +151,207 @@ class TestBuildArgv:
         assert argv[-1] == "go"
 
 
+def argv_for(engine, **kwargs):
+    """Compose one engine's argv with the ollama launchers' required --model
+    supplied, so a test can name an engine without restating that rule."""
+    kwargs.setdefault("model", "qwen3.6" if engine.startswith("ollama-") else None)
+    kwargs.setdefault("timeout", 900)
+    kwargs.setdefault("workdir", Path("/w"))
+    return engine_run.build_argv(engine, "P", **kwargs)
+
+
+class TestContinueFlag:
+    CAN_CONTINUE = ["claude", "codex", "cursor", "opencode", "agy", "ollama-opencode"]
+    CANNOT = ["copilot", "ollama-claude", "ollama-codex"]
+
+    @pytest.mark.parametrize("engine", CAN_CONTINUE)
+    def test_continuing_engines_gain_their_own_tokens(self, engine):
+        plain = argv_for(engine)
+        argv = argv_for(engine, continue_conversation=True)
+        assert argv != plain
+        assert "P" in argv  # the prompt survives the splice
+
+    def test_flag_shaped_clis_append_at_the_end(self):
+        assert argv_for("claude", continue_conversation=True)[-2:] == ["P", "--continue"]
+        assert argv_for("agy", continue_conversation=True)[-1] == "--continue"
+
+    def test_codex_anchors_resume_after_exec_and_drops_the_sandbox_flag(self):
+        # `codex exec resume` is its own clap subcommand and rejects
+        # -s/--sandbox outright (verified against codex-cli 0.147.0), so the
+        # pair comes out rather than composing an argv the CLI refuses.
+        argv = argv_for("codex", continue_conversation=True)
+        assert argv[:4] == ["codex", "exec", "resume", "--last"]
+        assert "--sandbox" not in argv
+        assert "workspace-write" not in argv
+        assert "--skip-git-repo-check" in argv
+
+    def test_codex_bypass_survives_continuation(self):
+        argv = argv_for("codex", continue_conversation=True, permissions="bypass")
+        assert argv[:4] == ["codex", "exec", "resume", "--last"]
+        assert "--dangerously-bypass-approvals-and-sandbox" in argv
+
+    def test_opencode_keeps_its_workdir_and_gains_continue(self):
+        argv = argv_for("opencode", continue_conversation=True)
+        assert argv[argv.index("--dir") + 1] == "/w"
+        assert "--continue" in argv
+
+    @pytest.mark.parametrize("engine", CANNOT)
+    def test_unsupported_engine_errors_naming_the_engines_that_can(self, engine):
+        with pytest.raises(engine_run.RunError) as exc:
+            argv_for(engine, continue_conversation=True)
+        message = str(exc.value)
+        assert "cannot continue" in message
+        for able in ["claude", "codex", "cursor", "opencode"]:
+            assert able in message
+
+    def test_copilot_refusal_says_why(self):
+        # A user who sees `--continue` in `copilot --help` needs to know r4t
+        # refuses it on purpose, not that r4t is broken.
+        with pytest.raises(engine_run.RunError) as exc:
+            argv_for("copilot", continue_conversation=True)
+        assert "machine's most recent session" in str(exc.value)
+        assert "#17" in str(exc.value)
+
+    def test_anchor_missing_from_a_handedited_invoke_fails_closed(self, monkeypatch):
+        monkeypatch.setitem(
+            engine_run.HARNESS_PRESETS, "codex",
+            {**engine_run.HARNESS_PRESETS["codex"],
+             "invoke": ["codex", "--sandbox", "workspace-write", "{prompt}"]},
+        )
+        with pytest.raises(engine_run.RunError, match="cannot continue"):
+            argv_for("codex", continue_conversation=True)
+
+
+class TestPermissionsFlag:
+    def test_unset_is_byte_identical_to_the_preset(self):
+        for engine in sorted(engine_run.RUN_ENGINES):
+            assert argv_for(engine) == argv_for(engine, permissions=None)
+
+    def test_auto_is_where_the_presets_already_sit(self):
+        for engine in ["claude", "codex", "cursor", "opencode", "copilot"]:
+            assert argv_for(engine, permissions="auto") == argv_for(engine)
+
+    def test_claude_ask_drops_both_permission_flags(self):
+        argv = argv_for("claude", permissions="ask")
+        assert "--permission-mode" not in argv
+        assert "--allowedTools" not in argv
+        assert "dontAsk" not in argv
+        assert argv[-2:] == ["-p", "P"]
+
+    def test_claude_bypass_swaps_the_mode_and_keeps_the_allowlist(self):
+        argv = argv_for("claude", permissions="bypass")
+        assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+        assert "--allowedTools" in argv
+
+    def test_cursor_ask_drops_the_auto_approval_tokens(self):
+        argv = argv_for("cursor", permissions="ask")
+        for token in ("--trust", "--force", "--approve-mcps"):
+            assert token not in argv
+        assert argv[-1] == "P"
+
+    def test_opencode_ask_drops_auto(self):
+        argv = argv_for("opencode", permissions="ask")
+        assert "--auto" not in argv
+        assert argv[argv.index("--dir") + 1] == "/w"
+
+    def test_codex_bypass_replaces_the_sandbox_flag(self):
+        argv = argv_for("codex", permissions="bypass")
+        assert "--dangerously-bypass-approvals-and-sandbox" in argv
+        assert "--sandbox" not in argv
+        assert "workspace-write" not in argv
+
+    def test_copilot_bypass_widens_allow_all_tools(self):
+        argv = argv_for("copilot", permissions="bypass")
+        assert "--allow-all" in argv
+        assert "--allow-all-tools" not in argv
+
+    def test_ollama_launchers_translate_the_wrapped_engine(self):
+        argv = argv_for("ollama-claude", permissions="bypass")
+        assert argv[:3] == ["ollama", "launch", "claude"]
+        assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+        assert argv_for("ollama-opencode", permissions="ask").count("--auto") == 0
+        assert "--dangerously-bypass-approvals-and-sandbox" in argv_for(
+            "ollama-codex", permissions="bypass"
+        )
+
+    @pytest.mark.parametrize(
+        "engine,mode,reason",
+        [
+            ("codex", "ask", "approval policy"),
+            ("ollama-codex", "ask", "approval policy"),
+            ("copilot", "ask", "--allow-all-tools"),
+            ("agy", "ask", "auto-denies"),
+            ("agy", "auto", "auto-denies"),
+        ],
+    )
+    def test_below_the_floor_is_a_hard_error_with_the_reason(self, engine, mode, reason):
+        with pytest.raises(engine_run.RunError) as exc:
+            argv_for(engine, permissions=mode)
+        assert reason in str(exc.value)
+        assert mode in str(exc.value)
+
+    @pytest.mark.parametrize("engine", ["cursor", "opencode", "ollama-opencode"])
+    def test_above_the_ceiling_accepts_and_equals_auto(self, engine):
+        # Requesting a stronger mode than the engine offers is not a safety
+        # failure — the argv is the most permissive one available.
+        assert argv_for(engine, permissions="bypass") == argv_for(engine, permissions="auto")
+
+    @pytest.mark.parametrize("engine", ["cursor", "opencode"])
+    def test_the_ceiling_note_names_the_engine_and_its_strongest_mode(self, engine):
+        _, note = engine_run._build_argv_template(
+            engine, model=None, timeout=900, workdir=Path("/w"), permissions="bypass"
+        )
+        assert note == f"{engine}'s strongest mode is 'auto'; 'bypass' means the same here"
+
+    def test_codex_bypass_note_says_the_sandbox_goes_too(self):
+        _, note = engine_run._build_argv_template(
+            "codex", model=None, timeout=900, workdir=Path("/w"), permissions="bypass"
+        )
+        assert "drops the sandbox" in note
+
+    def test_no_note_when_the_mode_is_unset(self):
+        _, note = engine_run._build_argv_template(
+            "claude", model=None, timeout=900, workdir=Path("/w")
+        )
+        assert note is None
+
+    def test_unknown_mode_is_rejected(self):
+        with pytest.raises(engine_run.RunError, match="unknown permissions mode"):
+            argv_for("claude", permissions="yolo")
+
+
+class TestAllowedToolsFlag:
+    def test_claude_replaces_the_presets_list(self):
+        argv = argv_for("claude", allowed_tools="Bash(git:*) Read")
+        assert argv[argv.index("--allowedTools") + 1] == "Bash(git:*) Read"
+        assert "TodoWrite" not in " ".join(argv)
+
+    def test_ollama_claude_replaces_it_too(self):
+        argv = argv_for("ollama-claude", allowed_tools="Read")
+        assert argv[argv.index("--allowedTools") + 1] == "Read"
+
+    def test_ask_then_an_explicit_list_re_adds_the_flag(self):
+        argv = argv_for("claude", permissions="ask", allowed_tools="Read")
+        assert "--permission-mode" not in argv
+        assert argv[argv.index("--allowedTools") + 1] == "Read"
+
+    @pytest.mark.parametrize(
+        "engine,reason",
+        [
+            ("codex", "config.toml"),
+            ("cursor", "cli-config.json"),
+            ("opencode", "opencode.json"),
+            ("agy", "settings.json"),
+            ("copilot", "--allow-tool"),
+        ],
+    )
+    def test_unsupported_engines_error_with_the_reason(self, engine, reason):
+        with pytest.raises(engine_run.RunError) as exc:
+            argv_for(engine, allowed_tools="Read")
+        assert reason in str(exc.value)
+        assert "claude" in str(exc.value)  # names the engines that can
+
+
 class TestScaffold:
     def test_byte_stable_across_two_invocations_same_dir(self, tmp_path):
         first = engine_run.scaffold_prompt(tmp_path, "do the thing", agent="bob")
@@ -397,9 +598,9 @@ class TestExecuteAndSpawn:
 
 
 class TestCapabilities:
-    def test_run_engines_report_both_verbs(self):
+    def test_run_engines_report_every_verb(self):
         for name in engine_run.RUN_ENGINES:
-            assert engines.capabilities(name) == ["quota", "run"]
+            assert engines.capabilities(name) == ["quota", "run", "check"]
 
     def test_non_run_engines_report_only_quota(self):
         for name in engines.MODULES:
@@ -575,6 +776,84 @@ class TestEngineRunCli:
         )
         assert code == 0
         assert len(list(calls.iterdir())) == 1
+
+
+class TestEngineRunFlagsCli:
+    def test_idle_and_continue_contradict(self, tmp_path, capsys):
+        # #155 rule 4, enforced mechanically: an idle wake is a cold start.
+        assert engine_cli("claude", "run", "--dir", str(tmp_path), "--idle", "--continue") == 2
+        assert "idle" in capsys.readouterr().err
+        assert not (tmp_path / ".engine-idle").exists()  # the latch never armed
+
+    def test_continue_on_an_engine_that_cannot_exits_one(self, tmp_path, capsys):
+        assert engine_cli("copilot", "run", "--dir", str(tmp_path), "--continue", "go") == 1
+        assert "#17" in capsys.readouterr().err
+
+    def test_permissions_below_the_floor_exits_one(self, tmp_path, capsys):
+        assert engine_cli(
+            "agy", "run", "--dir", str(tmp_path), "--permissions", "auto", "go"
+        ) == 1
+        assert "auto-denies" in capsys.readouterr().err
+
+    def test_unknown_permissions_mode_is_refused_by_the_parser(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            engine_cli("claude", "run", "--dir", str(tmp_path), "--permissions", "yolo", "go")
+        assert exc.value.code == 2
+        assert "yolo" in capsys.readouterr().err
+
+    def test_echo_prints_the_final_composed_argv(self, tmp_path, monkeypatch, capsys):
+        # The composed argv is the whole diagnostic: a translation the caller
+        # cannot see is a translation the caller cannot debug.
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--no-scaffold", "--echo",
+            "--permissions", "bypass", "--allowed-tools", "Read Edit", "go",
+        )
+        argv_line = next(
+            line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("r4t engine echo: argv:")
+        )
+        assert "--permission-mode bypassPermissions" in argv_line
+        assert "'Read Edit'" in argv_line
+        assert "dontAsk" not in argv_line
+        # claude is not installed in CI; the composition is what is asserted.
+        assert code in (0, 1, 127)
+
+    def test_bypass_note_reaches_stderr_before_the_turn(self, tmp_path, monkeypatch):
+        import rig as rig_module
+
+        script, calls = fake_cli(tmp_path)
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "opencode",
+            {**rig_module.HARNESS_PRESETS["opencode"],
+             "invoke": [sys.executable, str(script), "run", "--auto", "{prompt}"]},
+        )
+        import io
+        err = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err)
+        code = engine_cli(
+            "opencode", "run", "--dir", str(tmp_path), "--no-scaffold",
+            "--permissions", "bypass", "go",
+        )
+        assert code == 0
+        assert len(list(calls.iterdir())) == 1  # the turn still ran
+        assert "opencode's strongest mode is 'auto'" in err.getvalue()
+
+    def test_continue_reaches_the_engine(self, tmp_path, monkeypatch):
+        import rig as rig_module
+
+        script, calls = fake_cli(tmp_path)
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--no-scaffold", "--continue", "go",
+        )
+        assert code == 0
+        [call] = sorted(calls.iterdir())
+        import json as jsonlib
+        assert jsonlib.loads(call.read_text()) == ["go", "--continue"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")

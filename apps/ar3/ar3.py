@@ -17,6 +17,7 @@ never go stale against a product's own resolution.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -43,6 +44,7 @@ except ImportError:
 
 from ark import deps as ark_deps  # noqa: E402
 from ark.home import app_home  # noqa: E402
+from ark.proc import pid_alive  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -147,13 +149,7 @@ def _live_pid(path: Path) -> int | None:
         pid = int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None
-    except OSError:
-        pass
-    return pid
+    return pid if pid_alive(pid) else None
 
 
 def a8s_rows() -> list[Row]:
@@ -499,4 +495,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # stderr already defaults to backslashreplace, so only stdout needs the
+    # floor — an unencodable glyph (e.g. on a redirected Windows console)
+    # gets a lossless, reversible escape instead of crashing the process.
+    # The isinstance/errors=="strict" guard is mypy's own (PR 18292): it
+    # never fires once a caller has set a deliberate error handler, and
+    # skips a replaced sys.stdout (e.g. io.StringIO under embedding) cleanly
+    # instead of raising AttributeError. Every --json path in the suite is
+    # ensure_ascii, so machine-readable output is unaffected either way.
+    if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.errors == "strict":
+        sys.stdout.reconfigure(errors="backslashreplace")
     sys.exit(main())

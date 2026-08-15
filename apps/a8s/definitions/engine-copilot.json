@@ -1,10 +1,10 @@
 {
-  "description": "Claude Code as a bare stateless engine node — `r4t engine claude run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Tune it with --permissions and --allowed-tools on the invoke lines below; `r4t engine claude check` proves the argv still parses.",
+  "description": "GitHub Copilot CLI as a bare stateless engine node \u2014 `r4t engine copilot run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Tune it with --permissions on the invoke lines below (no --continue: copilot's session is machine-global, not per-agent \u2014 #17); `r4t engine copilot check` proves the argv still parses.",
   "invoke": [
     "python3",
     "$A8S_DIR/../r4t/r4t.py",
     "engine",
-    "claude",
+    "copilot",
     "run",
     "--agent",
     "$RECIPIENT",
@@ -16,7 +16,7 @@
       "python3",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
-      "claude",
+      "copilot",
       "run",
       "--agent",
       "$RECIPIENT"
@@ -28,7 +28,7 @@
       "python3",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
-      "claude",
+      "copilot",
       "run",
       "--idle",
       "--agent",

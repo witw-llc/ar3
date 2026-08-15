@@ -1500,13 +1500,15 @@ KILL_POLL_S = 0.1
 
 
 def cmd_kill(args: list[str]) -> int:
-    """`a8s kill <name>` — per-agent force-detach. For each member, write
-    a kill-request file and SIGUSR1 the holder; the holder's iteration top
-    releases just that agent (and its SIGUSR1 handler kills any in-flight
-    wake subprocess group iff the current wake target matches), so siblings
-    keep running. Falls back to whole-process SIGTERM if the holder doesn't
-    honor the request within KILL_TIMEOUT_S — that's the only path that
-    still creates collateral, and it's the user's explicit force escalation."""
+    """`a8s kill <name>` — per-agent force-detach. For each member, write a
+    kill-request file and, on POSIX, SIGUSR1 the holder as a nudge. The
+    holder's iteration top is what actually acts — on every platform, not
+    only where the signal exists — releasing just that agent and killing
+    any in-flight wake subprocess group iff the current wake target
+    matches, so siblings keep running. Falls back to whole-process SIGTERM
+    if the holder doesn't honor the request within KILL_TIMEOUT_S — that's
+    the only path that still creates collateral, and it's the user's
+    explicit force escalation."""
     if len(args) != 1:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
@@ -1521,11 +1523,15 @@ def cmd_kill(args: list[str]) -> int:
             continue
         _write_kill_request(name, os.getpid())
         print(f"{name}: kill request → PID {holder}")
-        try:
-            os.kill(holder, signal.SIGUSR1)
-        except ProcessLookupError:
-            _clear_kill_request(name)
-            continue
+        if hasattr(signal, "SIGUSR1"):
+            try:
+                os.kill(holder, signal.SIGUSR1)
+            except ProcessLookupError:
+                _clear_kill_request(name)
+                continue
+        # Windows has no SIGUSR1 to nudge the holder immediately; the
+        # kill-request file above is still honored at its next iteration
+        # top, so the poll loop below is the whole mechanism there.
         deadline = time.time() + KILL_TIMEOUT_S
         released = False
         while time.time() < deadline:

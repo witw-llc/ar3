@@ -26,10 +26,11 @@ About 20 minutes. Nothing new to install.
 
 ## 4. The change
 
-Chapter 1's agent carries every sharp edge itself. Nothing bounds what it
-spends. A message that lands while it is mid-answer waits on nothing but
-luck. Every wake starts from zero, because there is nothing in `solo.json`
-that could hold a conversation open. r4t takes all of that off your hands —
+Chapter 1's agent rebuilds itself from its own notes on every wake. That is
+enough to remember and not enough to be governed: nothing bounds what it
+spends, a message that lands while it is mid-answer waits on nothing but
+luck, and no CLI conversation stays open from one turn to the next. r4t takes
+all of that off your hands —
 and it governs *rosters*, not lone agents, so the first move is to give the
 agent a roster to belong to.
 
@@ -91,16 +92,15 @@ Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
 ```
 
-The prose under Wren's heading does the job the seeded `prompt=` string does
-in chapter 1: it is the character the answers come out in. On a roster that
-string lives beside the name it belongs to, and r4t puts it in
-Wren's prompt at every turn.
+The prose under Wren's heading does the job `AGENTS.md` does in chapter 1: it
+is the character the answers come out in. On a roster that prose lives beside
+the name it belongs to, and r4t puts it in Wren's prompt at every turn.
 
 Four lines carry the rest of the weight. `Leader: yes` — external mail
 enters at Wren. `Rig: silo` — a symbolic name; what it runs comes next, from
 outside the repo. `Continue: on` — Wren's turns resume its CLI's own
-conversation instead of starting cold every wake, which is the edge chapter 1
-had no way to hold. `Workdir: agents/wren` — Wren gets its own subfolder, so
+conversation instead of starting cold every wake, which chapter 1's agent
+could only approximate by re-reading a file. `Workdir: agents/wren` — Wren gets its own subfolder, so
 its conversation and files never collide with a future member's.
 
 Now define the `silo` rig. Pick your path — and note that these two
@@ -124,9 +124,9 @@ Reference it from ROSTER.md: `- **Rig:** silo`
 set silo echo = true in /home/you/.config/r4t/rigs.json
 ```
 
-That `invoke:` line is the argv you typed into `solo.json` by hand in
-chapter 1. It is a rig now: named once, kept outside the repo, and available
-to every member who asks for it by name.
+That `invoke:` line is the argv `r4t engine ollama-opencode run` composed for
+you in chapter 1. It is a rig now: named once, kept outside the repo, and
+available to every member who asks for it by name.
 
 **Run** (subscription path)
 
@@ -157,8 +157,9 @@ only when you mean to. (`agent models` lists what your account can run.)
 `echo true` makes Wren **stdout-only**: its turn prompt carries no
 messaging doctrine, and whatever it prints becomes its one reply to you.
 That is the right shape for a roster of one — Wren has nobody to message but
-you — and it is the last two lines of chapter 1's `reply.sh` done for you:
-capture what the harness printed, send it to whoever asked. Without echo, a
+you — and it is the reply rule you wrote into chapter 1's `AGENTS.md` done
+for you: capture what the harness printed, send it to whoever asked. r4t does
+it from outside the turn, so a member cannot forget. Without echo, a
 member has to run `tell` itself, and prose answers under ~80 characters get
 discarded as terminal chrome. Chapter 4 lifts echo when the roster grows.
 
@@ -218,7 +219,7 @@ solo: stopped
 removed solo
 ```
 
-`~/ark/solo` and its two files stay on disk — only the registration went
+`~/ark/solo` and everything in it stays on disk — only the registration went
 away. The address is what moved: one name on the registry reaches a whole
 roster, and a roster can grow.
 
@@ -294,8 +295,8 @@ TIDEPOOL.
 ```
 
 Two processes, two wakes, one conversation. That continuity is what
-`Continue: on` buys, and it is the one thing chapter 1's agent could not do
-at any price.
+`Continue: on` buys, and it is the one thing chapter 1's agent could not do:
+solo re-read its own notes each wake, but it never resumed a conversation.
 
 ## 7. Break it
 

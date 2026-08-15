@@ -37,6 +37,7 @@ from rig import (
     knowledge_tier_bytes,
     load_rig_config,
     mcp_presets,
+    permission_ceiling_note,
     preset_names,
     remove_rig,
     resolve_agy_model,
@@ -483,9 +484,11 @@ class TestContinue:
         add_preset_rig(path, "worker", "codex")
         rig = load_rig_config(path).rigs["worker"]
         assert rig.continue_anchor == "exec"
+        # `codex exec resume` takes no -s/--sandbox — verified live against
+        # codex-cli 0.147.0, which answers "unexpected argument '--sandbox'
+        # found" — so the pair comes out when the turn resumes.
         assert rig.argv("hi", continue_conversation=True) == [
-            "codex", "exec", "resume", "--last",
-            "--full-auto", "--skip-git-repo-check", "hi",
+            "codex", "exec", "resume", "--last", "--skip-git-repo-check", "hi",
         ]
 
     def test_codex_continue_and_model_splice_in_the_right_order(self, tmp_path):
@@ -496,7 +499,7 @@ class TestContinue:
         rig = load_rig_config(path).rigs["worker"]
         assert rig.argv("hi", continue_conversation=True) == [
             "codex", "exec", "resume", "--last", "-m", "gpt-5",
-            "--full-auto", "--skip-git-repo-check", "hi",
+            "--skip-git-repo-check", "hi",
         ]
 
     def test_codex_founds_cold_without_a_detection_pattern(self, tmp_path):
@@ -1075,6 +1078,176 @@ class TestRemoveCLI:
             ["rig", "remove", "a", "--force", "--rig-config", str(path)]
         ) == 0
         assert "a" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestPermissionsRigKey:
+    """#160 — the rig is where an operational stance lives, and never the
+    roster: a repo edit must not be able to raise a member's permissions."""
+
+    def test_set_get_round_trip(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        s = rig_setting(path, "worker", "permissions")
+        assert (s.value, s.explicit, s.source) == (None, False, "from preset claude")
+        assert s.display() == "unset"
+        set_rig_value(path, "worker", "permissions", "bypass")
+        s = rig_setting(path, "worker", "permissions")
+        assert (s.value, s.explicit, s.source) == ("bypass", True, "explicit")
+        assert unset_rig_value(path, "worker", "permissions") is True
+        assert rig_setting(path, "worker", "permissions").value is None
+
+    def test_unset_leaves_the_preset_argv_byte_identical(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "claude-rig", "claude")
+        rig = load_rig_config(path).rigs["claude-rig"]
+        assert rig.argv("hi") == build_preset_invoke("claude")[:-1] + ["hi"]
+
+    @pytest.mark.parametrize(
+        "preset,mode,expected_in,expected_out",
+        [
+            ("claude", "ask", [], ["--permission-mode", "--allowedTools"]),
+            ("claude", "bypass", ["bypassPermissions"], ["dontAsk"]),
+            ("cursor", "ask", [], ["--trust", "--force", "--approve-mcps"]),
+            ("opencode", "ask", [], ["--auto"]),
+            ("codex", "bypass", ["--dangerously-bypass-approvals-and-sandbox"], ["--sandbox"]),
+            ("copilot", "bypass", ["--allow-all"], ["--allow-all-tools"]),
+        ],
+    )
+    def test_argv_carries_the_translation(
+        self, tmp_path, preset, mode, expected_in, expected_out
+    ):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", preset)
+        set_rig_value(path, "worker", "permissions", mode)
+        argv = load_rig_config(path).rigs["worker"].argv("hi")
+        for token in expected_in:
+            assert token in argv
+        for token in expected_out:
+            assert token not in argv
+        assert "hi" in argv
+
+    def test_a_mode_below_the_floor_is_refused_at_set_time(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "agy")
+        with pytest.raises(RigError) as exc:
+            set_rig_value(path, "worker", "permissions", "auto")
+        assert "worker" in str(exc.value)
+        assert "auto-denies" in str(exc.value)
+        assert "permissions" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+
+    def test_an_unknown_mode_is_refused(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", "claude")
+        with pytest.raises(RigError, match="unknown permissions mode"):
+            set_rig_value(path, "worker", "permissions", "yolo")
+
+    def test_a_hand_edited_impossible_mode_fails_the_rig_closed_by_name(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "preset": "agy",
+                "permissions": "ask",
+                "invoke": ["agy", "--print", "{prompt}"],
+            },
+        })
+        rig = load_rig_config(path).rigs["worker"]
+        assert "worker" in rig.error
+        assert "auto-denies" in rig.error
+
+    def test_the_ceiling_note_is_what_rig_set_prints(self, tmp_path):
+        assert permission_ceiling_note("opencode", "bypass") == (
+            "opencode's strongest mode is 'auto'; 'bypass' means the same here"
+        )
+        assert permission_ceiling_note("claude", "auto") is None
+        assert permission_ceiling_note("claude", None) is None
+
+    def test_a_rig_with_no_preset_cannot_carry_a_stance(self, tmp_path):
+        path = write_config(tmp_path, {
+            "custom": {"invoke": ["mycli", "{prompt}"], "permissions": "auto"},
+        })
+        rig = load_rig_config(path).rigs["custom"]
+        assert "custom" in rig.error
+        assert "no permission flags to translate" in rig.error
+
+
+class TestAllowedToolsRigKey:
+    """#136 — the claude preset's allowlist was the one knob with no override,
+    so the AR3 rigs carried hand edits that `rig swap`/`add` reverted."""
+
+    def test_set_get_round_trip_and_argv_effect(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "ark-eng", "claude")
+        set_rig_value(path, "ark-eng", "allowed_tools", "Bash(git:*) Bash(gh:*) Read Edit")
+        s = rig_setting(path, "ark-eng", "allowed_tools")
+        assert (s.value, s.explicit) == ("Bash(git:*) Bash(gh:*) Read Edit", True)
+        argv = load_rig_config(path).rigs["ark-eng"].argv("hi")
+        assert argv[argv.index("--allowedTools") + 1] == "Bash(git:*) Bash(gh:*) Read Edit"
+        assert "TodoWrite" not in " ".join(argv)
+
+    def test_it_survives_rig_swap(self, tmp_path):
+        # The #136 reproduction: the hand edit used to vanish on the next swap.
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "ark-lead", "claude")
+        set_rig_value(path, "ark-lead", "allowed_tools", "Bash(git:*) Read")
+        set_rig_value(path, "ark-lead", "permissions", "bypass")
+        swap_preset_rig(path, "ark-lead", "ollama-claude", model="qwen3.6")
+        rig = load_rig_config(path).rigs["ark-lead"]
+        assert (rig.allowed_tools, rig.permissions, rig.error) == (
+            "Bash(git:*) Read", "bypass", None
+        )
+        argv = rig.argv("hi")
+        assert argv[argv.index("--allowedTools") + 1] == "Bash(git:*) Read"
+        assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+
+    def test_swapping_onto_a_harness_that_cannot_express_it_is_refused(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "ark-lead", "claude")
+        set_rig_value(path, "ark-lead", "allowed_tools", "Read")
+        with pytest.raises(RigError) as exc:
+            swap_preset_rig(path, "ark-lead", "cursor")
+        assert "ark-lead" in str(exc.value)
+        assert "cli-config.json" in str(exc.value)
+        # Nothing was written: the rig still runs claude.
+        assert load_rig_config(path).rigs["ark-lead"].preset == "claude"
+
+    @pytest.mark.parametrize("preset", ["codex", "cursor", "opencode", "agy", "copilot"])
+    def test_unsupported_presets_refuse_it_at_set_time(self, tmp_path, preset):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "worker", preset)
+        with pytest.raises(RigError) as exc:
+            set_rig_value(path, "worker", "allowed_tools", "Read")
+        assert "worker" in str(exc.value)
+        assert "claude" in str(exc.value)  # names the engines that can
+
+    def test_a_hand_edited_unsupported_allowlist_fails_the_rig_closed(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "preset": "opencode",
+                "allowed_tools": "Read",
+                "invoke": ["opencode", "run", "--auto", "{prompt}"],
+            },
+        })
+        rig = load_rig_config(path).rigs["worker"]
+        assert "worker" in rig.error and "opencode.json" in rig.error
+
+    def test_a_non_string_value_fails_the_rig_closed(self, tmp_path):
+        path = write_config(tmp_path, {
+            "worker": {
+                "preset": "claude",
+                "allowed_tools": 7,
+                "invoke": ["claude", "-p", "{prompt}"],
+            },
+        })
+        assert "expected a string" in load_rig_config(path).rigs["worker"].error
+
+
+class TestOverridePrecedence:
+    def test_the_flag_wins_then_the_rig_then_the_preset(self):
+        # One rule for both keys: a per-invocation value beats the rig's, the
+        # rig's beats the preset's own flags, and unset everywhere is the
+        # preset's argv untouched.
+        assert rig_module.resolve_override("ask", "bypass") == "ask"
+        assert rig_module.resolve_override(None, "bypass") == "bypass"
+        assert rig_module.resolve_override(None, None) is None
 
 
 class TestRigSettingsCore:

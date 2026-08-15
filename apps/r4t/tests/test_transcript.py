@@ -163,8 +163,11 @@ class TestPresets:
         from rig import HARNESS_PRESETS
 
         for name, preset in HARNESS_PRESETS.items():
+            # continue_argv/anchor/drop_pair are spellings — WHERE the tokens
+            # go and which flag the resume subcommand refuses — not gates on
+            # WHETHER a member continues.
             gates = [k for k in preset if k.startswith("continue_") and k not in
-                     ("continue_argv", "continue_anchor")]
+                     ("continue_argv", "continue_anchor", "continue_drop_pair")]
             assert not gates, f"{name} carries continuation gates: {gates}"
 
     def test_the_claude_preset_stabilizes_its_prefix(self):
