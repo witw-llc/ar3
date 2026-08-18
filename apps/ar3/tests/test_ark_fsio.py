@@ -1,4 +1,4 @@
-"""Tests for the shared atomic-write primitive — The Ark's foundation layer."""
+"""Tests for the shared atomic-write primitive — ar3's foundation layer."""
 from __future__ import annotations
 
 import os

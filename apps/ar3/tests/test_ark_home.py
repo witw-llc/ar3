@@ -1,4 +1,4 @@
-"""Tests for the shared config-home resolver — The Ark's foundation layer.
+"""Tests for the shared config-home resolver — ar3's foundation layer.
 
 One `app_home` resolves state roots for every product (A8S_HOME / R4T_HOME /
 K7E_HOME all call through it). a8s alone carries a `legacy` fallback for its

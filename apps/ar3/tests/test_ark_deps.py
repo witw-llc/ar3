@@ -1,4 +1,4 @@
-"""Tests for the on-demand heavy-dependency mechanism — The Ark's tier-2
+"""Tests for the on-demand heavy-dependency mechanism — ar3's tier-2
 dependency foundation.
 
 `ark.deps` fetches boto3/textual-class packages into per-interpreter

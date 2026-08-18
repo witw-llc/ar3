@@ -78,7 +78,7 @@ cat >/etc/r4t-org/r4t-org.json <<'EOF'
 EOF
 cat >/etc/r4t-rigs.json <<'EOF'
 {
-  "throttle": { "max_concurrent": 0, "min_seconds_between_turn_starts": 0 },
+  "throttle": { "min_seconds_between_turn_starts": 0 },
   "cell_budget_max": 100, "cell_budget_earn_per_hour": 100,
   "solo": {
     "invoke": ["python3", "/opt/r4t/tests/docker/member.py", "{prompt}"],

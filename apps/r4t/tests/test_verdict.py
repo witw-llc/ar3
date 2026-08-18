@@ -6,7 +6,6 @@ import time
 import pytest
 
 import state
-import tasks
 import verdict
 from rig import load_rig_config
 from roster import load_roster
@@ -68,21 +67,12 @@ class TestRollup:
         assert roll.routine_total == 0 and roll.signal_total == 0
 
 
-class TestSeatVerdict:
-    def test_unread_waits_on_you(self, r4t_home, roster, config):
-        state.park_seat_message(NODE, "Neil", "acme:gerry", "look at this")
+class TestNoSeatVerdict:
+    def test_nothing_waits_on_the_operator(self, r4t_home, roster, config):
+        # The seat retired: no verdict speaks about mail parked for a human.
         verdicts = verdict.roster_verdicts(NODE, roster, config)
-        bad = by_level(verdicts, verdict.BAD)
-        assert any("waiting on YOU" in v.text for v in bad)
-        assert any("seat inbox" in (v.hint or "") for v in bad)
-
-    def test_quiet_seat_is_ok(self, r4t_home, roster, config):
-        verdicts = verdict.roster_verdicts(NODE, roster, config)
-        assert any("nothing waiting on you" in v.text for v in verdicts)
-
-    def test_no_roster_skips_seat(self, r4t_home):
-        verdicts = verdict.roster_verdicts(NODE, None, None)
         assert "waiting on you" not in texts(verdicts)
+        assert "waiting on YOU" not in texts(verdicts)
 
 
 class TestRunawayVerdict:

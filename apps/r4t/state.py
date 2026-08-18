@@ -6,10 +6,15 @@ honors A8S_HOME).
     ├── agents/<name>/history.md   rolling conversation memory (messages only), ~8KB cap
     ├── agents/<name>/queue/       durable inbound queue — one envelope per file,
     │                              ULID-named; a turn drains the whole queue at once
+    ├── agents/<name>/queue/.inflight/  the batch a running turn claimed — moved,
+    │                              never deleted, so a SIGKILL mid-turn cannot
+    │                              lose it; an orphan with no live lock goes back
     ├── agents/<name>/.lock        PID lockfile — one turn per agent at a time
     ├── agents/<name>/.turn.json   in-flight turn: thread/hop/sender;
     │                              a leftover file with no live lock = crashed turn
-    ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping
+    ├── agents/<name>/meta.json    last inbound / last completed turn bookkeeping,
+    │                              plus the two fields the rotation needs:
+    │                              `passes` (turns passed over) and `parked`
     ├── agents/<name>/staging/     per-turn $TELL_OUTBOX_DIR — envelopes the agent
     │                              sent this turn, released by dispatch afterwards
     ├── agents/<name>/delivered/   per-turn bundles of inbound attachment copies
@@ -21,7 +26,12 @@ honors A8S_HOME).
     │                              (truncated at turn start; a gemba attach tails it)
     ├── agents/<name>/turns/       per-turn capture — one markdown file per turn
     │                              (full prompt + raw output; most recent 50 kept)
-    ├── tasks/<id>.json            thread ledger (see tasks.py)
+    ├── root                       the node directory `r4t add` registered
+    ├── runbook                    the runbook `r4t add` named, when it is not the
+    │                              node dir's own r4t.md (a built-in, or a path)
+    ├── trust                      this node's permission ceiling, raised only by
+    │                              `r4t add --trust` — the one thing a repo cannot
+    │                              write, which is the whole point of it
     ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
     ├── buckets.json               per-member + roster spend budgets (turns, not tokens)
     ├── rotation.json              per-rig round-robin index for harness pools
@@ -161,6 +171,56 @@ def read_root(node: str) -> Path | None:
     except OSError:
         return None
     return Path(text) if text else None
+
+
+def runbook_record_path(node: str) -> Path:
+    return roster_dir(node) / "runbook"
+
+
+def stamp_runbook(node: str, path: Path | None) -> None:
+    """Remember the runbook `r4t add` named, or forget it.
+
+    Only an out-of-repo runbook is recorded — a built-in, or a path somewhere
+    else on disk. A node whose own directory carries an `r4t.md` records
+    nothing, because that file is the answer and a second copy of the answer
+    is a second thing to keep true.
+    """
+    record = runbook_record_path(node)
+    if path is None:
+        record.unlink(missing_ok=True)
+        return
+    _atomic_write_text(record, str(path) + "\n")
+
+
+def read_runbook(node: str) -> Path | None:
+    try:
+        text = runbook_record_path(node).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(text) if text else None
+
+
+def trust_path(node: str) -> Path:
+    return roster_dir(node) / "trust"
+
+
+def stamp_trust(node: str, mode: str) -> None:
+    _atomic_write_text(trust_path(node), mode.strip().lower() + "\n")
+
+
+def read_trust(node: str) -> str | None:
+    """The permission ceiling an operator raised for this node, or None.
+
+    It lives here, out of the repo, for one reason: a runbook is checked in,
+    and a checked-in file that could raise its own ceiling would not be a
+    ceiling. Nothing r4t runs writes this — only `r4t add --trust`, typed by
+    a person.
+    """
+    try:
+        text = trust_path(node).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text.lower() or None
 
 
 def node_for_root(cwd: Path) -> str | None:
@@ -351,10 +411,6 @@ def admission_lock(node: str) -> ProcessLock:
     return ProcessLock(roster_dir(node) / ".admission.lock")
 
 
-def task_lock(node: str, task_id: str) -> ProcessLock:
-    return ProcessLock(roster_dir(node) / "tasks" / f".{task_id}.lock")
-
-
 def read_lock(path: Path) -> dict | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -473,11 +529,32 @@ def enqueue(node: str, name: str, envelope: dict) -> Path:
     return path
 
 
+def inflight_dir(node: str, name: str) -> Path:
+    return queue_dir(node, name) / ".inflight"
+
+
+def list_inflight(node: str, name: str) -> list[Path]:
+    d = inflight_dir(node, name)
+    if not d.is_dir():
+        return []
+    return sorted(f for f in d.iterdir() if f.is_file() and f.name.endswith(".json"))
+
+
 def claim_queue(node: str, name: str) -> list[dict]:
-    """Read and remove every currently-queued envelope in arrival order.
-    Called under the agent lock at turn start, so no two turns claim the same
-    batch; envelopes arriving mid-turn are written after this snapshot and
-    ride the next turn."""
+    """Move every currently-queued envelope into `queue/.inflight/` in arrival
+    order and return it. Called under the agent lock at turn start, so no two
+    turns claim the same batch; envelopes arriving mid-turn are written after
+    this snapshot and ride the next turn.
+
+    The claim MOVES rather than deletes, keeping the filename so arrival order
+    survives. A turn that ends — cleanly or not — either drops the in-flight
+    copies (`release_claim`) or returns them (`return_claim`). A turn that never
+    ends at all, because the process was killed, leaves them where
+    `recover_inflight` finds them. Deleting at claim time made a SIGKILL between
+    claim and completion lose the batch outright: `.turn.json` records counts
+    and thread ids, not bodies."""
+    d = inflight_dir(node, name)
+    d.mkdir(parents=True, exist_ok=True)
     entries: list[dict] = []
     for path in list_queue(node, name):
         try:
@@ -485,10 +562,57 @@ def claim_queue(node: str, name: str) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             path.unlink(missing_ok=True)
             continue
-        if isinstance(data, dict):
-            entries.append(data)
-        path.unlink(missing_ok=True)
+        if not isinstance(data, dict):
+            path.unlink(missing_ok=True)
+            continue
+        entries.append(data)
+        os.replace(path, d / path.name)
     return entries
+
+
+def release_claim(node: str, name: str) -> None:
+    """Drop the in-flight batch — the turn is over and its messages are spent."""
+    for path in list_inflight(node, name):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def return_claim(node: str, name: str) -> int:
+    """Move the in-flight batch back to the queue, names intact, so the next
+    turn sees the same envelopes in the same order. Returns how many moved.
+    A returned envelope keeps its id, so it does not re-trigger duplicate
+    collapse against whatever arrived while the turn ran."""
+    q = queue_dir(node, name)
+    q.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for path in list_inflight(node, name):
+        try:
+            os.replace(path, q / path.name)
+        except OSError:
+            continue
+        moved += 1
+    return moved
+
+
+def recover_inflight(node: str) -> list[tuple[str, int]]:
+    """Return every orphaned in-flight batch to its queue: the visibility
+    timeout, with the live PID lock as the liveness test. A member whose turn is
+    genuinely running holds its lock and is left alone. Returns (member, count)
+    for each recovery, so the caller can say what it found."""
+    agents_root = roster_dir(node) / "agents"
+    if not agents_root.is_dir():
+        return []
+    running = {lock["agent"] for lock in live_locks(node)}
+    out: list[tuple[str, int]] = []
+    for entry in sorted(agents_root.iterdir()):
+        if entry.name in running or not list_inflight(node, entry.name):
+            continue
+        moved = return_claim(node, entry.name)
+        if moved:
+            out.append((entry.name, moved))
+    return out
 
 
 def members_with_queue(node: str) -> list[str]:
@@ -497,107 +621,25 @@ def members_with_queue(node: str) -> list[str]:
         return []
     out: list[str] = []
     for entry in sorted(root.iterdir()):
-        q = entry / "queue"
-        if q.is_dir() and any(
-            f.is_file() and f.name.endswith(".json") for f in q.iterdir()
-        ):
+        if queue_depth(node, entry.name):
             out.append(entry.name)
     return out
-
-
-# ---------- seat (the roster human's mailbox on the node) ----------
-
-def seat_dir(node: str, name: str) -> Path:
-    return roster_dir(node) / "seat" / name.strip().lower()
-
-
-def seat_inbox_dir(node: str, name: str) -> Path:
-    return seat_dir(node, name) / "inbox"
-
-
-def seat_read_dir(node: str, name: str) -> Path:
-    return seat_dir(node, name) / "read"
-
-
-def park_seat_message(
-    node: str,
-    name: str,
-    sender: str,
-    content: str,
-    *,
-    files: list[dict] | None = None,
-    bundle: Path | None = None,
-) -> Path:
-    """Park one message in the human's seat inbox. When the envelope carried
-    attachments (`files` entries + the staged `bundle` dir), copy them into the
-    seat's own storage so they outlive the per-turn staging dir; the parked
-    JSON records filename + stored path for each."""
-    envelope = {
-        "id": new_ulid(),
-        "from": sender,
-        "to": name.strip().lower(),
-        "content": content,
-        "files": [],
-        "parked_at": utc_now(),
-    }
-    if files and bundle is not None:
-        store = seat_dir(node, name) / "files" / envelope["id"]
-        for entry in files:
-            src = bundle / str(entry.get("filename", ""))
-            if not src.is_file():
-                continue
-            store.mkdir(parents=True, exist_ok=True)
-            dest = store / src.name
-            shutil.copyfile(src, dest)
-            envelope["files"].append({"filename": src.name, "path": str(dest)})
-    path = seat_inbox_dir(node, name) / f"{envelope['id']}.json"
-    atomic_write_json(path, envelope)
-    return path
-
-
-def list_seat_messages(node: str, name: str, *, read: bool = False) -> list[Path]:
-    root = seat_read_dir(node, name) if read else seat_inbox_dir(node, name)
-    if not root.is_dir():
-        return []
-    return sorted(f for f in root.iterdir() if f.is_file() and f.name.endswith(".json"))
-
-
-def mark_seat_read(node: str, name: str, path: Path) -> Path:
-    dest_dir = seat_read_dir(node, name)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / path.name
-    path.rename(dest)
-    return dest
-
-
-def seat_presence_path(node: str, name: str) -> Path:
-    return seat_dir(node, name) / "presence"
-
-
-def touch_seat_presence(node: str, name: str) -> None:
-    p = seat_presence_path(node, name)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(p, str(os.getpid()))
-
-
-def clear_seat_presence(node: str, name: str) -> None:
-    try:
-        seat_presence_path(node, name).unlink()
-    except OSError:
-        pass
-
-
-def seat_attached(node: str, name: str) -> bool:
-    try:
-        pid = int(seat_presence_path(node, name).read_text().strip())
-    except (OSError, ValueError):
-        return False
-    return pid > 0 and _pid_alive(pid)
 
 
 # ---------- transcript log + velocity ----------
 
 def append_log(node: str, text: str) -> None:
+    """Append one archive entry to today's day file.
+
+    The day is UTC and stays UTC while every surface a human reads goes local.
+    The filename is a sort key, not a reading: `recent_log_lines` concatenates
+    `sorted(glob("*.md"))` and `prune_day_logs` string-compares those names, and
+    `org.py` supports a log directory shared between machines that are not in
+    one zone. Under local naming two machines would name the same wall moment
+    different days, sort order would stop being chronological order, and the
+    retention pass would delete a file still inside its window — with no error
+    anywhere. `r4t logs` prints a day header naming both zones instead.
+    """
     log_dir = roster_dir(node) / "log"
     log_dir.mkdir(parents=True, exist_ok=True)
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1177,6 +1219,49 @@ def breaker_open(
 
 def clear_failures(node: str, name: str) -> None:
     update_meta(node, name, consecutive_failures=0)
+
+
+# ---------- park (the breaker's third state, for failures that will recur) ----------
+#
+# The transient breaker probes forever, which is right for a timeout and wrong
+# for a harness binary that is not installed: nothing changes between probes, so
+# every probe fails identically and every failure speaks. PARKED is systemd's
+# `failed` — entered on the FIRST structural failure, left only when a probe that
+# costs nothing says the precondition holds, or by `r4t resume`. The member's
+# queue holds untouched the whole time, which is what makes parking safe.
+
+def read_parked(node: str, name: str) -> dict:
+    data = read_meta(node, name).get("parked")
+    return data if isinstance(data, dict) else {}
+
+
+def park_member(node: str, name: str, *, reason: str, rig: str, probe: str) -> dict:
+    """Park `name`, or leave an existing park untouched. Returns the park
+    record when this call created it and {} when the member was already
+    parked — the caller speaks exactly once per episode off that."""
+    if read_parked(node, name):
+        return {}
+    record = {"at": utc_now(), "reason": reason, "rig": rig, "probe": probe}
+    update_meta(node, name, parked=record)
+    return record
+
+
+def unpark_member(node: str, name: str) -> dict:
+    """Clear the park and return the record that was cleared ({} if none).
+    Failures are cleared with it: the structural cause is gone, so the count
+    that accumulated against it is not evidence about anything."""
+    record = read_parked(node, name)
+    if not record:
+        return {}
+    update_meta(node, name, parked=None, consecutive_failures=0)
+    return record
+
+
+def parked_members(node: str) -> list[str]:
+    agents_root = roster_dir(node) / "agents"
+    if not agents_root.is_dir():
+        return []
+    return [e.name for e in sorted(agents_root.iterdir()) if read_parked(node, e.name)]
 
 
 # ---------- per-agent meta (idle recovery bookkeeping) ----------

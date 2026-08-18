@@ -1,4 +1,4 @@
-"""One atomic-write primitive for every Ark app.
+"""One atomic-write primitive for every ar3 app.
 
 Writes to a same-directory temp file (a ULID-suffixed name, so concurrent
 writers targeting the same path never collide) and `os.replace`s it into

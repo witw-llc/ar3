@@ -22,7 +22,7 @@ spine is the build order itself.
 | # | Chapter | Teaches | What you raise |
 |---|---------|---------|----------------|
 | 01 | [Hello, Agent](01-hello-agent.md) | r4t + a8s | `solo` — the agent instructions you already have, run through r4t's engine so they remember, and answering mail on a8s. |
-| 02 | [The Founding](02-the-founding.md) | r4t | solo joins a roster and becomes Wren: budgets, a queue, a persistent conversation, your seat. |
+| 02 | [The Founding](02-the-founding.md) | r4t | solo joins a roster and becomes Wren: one runbook that says what the team is, a budget, a queue, a persistent conversation. |
 | 03 | [The Long Memory](03-the-long-memory.md) | r4t | Flush, refound, and rig portability — what Wren keeps when the conversation ends. |
 | 04 | [A Second Pair of Hands](04-a-second-pair-of-hands.md) | r4t | The roster grows to two: Wren delegates, Moss answers for free, budgets bite. |
 | 05 | [Nothing Learned Twice](05-nothing-learned-twice.md) | k7e | A knowledge store of your own: flat markdown, FTS5 search, distilled notes, a rebuildable index. |
@@ -30,13 +30,15 @@ spine is the build order itself.
 | 07+ | *(coming)* | r4t | Cells and missions — the roster grows a tree, and a `MISSION.md` it reviews itself against. |
 
 Each chapter costs about twenty minutes of your attention and hands back
-something you keep using afterwards.
+something you keep using afterwards: immediate value, but it starts with you
+turning the crank.
 
 ## Two blessed paths
 
 Every chapter is completable with **zero subscriptions** — that is the
-default path and the one every pasted output in these guides was captured
-on:
+default path, and the pasted output in chapters 2–6 was captured on it.
+(Chapter 1 is written around Claude Code and says so; its free-path variants
+are marked line by line.)
 
 - **Free path** — [OpenCode](https://opencode.ai/) driven through
   `ollama launch`, running a local model (`qwen3.6` in these guides). Your

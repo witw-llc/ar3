@@ -6,7 +6,7 @@ differ, `CLAUDE.md` wins for Claude sessions.
 
 ## What this repo is
 
-**The Ark** — a suite for governing a roster of AI CLI agents:
+**ar3** — a suite for governing a roster of AI CLI agents:
 
 | App | One line | Start at |
 |---|---|---|

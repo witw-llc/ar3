@@ -1,11 +1,9 @@
 # Sandbox Trio
 
-Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead answers human.
+Three-agent pipeline: Lead delegates → Dev builds → Tester verifies → Lead tells `human`.
 
-### Owner
-- **Human:** yes
-- **Address:** human
-- **Role:** Product owner
+`human` is an a8s agent outside the walls, not a member: the lead reaches it
+by ordinary egress.
 
 ### Lead
 - **Rig:** leader

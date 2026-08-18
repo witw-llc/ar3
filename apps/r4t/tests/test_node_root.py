@@ -144,12 +144,8 @@ def test_bare_status_resolves_from_workplace_cwd(
 
 AMBIGUOUS_ARGVS = [
     ["status"],
-    ["seat"],
-    ["seat", "send", "hello"],
-    ["seat", "inbox"],
-    ["chat", "--plain"],
+    ["tell", "--as", "gerry"],
     ["logs"],
-    ["task", "list"],
     ["clear"],
     ["idle"],
 ]
@@ -157,7 +153,7 @@ AMBIGUOUS_ARGVS = [
 
 @pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
 def test_ambiguous_roster_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
-    # The live hour-long stall: a scripted `r4t seat send` printed the
+    # The live hour-long stall: a scripted send printed the
     # pass-node hint but the pipeline read exit 0 (the pipe's last command
     # masked it). r4t's side of the contract is a hard non-zero exit from
     # EVERY command that resolves a node, so a plain (unpiped) invocation
@@ -165,7 +161,7 @@ def test_ambiguous_roster_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys,
     state.roster_dir("aaa").mkdir(parents=True)
     state.roster_dir("bbb").mkdir(parents=True)
     monkeypatch.chdir(tmp_path)  # no stamped root matches cwd
-    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
+    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] == "tell" else argv)
     assert rc == 2
     assert "pass --node" in capsys.readouterr().err
 
@@ -173,6 +169,6 @@ def test_ambiguous_roster_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys,
 @pytest.mark.parametrize("argv", AMBIGUOUS_ARGVS, ids=lambda a: " ".join(a))
 def test_no_rosters_exits_nonzero(r4t_home, tmp_path, monkeypatch, capsys, argv):
     monkeypatch.chdir(tmp_path)
-    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] in ("seat", "chat") else argv)
+    rc = r4t_main([*argv, "--simulate-tell"] if argv[0] == "tell" else argv)
     assert rc == 2
     assert "pass --node" in capsys.readouterr().err

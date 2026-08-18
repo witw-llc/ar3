@@ -6,6 +6,10 @@ What keeps a repo edit, or a lying message, from changing what runs.
   (`leader`, `member`, ...). Argv, timeouts, and limits live exclusively in
   the out-of-repo config — a repo edit can never change what runs. An
   unknown rig fails closed: that member does not run.
+- **The trust ceiling.** A runbook's `## Rigs` block *may* name a permission
+  stance, and the machine caps which one: `auto` until `r4t add <dir> --trust`
+  raises it for that node, re-checked every turn. Cloning a repo and
+  registering it is not a code-execution decision made silently.
 - **Pins.** `"pins": {"gerry": "leader"}` overrides the roster's Harness
   line silently — an in-repo edit can't upgrade a pinned agent.
 - **Out-of-repo state.** All r4t state lives under `~/.config/r4t/` (relocate

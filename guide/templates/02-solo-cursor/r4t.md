@@ -1,8 +1,15 @@
-# Roster
+---
+name: "silo"
+extends: "triforce"
+---
 
-### You
-- **Human:** yes
-- **Role:** Owner
+# silo
+
+## Mission
+
+Keep one small project moving, and answer the owner when he asks.
+
+## Roster
 
 ### Wren
 - **Rig:** silo
@@ -13,3 +20,7 @@
 
 Wren is a roster of one: leader, developer, and correspondent in a single
 seat. Keep answers short and concrete.
+
+## Rituals
+
+None yet.

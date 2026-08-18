@@ -65,13 +65,22 @@ _REMOTE_DIAGNOSTIC_INTERVAL_S = 300.0
 _REMOTE_DIAGNOSTIC_MAX_KEYS = 256
 
 
-def _remote_drop_diagnostic(
+def _remote_receive_diagnostic(
     msg_id: str,
     recipient: str,
     reason: str,
-    remote_id: str = "remote",
+    remote_id: str,
+    *,
+    event: txlog.Event,
+    prefix: str,
 ) -> None:
-    """Rate-limited shared-topic miss diagnostic; never includes content."""
+    """Rate-limited shared-topic receive diagnostic; never includes content.
+
+    NOT_LOCAL: the envelope resolved to no local agent on this node — a
+    normal outcome on a shared topic, since some other node owns delivery.
+    DROPPED is reserved for terminal paths where the message will not be
+    delivered by anyone; this helper never logs that event.
+    """
     key = (remote_id, reason, recipient.lower())
     now = time.monotonic()
     with _REMOTE_DIAGNOSTIC_LOCK:
@@ -82,13 +91,33 @@ def _remote_drop_diagnostic(
         if len(_REMOTE_DIAGNOSTIC_LAST) > _REMOTE_DIAGNOSTIC_MAX_KEYS:
             oldest = min(_REMOTE_DIAGNOSTIC_LAST, key=_REMOTE_DIAGNOSTIC_LAST.get)
             del _REMOTE_DIAGNOSTIC_LAST[oldest]
-    out(f"REMOTE_DROP id={msg_id} to={recipient!r} reason={reason}")
+    out(f"{prefix} id={msg_id} to={recipient!r} reason={reason}")
     txlog.log(
-        "DROPPED",
+        event,
         msg_id=msg_id,
         recipient=recipient,
         remote=remote_id,
         detail=reason,
+    )
+
+
+def _remote_not_local(
+    msg_id: str, recipient: str, reason: str, remote_id: str = "remote",
+) -> None:
+    """Envelope observed on a shared remote that resolves to no local agent
+    here. Not a failure — some other node on the same topic owns delivery."""
+    _remote_receive_diagnostic(
+        msg_id, recipient, reason, remote_id, event="NOT_LOCAL", prefix="REMOTE_SKIP",
+    )
+
+
+def _remote_discarded(
+    msg_id: str, recipient: str, reason: str, remote_id: str = "remote",
+) -> None:
+    """The received envelope itself is unusable (malformed/unsupported).
+    Nothing will retry it from this observation."""
+    _remote_receive_diagnostic(
+        msg_id, recipient, reason, remote_id, event="DISCARDED", prefix="REMOTE_DROP",
     )
 
 
@@ -695,7 +724,7 @@ def _deliver_claimed_envelope(
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        _remote_drop_diagnostic(msg_id, recipient_name, "not in local registry", remote_id)
+        _remote_not_local(msg_id, recipient_name, "not in local registry", remote_id)
         release_claim(msg_id)
         return
     recipients: list[Participant] = []
@@ -707,7 +736,7 @@ def _deliver_claimed_envelope(
             # is the dual-name foot-gun. Per the design, deliver locally.
             recipients.append(rp)
     if not recipients:
-        _remote_drop_diagnostic(
+        _remote_not_local(
             msg_id,
             recipient_name,
             f"{kind} resolved to zero local recipients",
@@ -955,7 +984,7 @@ def _receive_control_envelope(
 ) -> None:
     receipt = parse_delivery_receipt(message)
     if receipt is None:
-        _remote_drop_diagnostic(
+        _remote_discarded(
             str(message.get("id", "?")),
             str(message.get("to", "?")),
             "unsupported or malformed a8s control envelope",

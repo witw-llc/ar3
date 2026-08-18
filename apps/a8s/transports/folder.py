@@ -53,11 +53,13 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from core import MAX_SEEN_IDS, folder_ledger_path, out
 from transports import OnMessage, Transport, TransportError
+from ark import clock
 from ark.fsio import (
     REPLACE_ATTEMPTS,
     REPLACE_BACKOFF_CAP_SECONDS,
@@ -414,14 +416,17 @@ class FolderTransport(Transport):
             # a poisoned cutoff grows the count every poll, and a warning that
             # fires per poll is the log spam that trains an operator to stop
             # reading warnings.
-            joined_utc = time.strftime(
-                "%Y-%m-%d %H:%M:%SZ", time.gmtime(parse_ulid(self._joined)[0] / 1000)
+            joined_local = clock.stamp(
+                datetime.fromtimestamp(
+                    parse_ulid(self._joined)[0] / 1000, tz=timezone.utc
+                ),
+                seconds=True,
             )
             self._warn_once(
                 "backlog",
                 f"WARN: remote {self._remote_id}: ignoring {dropped} "
                 f"envelope{'' if dropped == 1 else 's'} predating this "
-                f"machine's join ({self._joined} = {joined_utc}) as backlog — "
+                f"machine's join ({self._joined} = {joined_local}) as backlog — "
                 f"if that time is in the future, the clock was ahead at "
                 f"registration; a8s unremote + re-add re-joins at now",
             )

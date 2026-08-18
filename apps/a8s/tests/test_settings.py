@@ -54,6 +54,42 @@ class TestSettingsResolution:
         assert sm.get_setting("definition.files_ttl_hours") == 48
 
 
+class TestRunnerLifecycleKnobs:
+    """`wake_drain_grace_seconds`, `txlog_heartbeat_seconds`, and
+    `watchdog_wedge_seconds` — the alive-but-deaf incident's three new knobs.
+    The latter two allow 0 to mean "disabled", so they must be readable
+    without `get_int`/`get_float`'s positive floor."""
+
+    def test_defaults(self, fake_home):
+        assert sm.get_setting("wake_drain_grace_seconds") == 5.0
+        assert sm.get_setting("txlog_heartbeat_seconds") == 300.0
+        assert sm.get_setting("watchdog_wedge_seconds") == 120.0
+
+    def test_wake_drain_grace_seconds_rejects_non_positive(self, fake_home):
+        with pytest.raises(ValueError, match="positive"):
+            sm.set_setting("wake_drain_grace_seconds", 0)
+
+    def test_heartbeat_and_watchdog_accept_zero_to_disable(self, fake_home):
+        sm.set_setting("txlog_heartbeat_seconds", 0)
+        sm.set_setting("watchdog_wedge_seconds", 0)
+        assert sm.get_setting("txlog_heartbeat_seconds") == 0
+        assert sm.get_setting("watchdog_wedge_seconds") == 0
+
+    def test_heartbeat_and_watchdog_reject_negative(self, fake_home):
+        with pytest.raises(ValueError, match="zero or positive"):
+            sm.set_setting("txlog_heartbeat_seconds", -1)
+        with pytest.raises(ValueError, match="zero or positive"):
+            sm.set_setting("watchdog_wedge_seconds", -1)
+
+    def test_env_vars_apply(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_WAKE_DRAIN_GRACE_SECONDS", "0.5")
+        monkeypatch.setenv("A8S_TXLOG_HEARTBEAT_SECONDS", "0")
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0.2")
+        assert sm.get_setting("wake_drain_grace_seconds") == 0.5
+        assert sm.get_setting("txlog_heartbeat_seconds") == 0.0
+        assert sm.get_setting("watchdog_wedge_seconds") == 0.2
+
+
 class TestCatalog:
     def test_lists_all_groups(self):
         groups = [label for label, _ in sm.list_catalog()]

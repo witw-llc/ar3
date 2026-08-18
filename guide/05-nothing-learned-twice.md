@@ -20,7 +20,7 @@ thinking.
 
 ## 3. Starting state
 
-- Chapter 4 complete, or at least The Ark installed with `k7e` on your PATH,
+- Chapter 4 complete, or at least ar3 installed with `k7e` on your PATH,
   and Python 3 (`python3 --version` answers) for the one script you write here.
 - **Free path** — `ollama` serving with `qwen3.6` pulled (`ar3 doctor` lists
   your models on its `ollama serve` line). **Subscription path** — the Cursor
@@ -28,9 +28,8 @@ thinking.
 
 The `k7e` panel in `ar3` has been ✗ since chapter 1 and stays ✗ until the
 first thing is written: there is no create step, and the store appears
-under `~/.config/k7e` (`K7E_HOME`) the moment you store an entry — chapter
-1's panel hints `(try: k7e init)`, but that verb does not exist (issue #78
-tracks the hint).
+under `~/.config/k7e` (`K7E_HOME`) the moment you store an entry — which is
+exactly what chapter 1's panel hints, `(try: k7e store <title>)`.
 
 ## 4. The change
 

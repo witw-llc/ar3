@@ -1,4 +1,4 @@
-"""Tests for the reserved-env contract — The Ark's foundation layer.
+"""Tests for the reserved-env contract — ar3's foundation layer.
 
 Trivial by design: this module is just names. The behavior that matters
 (a8s injecting these on wake, r4t refusing a rig that names one) is tested

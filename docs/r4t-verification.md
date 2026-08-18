@@ -24,13 +24,6 @@ blank lines are ignored, and no checklist at all is a pass.
 These files live outside every repo, uncommitted, because they may carry
 private strings like a codename (e.g. `secret-codename`) or a name.
 
-## Gating the doorbell
-
-Set `doorbell_check` in `r4t-org.json` (see [r4t-org.md](r4t-org.md#org-settings)) to
-run any command — the sweep or a test suite — before the org may ring an
-absent human, and a failing check parks the message without ringing rather
-than losing it.
-
 ## The post-hoc judge
 
 How best to ask a judge is an open question the field is actively
@@ -40,8 +33,8 @@ so the judging shape here (yes/no flags, persona anchoring proposed) is
 held as a hypothesis: the experiment ladder's E5 rung tests it before it
 hardens into doctrine.
 
-`r4t check` and the doorbell gate act on a live run; the judge is the third
-leg — it grades a finished run. `r4t judge <node> --rig <rig>` reads a
+`r4t check` acts on a live run; the judge is the other leg — it grades a
+finished run. `r4t judge <node> --rig <rig>` reads a
 completed run's recorded transcripts and scores them against the MAST
 multi-agent failure taxonomy ("Why Do Multi-Agent LLM Systems Fail?",
 arXiv:2503.13657), plus one r4t extension mode for mutual-wait deadlock, a
@@ -53,32 +46,11 @@ under the roster dir's `judge/` — a surface no roster agent ever reads — nev
 inside the workplace repo. Pass `--json` instead of the sectioned panel to
 derive an experiment-ledger column.
 
-## Tracing one task
+## Reading a run back
 
-The judge grades a run; `r4t task trace <id>` reconstructs a single task. It
-answers "what actually happened here?" in one screen: the delegation tree, hop
-by hop — who received the task, who they passed it to, what came back — plus
-every turn the thread cost with its exit code and duration, dead letters
-inline, and whatever is still in flight.
-
-```
-Delegation
-  boss -> gerry        hop 0  "ship the parser by friday"
-    gerry -> phil      hop 1  "take the tokenizer and land it behind the flag"
-      phil -> neil     hop 2
-      phil -> gerry    hop 2  "tokenizer landed, PR is up"
-        gerry -> boss  hop 3  (out of the walls)  (closes the thread)
-```
-
-Nothing new is written for it, and no new transport is involved: the whole
-trace is read back out of state the roster already keeps. The day log is the
-spine — append-only, never pruned, and every delivery and turn boundary lands
-in it carrying the thread id — while the thread ledger, the dead-letter dir,
-the members' queues and any in-flight turn supply the originator, what never
-got delivered, and what is still moving. A thread whose ledger has already
-expired still traces: the panel says so, and reads the originator and the
-closure back out of the log.
-
-`--json` gives the same reconstruction as a structure, so an acceptance check
-can assert on trace shape (`delegation`, `turns`, `dead_letters`) instead of
-grepping logs.
+The day log is the spine of everything after the fact: append-only, kept for
+`log_retention_days`, with every delivery and turn boundary carrying the
+thread id that labels the message lineage. `r4t logs --agent <member>` narrows
+it to one member and `--full` prints the captured turns; the dead-letter dir
+holds what never got delivered. Grepping one thread id across the day log is
+how a single chain of messages reads back, hop by hop.

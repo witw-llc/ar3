@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-from core import version_line as _version_line
+from core import harden_stdio, version_line as _version_line
 from tell import agent_root_from_outbox, find_outbox
 
 DEFAULT_TIMEOUT_SEC = 5.0
@@ -343,7 +343,14 @@ def _poll_new_messages(
 
 
 def _configure_stdout() -> None:
-    """Prefer line buffering so background ``tells -f`` shows output promptly."""
+    """Floor stdout's error handler, then prefer line buffering so background
+    ``tells -f`` shows output promptly.
+
+    Two separate `reconfigure` calls, each touching only its own keyword —
+    `TextIOWrapper.reconfigure` leaves every other current setting alone, so
+    flooring errors first and buffering second cannot clobber either one.
+    """
+    harden_stdio()
     try:
         sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
     except (AttributeError, OSError, ValueError):

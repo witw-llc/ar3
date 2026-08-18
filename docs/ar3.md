@@ -1,11 +1,11 @@
 ---
 name: "ar3"
-description: "Show whether The Ark is set up and working on this machine."
+description: "Show whether ar3 is set up and working on this machine."
 ---
 
 # ar3
 
-The front door to The Ark: **a8s** (agent message router), **r4t**
+The front door to ar3: **a8s** (agent message router), **r4t**
 (the roster), **k7e** (knowledge engine).
 
 `ar3` never mutates product state; it owns and maintains the suite's own
@@ -19,8 +19,8 @@ own substrate: `ar3 deps` fetches on-demand heavy dependencies into
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
 ar3 deps       # list on-demand heavy dependency groups and their status
-ar3 deps r4t   # fetch one group (here, textual for r4t's chat TUI)
-ar3 --version  # the suite semver (every Ark CLI answers this)
+ar3 deps a8s-s3 # fetch one group (here, boto3 for a8s's S3 storage)
+ar3 --version  # the suite semver (every ar3 CLI answers this)
 ```
 
 ## `ar3` — the greeter
@@ -43,7 +43,7 @@ a8s — agent message router  (~/.config/a8s)
 r4t — the roster  (~/.config/r4t)
   ✓ cli    r4t -> /path/to/r4t
   ✓ rigs   2 rig(s): leader, worker
-  ✗ rosters  none under ~/.config/r4t/rosters   (try: r4t init)
+  ✗ rosters  none under ~/.config/r4t/rosters   (try: r4t add <dir> [<runbook>])
 
 k7e — knowledge engine  (~/.config/k7e)
   ✓ cli    k7e -> /path/to/k7e
@@ -79,10 +79,10 @@ one agent harness answering), 1 otherwise — so it can gate a setup script.
 ## `ar3 deps`
 
 A handful of features depend on a heavy package most installs never need —
-boto3 for a8s's S3 storage service, textual for r4t's chat TUI. Those
-packages are not vendored and not required at install time; the feature that
-needs one calls `ark.deps.use_group` and degrades to a WARN naming the fix
-when the group is not there.
+boto3 for a8s's S3 storage service. Those packages are not vendored and not
+required at install time; the feature that needs one calls
+`ark.deps.use_group` and degrades to a WARN naming the fix when the group is
+not there.
 
 `ar3 deps` lists every group defined under `requirements/*.txt` with its
 installed/missing status for the running interpreter. `ar3 deps <group>`

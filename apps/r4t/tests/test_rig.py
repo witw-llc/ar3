@@ -13,8 +13,6 @@ from rig import (
     DEFAULT_BUDGET_EARN_PER_HOUR,
     DEFAULT_ECHO_MAX_CHARS,
     DEFAULT_BUDGET_MAX,
-    DEFAULT_CONCURRENCY,
-    DEFAULT_MAX_CONCURRENT,
     DEFAULT_MAX_SENDS_PER_TURN,
     DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS,
     DEFAULT_CELL_BUDGET_EARN_PER_HOUR,
@@ -30,7 +28,6 @@ from rig import (
     build_preset_invoke,
     continue_collisions,
     continue_presets,
-    default_config_payload,
     format_preset_invoke,
     fuzzy_match_model,
     is_below_knowledge_floor,
@@ -77,7 +74,6 @@ class TestLoading:
         rig = config.rigs["fast"]
         assert rig.invoke == ["run", "{prompt}"]
         assert rig.timeout_seconds == DEFAULT_TIMEOUT_SECONDS
-        assert rig.concurrency == DEFAULT_CONCURRENCY
         assert rig.max_sends_per_turn == DEFAULT_MAX_SENDS_PER_TURN
         assert rig.budget_max == DEFAULT_BUDGET_MAX == 8.0
         assert rig.budget_earn_per_hour == DEFAULT_BUDGET_EARN_PER_HOUR == 4.0
@@ -86,11 +82,10 @@ class TestLoading:
         config = load_rig_config(
             write_config(tmp_path, {"t": {"invoke": ["x", "{prompt}"]}})
         )
-        assert config.throttle.max_concurrent == DEFAULT_MAX_CONCURRENT == 1
         assert (
             config.throttle.min_seconds_between_turn_starts
             == DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS
-            == 15.0
+            == 0.0
         )
         assert config.cell_budget_max == DEFAULT_CELL_BUDGET_MAX == 16.0
         assert (
@@ -98,7 +93,6 @@ class TestLoading:
         )
         assert config.breaker_cap == 5
         assert config.breaker_cooldown_seconds == 600.0
-        assert config.quiet_task_seconds == 1800.0
         assert config.log_retention_days == 14
 
     def test_explicit_limits(self, tmp_path):
@@ -109,7 +103,6 @@ class TestLoading:
                     "t": {
                         "invoke": ["x", "{prompt}"],
                         "timeout_seconds": 60,
-                        "concurrency": 3,
                         "budget_max": 10,
                         "budget_earn_per_hour": 2,
                     }
@@ -117,7 +110,7 @@ class TestLoading:
             )
         )
         rig = config.rigs["t"]
-        assert (rig.timeout_seconds, rig.concurrency) == (60, 3)
+        assert rig.timeout_seconds == 60
         assert (rig.budget_max, rig.budget_earn_per_hour) == (10, 2)
 
     def test_explicit_governance_keys(self, tmp_path):
@@ -126,36 +119,21 @@ class TestLoading:
                 tmp_path,
                 {
                     "t": {"invoke": ["x", "{prompt}"]},
-                    "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+                    "throttle": {"min_seconds_between_turn_starts": 3},
                     "cell_budget_max": 4,
                     "cell_budget_earn_per_hour": 2,
                     "breaker_cap": 2,
                     "breaker_cooldown_seconds": 30,
-                    "quiet_task_seconds": 60,
                     "log_retention_days": 3,
                 },
             )
         )
-        assert config.throttle.max_concurrent == 0
-        assert config.throttle.min_seconds_between_turn_starts == 0
+        assert config.throttle.min_seconds_between_turn_starts == 3
         assert config.cell_budget_max == 4
         assert config.cell_budget_earn_per_hour == 2
         assert config.breaker_cap == 2
         assert config.breaker_cooldown_seconds == 30
-        assert config.quiet_task_seconds == 60
         assert config.log_retention_days == 3
-
-    def test_quiet_task_zero_means_off(self, tmp_path):
-        # The sweep has always read <= 0 as disabled while the loader rejected
-        # it, so the obvious off switch was a config error — and a config error
-        # fails the whole dispatch path, which is an outage (#58).
-        config = load_rig_config(
-            write_config(
-                tmp_path,
-                {"t": {"invoke": ["x", "{prompt}"]}, "quiet_task_seconds": 0},
-            )
-        )
-        assert config.quiet_task_seconds == 0
 
     def test_log_retention_zero_means_keep_forever(self, tmp_path):
         config = load_rig_config(
@@ -370,13 +348,6 @@ class TestWorkdirPlaceholder:
             assert argv[argv.index("--dir") + 1] == "{workdir}"
             assert "." not in argv
 
-    def test_init_starter_rigs_pin_the_workdir(self):
-        for entry in default_config_payload().values():
-            if not isinstance(entry, dict) or "invoke" not in entry:
-                continue
-            assert "{workdir}" in entry["invoke"]
-
-
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
         # Each of these was verified against the installed CLI's own --help and
@@ -488,7 +459,8 @@ class TestContinue:
         # codex-cli 0.147.0, which answers "unexpected argument '--sandbox'
         # found" — so the pair comes out when the turn resumes.
         assert rig.argv("hi", continue_conversation=True) == [
-            "codex", "exec", "resume", "--last", "--skip-git-repo-check", "hi",
+            "codex", "exec", "resume", "--last", "--include-non-interactive",
+            "--skip-git-repo-check", "hi",
         ]
 
     def test_codex_continue_and_model_splice_in_the_right_order(self, tmp_path):
@@ -498,7 +470,8 @@ class TestContinue:
         add_preset_rig(path, "worker", "codex", model="gpt-5")
         rig = load_rig_config(path).rigs["worker"]
         assert rig.argv("hi", continue_conversation=True) == [
-            "codex", "exec", "resume", "--last", "-m", "gpt-5",
+            "codex", "exec", "resume", "--last", "--include-non-interactive",
+            "-m", "gpt-5",
             "--skip-git-repo-check", "hi",
         ]
 
@@ -522,9 +495,11 @@ class TestContinue:
 
 
 COLLISION_CONFIG = {
-    "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
-    "twin": {"preset": "claude", "invoke": ["claude", "--model", "x", "-p", "{prompt}"]},
-    "other": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+    # cursor, not claude: a roster may not continue on a poor-graded engine,
+    # and this suite is about the directory key, not the grade.
+    "solo": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]},
+    "twin": {"preset": "cursor", "invoke": ["agent", "--model", "x", "-p", "{prompt}"]},
+    "other": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
     "cloud": {"preset": "opencode", "invoke": ["opencode", "run", "--dir", ".", "{prompt}"]},
     "launched": {
         "preset": "ollama-opencode",
@@ -559,7 +534,7 @@ class TestContinueCollisions:
         ))
         assert len(warnings) == 1
         assert warnings[0].startswith("Ana: Continue: on")
-        assert "Bob" in warnings[0] and "'claude'" in warnings[0]
+        assert "Bob" in warnings[0] and "'agent'" in warnings[0]
 
     def test_warns_across_different_rigs_on_one_cli(self, tmp_path):
         warnings = self.collisions(tmp_path, (
@@ -579,10 +554,10 @@ class TestContinueCollisions:
         assert "Bob" in warnings[0] and "'opencode'" in warnings[0]
         assert "per directory" in warnings[0]
 
-    def test_humans_and_broken_members_never_collide(self, tmp_path):
+    def test_broken_members_never_collide(self, tmp_path):
+        # Dot has no Rig: line, so it is disabled and runs no CLI anywhere.
         assert self.collisions(tmp_path, (
             "### Ana\n- **Rig:** solo\n- **Continue:** on\n\n"
-            "### Cid\n- **Human:** yes\n- **Address:** cid\n\n"
             "### Dot\n"
         )) == []
 
@@ -608,15 +583,6 @@ class TestContinueCollisions:
             "### Bob\n- **Rig:** solo\n- **Workdir:** .\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
-
-
-class TestDefaultPayload:
-    def test_init_payload_parses_with_both_rigs(self, tmp_path):
-        config = load_rig_config(write_config(tmp_path, default_config_payload()))
-        assert set(config.rigs) == {"leader", "member"}
-        for rig in config.rigs.values():
-            assert rig.error is None
-            assert any("{prompt}" in a for a in rig.pool()[0])
 
 
 class TestHarnessPresets:
@@ -738,7 +704,7 @@ class TestHarnessPresets:
         path = write_config(tmp_path, {
             "worker": {
                 "invoke": ["x", "{prompt}"],
-                "concurrency": 3,
+                "echo_max_chars": 3000,
                 "timeout_seconds": 120,
                 "budget_max": 10,
                 "budget_earn_per_hour": 2,
@@ -747,14 +713,14 @@ class TestHarnessPresets:
         rig_key = swap_preset_rig(path, "worker", "agy")
         assert rig_key == "worker"
         raw = json.loads(path.read_text(encoding="utf-8"))
-        assert raw["worker"]["concurrency"] == 3
+        assert raw["worker"]["echo_max_chars"] == 3000
         assert raw["worker"]["timeout_seconds"] == 120
         assert raw["worker"]["budget_max"] == 10
         assert raw["worker"]["budget_earn_per_hour"] == 2
         assert "swap" in raw["worker"]["_notes"].lower()
         config = load_rig_config(path)
         assert config.rigs["worker"].argv("hi")[0] == "agy"
-        assert config.rigs["worker"].concurrency == 3
+        assert config.rigs["worker"].echo_max_chars == 3000
 
     def test_add_records_preset_and_tier_defaults_apply(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1272,13 +1238,15 @@ class TestRigSettingsCore:
         keys = [s.key for s in rig_settings(path, "worker")]
         assert keys == list(CONFIGURABLE_RIG_KEYS)
 
-    def test_concurrency_default_and_explicit_source(self, tmp_path):
+    def test_scalar_default_and_explicit_source(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
-        s = rig_setting(path, "worker", "concurrency")
-        assert (s.value, s.explicit, s.source) == (DEFAULT_CONCURRENCY, False, "built-in default")
-        set_rig_value(path, "worker", "concurrency", "4")
-        s = rig_setting(path, "worker", "concurrency")
+        s = rig_setting(path, "worker", "echo_max_chars")
+        assert (s.value, s.explicit, s.source) == (
+            DEFAULT_ECHO_MAX_CHARS, False, "built-in default"
+        )
+        set_rig_value(path, "worker", "echo_max_chars", "4")
+        s = rig_setting(path, "worker", "echo_max_chars")
         assert (s.value, s.explicit, s.source) == (4, True, "explicit")
 
     def test_text_knob_inherits_from_preset_tier(self, tmp_path):
@@ -1322,9 +1290,9 @@ class TestRigSettingsCore:
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
         before = json.loads(path.read_text(encoding="utf-8"))["worker"]
-        set_rig_value(path, "worker", "concurrency", "2")
+        set_rig_value(path, "worker", "echo_max_chars", "2")
         raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
-        assert raw["concurrency"] == 2
+        assert raw["echo_max_chars"] == 2
         assert "history_max_bytes" not in raw
         assert "rig_budget_max" not in raw
         assert before.get("preset") == raw.get("preset")
@@ -1332,7 +1300,7 @@ class TestRigSettingsCore:
     def test_unset_unset_key_is_noop(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
-        assert unset_rig_value(path, "worker", "concurrency") is False
+        assert unset_rig_value(path, "worker", "echo_max_chars") is False
 
     def test_unknown_key_errors_loudly(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1349,11 +1317,11 @@ class TestRigSettingsCore:
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
         with pytest.raises(RigError, match="must be a number"):
-            set_rig_value(path, "worker", "concurrency", "abc")
+            set_rig_value(path, "worker", "echo_max_chars", "abc")
         with pytest.raises(RigError, match="whole number"):
-            set_rig_value(path, "worker", "concurrency", "2.5")
+            set_rig_value(path, "worker", "echo_max_chars", "2.5")
         with pytest.raises(RigError, match="positive"):
-            set_rig_value(path, "worker", "concurrency", "0")
+            set_rig_value(path, "worker", "echo_max_chars", "0")
 
     def test_float_key_accepts_decimals(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1367,7 +1335,7 @@ class TestRigSettingsCore:
     def test_set_missing_rig_errors(self, tmp_path):
         path = write_config(tmp_path, {"other": {"invoke": ["x", "{prompt}"]}})
         with pytest.raises(RigError, match="no rig 'worker'"):
-            set_rig_value(path, "worker", "concurrency", "2")
+            set_rig_value(path, "worker", "echo_max_chars", "2")
 
 
 class TestEchoSetting:
@@ -1479,19 +1447,21 @@ class TestRigConfigureCLI:
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
         assert r4t_main(
-            ["rig", "set", "worker", "concurrency", "3", "--rig-config", str(path)]
+            ["rig", "set", "worker", "echo_max_chars", "3", "--rig-config", str(path)]
         ) == 0
         capsys.readouterr()
         assert r4t_main(
-            ["rig", "get", "worker", "concurrency", "--rig-config", str(path)]
+            ["rig", "get", "worker", "echo_max_chars", "--rig-config", str(path)]
         ) == 0
         out = capsys.readouterr()
         assert out.out.strip() == "3"
         assert "(explicit)" in out.err
         assert r4t_main(
-            ["rig", "unset", "worker", "concurrency", "--rig-config", str(path)]
+            ["rig", "unset", "worker", "echo_max_chars", "--rig-config", str(path)]
         ) == 0
-        assert "concurrency" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+        assert "echo_max_chars" not in json.loads(
+            path.read_text(encoding="utf-8")
+        )["worker"]
 
     def test_get_bare_lists_all(self, tmp_path, capsys):
         path = tmp_path / "rigs.json"
@@ -1514,21 +1484,21 @@ class TestRigConfigureCLI:
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
         assert r4t_main(
-            ["rig", "set", "worker", "concurrency", "abc", "--rig-config", str(path)]
+            ["rig", "set", "worker", "echo_max_chars", "abc", "--rig-config", str(path)]
         ) == 1
         assert "must be a number" in capsys.readouterr().err
 
     def test_unset_multiple_keys(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "opencode")
-        set_rig_value(path, "worker", "concurrency", "2")
+        set_rig_value(path, "worker", "echo_max_chars", "2")
         set_rig_value(path, "worker", "history_max_bytes", "1000")
         assert r4t_main(
-            ["rig", "unset", "worker", "concurrency", "history_max_bytes",
+            ["rig", "unset", "worker", "echo_max_chars", "history_max_bytes",
              "--rig-config", str(path)]
         ) == 0
         raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
-        assert "concurrency" not in raw and "history_max_bytes" not in raw
+        assert "echo_max_chars" not in raw and "history_max_bytes" not in raw
 
     def test_configure_piped_sets_one_keeps_rest(self, tmp_path, capsys, monkeypatch):
         path = tmp_path / "rigs.json"
@@ -1545,8 +1515,8 @@ class TestRigConfigureCLI:
         monkeypatch.setattr("builtins.input", piped)
         assert r4t_main(["rig", "configure", "worker", "--rig-config", str(path)]) == 0
         raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
-        assert raw["concurrency"] == 5
-        assert "rig_budget_max" not in raw
+        assert raw["rig_budget_max"] == 5
+        assert "rig_budget_earn_per_hour" not in raw
         assert "history_max_bytes" not in raw
 
     def test_configure_piped_eof_keeps_rest(self, tmp_path, monkeypatch):
@@ -1560,7 +1530,7 @@ class TestRigConfigureCLI:
         monkeypatch.setattr("builtins.input", eof)
         assert r4t_main(["rig", "configure", "worker", "--rig-config", str(path)]) == 0
         raw = json.loads(path.read_text(encoding="utf-8"))["worker"]
-        assert "concurrency" not in raw
+        assert "rig_budget_max" not in raw
 
     def test_configure_piped_invalid_errors_loudly(self, tmp_path, capsys, monkeypatch):
         path = tmp_path / "rigs.json"

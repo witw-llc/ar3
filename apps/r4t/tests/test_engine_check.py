@@ -191,7 +191,11 @@ class TestParseProbe:
     def test_codex_continuation_drops_the_flag_resume_refuses(self, bin_dir):
         # `codex exec resume` takes no --sandbox; the preset records that, and
         # the probe is what proves it.
-        fake_binary(bin_dir, "codex", flags=CODEX_FLAGS + ["--last"], strict=True)
+        fake_binary(
+            bin_dir, "codex",
+            flags=CODEX_FLAGS + ["--last", "--include-non-interactive"],
+            strict=True,
+        )
         report = engine_check.check_engine("codex", continue_conversation=True)
         assert report.verdict == engine_check.ACCEPTED
         assert "--sandbox" not in report.argv

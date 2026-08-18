@@ -1,5 +1,5 @@
-"""Roster health verdicts and dead-letter rollup — the shared brain behind
-`r4t status` and the chat header.
+"""Roster health verdicts and dead-letter rollup — the brain behind
+`r4t status`.
 
 Everything here is read-only over roster state. Callers render the marks;
 levels are `ok`/`warn`/`bad`. Thresholds are heuristics tuned for an
@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import state
-import tasks as taskmod
 
 OK = "ok"
 WARN = "warn"
@@ -30,6 +29,9 @@ ROUTINE_REASONS = {"quota"}
 REASON_GLOSS = {
     "quota": "one turn tried to send past max_sends_per_turn",
     "unknown-recipient": "mail to a name that is not on the roster",
+    "no-ingress": "outside mail to a member that takes none — it enters at the leader",
+    "cell-deferred": "outside mail to a cell; one post forked to a whole cell is #183",
+    "bad-address": "a leading colon that named nobody — `:name` means the global name",
     "no-leader": "a bare-node message with no leader marked to receive it",
     "member-disabled": "mail to a member disabled by a roster problem",
     "no-rig": "mail to a member whose rig will not resolve",
@@ -79,7 +81,7 @@ def rollup_dead_letters(records: list[dict]) -> Rollup:
 def recent_turns(
     node: str, now: float, window: float = RECENT_WINDOW_SECONDS
 ) -> tuple[int, set[str]]:
-    """(turn count, distinct task ids) from velocity.csv within the window."""
+    """(turn count, distinct thread ids) from velocity.csv within the window."""
     path = state.roster_dir(node) / "velocity.csv"
     if not path.is_file():
         return 0, set()
@@ -98,40 +100,22 @@ def recent_turns(
 def roster_verdicts(
     node: str, roster=None, config=None, *, now: float | None = None
 ) -> list[Verdict]:
-    """One plain-English line per operator concern: is anything waiting on
-    the human, is the roster runaway, is a member broken or resting with work
-    queued, is the shared cell budget spent, is any queue backing up.
-    Roster/config are optional; concerns that need them are skipped when they
-    are unavailable."""
+    """One plain-English line per operator concern: is the roster runaway, is
+    a member broken or resting with work queued, is the shared cell budget
+    spent, is any queue backing up. Roster/config are optional; concerns that
+    need them are skipped when they are unavailable."""
     now = time.time() if now is None else now
     out: list[Verdict] = []
-    open_tasks = [
-        t for t in taskmod.list_tasks(node)
-        if t.get("status") == taskmod.STATUS_OPEN
-    ]
     dead = state.list_dead_letters(node)
 
-    human = None
-    if roster is not None:
-        human = next((m for m in roster.members if m.is_human), None)
-    if human is not None:
-        unread = len(state.list_seat_messages(node, human.name))
-        if unread:
-            out.append(Verdict(
-                BAD, f"{unread} message(s) waiting on YOU",
-                f"r4t seat inbox --node {node}",
-            ))
-        else:
-            out.append(Verdict(OK, "nothing waiting on you"))
-
-    turns, active_tasks = recent_turns(node, now)
+    turns, active_threads = recent_turns(node, now)
     live = state.live_locks(node, prune=False)
     if turns >= RUNAWAY_TURNS_PER_WINDOW:
         out.append(Verdict(
             WARN,
             f"hot: {turns} turns in the last 10m across "
-            f"{len(active_tasks)} thread(s)",
-            "watch it live: r4t chat",
+            f"{len(active_threads)} thread(s)",
+            f"watch it live: r4t logs --node {node} -f",
         ))
     else:
         detail = f"{turns} turn(s) last 10m"
@@ -158,7 +142,7 @@ def roster_verdicts(
 
     if roster is not None and config is not None:
         flagged = 0
-        members = [m for m in roster.members if not m.is_human and not m.errors]
+        members = [m for m in roster.members if not m.errors]
         for m in members:
             rig, _err, _pinned = config.rig_for(m)
             depth = state.queue_depth(node, m.name)

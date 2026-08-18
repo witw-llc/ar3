@@ -1,7 +1,9 @@
 """Tests for core helpers added for the remote-routing PR (issue #63)."""
 from __future__ import annotations
 
+import io
 import os
+import sys
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +15,7 @@ from core import (
     _a8s_dir,
     _pid_alive,
     agent_dir,
+    harden_stdio,
     last_active_path,
     network_config_path,
     pending_dir,
@@ -213,3 +216,73 @@ class TestLastActive:
         d.mkdir(parents=True, exist_ok=True)
         last_active_path("claude").write_text("not-a-date")
         assert read_last_active("claude") is None
+
+
+class TestHardenStdio:
+    """A redirected Windows console can leave stdout on a strict narrow
+    codec (e.g. cp1252); harden_stdio floors it at backslashreplace so an
+    unencodable glyph degrades losslessly instead of crashing the process.
+    The same locale leaves stdin DECODING as cp1252, which turns a piped
+    UTF-8 message body into mojibake stored permanently — so stdin is
+    re-pinned to UTF-8, the envelope store's contract."""
+
+    def test_floors_a_strict_stdout(self, monkeypatch):
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="cp1252", errors="strict")
+        monkeypatch.setattr(sys, "stdout", wrapper)
+
+        harden_stdio()
+        assert wrapper.errors == "backslashreplace"
+
+        print("tell -> MOSS: over → there")
+        wrapper.flush()
+        assert b"\\u2192" in buf.getvalue()
+
+    def test_floors_a_surrogateescape_stdout(self, monkeypatch):
+        """surrogateescape raises exactly like strict on any real unencodable
+        character — the field crash that killed a send after it committed."""
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="cp1252", errors="surrogateescape")
+        monkeypatch.setattr(sys, "stdout", wrapper)
+
+        harden_stdio()
+        assert wrapper.errors == "backslashreplace"
+
+        print("tell -> MOSS: over → there")
+        wrapper.flush()
+        assert b"\\u2192" in buf.getvalue()
+
+    def test_leaves_a_non_strict_stdout_alone(self, monkeypatch):
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="utf-8", errors="replace")
+        monkeypatch.setattr(sys, "stdout", wrapper)
+
+        harden_stdio()
+        assert wrapper.errors == "replace"
+
+    def test_skips_a_non_textiowrapper_stdout(self, monkeypatch):
+        monkeypatch.setattr(sys, "stdout", io.StringIO())
+        harden_stdio()  # must not raise
+
+    def test_repins_a_locale_codepage_stdin_to_utf8(self, monkeypatch):
+        body = "→ ⇒ 中 é —"
+        wrapper = io.TextIOWrapper(io.BytesIO(body.encode("utf-8")), encoding="cp1252")
+        monkeypatch.setattr(sys, "stdin", wrapper)
+
+        harden_stdio()
+        assert sys.stdin.read() == body
+
+    def test_leaves_a_utf8_stdin_alone(self, monkeypatch):
+        wrapper = io.TextIOWrapper(io.BytesIO(b"hi"), encoding="UTF-8", errors="replace")
+        monkeypatch.setattr(sys, "stdin", wrapper)
+
+        harden_stdio()
+        assert sys.stdin.errors == "replace"
+        assert sys.stdin.read() == "hi"
+
+    def test_invalid_utf8_stdin_bytes_escape_reversibly(self, monkeypatch):
+        wrapper = io.TextIOWrapper(io.BytesIO(b"caf\xe9"), encoding="cp1252")
+        monkeypatch.setattr(sys, "stdin", wrapper)
+
+        harden_stdio()
+        assert sys.stdin.read() == "caf\\xe9"

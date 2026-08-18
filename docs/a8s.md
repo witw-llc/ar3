@@ -128,9 +128,9 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 | `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
 | `a8s definitions` / `a8s defs` | Manage user-installed templates in `definitions/` under the a8s state root (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
-| `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv (not OS env). Used-but-unset fails wake. |
+| `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv and the `outbox_dir` / `inbox_dir` / `files_dir` path fields (not OS env). Used-but-unset fails the wake and makes the node unresolved. Refuses a key that feeds a path field while a handler is attached; otherwise moves the old mailbox's contents to the new path. |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
-| `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
+| `a8s ls [-q]`                  | List every registered node, running or not: NAME, STATUS (`running (pid N)` / `stopped` / `unresolved: $KEY`), DEFINITION, ROOT, and bound namespaces. `-q` prints just names. |
 
 
 ### Aliases
@@ -395,7 +395,7 @@ Strict opacity (bin#69, bin#70) still holds: a routed message looks identical wh
 ```json
 {
   "description": "...",
-  "invoke": ["claude", "...", "--continue", "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+  "invoke": ["claude", "...", "--continue", "-p", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
   "idle":   { "timeout": 1800, "invoke": ["claude", "-p", "summarize the day's tells"] }
 }
 ```
@@ -407,12 +407,21 @@ Argv elements run through built-in substitutions plus any per-node **a8s vars**:
 - `$MESSAGE` → the message body (`content`, with any `ATTACHED FILE: <path>` lines appended for inbound attachments).
 - `$TIMESTAMP` → ISO 8601 UTC timestamp the message was queued (e.g. `2026-04-28T14:30:00.123456Z`). Useful when you want a stable machine-readable time.
 - `$AGE` → human-readable age relative to now (e.g. `5 minutes ago`). Computed at wake time, so a long backlog gets accurate values per message. Pick this OR `$TIMESTAMP` per definition based on which the LLM will read more naturally.
+- `$NOW` → the wake's own time in this machine's zone (e.g. `2026-08-16 13:22 PDT`). The absolute anchor beside `$AGE`'s relative one; every bundled definition's prompt leads with it. Reserved from `a8s vars`.
 - `$META` → the envelope's `meta` object as compact JSON (`{"class":"auto"}`), empty when the message carries none. Protocol metadata one node stamps for another; a8s carries and hands it over without reading a key, so the vocabulary belongs to the nodes at the edges (r4t's message class is the first user).
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
 - `$DEFINITION_PATH` → resolved path of this agent's definition file.
 - `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env; `definition.env` is the knob for that (see [Wake environment](#wake-environment-optional)). If the definition references `$KEY` and that var is unset, wake fails closed.
 
-`$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one). `$META` is empty unless the sending node stamped a `meta` object.
+`$TIMESTAMP` and `$AGE` are empty for any message without a `date` field (defensive — every `_write_outbox` stamps one). `$META` is empty unless the sending node stamped a `meta` object. `$NOW` is always set.
+
+#### Time: local where it is read, UTC where it is sorted
+
+a8s stores UTC and shows local. `a8s logs`, `a8s convo`, the wake ticker lines and the remote `joined` display all read in this machine's zone and always name it — `2026-08-16 13:22:04 PDT`, or `2026-08-16 13:22:04 UTC-07:00` on a platform whose zone has no short abbreviation. What is written stays UTC byte for byte: the ISO prefix on every agent log line, the envelope `date`, the conversation archive, every ULID. The split is not cosmetic — the log-line prefix is the key `a8s logs A B` merges two agents' files by, and two nodes under different `TZ` would interleave wrongly with nothing to detect it. A timestamp that is sorted, compared or merged is UTC; a timestamp a human or a model reads is local and carries its zone.
+
+The composed batch prompt states the local time in its first line, and `$NOW` puts the same anchor in a single-message wake. That is the point of the whole arrangement: an agent handed nothing but UTC concludes it lives in UTC, after which every *today* and *tomorrow* it writes lands a day off.
+
+The zone is the machine's, so `TZ` is the only knob and there is no a8s-specific one. A container or VM that boots UTC is corrected the ordinary way — `TZ=America/Los_Angeles` in the environment the wake inherits, or `rig.env` for an r4t member. Use `{utc}` in an `a8s convo --heading-*` template when a script needs the stored value instead of the local reading.
 
 ```bash
 a8s add bob ./ ollama-opencode --model=qwen3.6
@@ -422,6 +431,29 @@ a8s vars bob unset model
 ```
 
 A shared definition can then use `"--model", "$MODEL"`; each node supplies its own value.
+
+#### Vars in the mailbox path fields
+
+`outbox_dir`, `inbox_dir` and `files_dir` interpolate the same vars, plus one built-in of their own:
+
+- `$NODE` → the node's registered name. Path fields only, always defined, and distinct between any two registrations — so `".outbox-$NODE"` works with no vars set. Reserved from `a8s vars`.
+- Per-message built-ins (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`, `$AGE`, `$META`, `$NOW`) are refused: a mailbox path is resolved per node, long before any message exists.
+- A `$KEY` that is not set makes the node **unresolved** — no empty expansion, no fallback to `.outbox`. It is skipped by routing, `a8s ls` shows `unresolved: $KEY` in place of its status, `a8s start` refuses it, and `a8s health` names it. Either fallback would put two nodes back in one directory silently, which is the collision this exists to remove.
+
+Two agents in one repo, one definition file each, no vars:
+
+```json
+{ "outbox_dir": ".outbox-$NODE", "inbox_dir": ".inbox-$NODE", "files_dir": ".files-$NODE" }
+```
+
+```bash
+a8s add codex-ares  ~/ar3-private  two-seat-codex
+a8s add claude-ares ~/ar3-private  two-seat-claude
+```
+
+Each seat now owns `<repo>/.outbox-<name>/`, the wake injects that path as `TELL_OUTBOX_DIR`, and the router stamps `from` from the node owning the directory it ingested. Bundled definitions carry no path fields — the pattern is a user-installed copy (`a8s defs add ./two-seat-claude.json`).
+
+Changing a mailbox var re-points a live directory, so `a8s vars set|unset` refuses a key that feeds a path field while a handler holds the node (`a8s stop <name>` first), and otherwise carries anything left in the old directory across before writing the registry. `a8s health` reports any non-empty `.outbox*` / `.inbox*` / `.files*` directory under a registered root that no node owns — the catch-all for a path field edited by hand.
 
 Override per-agent with `a8s define <name> <definition>` — a filesystem path or a bare name (`filedrop`, `claude`, or a user template from `a8s defs add`). The file isn't moved or copied into the agent root; the registry stores the resolved path.
 

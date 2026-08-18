@@ -3,7 +3,7 @@
   "max_wake_seconds": 900,
   "invoke": ["r4t", "engine", "cursor", "run", "--timeout", "600",
              "--agent", "$RECIPIENT",
-             "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+             "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
   "batch": {
     "limit": 20,
     "invoke": ["r4t", "engine", "cursor", "run", "--timeout", "600",

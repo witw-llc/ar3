@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to The Ark, newest first, following
+Notable changes to ar3, newest first, following
 [Keep a Changelog](https://keepachangelog.com/). Versions are the suite semver
 in `VERSION`; a merge to `main` bumps it and cuts a release.
 
@@ -9,6 +9,407 @@ history is in git.
 
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
+
+## 0.1.71
+
+### Fixed
+- **Wake rotation advances past the agent that woke, not by one.** When the
+  rotation's preferred agent was transiently unready and a later sibling took
+  the slot, `wake_rr += 1` parked the counter on the agent that had just
+  woken — handing it a double turn. The counter now advances by position
+  (`start + woke_index + 1`), the way the idle rotation always has, matching
+  the stated contract: next after the one that woke.
+- **The strict-rotation test stops racing real subprocesses.** 0.1.70's
+  release run failed on both platforms because the wake-fairness test
+  asserted strict `A,B,A,B` alternation against real wake subprocesses,
+  whose completion timing on a loaded runner can legitimately hand a sibling
+  two turns. The test now stubs the wake to a deterministic consume — it
+  asserts the rotation arithmetic, which is what it names — while the
+  starvation-bound test keeps covering fairness under real timing.
+
+## 0.1.70
+
+### Changed
+- **Time is local where a human or a model reads it, UTC where it sorts.**
+  Every timestamp the suite showed was UTC, so agents concluded they live in
+  UTC and every relative word they wrote — *today*, *tomorrow*, *this
+  morning* — resolved in the wrong day. Display now reads in the machine's own
+  zone and always names it: `a8s logs`, `a8s convo`, the wake ticker lines,
+  the remote `joined` display, `r4t status` (a new `time:` line) and `r4t logs`
+  (a new day header) all show `2026-08-16 13:22:04 PDT`, or `UTC-07:00` in
+  place of the abbreviation on a platform that has none — the Windows seat
+  spells zone names the long way. **The prompts are the real fix**, because the
+  reader that matters is the model: a8s's composed batch prompt opens with
+  *Local time is 2026-08-16 13:22 PDT. Every date and time you read or write
+  is this zone unless it carries an explicit offset.*, r4t's member intro
+  closes with the same statement about relative words, and a new `$NOW`
+  built-in puts the anchor in a single-message wake — every bundled definition's
+  prompt now leads with `[$NOW]`. **Storage did not move.** Agent log-line
+  prefixes, envelope `date`, the conversation archive, r4t's day-log filenames
+  and its retention window are all still UTC, byte for byte, because those are
+  sort keys: `a8s logs A B` merges two files by that prefix, `prune_day_logs`
+  string-compares day names, and a portable org's log directory is shared
+  between machines that are not in one zone. `a8s convo --heading-*` gains a
+  `{utc}` placeholder for the stored value. The zone is the machine's, so `TZ`
+  is the only knob — a caged r4t member takes `"env": {"TZ": "..."}` on its rig
+  — and there is no new zone field anywhere. New shared module `ark/clock.py`.
+
+### Fixed
+- **A wake's stdout can no longer wedge the runner** (the alive-but-deaf
+  incident: a runner sat 8 hours with 34 routed messages queued because a
+  grandchild of an exited wake held the stdout pipe's write end open, and the
+  runner's read-to-EOF never returned). A dedicated reader thread now owns
+  each wake's stdout; after the wake exits the runner drains it for a bounded
+  grace (`wake_drain_grace_seconds`, default 5) and then closes its own end,
+  logging the suspected inherited handle. Side effect: wake output now
+  streams live on Windows, where the old `select`-on-a-pipe path could not.
+- **An alive-but-deaf runner recovers itself.** A watchdog thread on every
+  resident `a8s run` watches three clocks — the dispatch loop's own beat, the
+  in-flight wake, and the oldest undispatched inbox message. When the beat is
+  stale and addressed mail has waited longer than `watchdog_wedge_seconds`
+  (default 120, 0 disables), it closes the wake's stdout, terminates the
+  wake's own process group — never anything detached from it — and logs a
+  `WEDGE` row recording recovery or, failing that, a loud alert. An active
+  turn is never touched: a wake alive and inside its `max_wake_seconds`
+  budget means the stall is elsewhere (a slow storage upload can hold an
+  iteration past the threshold), so the watchdog logs and stands down. On a
+  drain timeout the exited wake's surviving group members are terminated —
+  the grandchild holding the pipe dies with the turn it leaked from.
+- **`a8s tx` no longer logs `DROPPED` for messages that deliver.** On a
+  shared broker topic every node sees every envelope; one addressed to an
+  agent this node does not host now logs `NOT_LOCAL` (console `REMOTE_SKIP`),
+  and a malformed control envelope logs `DISCARDED`. `DROPPED` is reserved
+  for terminal paths — grep for it and every hit is real.
+- **`tell` stops warning on every send from a deliberately exported
+  `TELL_OUTBOX_DIR`.** The hijack note now fires only when the CWD sits
+  inside a *different* registered agent's root — the one shape where
+  misattribution is real. A CWD no agent owns is explicit configuration, and
+  a sibling sharing the owner's repo root is not a hijacker.
+- **The locale codepage can neither crash output nor corrupt input.** The
+  stdout `backslashreplace` floor is now `core.harden_stdio()` and runs for
+  `tell`/`tells` too, with a cp1252 regression test pinning `a8s tx`. The
+  same call re-pins stdin to UTF-8: a Windows seat's cp1252 decode was
+  storing every piped non-ASCII body as permanent mojibake with nothing
+  telling the sender — the envelope store's contract is UTF-8, so stdin
+  decodes as UTF-8 no matter what the locale (or `PYTHONIOENCODING`) says,
+  invalid bytes escaping reversibly. The floor covers both raising stdout
+  modes — strict and surrogateescape (the interpreter's own default under a
+  C locale and on some Windows pipe setups), whose difference cost a field
+  seat a crash *after* the send had committed: the exit code lied and a
+  retrying caller would double-send. A seat needs no `PYTHONUTF8=1` for
+  either direction.
+
+### Added
+- **Runner lifecycle in the transaction log.** `RUN_START`, `RUN_STOP`,
+  `WAKE_START`/`WAKE_RETURN` per envelope, a throttled `HEARTBEAT`
+  (`txlog_heartbeat_seconds`, default 300, 0 disables), and `WEDGE` — so a
+  dead or deaf dispatcher is visible from `a8s tx` in minutes, not
+  reconstructed from per-seat logs after the fact.
+- **`r4t add <dir> [<runbook>]` — one name registers everything.** One command
+  validates a runbook and puts a directory on the network: the a8s agent, the
+  namespace prefix, the node directory and the address you type are all the
+  same word, the directory's own. The runbook resolves the way an a8s
+  definition does — a built-in by bare name (`r4t add ~/proj triforce`), an
+  explicit path, or the `r4t.md` already at the directory — and it is validated
+  fully, loudly, with the file:line errors the loader already produces, before
+  anything is registered. Registering nothing on a failure is the point: a
+  node that exists is a node that runs. Re-adding a registered name refuses
+  with the remedy rather than duplicating it, matching `a8s add`, and it names
+  the reason you rarely need it — the runbook is re-read every turn, so a
+  changed roster needs no re-add. **`r4t init` retargets to match**: it writes
+  a starter `r4t.md` extending `triforce` and stops there. Two verbs, one job
+  each — init writes the file, add registers the node — and the stale advice
+  that a namespace prefix cannot share its agent's name is gone with the
+  `-node` suffix it produced.
+- **The node is the namespace, and `:name` is the way out.** Three address
+  forms and no fourth: `node` is the roster leader, `node:member` is that
+  member, and a leading colon means the global a8s space — `:bob` is the
+  outside node named bob even when this roster has a member called bob. That
+  is the one case in the grammar where the colon is mandatory, and it is
+  stripped on resolution, so the recipient replies to a plain name without
+  knowing a marker was typed. Qualifying your own node is a no-op
+  (`acme:bob` means the same thing inside `acme` as outside it), so runbook and
+  charter text is portable verbatim, while `:acme:bob` deliberately leaves the
+  walls and comes back at the ingress gate. Colons are for namespacing only:
+  a member, cell or node name is refused if one appears inside it, and
+  `r4t roster check` now points a shadowed name at `:name` instead of
+  shrugging.
+- **`Ingress:` is enforced, and a walled member is refused rather than
+  redirected.** External mail addressed to `node:member` reaches that member
+  when it carries `- **Ingress:** yes` — on by default for the leader, off for
+  everyone else — and is otherwise dead-lettered with the reason, one
+  `REFUSED` line on the ticker, and a message naming both remedies. Silently
+  landing it on the leader would have the leader answer for a member that
+  never saw it, and the sender would never learn its address was ignored. An
+  unknown sub-address and a cell address are refused the same way; one post
+  forked to a whole cell is deferred and says so by name.
+- **The trust ceiling — a repo cannot raise its own permissions.** A runbook is
+  checked in and its `## Rigs` blocks name permission stances, so the runbook
+  proposes and the machine caps: an out-of-repo ceiling, `auto` by default,
+  fails any repo-declared rig that asks above it, with the remedy. `r4t add
+  <dir> --trust` raises it for that node, once, knowingly, and records it
+  machine-side where nothing in the repo can reach it. The check runs wherever
+  the roster loads, which is every turn, so editing `r4t.md` to `bypass` after
+  an untrusted `add` fails closed at the next wake rather than the next `add`.
+  A machine `rigs.json` rig is untouched — that stance is the operator's own.
+- **The runbook — one `r4t.md` that says what the team is.** A node's whole
+  configuration is now one markdown file at the node directory: YAML
+  frontmatter plus six closed H2 sections (`Mission`, `Charter`, `Roster`,
+  `Cells`, `Rigs`, `Rituals`), replacing `ROSTER.md` + `MISSION.md` +
+  `CHARTER.md` + `rigs.json` + `r4t-org.json`. One block grammar serves every
+  collection — a leading run of `- **Key:** value` bullets, then prose the
+  model reads verbatim — and the bold is optional, so `engine: claude --model
+  opus` parses exactly as a person would write it. A member is complete with
+  that one line: the engine line is a `r4t engine <id> run` invocation minus
+  the prompt, and promoting it to a `## Rigs` block is cut, paste, name it.
+  **A rig declared in the runbook shadows a machine rig of the same name,
+  whole-block** — never field-merged, so a runbook can never inherit a
+  permission stance you cannot see. `extends:` names a base (the shipped
+  `triforce` and `ark-suite`, or a path); frontmatter merges per key and an H2
+  section replaces whole, which is also how a runbook splits across files.
+  `${VAR}` / `${VAR:-default}` / `${VAR:?message}` resolve from the node's a8s
+  vars in field values and prose — never a heading, never frontmatter — and an
+  unset variable with no default is a hard error rather than an empty string; a
+  node var named `MISSION` replaces the `## Mission` section outright, which is
+  how one runbook serves two projects. `r4t runbook show --resolved
+  [--sources]` prints the merged, interpolated truth and names the layer every
+  section came from, and `r4t runbook check` lints it with every error naming
+  the line, the token and the closed set it should have come from. Colons are
+  refused inside member and cell names, an unknown or repeated `##` is a loud
+  error naming the six, and `## Charter` reaches every member's prompt where
+  the mission reaches only leads. A `r4t.md` wins over a legacy `ROSTER.md` in
+  the same directory, which is named as ignored rather than blended. v1 does
+  not carry H3-level merge, `Remove:` tombstones, or an `r4t/` directory
+  convention — the `extends:` chain is the split, and a runbook using one of
+  them is refused as deferred rather than unknown.
+- **The leader is the node's door, and a roster without one is refused.** Mail
+  addressed to the node with nothing past the colon lands on the roster leader
+  — the apex takes the node's mail, so it queues, threads, batches and narrates
+  the ticker exactly like member-addressed mail. What is new is the guarantee:
+  a ROSTER.md that marks no leader, or marks two, now fails when the roster
+  loads, naming the remedy, instead of loading fine and dead-lettering the
+  first bare message to arrive.
+  `r4t roster check` still reads a broken roster and reports every problem in
+  one pass — the tool that diagnoses a roster has to be able to load a wrong
+  one — and a roster that will not load now says so on the node log instead of
+  draining silently.
+- **Per-node a8s vars reach the mailbox path fields, so two agents can share
+  one repo.** `outbox_dir`, `inbox_dir` and `files_dir` now interpolate the
+  node's vars plus a new path-field built-in `$NODE` (the registered name), so
+  a definition carrying `".outbox-$NODE"` gives every node rooted at the same
+  directory a mailbox of its own — where before both resolved `<root>/.outbox`,
+  one handler won the scan race, and the router stamped the winner's name on
+  the loser's mail. A path field naming an unset var makes the node
+  *unresolved* rather than falling back to the default: it is skipped by
+  routing, `a8s ls` shows `unresolved: $KEY`, `a8s start` refuses it, and
+  `a8s health` names it — a fallback would silently re-create the collision.
+  Per-message placeholders (`$SENDER` and friends) are refused in a path field,
+  and `definition.env` stays literal: a var reaches argv and a mailbox path,
+  never the child's environment. Re-pointing a mailbox var is refused while a
+  handler is attached, and the carry-over is transactional when it is allowed:
+  a destination collision or unreadable source aborts the whole switch with
+  nothing moved and nothing saved, and a mid-move failure rolls back — the
+  registry never records a path the mail did not fully reach. Every path the
+  tool un-points is remembered on the node's `retired_mailboxes` list, and
+  `a8s health` walks that list — nested and absolute paths included — plus
+  any non-empty `.outbox*` / `.inbox*` / `.files*` directory under a
+  registered root that no node owns, pruning retired entries once they empty.
+- **The node log narrates the roster — one line per dispatch lifecycle
+  event.** `a8s logs <node> -f` used to show a wake starting and a wake
+  exiting and nothing in between: r4t wrote its narration only to its own day
+  log. Every lifecycle event now also goes to stdout, flushed as it happens,
+  which is what a8s pumps into the node's log — so one `-f` on one node is the
+  roster running, in order: `QUEUED` (a message joined a member's queue),
+  `TURN` (a turn started, with its batch size, rig and conversation path),
+  `DONE` (exit and duration), and `RESTING` / `BREAKER` / `DEFERRED` for a
+  member with mail that did not run, carrying the reason. Never a message body
+  and never transcript text — those stay in the day log, where `r4t logs`
+  scopes them.
+- **`r4t tell --as <member>` — speak into the roster as another member.**
+  The owner's impersonation verb, for jumpstarting a member's queue or
+  diagnosing where a message lands without waiting for a real sender. Routes
+  through the same ingest path a real member-to-member send takes, stamped
+  `from` the impersonated member, and narrates the ticker (`r4t: QUEUED ...`)
+  like any other arrival. Refuses an unknown `--as` or `--to` name loudly.
+- **`r4t logs` scopes to several members or a whole cell.** `--agent` is now
+  repeatable, and a new `--cell <cell>` follows every member in a roster
+  cell — both work with `-f`.
+- **The rotation, and one place that prints it (#179).** `r4t status` opens
+  with a Now / Next / Then / Held block above Health: who is running and for
+  how long against its timeout, who goes next **and why**, and every held
+  member with its blocker and its next verb. "Why" is words before numbers —
+  `ingress + passed over 2   score 3` — because a bare number is a symptom
+  with no cause. The selection is `schedule.next_up`, the same call the drain
+  loop makes: status never re-derives the ranking, so the printed answer and
+  the taken one cannot drift.
+  Two tiers. **Tier 1**: a member holding mail from a priority sender goes
+  next, always — `priority_senders` in the org config, `fnmatch` globs,
+  default `["neil*"]`, `[]` to empty the tier. It never preempts; a running
+  turn always finishes, so the promise is *next*, not *now*. **Tier 2**:
+  `score = 2*ask + 1*ingress + passes`, ties broken by oldest message then by
+  name. `ask` is the future r4t-only verb and contributes 0 by construction
+  today; the term is visible so the ladder does not change shape when it
+  lands. `ingress` is mail from outside the roster, stamped `origin` on the
+  envelope at the wall. `passes` is aging counted in turns, not seconds:
+  it rises for every ready member a selection skips and resets when the member
+  runs, and a member the budget held back does not age — the scheduler did not
+  pass it over, the budget did. Because the classes can add at most 3, a
+  member passed over 4 times outranks anything freshly arrived mail can carry.
+  The run queue itself is derived, never stored: a member is queued when its
+  inbox holds a message, and there is no scheduler state file to disagree with
+  the inboxes.
+- **A killed turn no longer loses its batch.** A turn claims by MOVING its
+  envelopes into `agents/<member>/queue/.inflight/` rather than deleting them.
+  A clean end drops them; a failed turn moves them back under their original
+  filenames, so they keep their ids and their place in arrival order instead
+  of being minted afresh behind whatever arrived meanwhile. A `SIGKILL`, an
+  OOM or a closed lid simply leaves them there, and every idle wake returns
+  each in-flight batch whose member holds no live lock — the PID lock is the
+  liveness test, so a turn genuinely running is left alone.
+- **A member whose harness cannot start parks, instead of failing forever
+  (#138).** An exec that never started — the binary is not on `PATH` — fails
+  identically on every retry, and the breaker's answer was a probe turn every
+  ten minutes with a fresh error to the sender each time, forever. The FIRST
+  such failure now parks the member: one `PARKED` ticker line, one day-log
+  line, then silence. Its queue holds untouched, which is what makes the
+  silence safe, and it leaves the rotation entirely. It returns when a probe
+  that costs nothing says the cause is gone — `shutil.which` on every idle
+  wake, no subprocess and no tokens — or when `r4t resume <member>` /
+  `r4t resume --all` says so by hand. A timeout, a nonzero exit with output, a
+  network error and an exhausted quota stay transient and keep the ordinary
+  breaker.
+
+### Changed
+- **ar3's own roster runs on a runbook — the format's acceptance test.**
+  `org/AR3/` collapses from six files in three formats (`ROSTER.md`,
+  `MISSION.md`, `CHARTER.md`, `rigs.json`, `definition.json`,
+  `r4t-org.json` — 429 lines) to one 382-line `r4t.md`, and a five-member
+  roster with cells, rigs and rituals loads with no error and no warning.
+  Nothing load-bearing moved: each `Engine:` line rebuilds the deleted
+  `invoke` array byte for byte, the widened `Allowed tools:` and the rig
+  budgets are fields, and the `_notes` strings that carried the reason for
+  each rig's shape are readable prose under the block instead of escaped JSON.
+  The workplace repo, `comms` and `egress` are frontmatter, and the node's
+  hand-copied `definition.json` is gone: `r4t add` registers against the
+  bundled `r4t` definition, and idle resolves its node from the directory it
+  wakes in.
+- **The product is named `ar3` (owner ruling, 2026-08-16).** The suite takes
+  the name of its front-door command, styled like `a8s`, `r4t` and `k7e`:
+  lowercase always, "the ar3 suite" where the longer form reads better. Every
+  user-visible surface follows — `--version` prints `(ar3, python …)` on all
+  four CLIs, the bare `ar3` tagline, `--help`, the installed skill
+  descriptions, the installer messages, and the mirror's release titles and
+  commit subjects. The `ark/` package, `arkver`, the `ar3`/`a8s`/`r4t`/`k7e`
+  commands and the `AR3` node are unchanged, as is the build-along guide's
+  title, *The Ark Raising*.
+
+### Changed
+- **Continuation is gated by the label, the clock, the last exit, and the
+  engine.** `Continue:` is still the opt-in and still time-valued
+  (`Continue: 15m`), and a turn now founds a fresh conversation rather than
+  resuming one whenever the previous turn did not exit clean (`CONTINUE-DIRTY`)
+  or the conversation sat idle past the member's window (`CONTINUE-STALE`) —
+  the idle sweep spends a dump turn on the graceful path, and these are the
+  backstop for a roster whose idle pass has not run. Each measured engine
+  preset also carries a continuation grade: **cursor** is good (resume is keyed
+  on an MD5 of the absolute working directory, verified), **codex** is moderate
+  and its preset now passes `--include-non-interactive` so `resume --last` can
+  see the roster's own `codex exec` turns, and **claude** is poor — resuming
+  `claude -p` across a process boundary re-wrote the whole conversation 40.6%
+  of the time against a 2.5% same-process baseline, and every roster turn is a
+  new process. `Continue:` on a poor-graded preset is now a config error naming
+  the measurement rather than a quiet cost. Engines the research has not
+  measured are ungraded and continue exactly as before, and
+  `r4t engine run --continue` is untouched: one process, and the operator's
+  own choice. `r4t rig presets` prints each preset's grade beside its
+  continuation tokens, so the refusal is visible where a preset is chosen.
+- **A stalled org is re-engaged by the mission-review heartbeat alone.** With
+  no ledger to ask, a stall is now "the drain ran nothing, every queue is
+  empty, no turn is live, and no member has finished a turn since the last
+  tick" — the turn-completion stamp is what keeps a stall distinguishable from
+  a lull across idle passes. One general mechanism replaces the watchdog that
+  used to chase individual unanswered threads.
+- **`r4t clear` prunes locks, drains, and applies log retention.** It no longer
+  expires thread ledgers, and its `--older-than` flag is gone with them.
+- **One turn at a time is a contract, not a setting.** A node runs exactly one
+  member turn, start to finish, and only then asks who goes next. That is what
+  makes `a8s logs <node> -f` followable by a person: nothing interleaves
+  because nothing is concurrent. The rotation is always arithmetic and never a
+  model call — a queue whose order came out of a model is a queue nobody can
+  explain. The drain loop re-selects after every turn rather than sweeping
+  members alphabetically. Parallelism is a **second node**, on another machine
+  or this one; the rig spend buckets are machine-global, so two nodes on one
+  machine cannot double your burn behind your back. What you give up is the
+  single watchable stream, and one hung member stalling the roster until its
+  per-turn timeout ends it — which is why the running row prints
+  `1m12s of 45m`.
+- **The cadence throttle is off by default** (`throttle.min_seconds_between_
+  turn_starts`, 15 -> 0). Under serialization there is no pile-up left to
+  defend against, so a standing gap between turns is dead air that also makes
+  "who is next" stop being immediate. It stays as opt-in slow motion for
+  watching a rotation go by.
+- **The idle pass runs every 60 seconds, in a strict order, and says nothing
+  when nothing happened.** `idle.timeout` in the r4t node definition drops from
+  300 to 60. A pass now recovers orphaned in-flight batches first (everything
+  after it reads the queue and has to read a true one), prunes stale locks,
+  probes parked members, drains, dreams, runs the stall heartbeat, and retires
+  idle conversations last. A pass that finds nothing prints nothing at all: at
+  a one-minute cadence a heartbeat line would be over a thousand lines a day in
+  the one stream the roster is meant to be watchable in — `r4t status` carries
+  the idle time instead. Because the heartbeat's backoff ladder counts idle
+  WAKES, a wall-clock floor of 30 minutes now bounds it too, so shortening the
+  wake interval cannot multiply a paid leader turn five-fold without anyone
+  editing a policy.
+- **The guide teaches the runbook path, and its transcripts were re-captured
+  against this build.** *The Ark Raising* chapter 2 founds a roster with
+  `r4t init` → edit `r4t.md` → `r4t add` in place of a hand-written `ROSTER.md`
+  and the three-command a8s registration, and it reads the ticker and the
+  rotation instead of a seat inbox; chapters 3–6 lose the retired `r4t seat`,
+  the task layer and the chat TUI, and speak to the roster from the chapter 1
+  a8s seat with `tell`. Every "You should see:" block on the reworked path was
+  re-run on a throwaway HOME rather than edited by hand. The roster templates
+  under `guide/templates/` are `r4t.md` runbooks now, and a new
+  `apps/r4t/tests/test_guide.py` pins each receipt the chapters quote to the
+  source that prints it, so a reworded line fails a suite instead of rotting a
+  tutorial.
+
+### Removed
+- **`throttle.max_concurrent` and the per-rig `concurrency` (owner ruling,
+  2026-08-16).** Both are deleted outright with no lineage: no explanatory
+  error, no pin-to-1 that ignores the value. A knob that can only hold one
+  value invites the question "what if 2?", and the answer — "nothing, it is
+  ignored" — is worse than the question. Leaving them parseable would also have
+  silently opted every existing config *out* of the contract, since
+  `max_concurrent: 0` meant unlimited. Nothing the repo ships set either to
+  anything but 1; `r4t rig set <rig> concurrency` now fails with the ordinary
+  unknown-setting error, and a leftover key in a hand-written config is
+  ignored like any other unknown key. `r4t status` and `r4t rig list` print
+  `contract: one turn at a time (cadence 0s)` where the throttle line was, and
+  the `CONC` column is gone.
+- **The `r4t chat` TUI (owner ruling, 2026-08-16).** The interactive chat
+  window — Textual front end and line-UI fallback alike — is gone: a scoped
+  `r4t logs` is the window onto a running roster, and `r4t tell --as` is the
+  door back in. `chat_tui.py` is deleted and `textual` drops out of
+  `requirements/r4t.txt`.
+- **The human seat, and the task layer behind it (owner ruling, 2026-08-16).**
+  Fire-and-forget is now the rule inside the walls: a message carries no task
+  and demands no answer.
+  - **The seat.** No `r4t seat` verb, no seat mailbox, no parking, no
+    `Address:` doorbell and no `doorbell_check` org setting. `chat.py` is
+    deleted. The operator's way into a roster is `r4t tell --as <member>` and
+    their way to watch it is `r4t logs`.
+  - **The `Human:` and `Address:` roster fields.** A roster is members that
+    take turns, so every member carries a `Rig:` and the operator has no row.
+    Both fields now name themselves as retired and disable the member that
+    carries one. The Ark's own roster keeps Ares as prose about the PR gate
+    rather than a member entry.
+  - **The task ledger and every answer obligation.** `tasks.py`,
+    `tasktrace.py`, the `r4t task` verb, the `quiet_task_seconds` knob and the
+    quiet-thread sweep are gone, along with thread status, thread closure, the
+    `ANSWERED` line and the ingress/inside distinction that existed to decide
+    what was owed. **Thread ids stay**: they are message lineage, and the
+    ticker, the day log, the dead-letter record and reply attribution all still
+    carry them. This resolves #58 by removing the code the bug lived in.
 
 ## [0.1.69]
 

@@ -1,4 +1,4 @@
-"""Every Ark CLI answers `--version` with the suite semver.
+"""Every ar3 CLI answers `--version` with the suite semver.
 
 This is the one promise that has to hold across all six entry points, and the
 only way to check it is to run them. The conftest forbids spawning harnesses,
@@ -50,7 +50,7 @@ def test_cli_reports_the_suite_version(name, argv, real_subprocess, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert (
         proc.stdout.strip()
-        == f"{name} {arkver.suite_version()} (The Ark, python {platform.python_version()})"
+        == f"{name} {arkver.suite_version()} (ar3, python {platform.python_version()})"
     )
 
 
@@ -81,5 +81,5 @@ def test_a_relocated_entry_point_still_runs(real_subprocess, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert (
         proc.stdout.strip()
-        == f"r4t unknown (The Ark, python {platform.python_version()})"
+        == f"r4t unknown (ar3, python {platform.python_version()})"
     )

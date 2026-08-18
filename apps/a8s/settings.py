@@ -116,6 +116,30 @@ KNOBS: tuple[Knob, ...] = (
         "A8S_WAKE_PATH",
         "PATH every wake gets unless its definition.env names one; a8s add records the operator's PATH here (empty = inherit the handler's)",
     ),
+    Knob(
+        "wake_drain_grace_seconds",
+        5.0,
+        "machine",
+        True,
+        "A8S_WAKE_DRAIN_GRACE_SECONDS",
+        "Seconds to wait for a wake's stdout to reach EOF after the process exits before the runner closes it itself (an inherited pipe write end must not wedge the runner)",
+    ),
+    Knob(
+        "txlog_heartbeat_seconds",
+        300.0,
+        "machine",
+        True,
+        "A8S_TXLOG_HEARTBEAT_SECONDS",
+        "Seconds between HEARTBEAT rows in transactions.sqlite3 while a resident attached_loop runs (0 disables)",
+    ),
+    Knob(
+        "watchdog_wedge_seconds",
+        120.0,
+        "machine",
+        True,
+        "A8S_WATCHDOG_WEDGE_SECONDS",
+        "Seconds of stale loop-beat plus an addressed inbox message that old before the alive-but-deaf watchdog recovers the in-flight wake (0 disables the watchdog)",
+    ),
     # --- per-agent definition (a8s define) ---
     Knob("definition.invoke", None, "definition", False, note="Required argv template for message wakes"),
     Knob("definition.outbox_dir", ".outbox", "definition", False, note="Tell outbox under agent root (absolute OK); a8s injects TELL_OUTBOX_DIR on wake"),
@@ -241,7 +265,12 @@ def _coerce(key: str, raw: str) -> Any:
         "txlog_max_rows",
     ):
         return int(raw)
-    if key == "loop_interval":
+    if key in (
+        "loop_interval",
+        "wake_drain_grace_seconds",
+        "txlog_heartbeat_seconds",
+        "watchdog_wedge_seconds",
+    ):
         return float(raw)
     return raw
 
@@ -296,6 +325,21 @@ def _validate(key: str, value: Any) -> Any:
         if not isinstance(value, str):
             raise ValueError("wake_path must be a string")
         return value
+    if key == "wake_drain_grace_seconds":
+        f = float(value)
+        if f <= 0:
+            raise ValueError("wake_drain_grace_seconds must be a positive number")
+        return f
+    if key == "txlog_heartbeat_seconds":
+        f = float(value)
+        if f < 0:
+            raise ValueError("txlog_heartbeat_seconds must be zero or positive")
+        return f
+    if key == "watchdog_wedge_seconds":
+        f = float(value)
+        if f < 0:
+            raise ValueError("watchdog_wedge_seconds must be zero or positive")
+        return f
     return value
 
 

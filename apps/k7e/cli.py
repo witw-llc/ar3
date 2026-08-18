@@ -19,7 +19,7 @@ except ImportError:
     def version_line(app: str) -> str:
         import platform
 
-        return f"{app} unknown (The Ark, python {platform.python_version()})"
+        return f"{app} unknown (ar3, python {platform.python_version()})"
 
 import config
 import engine

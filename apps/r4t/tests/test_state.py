@@ -413,3 +413,22 @@ def test_live_log_reset_and_tail(r4t_home):
     # a new turn truncates the file; a stale offset restarts from the top
     state.reset_live_log(NODE, "phil")
     assert state.read_live_log_tail(NODE, "phil", offset) == ("", 0)
+
+
+class TestSeatRetired:
+    """The seat mailbox and its presence doorbell are gone (#182). Nothing
+    parks for a human, so nothing needs a flag saying whether one is watching."""
+
+    def test_no_seat_mailbox_api_survives(self):
+        for name in (
+            "seat_dir", "seat_inbox_dir", "seat_read_dir", "park_seat_message",
+            "list_seat_messages", "mark_seat_read",
+        ):
+            assert not hasattr(state, name), f"state.{name} outlived the seat"
+
+    def test_no_presence_doorbell_api_survives(self):
+        for name in (
+            "seat_presence_path", "touch_seat_presence", "clear_seat_presence",
+            "seat_attached",
+        ):
+            assert not hasattr(state, name), f"state.{name} outlived the doorbell"

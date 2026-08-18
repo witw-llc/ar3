@@ -29,6 +29,18 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _no_var_cache_leak():
+    """A runbook reads a node's a8s vars once per process. A process is one
+    wake in production and the whole suite under pytest, so the cache is
+    emptied between tests."""
+    import runbook
+
+    runbook.clear_vars_cache()
+    yield
+    runbook.clear_vars_cache()
+
+
+@pytest.fixture(autouse=True)
 def _no_ollama(monkeypatch):
     """Member stores drive k7e as a subprocess, which reaches for ollama when
     one answers. Point every test at a dead port so the suite measures r4t and
@@ -67,13 +79,9 @@ ROSTER_TEXT = textwrap.dedent(
     ### Phil
     - **Rig:** junior-dev
     - **Role:** Lead Backend Engineer
+    - **Ingress:** yes
 
     Grumpy, cynical veteran. Despises feature creep.
-
-    ### Neil
-    - **Human:** yes
-    - **Address:** neil
-    - **Role:** Game Director
 
     ### Broken
     - **Rig:** ./run-agent.sh --headless

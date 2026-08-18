@@ -13,6 +13,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -30,25 +32,29 @@ except ImportError:
     def version_line(app: str) -> str:
         import platform
 
-        return f"{app} unknown (The Ark, python {platform.python_version()})"
+        return f"{app} unknown (ar3, python {platform.python_version()})"
 from typing import NamedTuple
 
 import knowledge
+import runbook
+import schedule
 import state
-import tasks
 import verdict
 from dispatch import (
     DispatchContext,
     class_from_meta,
     handle_batch,
     handle_message,
+    local_stamp,
+    local_zone,
     run_clear,
     run_flush,
     run_idle,
     split_recipient,
 )
 from rig import (
-    DEFAULT_CONCURRENCY,
+    A8S_PY,
+    CONTINUE_POOR,
     DEFAULT_TIMEOUT_SECONDS,
     PERMISSION_MODES,
     RigError,
@@ -56,13 +62,15 @@ from rig import (
     add_preset_rig,
     build_preset_invoke,
     continue_collisions,
+    continue_grade,
     default_config_path,
-    default_config_payload,
     format_preset_invoke,
     is_below_knowledge_floor,
     load_rig_config,
+    machine_ceiling,
     permission_ceiling_note,
     preset_names,
+    raise_machine_ceiling,
     remove_rig,
     resolve_config_path,
     resolve_override,
@@ -75,7 +83,7 @@ from rig import (
     unset_rig_value,
 )
 from notify import resolve_tell_fn, simulate_enabled, visible_a8s_names
-from org import check_org, load_org
+from org import Org, check_org, load_org
 from roster import (
     Member,
     Roster,
@@ -84,7 +92,6 @@ from roster import (
     resolve_roster_path,
 )
 
-DEFAULT_TASK_TTL_SECONDS = 7 * 86400
 
 
 class Command(NamedTuple):
@@ -104,7 +111,18 @@ COMMAND_HELP = [
     (
         "Getting started",
         [
-            Command("init", "Set up this repo: a starter roster and rig config", "init"),
+            Command("init", "Write a starter r4t.md in this repo", "init"),
+            Command(
+                "add <dir> [<runbook>]",
+                "Register a directory as a node — one name, one door",
+                "add",
+                'tell <name> "hello"',
+            ),
+            Command(
+                "runbook show --resolved",
+                "The one file that says what the team is, layers merged",
+                "runbook",
+            ),
             Command(
                 "roster check",
                 "Check the roster reads cleanly and every rig resolves",
@@ -127,7 +145,7 @@ COMMAND_HELP = [
         [
             Command(
                 "status",
-                "Where a roster stands: budgets, queues, open threads",
+                "Where a roster stands: budgets, queues, dead letters",
                 "status",
             ),
             Command(
@@ -137,22 +155,20 @@ COMMAND_HELP = [
                 "r4t logs -f",
             ),
             Command(
-                "chat",
-                "Your seat at the roster: speak, and watch the work land",
-                "chat",
-            ),
-            Command(
-                "seat",
-                "Read messages waiting for you and answer them",
-                "seat",
+                "tell",
+                "Speak into the roster as any member — jumpstart or diagnose",
+                "tell",
             ),
             Command(
                 "flush <member>",
                 "Save a member's state and start the conversation fresh",
                 "flush",
             ),
-            Command("task list", "The roster's conversation threads", "task"),
-            Command("task show <id>", "One thread, in full"),
+            Command(
+                "resume <member>",
+                "Put a parked member back in the rotation",
+                "resume",
+            ),
             Command(
                 "engine <id> quota",
                 "How much subscription an engine has left, and when it resets",
@@ -181,12 +197,6 @@ COMMAND_HELP = [
                 "Sweep a roster's work for the patterns you forbid",
                 "check",
             ),
-            Command(
-                "task trace <id>",
-                "Who told whom on one task, hop by hop",
-                None,
-                "r4t task list",
-            ),
         ],
     ),
 ]
@@ -200,35 +210,33 @@ PARSER_HELP = {
 
 HIDDEN_COMMANDS = ("clear", "dispatch", "idle", "judge", "lab", "sandbox")
 
-ROSTER_TEMPLATE = """\
-# Roster
+RUNBOOK_TEMPLATE = """\
+---
+name: "{name}"
+extends: "triforce"
+---
 
-Members are `### <Name>` blocks. AI is the default and carries no marker.
-`Human: yes` members are never dispatched: mail to them parks in the roster's
-seat mailbox (`r4t seat`, `r4t chat`), and the optional `Address:` is a
-doorbell — a copy forwarded over a8s when no seat session is attached.
-`Rig:` names a SYMBOLIC rig defined in the out-of-repo rig config
-(~/.config/r4t/rigs.json) and belongs only to AI members. Free prose in a
-block becomes the member's persona.
+# {title}
 
-### Owner
-- **Human:** yes
-- **Address:** YOUR-A8S-NAME
-- **Role:** Product owner
+This one file is the team. It extends the built-in `triforce` runbook — a
+lead who talks to you, a builder, and one who tries to break it — so the only
+thing you have to write here is what makes this project different.
 
-### Lead
-- **Rig:** leader
-- **Leader:** yes
-- **Role:** Roster lead — delegates work and answers the owner
+Six sections exist and no others: `## Mission`, `## Charter`, `## Roster`,
+`## Cells`, `## Rigs`, `## Rituals`. A section written here REPLACES the
+base's whole, so read the base before you edit one:
 
-Coordinates the roster. Delegates implementation, follows up on replies, and
-synthesizes answers for whoever asked.
+    r4t runbook show --resolved --sources
 
-### Dev
-- **Rig:** member
-- **Role:** Developer
+Then register the node — one name for the directory, the runbook and the
+address you mail:
 
-Implements what the Lead asks for and reports back.
+    r4t add {root}
+
+## Mission
+
+Say what this roster is for, and how anyone will know it is done. Delete this
+section to keep triforce's.
 """
 
 
@@ -236,6 +244,21 @@ def _resolve_root(raw: str | None) -> Path:
     if raw:
         return Path(raw).expanduser().resolve()
     return Path.cwd().resolve()
+
+
+def _runbook_node(args: argparse.Namespace, root: Path) -> str | None:
+    """The node whose a8s vars a runbook's `${VAR}` references resolve
+    against, inferred without complaining: an explicit `--node`, the sole
+    registered roster, or the one stamped at this root. A runbook that names
+    no variable needs no node, so a missing one is not worth a line of
+    stderr — the interpolation itself says so, by name, if it matters."""
+    raw = getattr(args, "node", None)
+    if raw:
+        return raw.strip().lower()
+    rosters = state.known_rosters()
+    if len(rosters) == 1:
+        return rosters[0]
+    return state.node_for_root(root)
 
 
 def _resolve_node(raw: str | None) -> str | None:
@@ -254,11 +277,23 @@ def _resolve_node(raw: str | None) -> str | None:
     return None
 
 
-def _context(args: argparse.Namespace, node: str) -> DispatchContext:
+def _warn_org_errors(org: Org) -> None:
+    """A malformed `comms:`/`egress:`/other org setting used to vanish the
+    moment `load_org` degraded to defaults — invisible until the operator
+    happened to run `roster check`. Every caller that dispatches on the
+    result prints it instead: loud, not fatal, because the turn still has to
+    run on the defaults `load_org` already chose."""
+    for message in org.errors:
+        print(f"warning: {message}", file=sys.stderr)
+
+
+def _context(
+    args: argparse.Namespace, node: str, *, ticker: bool = False
+) -> DispatchContext:
     # The stamped node root IS the org dir — it is what dispatch resolved and
-    # ran against. Observer surfaces (chat/status/seat) must read the roster,
-    # mission and docs from there too, not from wherever the human happens to
-    # stand: in a portable org the workplace repo is not the org dir, and a
+    # ran against. Observer surfaces (status, logs) must read the roster,
+    # mission and docs from there too, not from wherever the operator happens
+    # to stand: in a portable org the workplace repo is not the org dir, and a
     # member that wrote a shadow ROSTER.md/MISSION.md into the workplace must
     # not shadow the authoritative copy. So prefer the stamp over cwd whenever
     # no explicit --root overrides it.
@@ -268,7 +303,8 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
         if stamped is not None and stamped.is_dir():
             root = stamped
     org = load_org(root)
-    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None))
+    _warn_org_errors(org)
+    roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None), node)
     return DispatchContext(
         root=org.dir,
         node=node,
@@ -282,11 +318,12 @@ def _context(args: argparse.Namespace, node: str) -> DispatchContext:
         comms=org.comms,
         leader_sees_lateral=org.leader_sees_lateral,
         egress=org.egress,
-        doorbell_check=org.doorbell_check,
+        priority_senders=org.priority_senders,
         isolation=org.isolation,
         definition_path=(
             Path(defn).expanduser() if (defn := getattr(args, "definition", None)) else None
         ),
+        ticker=ticker,
     )
 
 
@@ -330,13 +367,9 @@ def _rig_model(rig) -> str:
 
 def _print_rig_table(config, indent: str, wide: bool) -> None:
     rigs = [(n, config.rigs[n]) for n in sorted(config.rigs) if not config.rigs[n].error]
-    show_concurrency = any(r.concurrency != DEFAULT_CONCURRENCY for _, r in rigs)
     show_rig_budget = any(r.rig_budget_max is not None for _, r in rigs)
 
-    headers = ["RIG", "PRESET", "MODEL"]
-    if show_concurrency:
-        headers.append("CONC")
-    headers += ["TIMEOUT", "SENDS", "BUDGET"]
+    headers = ["RIG", "PRESET", "MODEL", "TIMEOUT", "SENDS", "BUDGET"]
     if show_rig_budget:
         headers.append("RIG-BUDGET")
     if wide:
@@ -345,8 +378,6 @@ def _print_rig_table(config, indent: str, wide: bool) -> None:
     rows: list[tuple[str, ...]] = []
     for name, rig in rigs:
         row = [name, rig.preset or "-", _rig_model(rig)]
-        if show_concurrency:
-            row.append(str(rig.concurrency))
         row += [
             f"{rig.timeout_seconds:g}s",
             str(rig.max_sends_per_turn),
@@ -385,9 +416,7 @@ def _print_roster_table(config, roster_path: Path, indent: str) -> None:
         return
     rows: list[tuple[str, ...]] = []
     for m in roster.members:
-        if m.is_human:
-            rows.append((m.name, "-", "human"))
-        elif m.errors:
+        if m.errors:
             rows.append((m.name, "-", f"DISABLED — {m.error}"))
         else:
             rig, err, pinned = config.rig_for(m)
@@ -412,7 +441,7 @@ def _print_rig_summary(
         print(f"{indent}error: {e}")
         return
     if config.missing:
-        print(f"{indent}(no rigs yet — try: r4t rig add <rig> <preset>, or r4t init)")
+        print(f"{indent}(no rigs yet — try: r4t rig add <rig> <preset>)")
         return
     _print_rig_table(config, indent, wide)
     if config.pins:
@@ -422,14 +451,12 @@ def _print_rig_summary(
             print(f"{indent}  {agent} -> {config.pins[agent]}")
     print()
     print(
-        f"{indent}throttle:   max_concurrent={config.throttle.max_concurrent} "
-        f"min_seconds_between_turn_starts="
-        f"{config.throttle.min_seconds_between_turn_starts:g}"
+        f"{indent}contract:   one turn at a time  (cadence "
+        f"{config.throttle.min_seconds_between_turn_starts:g}s)"
     )
     print(
         f"{indent}governance: cell_budget={config.cell_budget_max:g}/"
         f"+{config.cell_budget_earn_per_hour:g}per-h "
-        f"quiet_task={config.quiet_task_seconds:g}s "
         f"breaker_cap={config.breaker_cap} "
         f"breaker_cooldown={config.breaker_cooldown_seconds:g}s"
     )
@@ -441,17 +468,13 @@ def _print_rig_summary(
 def _print_roster_summaries() -> None:
     rosters = state.known_rosters()
     if not rosters:
-        print("  (none — register a roster after `r4t init`; see printed a8s steps)")
+        print("  (none — try: r4t add <dir> [<runbook>])")
         return
     for node in rosters:
         locks = state.live_locks(node)
-        open_tasks = [
-            t for t in tasks.list_tasks(node) if t.get("status") == tasks.STATUS_OPEN
-        ]
         dead = len(state.list_dead_letters(node))
         queued = sum(state.queue_depth(node, m) for m in state.members_with_queue(node))
         parts = [
-            f"{len(open_tasks)} open thread(s)",
             f"{len(locks)} lock(s)",
             f"{queued} queued",
             f"{dead} dead letter(s)",
@@ -486,21 +509,21 @@ def _next_steps(
 ) -> list[str]:
     steps: list[str] = []
     if config_missing:
-        steps.append("`r4t init` — write ~/.config/r4t/rigs.json with default rigs")
+        steps.append(
+            "`r4t rig add <rig> <preset>` — write ~/.config/r4t/rigs.json "
+            "(a runbook whose members carry `Engine:` lines needs none)"
+        )
     if not roster_path.is_file():
-        steps.append("`r4t init` — write a starter ROSTER.md in the current repo")
+        steps.append("`r4t init` — write a starter r4t.md in the current repo")
     else:
         steps.append("`r4t roster check` — lint the roster and rig mapping")
         steps.append("`r4t rig presets` — named CLI rigs aligned with a8s definitions")
-        steps.append("`r4t rig add <rig> <preset>` — add a rig to the rig config")
     if not rosters:
-        steps.append("`r4t init` — prints the a8s add / namespace / start sequence")
+        steps.append("`r4t add .` — register this directory as a node")
     elif len(rosters) == 1:
-        steps.append(f"`r4t status --node {rosters[0]}` — budgets, queues, threads")
-        steps.append(f"`r4t chat --node {rosters[0]}` — take your seat at the roster")
+        steps.append(f"`r4t status --node {rosters[0]}` — budgets, queues, dead letters")
     else:
         steps.append("`r4t status --node <roster>` — pick a roster from the list above")
-        steps.append("`r4t chat --node <roster>` — take your seat at the roster")
     return steps
 
 
@@ -511,8 +534,8 @@ def cmd_default(_args: argparse.Namespace) -> int:
     rosters = state.known_rosters()
 
     print("r4t — the roster")
-    print("Define agents in ROSTER.md; ~/.config/r4t/rigs.json maps roster rigs")
-    print("to what actually runs. r4t dispatches governed turns on a8s.")
+    print("Define the team in one r4t.md at the node dir — mission, charter,")
+    print("roster, rigs. r4t dispatches governed turns on a8s.")
     print()
     print("Environment")
     print(f"  R4T_HOME: {state.r4t_home()}")
@@ -529,16 +552,14 @@ def cmd_default(_args: argparse.Namespace) -> int:
     if roster_path.is_file():
         try:
             roster = load_roster(roster_path)
-            leaders = [m for m in roster.members if m.leader and not m.is_human]
-            leader = leaders[0].name if len(leaders) == 1 else "(unset)"
             print(
                 f"  {roster_path}: {len(roster.members)} member(s), "
-                f"leader {leader}"
+                f"leader {roster.leader().name}"
             )
         except RosterError as e:
             print(f"  {roster_path}: {e}")
     else:
-        print(f"  no ROSTER.md under {root}")
+        print(f"  no r4t.md or ROSTER.md under {root}")
     print()
     _print_command_panel()
     print()
@@ -581,7 +602,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             node = _resolve_node(None)
         if not node:
             return 2
-        ctx = _context(args, node)
+        # a8s runs `dispatch` and `idle` as wake subprocesses and pumps their
+        # stdout into the node's log, so these two verbs — and only these two —
+        # narrate the ticker (`ctx.event`) that `a8s logs <node> -f` follows.
+        ctx = _context(args, node, ticker=True)
         state.stamp_root(ctx.node, ctx.root)
         return handle_batch(
             ctx, args.batch, drain_after=not args.no_drain,
@@ -597,7 +621,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if not node:
         print("dispatch: --to must carry the node name", file=sys.stderr)
         return 2
-    ctx = _context(args, node.lower())
+    ctx = _context(args, node.lower(), ticker=True)
     state.stamp_root(ctx.node, ctx.root)
     return handle_message(
         ctx, args.from_agent, args.to, args.message,
@@ -627,15 +651,61 @@ def cmd_clear(args: argparse.Namespace) -> int:
     if node is None:
         return 2
     ctx = _context(args, node)
-    summary = run_clear(ctx, args.older_than)
-    expired = summary["tasks_expired"]
+    summary = run_clear(ctx)
+    recovered = sum(count for _name, count in summary["recovered"])
     print(
-        f"pruned {summary['locks_pruned']} stale lock(s); "
-        f"expired {len(expired)} thread(s)"
-        + (f" ({', '.join(expired)})" if expired else "")
+        f"pruned {summary['locks_pruned']} stale lock(s)"
+        + (f"; recovered {recovered} in-flight message(s)" if recovered else "")
         + f"; drained {summary['drained']} queued turn(s)"
         + _retention_line(summary)
     )
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Put a parked member back in the rotation — systemd's `reset-failed`.
+
+    Parking is left automatically only when a probe that costs nothing says the
+    structural cause is gone. Where there is no such probe — an engine refusing
+    authentication has no cheap test that is not a paid call — the operator
+    says so, here. A system that cannot cheaply tell whether a problem is fixed
+    must not spend the user's money finding out on a timer."""
+    node = _resolve_node(args.node)
+    if node is None:
+        return 2
+    ctx = _context(args, node)
+    try:
+        roster = load_roster(ctx.roster_path, node=ctx.node)
+    except RosterError as e:
+        print(f"resume: cannot read roster: {e}", file=sys.stderr)
+        return 2
+    if args.all:
+        targets = state.parked_members(node)
+    elif not args.member:
+        print("resume: name a member, or --all (try: r4t status)", file=sys.stderr)
+        return 2
+    else:
+        member = roster.find(args.member)
+        if member is None:
+            known = ", ".join(roster.names()) or "(none)"
+            print(
+                f"resume: no roster member named {args.member!r} "
+                f"(members: {known})",
+                file=sys.stderr,
+            )
+            return 2
+        targets = [member.name.lower()]
+    if not targets:
+        print("nothing parked")
+        return 0
+    for name in targets:
+        record = state.unpark_member(node, name)
+        if not record:
+            print(f"{name} is not parked")
+            continue
+        depth = state.queue_depth(node, name)
+        state.append_log(node, f"r4t: RESUME {name} — resumed by hand; {depth} queued")
+        print(f"resumed {name} — {depth} message(s) waiting  ({record['reason']})")
     return 0
 
 
@@ -684,7 +754,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     try:
-        roster = load_roster(ctx.roster_path)
+        roster = load_roster(ctx.roster_path, node=ctx.node)
         config = load_rig_config(ctx.config_path)
     except (RosterError, RigError) as e:
         print(f"flush: {e}", file=sys.stderr)
@@ -714,19 +784,12 @@ def cmd_idle(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node)
+    ctx = _context(args, node, ticker=True)
     summary = run_idle(ctx)
-    nudged = summary.get("quiet_nudged") or []
-    print(
-        f"drained {summary['drained']} queued turn(s); "
-        f"nudged the leader on {len(nudged)} quiet thread(s)"
-        + (f" ({', '.join(nudged)})" if nudged else "")
-    )
-    clear_summary = run_clear(ctx, args.older_than)
-    expired = clear_summary["tasks_expired"]
+    print(f"drained {summary['drained']} queued turn(s)")
+    clear_summary = run_clear(ctx)
     print(
         f"pruned {clear_summary['locks_pruned']} stale lock(s); "
-        f"expired {len(expired)} thread(s); "
         f"drained {clear_summary['drained']} more queued turn(s)"
         + _retention_line(clear_summary)
     )
@@ -763,14 +826,6 @@ def _roster_rows(
         if m.name.lower() in locks:
             flags.append(f"turn running, pid {locks[m.name.lower()].get('pid')}")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
-        if m.is_human:
-            rows.append((
-                None,
-                m.name,
-                f"Human  address={m.address or '(none)'}{suffix}",
-                None if m.address else "add an **Address:** line so the roster can reach them",
-            ))
-            continue
         if m.errors:
             rows.append((
                 False, m.name, f"disabled: {m.error}{suffix}",
@@ -874,16 +929,15 @@ def _rig_rows(
     for agent in sorted(config.pins):
         rows.append((None, "pin", f"{agent} -> {config.pins[agent]}", None))
     rows.append((
-        None, "throttle",
-        f"max_concurrent={config.throttle.max_concurrent}  "
-        f"cadence={config.throttle.min_seconds_between_turn_starts:g}s",
+        None, "contract",
+        "one turn at a time  (cadence "
+        f"{config.throttle.min_seconds_between_turn_starts:g}s)",
         None,
     ))
     rows.append((
         None, "governance",
         f"cell_budget={config.cell_budget_max:g}/"
         f"+{config.cell_budget_earn_per_hour:g}per-h  "
-        f"quiet_task={config.quiet_task_seconds:g}s  "
         f"breaker={config.breaker_cap}/{config.breaker_cooldown_seconds:g}s",
         None,
     ))
@@ -898,20 +952,6 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
             f"{name}  {state.queue_depth(node, name)} message(s) waiting",
             None,
         ))
-    open_tasks = [
-        t for t in tasks.list_tasks(node) if t.get("status") == tasks.STATUS_OPEN
-    ]
-    for task in open_tasks:
-        rows.append((
-            None, "thread",
-            f"{task['id']}  creator={task.get('creator', '?')}  "
-            f"status={task.get('status', '?')}"
-            + ("  answered" if task.get("answered") else "")
-            + ("  ingress" if task.get("ingress") else ""),
-            None,
-        ))
-    if not open_tasks:
-        rows.append((None, "threads", "none open", None))
     roll = verdict.rollup_dead_letters(state.list_dead_letters(node))
     if not roll.routine_total and not roll.signal_total:
         rows.append((None, "dead letters", "0", None))
@@ -940,6 +980,103 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
     return rows
 
 
+def _last_finished(node: str, roster) -> tuple[str, str, dict] | None:
+    """(member, completed_at, last_turn) for the most recently finished turn on
+    the roster, or None when nobody has run."""
+    best: tuple[str, str, dict] | None = None
+    for m in roster.members:
+        meta = state.read_meta(node, m.name)
+        turn = meta.get("last_turn")
+        stamp = str(meta.get("last_completed_at", ""))
+        if not stamp or not isinstance(turn, dict):
+            continue
+        if best is None or stamp > best[1]:
+            best = (m.name.lower(), stamp, turn)
+    return best
+
+
+def _since(stamp: str) -> float:
+    try:
+        started = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+    return max(0.0, time.time() - started)
+
+
+def _now_row(ctx: DispatchContext, node: str, roster, config) -> tuple[str, str]:
+    """The one `Now` row. Exactly one, always: it IS the contract, rendered.
+
+    The running turn's elapsed time is printed against its timeout because
+    under run-to-completion a single hung member stalls the whole roster, and
+    that per-turn timeout is the only thing that ends it. The cost of the
+    contract belongs on screen while it is being paid."""
+    for lock in state.live_locks(node):
+        name = lock["agent"]
+        member = roster.find(name)
+        turn = state.read_turn(node, name) or {}
+        detail = f"running {schedule.fmt_age(_since(str(lock.get('started', ''))))}"
+        rig = config.rig_for(member)[0] if member is not None else None
+        if rig is not None:
+            detail += f" of {schedule.fmt_age(rig.timeout_seconds)}"
+        detail += f"   rig {lock.get('rig', '?')}"
+        if turn.get("batch"):
+            detail += f"   {turn['batch']} msg"
+        return name, detail
+    last = _last_finished(node, roster)
+    if last is None:
+        return "—", "idle — no turn has run yet"
+    name, stamp, turn = last
+    return "—", (
+        f"idle {schedule.fmt_age(_since(stamp))}   "
+        f"(last: {name}, exit {turn.get('exit', '?')})"
+    )
+
+
+def _rotation_rows(
+    ctx: DispatchContext, node: str, roster, config
+) -> list[tuple[str, str, str]]:
+    """(slot, member, detail) for the Now / Next / Then / Held / Idle block.
+
+    `Next` is the real selection — `schedule.next_up`, the same call the drain
+    loop makes. Status never re-implements the ranking: the day the two drift
+    is the day "why" stops being true, and nothing would say which day that
+    was."""
+    entries = schedule.snapshot(
+        node, config, roster, priority_senders=ctx.priority_senders
+    )
+    running, detail = _now_row(ctx, node, roster, config)
+    rows = [("Now", running, detail)]
+    ready = [e for e in entries if e.state == schedule.READY and e.member.lower() != running]
+    for slot, entry in zip(("Next", "Then"), ready):
+        rows.append((
+            slot, entry.member.lower(),
+            f"{entry.why}   score {entry.score}   {entry.queue_note}",
+        ))
+    if not ready:
+        rows.append(("Next", "—", "nothing ready to run"))
+    for entry in entries:
+        if entry.state == schedule.READY or entry.member.lower() == running:
+            continue
+        detail = f"{entry.state.upper()} — {entry.held_note}   {entry.depth} queued"
+        if entry.state == schedule.PARKED:
+            detail += f"   (try: r4t resume {entry.member.lower()})"
+        rows.append(("Held", entry.member.lower(), detail))
+    quiet = len(roster.members) - len({e.member for e in entries}) - (running != "—")
+    if quiet > 0:
+        rows.append(("Idle", "", f"{quiet} member(s) with nothing queued"))
+    return rows
+
+
+def _print_rotation(rows: list[tuple[str, str, str]]) -> None:
+    slot_w = max(len(slot) for slot, _n, _d in rows)
+    name_w = max(len(name) for _s, name, _d in rows)
+    seen: set[str] = set()
+    for slot, name, detail in rows:
+        label = "" if slot == "Held" and slot in seen else slot
+        seen.add(slot)
+        print(f"  {label:<{slot_w}}  {name:<{name_w}}  {detail}".rstrip())
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
@@ -947,6 +1084,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     ctx = _context(args, node)
     print(f"roster: {node}")
     print(f"state: {state.roster_dir(node)}")
+    # The zone the roster speaks, stated once at the top: every prompt this
+    # node composes says the same thing, and an operator reading a member's
+    # "tomorrow" needs to know which midnight it meant.
+    print(f"time: {local_stamp()}")
     iso = _isolation_tag(ctx.isolation)
     if iso:
         print(f"isolation: {iso}  (every member turn runs behind this boundary)")
@@ -956,13 +1097,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = None
     roster_err = config_err = None
     try:
-        roster = load_roster(ctx.roster_path)
+        roster = load_roster(ctx.roster_path, node=ctx.node)
     except RosterError as e:
         roster_err = str(e)
     try:
         config = load_rig_config(ctx.config_path)
     except RigError as e:
         config_err = str(e)
+
+    print("Rotation  (one turn at a time)")
+    if roster is None or config is None:
+        print("  (unavailable until the roster and rig config load)")
+    else:
+        _print_rotation(_rotation_rows(ctx, node, roster, config))
+    print()
 
     print("Health")
     for v in verdict.roster_verdicts(node, roster, config):
@@ -974,7 +1122,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"Roster  (repo settings: {ctx.roster_path})")
     if roster_err:
-        _print_rows([(False, "roster", roster_err, "r4t init")])
+        _print_rows([(False, "roster", roster_err, "r4t roster check")])
     else:
         _print_rows(_roster_rows(ctx, node, roster, config))
     print()
@@ -991,28 +1139,53 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_log_member(args: argparse.Namespace, node: str) -> str | None | bool:
-    """Validate --agent against the roster. Returns the canonical member name,
-    None when no --agent was given, or False on an unknown member (already
-    reported)."""
-    if not args.agent:
+def _resolve_log_members(args: argparse.Namespace, node: str) -> list[str] | None | bool:
+    """Validate --agent (repeatable) and --cell against the roster. Returns
+    the canonical member name(s) to scope the stream to, None when neither
+    was given, or False on an unknown member or cell (already reported)."""
+    agents = args.agent or []
+    cell = getattr(args, "cell", None)
+    if not agents and not cell:
         return None
     ctx = _context(args, node)
     try:
-        roster = load_roster(ctx.roster_path)
+        roster = load_roster(ctx.roster_path, node=ctx.node)
     except RosterError as e:
-        print(f"logs --agent: cannot read roster: {e}", file=sys.stderr)
+        print(f"logs: cannot read roster: {e}", file=sys.stderr)
         return False
-    member = roster.find(args.agent)
-    if member is None:
-        names = ", ".join(roster.names()) or "(none)"
-        print(
-            f"logs --agent: no roster member named {args.agent!r} — "
-            f"(try: r4t logs --node {node} --agent <name>; members: {names})",
-            file=sys.stderr,
-        )
-        return False
-    return member.name
+    names: list[str] = []
+    for raw in agents:
+        member = roster.find(raw)
+        if member is None:
+            known = ", ".join(roster.names()) or "(none)"
+            print(
+                f"logs --agent: no roster member named {raw!r} — "
+                f"(try: r4t logs --node {node} --agent <name>; members: {known})",
+                file=sys.stderr,
+            )
+            return False
+        names.append(member.name)
+    if cell:
+        cell_members = [
+            m.name for m in roster.members
+            if m.cell.strip().lower() == cell.strip().lower()
+        ]
+        if not cell_members:
+            cells = sorted({m.cell for m in roster.members if m.cell})
+            print(
+                f"logs --cell: no roster members in cell {cell!r} — "
+                f"(cells: {', '.join(cells) or '(none)'})",
+                file=sys.stderr,
+            )
+            return False
+        names.extend(cell_members)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in names:
+        if name.lower() not in seen:
+            seen.add(name.lower())
+            ordered.append(name)
+    return ordered
 
 
 def _print_member_turns(node: str, member: str) -> int:
@@ -1035,19 +1208,49 @@ def _print_member_turns(node: str, member: str) -> int:
     return 0
 
 
+def filter_log_line(line: str) -> str | None:
+    """Compact one roster-log line into an activity event, or None to skip.
+
+    The daily log interleaves single-line events with full multi-line turn
+    transcripts; the scoped log view shows the events and the turn boundaries,
+    never the transcript bodies."""
+    if line.startswith("r4t: "):
+        return line
+    if line.startswith("## ") and " dispatch " in line:
+        _, _, rest = line.partition(" dispatch ")
+        return f"turn: {rest}"
+    if line.startswith("### Output ("):
+        return f"done: {line[len('### Output ('):].rstrip(')')}"
+    return None
+
+
+def _log_day_header(day: str) -> str:
+    """Name the day file's zone, and the reader's.
+
+    The file is named in UTC because its name is a sort key: `r4t`'s retention
+    pass string-compares those names, and two machines writing one portable
+    org's log must agree on the order. Near midnight the two zones name
+    different days, so the header says both rather than pretending.
+    """
+    return f"— log day {day} UTC (this machine reads {local_zone()})"
+
+
 def cmd_logs(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    from chat import filter_log_line
-
-    member = _resolve_log_member(args, node)
-    if member is False:
+    members = _resolve_log_members(args, node)
+    if members is False:
         return 2
-    if member and args.full:
-        return _print_member_turns(node, member)
+    if members and args.full:
+        for member in members:
+            _print_member_turns(node, member)
+        return 0
 
-    mention = re.compile(rf"\b{re.escape(member)}\b", re.IGNORECASE) if member else None
+    mention = None
+    if members:
+        alternation = "|".join(re.escape(name) for name in members)
+        mention = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
     log_dir = state.roster_dir(node) / "log"
 
     def rendered(raw: str) -> list[str]:
@@ -1061,7 +1264,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return [event]
 
     files = sorted(log_dir.glob("*.md")) if log_dir.is_dir() else []
-    collected: list[str] = []
+    collected: list[tuple[str, str]] = []
     offset = 0
     for path in files[-2:]:
         try:
@@ -1071,8 +1274,14 @@ def cmd_logs(args: argparse.Namespace) -> int:
         if path == files[-1]:
             offset = len(text.encode("utf-8"))
         for raw in text.splitlines():
-            collected.extend(rendered(raw))
-    for line in collected[-args.lines:] if args.lines else collected:
+            collected.extend((path.stem, line) for line in rendered(raw))
+    # The tail counts log lines, not headers, so it is applied first and the
+    # day headers are emitted over whatever survived.
+    day: str | None = None
+    for stem, line in collected[-args.lines:] if args.lines else collected:
+        if stem != day:
+            day = stem
+            print(_log_day_header(day))
         print(line)
     if not args.follow:
         if not files:
@@ -1096,6 +1305,9 @@ def cmd_logs(args: argparse.Namespace) -> int:
                         offset = f.tell()
                     for raw in chunk.splitlines():
                         for line in rendered(raw):
+                            if current.stem != day:
+                                day = current.stem
+                                print(_log_day_header(day), flush=True)
                             print(line, flush=True)
                 elif size < offset:
                     offset = size
@@ -1114,6 +1326,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if stamped is not None and stamped.is_dir():
             root = stamped
     org = load_org(root)
+    _warn_org_errors(org)
     if not org.workplace.is_dir():
         print(
             f"check: workplace {org.workplace} does not exist "
@@ -1141,133 +1354,69 @@ def cmd_judge(args: argparse.Namespace) -> int:
 
 
 def _ensure_tell_outbox(ctx: DispatchContext) -> None:
-    """Directly-invoked seat/chat sessions have no a8s-injected outbox env;
-    give `tell` subprocesses (the Address: doorbell, error notices) the same
-    fallback dispatch itself uses for releases."""
+    """A directly-invoked `r4t tell` has no a8s-injected outbox env; give
+    `tell` subprocesses (error notices) the same fallback dispatch itself
+    uses for releases."""
     os.environ.setdefault("TELL_OUTBOX_DIR", str(ctx.root / ".outbox"))
 
 
 def _adopt_root(ctx: DispatchContext) -> None:
-    """A seat session is roster ingress just like dispatch — chat/seat sends
-    call handle_message directly and never pass cmd_dispatch, the only place
-    the root stamp was written. A roster driven entirely through the seat
-    therefore had no stamp, and every observer command fell back to guessing
-    the root from cwd (the live quill repro). First successful seat
-    resolution writes the stamp; an existing stamp is never overridden here
-    — dispatch owns that."""
+    """`r4t tell` is roster ingress just like dispatch — it calls
+    handle_message directly and never passes cmd_dispatch, the only place the
+    root stamp was written. A roster driven entirely through `tell` therefore
+    had no stamp, and every observer command fell back to guessing the root
+    from cwd (the live quill repro). First successful resolution writes the
+    stamp; an existing stamp is never overridden here — dispatch owns that."""
     if state.read_root(ctx.node) is None and ctx.roster_path.is_file():
         state.stamp_root(ctx.node, ctx.root)
 
 
-def cmd_chat(args: argparse.Namespace) -> int:
+def cmd_tell(args: argparse.Namespace) -> int:
+    """Send into the walls as another roster member — the owner's
+    impersonation verb, for jumpstarting a member's queue or diagnosing how
+    one lands without waiting for a real sender. Routes through the same
+    ingest path a real member-to-member send takes (`handle_message` ->
+    `_ingest`), stamped `from` the impersonated member, so it enqueues,
+    threads, and narrates the ticker exactly like any other arrival."""
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node)
-    _adopt_root(ctx)
-    _ensure_tell_outbox(ctx)
-    attach = getattr(args, "attach", None)
-    if not args.plain and sys.stdout.isatty():
-        from ark.deps import use_group
-        use_group("r4t")
-        try:
-            from chat_tui import run_chat_tui
-        except ImportError:
-            print(
-                "textual not installed — line UI instead"
-                " (try: ar3 deps r4t)",
-                file=sys.stderr,
-            )
-        else:
-            return run_chat_tui(ctx, attach=attach)
-    from chat import run_chat
-
-    return run_chat(ctx, attach=attach)
-
-
-def _seat_human(roster: Roster) -> Member | None:
-    return next((m for m in roster.members if m.is_human), None)
-
-
-def cmd_seat(args: argparse.Namespace) -> int:
-    node = _resolve_node(args.node)
-    if node is None:
-        return 2
-    ctx = _context(args, node)
+    ctx = _context(args, node, ticker=True)
     _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     try:
-        roster = load_roster(ctx.roster_path)
+        roster = load_roster(ctx.roster_path, node=ctx.node)
     except RosterError as e:
-        print(f"seat: {e}", file=sys.stderr)
+        print(f"tell: {e}", file=sys.stderr)
         return 2
-    human = _seat_human(roster)
-    if human is None:
+    sender_member = roster.find(args.as_member)
+    if sender_member is None:
+        names = ", ".join(roster.names()) or "(none)"
         print(
-            "seat: no human member in the roster — add one to ROSTER.md "
-            "(Human: yes)",
+            f"tell --as: no roster member named {args.as_member!r} "
+            f"(members: {names})",
             file=sys.stderr,
         )
         return 2
-
-    if args.action == "send":
-        text = " ".join(args.message).strip()
-        if not text:
-            print("seat send: message is required", file=sys.stderr)
+    text = " ".join(args.message).strip()
+    if not text:
+        print("tell: message is required", file=sys.stderr)
+        return 2
+    if args.to:
+        to_member = roster.find(args.to)
+        if to_member is None or to_member.errors:
+            print(f"tell --to: no dispatchable member {args.to!r}", file=sys.stderr)
             return 2
-        if args.to:
-            member = roster.find(args.to)
-            if member is None or member.is_human or member.errors:
-                print(f"seat send: no dispatchable member {args.to!r}", file=sys.stderr)
-                return 2
-            to = f"{node}:{member.name.lower()}"
-        else:
-            to = node
-        sender = f"{node}:{human.name.lower()}"
-        handle_message(ctx, sender, to, text)
-        from dispatch import resting_note
+        to = f"{node}:{to_member.name.lower()}"
+    else:
+        to = node
+    sender = f"{node}:{sender_member.name.lower()}"
+    handle_message(ctx, sender, to, text)
+    from dispatch import resting_note
 
-        note = resting_note(ctx, to)
-        if note:
-            print(note)
-        return 0
-
-    if args.action == "inbox":
-        paths = state.list_seat_messages(node, human.name)
-        if not paths:
-            if not args.as_json:
-                print("(no unread messages)")
-            return 0
-        for path in paths:
-            try:
-                envelope = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if args.as_json:
-                print(json.dumps(envelope))
-            else:
-                print(
-                    f"── from {envelope.get('from', '?')}"
-                    f" ({envelope.get('parked_at', '?')})"
-                )
-                print(envelope.get("content", ""))
-                for f in envelope.get("files") or []:
-                    print(
-                        f"(attachment: {f.get('filename', '?')} "
-                        f"at {f.get('path', '?')})"
-                    )
-                print()
-            if not args.peek:
-                state.mark_seat_read(node, human.name, path)
-        return 0
-
-    unread = len(state.list_seat_messages(node, human.name))
-    attached = state.seat_attached(node, human.name)
-    print(f"seat: {human.name} on {node}")
-    print(f"unread: {unread}  (try: r4t seat inbox)")
-    print(f"attached: {'yes' if attached else 'no'}")
-    if human.address:
-        print(f"doorbell: {human.address} (rings when not attached)")
+    note = resting_note(ctx, to)
+    if note:
+        print(note)
     return 0
 
 
@@ -1306,7 +1455,6 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
     if not config_path.is_file():
         print("  - `r4t rig presets` — see the available CLI presets")
         print("  - `r4t rig add leader <preset>` — create the config with your first rig")
-        print("  - `r4t init` — or write the full starter config + ROSTER.md instead")
     else:
         if roster_path.is_file():
             print("  - `r4t roster check` — lint roster ↔ rig mappings")
@@ -1341,10 +1489,17 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
         print(f"  {'':<{width}}  headless: {entry['headless']}")
         print(f"  {'':<{width}}  invoke: {format_preset_invoke(name)}")
         if entry.get("continue_argv"):
-            print(
-                f"  {'':<{width}}  continue: {' '.join(entry['continue_argv'])} "
-                "(roster `- **Continue:** on`)"
-            )
+            # The grade decides whether a ROSTER may continue on this preset,
+            # so a reader picking one here must see it — not discover it when
+            # `roster check` disables the member.
+            graded = continue_grade(name)
+            if graded is None:
+                note = "(roster `- **Continue:** on`)"
+            elif graded[0] == CONTINUE_POOR:
+                note = f"(NOT for a roster — {graded[0]}: {graded[1]})"
+            else:
+                note = f"(roster `- **Continue:** on`; {graded[0]})"
+            print(f"  {'':<{width}}  continue: {' '.join(entry['continue_argv'])} {note}")
     print()
     print("Add one: r4t rig add <rig-name> <preset>")
     print("Example: r4t rig add worker opencode")
@@ -1811,7 +1966,7 @@ def cmd_rig_add(args: argparse.Namespace) -> int:
     print(f"added rig {rig_key!r} ({args.preset}) to {config_path}")
     print(f"  invoke: {' '.join(invoke)}")
     _print_model_note(preset_key, args.model)
-    print(f"Reference it from ROSTER.md: `- **Rig:** {rig_key}`")
+    print(f"Reference it from your runbook: `- **Rig:** {rig_key}`")
     return 0
 
 
@@ -1989,39 +2144,6 @@ def cmd_rig_unset(args: argparse.Namespace) -> int:
     return rc
 
 
-def cmd_task(args: argparse.Namespace) -> int:
-    node = _resolve_node(args.node)
-    if node is None:
-        return 2
-    if args.action == "list":
-        listing = tasks.list_tasks(node)
-        if not listing:
-            print("no tasks")
-            return 0
-        for task in listing:
-            print(
-                f"{task['id']}  creator={task.get('creator', '?')}  "
-                f"status={task.get('status', '?')}"
-                + ("  answered" if task.get("answered") else "")
-            )
-        return 0
-    if not args.id:
-        print(f"task {args.action}: <id> is required", file=sys.stderr)
-        return 2
-    if args.action == "trace":
-        import tasktrace
-
-        return tasktrace.run(node, args.id.strip().upper(), json_mode=args.json)
-    task = tasks.load_task(node, args.id.strip().upper())
-    if task is None:
-        print(f"task not found: {args.id}", file=sys.stderr)
-        return 1
-    import json
-
-    print(json.dumps(task, indent=2))
-    return 0
-
-
 def _name_shadow_warnings(roster) -> list[str]:
     """Where a member's name also names something outside the wall.
 
@@ -2042,8 +2164,8 @@ def _name_shadow_warnings(roster) -> list[str]:
             continue
         out.append(
             f"{m.name}: also names an a8s {kind} visible from this host — "
-            f"inside the roster the member wins, so that {kind} cannot be "
-            f"reached from here by name (rename either, or accept it)"
+            f"inside the roster the member wins; reach the a8s {kind} as "
+            f"`:{m.name.lower()}`"
         )
     return out
 
@@ -2065,7 +2187,7 @@ def _store_in_workplace_warnings(roster, root: Path, workplace: Path) -> list[st
     work = workplace.expanduser().resolve()
     out: list[str] = []
     for m in roster.members:
-        if m.is_human or m.errors or not m.knowledge_on:
+        if m.errors or not m.knowledge_on:
             continue
         store = knowledge.store_home(node, m.name).expanduser().resolve()
         if not store.is_relative_to(work):
@@ -2079,18 +2201,37 @@ def _store_in_workplace_warnings(roster, root: Path, workplace: Path) -> list[st
 
 
 def cmd_roster_check(args: argparse.Namespace) -> int:
-    org = load_org(_resolve_root(args.root))
+    root = _resolve_root(args.root)
+    node = _runbook_node(args, root)
+    org = load_org(root)
     root = org.dir
     problems = 0
+    warnings = 0
+    conflict = runbook.legacy_conflict(root)
+    if conflict:
+        print(f"warning: {conflict}")
+        warnings += 1
     for message in check_org(root):
         print(f"org: {message}")
         problems += 1
-    roster_path = resolve_roster_path(root, args.roster)
-    try:
-        roster = load_roster(roster_path)
-    except RosterError as e:
-        print(str(e), file=sys.stderr)
-        return 1
+    roster_path = resolve_roster_path(root, args.roster, node)
+    book: runbook.Runbook | None = None
+    if runbook.is_runbook(roster_path):
+        try:
+            # The one caller that skips leader validation: `check` exists to
+            # name what is wrong, so it has to be able to load a wrong one.
+            book = runbook.load_runbook(roster_path, node=node, validate=False)
+        except runbook.RunbookError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        roster = book.roster
+        print(f"runbook: {' -> '.join(book.chain)}")
+    else:
+        try:
+            roster = load_roster(roster_path, validate=False, node=node)
+        except RosterError as e:
+            print(str(e), file=sys.stderr)
+            return 1
     config_path = resolve_config_path(args.rig_config)
     try:
         config = load_rig_config(config_path)
@@ -2105,32 +2246,34 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         for err in m.errors:
             print(f"{m.name}: {err}")
             problems += 1
-        if m.is_human:
-            if not m.address:
-                print(f"{m.name}: note — Human without an Address (roster cannot tell them)")
-            continue
         if config is not None and not m.errors:
             rig, err, _pinned = config.rig_for(m)
             if rig is None:
                 print(f"{m.name}: {err}")
                 problems += 1
-    leaders = [m for m in roster.members if m.leader and not m.is_human]
-    if not leaders:
-        print(
-            "no leader: mark one AI member with `- **Leader:** yes` "
-            "(bare messages to the node have no recipient)"
-        )
+    leader_problem = roster.leader_problem()
+    if leader_problem is not None:
+        print(f"roster {leader_problem}")
         problems += 1
-    elif len(leaders) > 1:
-        print(
-            f"multiple leaders: {', '.join(m.name for m in leaders)} "
-            f"(first one wins: {leaders[0].name})"
-        )
-        problems += 1
-    warnings = 0
+    if book is not None:
+        for cell in book.cells.values():
+            for err in cell.errors:
+                print(f"cell {cell.name}: {err}")
+                problems += 1
+        for ritual in book.rituals.values():
+            for err in ritual.errors:
+                print(f"ritual {ritual.name}: {err}")
+                problems += 1
+        for name, rig in sorted(book.rigs.items()):
+            if rig.error:
+                print(f"rig {name}: {rig.error}")
+                problems += 1
+        for message in book.warnings:
+            print(f"warning: {message}")
+            warnings += 1
     if config is not None:
         for m in roster.members:
-            if m.is_human or m.errors or not m.knowledge_on:
+            if m.errors or not m.knowledge_on:
                 continue
             if m.knowledge_distill_rig:
                 distill_rig, distill_err = knowledge.resolve_distill_rig(m, config)
@@ -2174,57 +2317,227 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         else:
             print(f"warning: {message}")
             warnings += 1
-    mission = root / "MISSION.md"
-    if mission.is_file():
-        n = sum(1 for line in mission.read_text(encoding="utf-8").splitlines() if line.strip())
-        if n > 40:
-            print(
-                f"warning: MISSION.md is {n} lines — intent docs read best "
-                "under one page"
-            )
-            warnings += 1
+    mission = runbook.mission_text(root, node)
+    n = sum(1 for line in mission.splitlines() if line.strip())
+    if n > 40:
+        label = "the mission" if book is not None else "MISSION.md"
+        print(f"warning: {label} is {n} lines — intent docs read best under one page")
+        warnings += 1
     if problems:
         print(f"{problems} problem(s)")
         return 1
     tail = f", {warnings} warning(s)" if warnings else ""
     print(
         f"{roster_path}: OK ({len(roster.members)} member(s), "
-        f"leader {leaders[0].name}{tail})"
+        f"leader {roster.leader().name}{tail})"
     )
     return 0
 
 
+def cmd_runbook_show(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root)
+    path = runbook.runbook_path(root)
+    if not path.is_file():
+        print(f"no {runbook.RUNBOOK_NAME} under {root}", file=sys.stderr)
+        return 1
+    if not (args.resolved or args.sources):
+        sys.stdout.write(path.read_text(encoding="utf-8"))
+        return 0
+    try:
+        book = runbook.load_runbook(path, node=_runbook_node(args, root), validate=False)
+    except runbook.RunbookError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    sys.stdout.write(runbook.render(book, sources=args.sources))
+    return 0
+
+
+def cmd_runbook_check(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root)
+    if not runbook.has_runbook(root):
+        print(f"no {runbook.RUNBOOK_NAME} under {root}", file=sys.stderr)
+        return 1
+    # One linter, not two: a runbook IS the roster, so the checks that name a
+    # broken member, a missing rig or a leaderless roster are the same checks.
+    return cmd_roster_check(args)
+
+
+def _node_name_for(root: Path) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", root.name.lower()).strip("-")
+
+
 def cmd_init(args: argparse.Namespace) -> int:
+    """Write the file. `r4t add` registers the node — two verbs, one each."""
     root = _resolve_root(args.root)
     if not root.is_dir():
         print(f"init: not a directory: {root}", file=sys.stderr)
         return 1
 
-    roster_path = root / "ROSTER.md"
-    if roster_path.is_file():
-        print(f"roster: {roster_path} exists, left unchanged")
+    path = runbook.runbook_path(root)
+    if path.is_file():
+        print(f"runbook: {path} exists, left unchanged")
     else:
-        roster_path.write_text(ROSTER_TEMPLATE, encoding="utf-8")
-        print(f"roster: wrote starter {roster_path}")
+        name = _node_name_for(root) or "roster"
+        path.write_text(
+            RUNBOOK_TEMPLATE.format(name=name, title=root.name, root=root),
+            encoding="utf-8",
+        )
+        print(f"runbook: wrote starter {path}")
+    print(f"next: r4t add {root}")
+    return 0
 
-    config_path = default_config_path()
-    if config_path.is_file():
-        print(f"rig config: {config_path} exists, left unchanged")
-    else:
-        state.atomic_write_json(config_path, default_config_payload())
-        print(f"rig config: wrote starter {config_path}")
 
-    prefix = re.sub(r"[^a-z0-9_-]+", "-", root.name.lower()).strip("-") or "roster"
-    node = f"{prefix}-node"
+def _resolve_add_runbook(root: Path, raw: str | None) -> tuple[Path, bool]:
+    """The runbook this node runs, and whether it is the node dir's own.
+
+    Named like an a8s definition: a built-in by bare name, or a path. Naming
+    nothing takes the `r4t.md` already at the directory, which is where a
+    runbook normally lives — and which wins over anything named here, so
+    naming one for a directory that has its own is refused rather than
+    silently ignored.
+    """
+    own = runbook.runbook_path(root)
+    builtins = ", ".join(runbook.builtin_names())
+    if not raw:
+        if own.is_file():
+            return own, True
+        raise RosterError(
+            f"add: {root} carries no {runbook.RUNBOOK_NAME} — name a runbook "
+            f"(built-ins: {builtins}), or write one with `r4t init {root}`"
+        )
+    if own.is_file():
+        raise RosterError(
+            f"add: {own} is this directory's runbook, so {raw!r} would never "
+            f"run — drop the argument (or delete the file to use {raw!r})"
+        )
+    if runbook.looks_like_path(raw):
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if not candidate.is_file():
+            raise RosterError(f"add: no runbook at {candidate}")
+        return candidate.resolve(), False
+    candidate = runbook.BUILTIN_DIR / f"{raw}.md"
+    if not candidate.is_file():
+        raise RosterError(
+            f"add: {raw!r} names no built-in runbook — built-ins are: "
+            f"{builtins} (a path must start with ./ or ../ or end in .md)"
+        )
+    return candidate.resolve(), False
+
+
+def _a8s(*argv: str) -> tuple[int, str]:
+    result = subprocess.run(
+        [sys.executable, str(A8S_PY), *argv], capture_output=True, text=True
+    )
+    detail = (result.stderr or result.stdout or "").strip()
+    return result.returncode, detail
+
+
+def cmd_add(args: argparse.Namespace) -> int:
+    """One name registers everything.
+
+    The directory, the a8s agent, the namespace prefix and the address a
+    person types are all the same word. a8s permits a prefix that binds the
+    agent of its own name, so nothing here needs a `-node` suffix, and
+    `a8s ls` and `r4t status` say the same thing.
+    """
+    root = Path(args.dir).expanduser()
+    if not root.is_dir():
+        print(f"add: not a directory: {root}", file=sys.stderr)
+        return 1
+    root = root.resolve()
+
+    name = (args.name or _node_name_for(root)).strip().lower()
+    if not runbook.NAME_RE.fullmatch(name):
+        print(
+            f"add: {name!r} is not a node name — letters, digits, underscore "
+            f"and hyphen only, starting with a letter or digit. A colon "
+            f"separates a node from a member and can never be inside either "
+            f"(try: r4t add {root} --name <name>)",
+            file=sys.stderr,
+        )
+        return 2
+
+    taken = visible_a8s_names()
+    kind = taken.get(name) or taken.get(name.lower())
+    if kind:
+        print(
+            f"add: {name} already names an a8s {kind} — a node is registered "
+            f"once. The runbook is re-read every turn, so a changed roster "
+            f"needs no re-add; to move or rebuild this one, "
+            f"`a8s remove {name}` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        book_path, own = _resolve_add_runbook(root, args.runbook)
+    except RosterError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    # The node's own state has to exist before the runbook is read — a
+    # `${VAR}` and a relative `Workdir:` both resolve against the node, not
+    # against wherever the file happens to sit. A failure past here unwinds
+    # it, so a refused `add` leaves nothing behind: half a registration is a
+    # phantom roster in `r4t status`, and a raised ceiling waiting for a node
+    # that never arrived is worse than that.
+    existing = state.roster_dir(name).is_dir()
+    if args.trust:
+        raise_machine_ceiling(name)
+    state.stamp_root(name, root)
+
+    def refuse(message: str | None, code: int) -> int:
+        if not existing:
+            shutil.rmtree(state.roster_dir(name), ignore_errors=True)
+        if message:
+            print(message, file=sys.stderr)
+        return code
+
+    check = argparse.Namespace(
+        root=str(root),
+        roster=None if own else str(book_path),
+        rig_config=getattr(args, "rig_config", None),
+        node=name,
+        definition=None,
+    )
+    if cmd_roster_check(check) != 0:
+        return refuse(
+            f"add: {book_path} does not check out — nothing registered", 2
+        )
+    try:
+        roster = load_roster(book_path, validate=False, node=name)
+    except RosterError as e:
+        return refuse(str(e), 2)
+    shadow = roster.find(name)
+    if shadow is not None and not shadow.leader:
+        return refuse(
+            f"add: member {shadow.name!r} shares the node name but is not the "
+            f"leader — `tell {name}` would reach the leader and "
+            f"`tell {name}:{name}` would reach this member. Make it the "
+            f"leader, or rename it.",
+            2,
+        )
+
+    for argv in (
+        ("add", name, str(root), "r4t"),
+        ("namespace", name, name),
+        ("start", name),
+    ):
+        code, detail = _a8s(*argv)
+        if code != 0:
+            return refuse(f"add: a8s {' '.join(argv)} failed: {detail}", 1)
+
+    state.stamp_runbook(name, None if own else book_path)
     print()
-    print("Register and start the roster (a namespace prefix cannot share a")
-    print("name with its agent, so the node is registered as <roster>-node):")
+    print(f"added {name} -> {root}")
+    print(f"  runbook:   {book_path}")
+    print(f"  address:   {name} (leader {roster.leader().name}), "
+          f"{name}:<member> for a member with Ingress:")
+    print(f"  ceiling:   permissions {machine_ceiling(name)}")
     print()
-    print(f"  a8s add {node} {root} r4t")
-    print(f"  a8s namespace {prefix} {node}")
-    print(f"  a8s start {node}")
-    print(f'  tell {prefix} "hello"            # bare namespace -> roster leader')
-    print(f'  tell {prefix}:dev "hello"        # namespace:member -> specific member')
+    print(f'  tell {name} "hello"')
     return 0
 
 
@@ -2284,7 +2597,8 @@ def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
     p.add_argument("--root", help="Roster repo root (default: cwd).")
     p.add_argument(
         "--roster",
-        help="Roster path, absolute or root-relative (default: <root>/ROSTER.md).",
+        help="Roster path, absolute or root-relative (default: <root>/r4t.md, "
+        "else <root>/ROSTER.md).",
     )
     p.add_argument(
         "--rig-config",
@@ -2315,16 +2629,6 @@ def _add_tell_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_older_than(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--older-than",
-        type=float,
-        default=DEFAULT_TASK_TTL_SECONDS,
-        metavar="SECS",
-        help=f"Expire tasks idle longer than SECS (default {DEFAULT_TASK_TTL_SECONDS}).",
-    )
-
-
 def _positive_int(raw: str) -> int:
     value = int(raw)
     if value < 1:
@@ -2335,7 +2639,7 @@ def _positive_int(raw: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="r4t",
-        description="The roster — define agents in ROSTER.md; govern turns on a8s.",
+        description="The roster — define the team in one r4t.md; govern turns on a8s.",
     )
     p.add_argument("--version", action="version", version=version_line("r4t"))
     sub = p.add_subparsers(dest="command", required=False, metavar="COMMAND")
@@ -2344,16 +2648,82 @@ def build_parser() -> argparse.ArgumentParser:
     init_p = sub.add_parser(
         "init",
         help=_cmd_help("init"),
-        description="Write a starter ROSTER.md and ~/.config/r4t/rigs.json; print "
-        "the a8s registration sequence.",
+        description="Write a starter r4t.md that extends the built-in "
+        "`triforce` runbook. That is all it does: `r4t add` registers the "
+        "node.",
     )
     init_p.add_argument("--root", help="Repo to initialize (default: cwd).")
     init_p.set_defaults(func=cmd_init)
 
+    add_p = sub.add_parser(
+        "add",
+        help=_cmd_help("add"),
+        description="Register a directory as a node: validate its runbook, "
+        "then bind the a8s agent, the namespace prefix and the address you "
+        "mail — all under one name, the directory's own.",
+    )
+    add_p.add_argument("dir", help="The node directory.")
+    add_p.add_argument(
+        "runbook",
+        nargs="?",
+        help="A built-in runbook by name (see `r4t runbook show`), or a path. "
+        "Omit it when the directory already carries an r4t.md.",
+    )
+    add_p.add_argument(
+        "--name",
+        help="Node name (default: the directory's, lowercased). One name is "
+        "the agent, the namespace and what you type.",
+    )
+    add_p.add_argument(
+        "--trust",
+        action="store_true",
+        help="Raise this node's permission ceiling, so its runbook may name "
+        "`--permissions bypass`. Recorded on this machine, never in the repo.",
+    )
+    add_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    add_p.set_defaults(func=cmd_add)
+
+    runbook_p = sub.add_parser(
+        "runbook",
+        help=_cmd_help("runbook"),
+        description="The one file that says what the team is: r4t.md at the "
+        "node dir. `show --resolved` prints the merged, interpolated truth — "
+        "with inheritance, the file you read is not the file that runs, and "
+        "this is the command that closes the gap. `--sources` names the layer "
+        "every section came from.",
+    )
+    runbook_sub = runbook_p.add_subparsers(dest="action", required=True)
+    runbook_show_p = runbook_sub.add_parser(
+        "show", help="Print the runbook, as written or as resolved."
+    )
+    runbook_show_p.add_argument("--root", help="Node directory (default: cwd).")
+    runbook_show_p.add_argument(
+        "--node",
+        help="Node whose a8s vars ${VAR} resolves against (default: inferred).",
+    )
+    runbook_show_p.add_argument(
+        "--resolved",
+        action="store_true",
+        help="Print the merged, interpolated result instead of the file.",
+    )
+    runbook_show_p.add_argument(
+        "--sources",
+        action="store_true",
+        help="Annotate every section with the layer it came from (implies "
+        "--resolved).",
+    )
+    runbook_show_p.set_defaults(func=cmd_runbook_show)
+    runbook_check_p = runbook_sub.add_parser("check", help="Lint the runbook.")
+    _add_common(runbook_check_p, with_node=True)
+    runbook_check_p.set_defaults(func=cmd_runbook_check)
+
     roster_p = sub.add_parser("roster", help=_cmd_help("roster"))
     roster_sub = roster_p.add_subparsers(dest="action", required=True)
     roster_check_p = roster_sub.add_parser("check", help="Lint the roster.")
-    _add_common(roster_check_p)
+    _add_common(roster_check_p, with_node=True)
     roster_check_p.set_defaults(func=cmd_roster_check)
 
     from engines.run import LESSONS_CAP_LINES
@@ -2513,7 +2883,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rig_add_p.add_argument(
         "rig",
-        help="Symbolic rig name (referenced from ROSTER.md Harness lines).",
+        help="Symbolic rig name (referenced from runbook Rig lines).",
     )
     rig_add_p.add_argument(
         "preset",
@@ -2755,49 +3125,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raw daily log, prompts and transcripts included.",
     )
     logs_p.add_argument(
-        "--agent", metavar="MEMBER",
-        help="Only one member's activity; with --full, their captured turns.",
+        "--agent", action="append", metavar="MEMBER",
+        help="Only this member's activity; repeat for several. With --full, "
+        "their captured turns.",
+    )
+    logs_p.add_argument(
+        "--cell", metavar="CELL",
+        help="Only members in this cell (a roster member's Cell: field).",
     )
     logs_p.set_defaults(func=cmd_logs)
 
-    chat_p = sub.add_parser(
-        "chat",
-        help=_cmd_help("chat"),
-        description="Interactive human seat: messages and roster activity in one window.",
+    tell_p = sub.add_parser(
+        "tell",
+        help=_cmd_help("tell"),
+        description="Send into the roster as another member — jumpstart or diagnose.",
     )
-    _add_common(chat_p, with_node=True)
-    _add_tell_flags(chat_p)
-    chat_p.add_argument(
-        "--plain", action="store_true",
-        help="Line UI instead of the full-screen TUI.",
+    tell_p.add_argument("message", nargs="*", help="Message text.")
+    tell_p.add_argument(
+        "--as", dest="as_member", required=True, metavar="MEMBER",
+        help="Roster member to send as.",
     )
-    chat_p.add_argument(
-        "--attach", metavar="MEMBER",
-        help="Open watching a member read-only (messages in and turn output live).",
-    )
-    chat_p.set_defaults(func=cmd_chat)
-
-    seat_p = sub.add_parser(
-        "seat",
-        help=_cmd_help("seat"),
-        description="The roster human's mailbox and voice (bare: summary).",
-    )
-    seat_p.add_argument(
-        "action", nargs="?", choices=["inbox", "send"],
-        help="inbox: read parked messages; send: speak as the human.",
-    )
-    seat_p.add_argument("message", nargs="*", help="send: message text.")
-    seat_p.add_argument("--to", help="send: member first name (default: the leader).")
-    seat_p.add_argument(
-        "--peek", action="store_true", help="inbox: leave messages unread."
-    )
-    seat_p.add_argument(
-        "--json", action="store_true", dest="as_json",
-        help="inbox: one JSON object per message.",
-    )
-    _add_common(seat_p, with_node=True)
-    _add_tell_flags(seat_p)
-    seat_p.set_defaults(func=cmd_seat)
+    tell_p.add_argument("--to", help="Recipient member first name (default: the leader).")
+    _add_common(tell_p, with_node=True)
+    _add_tell_flags(tell_p)
+    tell_p.set_defaults(func=cmd_tell)
 
     flush_p = sub.add_parser("flush", help=_cmd_help("flush"))
     _add_common(flush_p, with_node=True)
@@ -2816,20 +3167,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_tell_flags(flush_p)
     flush_p.set_defaults(func=cmd_flush)
 
-    task_p = sub.add_parser(
-        "task",
-        help=_cmd_help("task"),
-        description="Conversation threads: list them, show one ledger, or trace "
-        "one task's delegation tree from recorded state.",
+    resume_p = sub.add_parser(
+        "resume",
+        help=_cmd_help("resume"),
+        description="Put a parked member back in the rotation with its queue "
+        "intact. A member parks when its harness cannot start at all.",
     )
-    task_p.add_argument("action", choices=["list", "show", "trace"])
-    task_p.add_argument("id", nargs="?", help="Task ULID.")
-    task_p.add_argument("--node", help="Roster node name (default: sole ~/.config/r4t roster).")
-    task_p.add_argument(
-        "--json", action="store_true",
-        help="With trace: the reconstruction as JSON instead of the panel.",
+    _add_common(resume_p, with_node=True)
+    resume_p.add_argument(
+        "member", nargs="?", metavar="MEMBER", help="The parked member."
     )
-    task_p.set_defaults(func=cmd_task)
+    resume_p.add_argument(
+        "--all", action="store_true", help="Every parked member on the roster."
+    )
+    resume_p.set_defaults(func=cmd_resume)
 
     check_p = sub.add_parser(
         "check",
@@ -2881,21 +3232,19 @@ def build_parser() -> argparse.ArgumentParser:
     clear_p = sub.add_parser(
         "clear",
         description=(
-            "Maintenance: prune stale locks, expire tasks, drain, and apply "
+            "Maintenance: prune stale locks, drain, and apply "
             "log retention."
         ),
     )
     _add_common(clear_p, with_node=True)
-    _add_older_than(clear_p)
     _add_tell_flags(clear_p)
     clear_p.set_defaults(func=cmd_clear)
 
     idle_p = sub.add_parser(
         "idle",
-        description="Idle pass: nudge active agents with unfinished business, then clear.",
+        description="Idle pass: drain queues, dream, heartbeat a stalled org, retire idle conversations.",
     )
     _add_common(idle_p, with_node=True)
-    _add_older_than(idle_p)
     _add_tell_flags(idle_p)
     idle_p.set_defaults(func=cmd_idle)
 
@@ -3016,9 +3365,9 @@ def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> lis
 
     Every parser whose optional positional can trail its flags is covered
     here, one branch per dest: `engine`'s action/prompt, `rig run`'s prompt,
-    `task show|trace`'s id, `rig get`'s key, and `seat send`'s message, which
-    is a list and so keeps taking. `flush` needs no branch — its `members` is
-    the parser's only positional, and 3.10 places it correctly."""
+    `rig get`'s key, and `tell`'s message — the last is a list and so keeps
+    taking. `flush` needs no branch — its
+    `members` is the parser's only positional, and 3.10 places it correctly."""
     remaining = []
     for tok in extras:
         if tok != "-" and tok.startswith("-"):
@@ -3030,8 +3379,6 @@ def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> lis
             and getattr(args, "action", "run") == "run"
         ):
             args.prompt = tok
-        elif getattr(args, "id", "") is None:
-            args.id = tok
         elif getattr(args, "key", "") is None:
             args.key = tok
         elif isinstance(getattr(args, "message", None), list):

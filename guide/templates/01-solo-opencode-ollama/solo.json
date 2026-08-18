@@ -4,7 +4,7 @@
   "invoke": ["r4t", "engine", "ollama-opencode", "run",
              "--model", "qwen3.6", "--timeout", "600",
              "--agent", "$RECIPIENT",
-             "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
+             "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"],
   "batch": {
     "limit": 20,
     "invoke": ["r4t", "engine", "ollama-opencode", "run",

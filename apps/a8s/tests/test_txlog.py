@@ -1,13 +1,15 @@
 """Tests for txlog.py — transaction log in WAL SQLite."""
 from __future__ import annotations
 
+import io
 import re
 import sqlite3
+import sys
 
 import pytest
 
 from commands import cmd_transactions
-from core import transactions_path
+from core import harden_stdio, transactions_path
 from txlog import (
     TransactionLogError,
     _one_line,
@@ -395,6 +397,24 @@ class TestCmdTransactions:
         log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
         assert cmd_transactions(["--from", "nobody"]) == 1
         assert "no matching transaction events" in capsys.readouterr().err
+
+    def test_non_ascii_detail_does_not_crash_a_strict_console(
+        self, fake_home, monkeypatch
+    ):
+        """A redirected Windows console can leave stdout on a strict narrow
+        codec; harden_stdio floors it so a non-ASCII detail (e.g. an arrow
+        in a routed preview) degrades to an escape instead of raising."""
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob", detail="over → there")
+        buf = io.BytesIO()
+        wrapper = io.TextIOWrapper(buf, encoding="cp1252", errors="strict")
+        monkeypatch.setattr(sys, "stdout", wrapper)
+        harden_stdio()
+
+        assert cmd_transactions([]) == 0
+        wrapper.flush()
+        out = buf.getvalue().decode("cp1252")
+        assert "01A" in out
+        assert "\\u2192" in out
 
     def test_msg_filter_uppercases(self, fake_home, capsys):
         log("ROUTED", msg_id="01ABC", sender="Alice", recipient="Bob")

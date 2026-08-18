@@ -415,9 +415,9 @@ class TestReceiveEnvelope:
             "id": new_ulid(), "from": "X", "to": "GHOST",
             "content": "different secret", "files": [],
         }).encode(), two_local_agents)
-        assert diagnostics == [f"REMOTE_DROP id={msg_id} to='GHOST' reason=not in local registry"]
+        assert diagnostics == [f"REMOTE_SKIP id={msg_id} to='GHOST' reason=not in local registry"]
         assert tx_events[0] == (
-            "DROPPED",
+            "NOT_LOCAL",
             {
                 "msg_id": msg_id,
                 "recipient": "GHOST",
@@ -430,6 +430,22 @@ class TestReceiveEnvelope:
         for n in ("A", "B"):
             d = inbox_dir(n)
             assert not d.exists() or list(d.iterdir()) == []
+
+    def test_unknown_recipient_is_not_local_never_dropped(
+        self, two_local_agents, monkeypatch,
+    ):
+        # A shared topic delivers every envelope to every node; a node that
+        # doesn't host the recipient must not log a terminal DROPPED for a
+        # message some other node is about to deliver fine.
+        tx_events = []
+        network._REMOTE_DIAGNOSTIC_LAST.clear()
+        monkeypatch.setattr(network.txlog, "log", lambda event, **fields: tx_events.append((event, fields)))
+        receive_envelope(json.dumps({
+            "id": new_ulid(), "from": "X", "to": "SOMEONE_ELSES_AGENT",
+            "content": "not for this node", "files": [],
+        }).encode(), two_local_agents)
+        assert [event for event, _fields in tx_events] == ["NOT_LOCAL"]
+        assert "DROPPED" not in [event for event, _fields in tx_events]
 
     def test_alias_with_no_local_participants_records_diagnostic(
         self, fake_home, tmp_path, monkeypatch,
@@ -567,7 +583,7 @@ class TestReceiveEnvelope:
 
         assert len(diagnostics) == 2
         assert all("unsupported or malformed a8s control envelope" in line for line in diagnostics)
-        drops = [fields for event, fields in events if event == "DROPPED"]
+        drops = [fields for event, fields in events if event == "DISCARDED"]
         assert [fields["remote"] for fields in drops] == ["one", "two"]
 
     def test_receipt_publish_failure_does_not_undo_inbox_write(

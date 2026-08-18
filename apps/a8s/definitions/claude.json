@@ -5,6 +5,6 @@
     "--permission-mode", "dontAsk",
     "--allowedTools", "Bash(tell:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite",
     "--exclude-dynamic-system-prompt-sections",
-    "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "-p", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

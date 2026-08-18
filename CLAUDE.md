@@ -5,7 +5,7 @@ code in this repository.
 
 ## Repo shape
 
-This repo is **The Ark** — four apps that ship together, plus the guide that
+This repo is **ar3** — four apps that ship together, plus the guide that
 teaches them.
 
 - **Top level** — polyglot CLI shims (`ar3`, `a8s`, `tell`, `tells`, `r4t`,
@@ -76,7 +76,7 @@ Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
 
 ## Conventions
 
-Every app on the Ark shares one doctrine — dependencies, filesystem, CLI feel,
+Every app in ar3 shares one doctrine — dependencies, filesystem, CLI feel,
 processes, integration, docs and release. It is stated as rules in
 [`docs/ark.md`](docs/ark.md); read it before adding a convention here.
 

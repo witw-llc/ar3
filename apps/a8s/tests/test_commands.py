@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from ark import clock
 from ark.ulid import new as new_ulid, parse as parse_ulid
 
 from commands import (
@@ -1050,6 +1052,272 @@ class TestCmdVars:
         assert argv == ["x", "qwen3.6"]
 
 
+class TestMailboxPathVars:
+    """Vars in `outbox_dir` / `inbox_dir` / `files_dir`, and the one data-loss
+    path they open: re-pointing a var orphans mail in the old directory."""
+
+    def _register(self, agent_root, tmp_path, name, spec):
+        path = tmp_path / f"{name}-definition.json"
+        path.write_text(json.dumps({"invoke": ["echo", "$MESSAGE"], **spec}))
+        assert cmd_add([name, str(agent_root), str(path)]) == 0
+        return path
+
+    def test_ls_names_the_unset_var_instead_of_a_status(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        capsys.readouterr()
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert "unresolved: $SEAT" in out
+        assert "stopped" not in out
+
+    def test_ls_reads_normally_once_the_var_is_set(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        capsys.readouterr()
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert "unresolved" not in out
+        assert "stopped" in out
+
+    def test_node_builtin_needs_no_vars_at_all(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$NODE"})
+        capsys.readouterr()
+        assert cmd_ls([]) == 0
+        assert "unresolved" not in capsys.readouterr().out
+
+    def test_start_refuses_an_unresolved_node(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _refuse_unresolved_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        capsys.readouterr()
+        assert _refuse_unresolved_mailboxes(["seat"]) is True
+        err = capsys.readouterr().err
+        assert "outbox_dir" in err
+        assert "$SEAT" in err
+
+    def test_start_allows_a_resolved_node(self, fake_home, agent_root, tmp_path, capsys):
+        from commands import _refuse_unresolved_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$NODE"})
+        capsys.readouterr()
+        assert _refuse_unresolved_mailboxes(["seat"]) is False
+        assert capsys.readouterr().err == ""
+
+    def test_repointing_a_mailbox_var_carries_the_mail_over(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        old = agent_root / ".outbox-a"
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "01PENDING.json").write_text('{"to": "x", "content": "in flight"}')
+        capsys.readouterr()
+
+        assert cmd_vars(["seat", "set", "SEAT", "b"]) == 0
+
+        new = agent_root / ".outbox-b"
+        assert (new / "01PENDING.json").read_text() == '{"to": "x", "content": "in flight"}'
+        assert not (old / "01PENDING.json").exists()
+        assert "moved 1 item" in capsys.readouterr().out
+
+    def test_repointing_is_refused_under_a_live_handler(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        _claim("seat")
+        capsys.readouterr()
+
+        assert cmd_vars(["seat", "set", "SEAT", "b"]) == 1
+        err = capsys.readouterr().err
+        assert "mailbox path field" in err
+        assert "a8s stop seat" in err
+        assert load_registry()["seat"]["vars"]["SEAT"] == "a"
+
+    def test_a_var_that_feeds_no_path_field_is_unaffected_by_the_handler(
+        self, fake_home, agent_root, tmp_path
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$NODE"})
+        _claim("seat")
+        assert cmd_vars(["seat", "set", "MODEL", "qwen3.6"]) == 0
+
+    def test_health_reports_an_unowned_non_empty_mailbox(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _report_orphan_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$NODE"})
+        stale = agent_root / ".outbox-old-seat"
+        stale.mkdir(parents=True)
+        (stale / "01ORPHAN.json").write_text("{}")
+        capsys.readouterr()
+
+        assert _report_orphan_mailboxes() == 1
+        out = capsys.readouterr().out
+        assert ".outbox-old-seat" in out
+        assert "no registered node owns it" in out
+
+    def test_health_ignores_an_owned_or_empty_mailbox(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _report_orphan_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$NODE"})
+        (agent_root / ".outbox-seat").mkdir(parents=True, exist_ok=True)
+        (agent_root / ".outbox-seat" / "01LIVE.json").write_text("{}")
+        (agent_root / ".outbox-empty").mkdir(parents=True, exist_ok=True)
+        capsys.readouterr()
+
+        assert _report_orphan_mailboxes() == 0
+        assert capsys.readouterr().out == ""
+
+    def test_collision_at_destination_aborts_the_switch(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        old = agent_root / ".outbox-a"
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "01PENDING.json").write_text("old")
+        new = agent_root / ".outbox-b"
+        new.mkdir(parents=True, exist_ok=True)
+        (new / "01PENDING.json").write_text("already there")
+        capsys.readouterr()
+
+        assert cmd_vars(["seat", "set", "SEAT", "b"]) == 1
+
+        err = capsys.readouterr().err
+        assert "01PENDING.json" in err
+        assert "already present" in err
+        assert "aborted" in err
+        entry = load_registry()["seat"]
+        assert entry["vars"]["SEAT"] == "a"
+        assert "retired_mailboxes" not in entry
+        assert (old / "01PENDING.json").read_text() == "old"
+        assert (new / "01PENDING.json").read_text() == "already there"
+
+    def test_mid_move_failure_rolls_back(
+        self, fake_home, agent_root, tmp_path, capsys, monkeypatch
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        old = agent_root / ".outbox-a"
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "01AAA.json").write_text("first")
+        (old / "02BBB.json").write_text("second")
+        capsys.readouterr()
+
+        real_move = shutil.move
+        calls = {"n": 0}
+
+        def flaky_move(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real_move(src, dst)
+
+        monkeypatch.setattr("commands.shutil.move", flaky_move)
+
+        assert cmd_vars(["seat", "set", "SEAT", "b"]) == 1
+
+        err = capsys.readouterr().err
+        assert "disk full" in err
+        assert "aborted" in err
+        assert sorted(p.name for p in old.iterdir()) == ["01AAA.json", "02BBB.json"]
+        assert (old / "01AAA.json").read_text() == "first"
+        assert (old / "02BBB.json").read_text() == "second"
+        new = agent_root / ".outbox-b"
+        assert not new.exists() or not any(new.iterdir())
+        entry = load_registry()["seat"]
+        assert entry["vars"]["SEAT"] == "a"
+        assert "retired_mailboxes" not in entry
+
+    def test_clean_switch_records_the_retired_mailbox(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": ".outbox-$SEAT"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        old = agent_root / ".outbox-a"
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "01PENDING.json").write_text('{"to": "x", "content": "in flight"}')
+        capsys.readouterr()
+
+        assert cmd_vars(["seat", "set", "SEAT", "b"]) == 0
+
+        entry = load_registry()["seat"]
+        assert entry["retired_mailboxes"] == [str(old.resolve())]
+
+    def test_health_reports_a_retired_nested_mailbox(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _report_orphan_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": "mail/$SEAT/outbox"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        stale = agent_root / "mail" / "old-seat" / "outbox"
+        stale.mkdir(parents=True)
+        (stale / "01ORPHAN.json").write_text("{}")
+        reg = load_registry()
+        reg["seat"]["retired_mailboxes"] = [str(stale.resolve())]
+        save_registry(reg)
+        capsys.readouterr()
+
+        assert _report_orphan_mailboxes() == 1
+        out = capsys.readouterr().out
+        assert str(stale) in out
+        assert "retired by a8s" in out
+        # Still non-empty and unowned — not pruned.
+        assert load_registry()["seat"]["retired_mailboxes"] == [str(stale.resolve())]
+
+    def test_health_prunes_an_empty_retired_mailbox(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _report_orphan_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": "mail/$SEAT/outbox"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        stale = agent_root / "mail" / "old-seat" / "outbox"
+        stale.mkdir(parents=True)
+        reg = load_registry()
+        reg["seat"]["retired_mailboxes"] = [str(stale.resolve())]
+        save_registry(reg)
+        capsys.readouterr()
+
+        assert _report_orphan_mailboxes() == 0
+        assert "retired_mailboxes" not in load_registry()["seat"]
+
+    def test_unset_making_a_field_unresolvable_still_succeeds_and_retires(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        from commands import _report_orphan_mailboxes
+
+        self._register(agent_root, tmp_path, "seat", {"outbox_dir": "mail/$SEAT/outbox"})
+        assert cmd_vars(["seat", "set", "SEAT", "a"]) == 0
+        old = agent_root / "mail" / "a" / "outbox"
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "01PENDING.json").write_text("in flight")
+        capsys.readouterr()
+
+        assert cmd_vars(["seat", "unset", "SEAT"]) == 0
+
+        entry = load_registry()["seat"]
+        assert entry["retired_mailboxes"] == [str(old.resolve())]
+        assert (old / "01PENDING.json").exists()
+
+        capsys.readouterr()
+        assert _report_orphan_mailboxes() == 1
+        out = capsys.readouterr().out
+        assert str(old) in out
+
+
 class TestHarnessWarningAtStart:
     """`a8s start` hands its own environment to the handler, which hands it to
     every wake. So a node's PATH is whatever the shell that started it happened
@@ -1629,7 +1897,7 @@ class TestCmdRemoteFolder:
         stamped = datetime.fromtimestamp(
             parse_ulid(joined)[0] / 1000, tz=timezone.utc
         )
-        assert stamped.strftime("%Y-%m-%d %H:%M:%SZ") in shown
+        assert clock.stamp(stamped, seconds=True) in shown
 
     def test_envelopes_and_bundles_land_in_one_directory(
         self, fake_home, shared, tmp_path
@@ -2274,7 +2542,22 @@ class TestCmdTellWithSplitFileArg:
 
 
 class TestCmdLogs:
-    def test_single_agent_preserves_append_order(self, fake_home, tmp_path, capsys):
+    @pytest.fixture
+    def zone(self, monkeypatch):
+        """Force the process's local zone so a rendered line is the same
+        string on every machine that runs this suite."""
+        import time as _time
+
+        def use(name: str) -> None:
+            monkeypatch.setenv("TZ", name)
+            _time.tzset()
+
+        yield use
+        monkeypatch.undo()
+        _time.tzset()
+
+    def test_single_agent_preserves_append_order(self, fake_home, tmp_path, capsys, zone):
+        zone("UTC")
         root = tmp_path / "x"; root.mkdir()
         save_registry({"claude": {"root": str(root)}})
         log = agent_log_path("claude")
@@ -2287,12 +2570,35 @@ class TestCmdLogs:
         assert cmd_logs(["claude"]) == 0
         out = capsys.readouterr().out
         assert out.splitlines() == [
-            "2026-01-01T12:00:02Z later timestamp first in file",
-            "2026-01-01T12:00:01Z earlier timestamp second in file",
+            "2026-01-01 12:00:02 UTC later timestamp first in file",
+            "2026-01-01 12:00:01 UTC earlier timestamp second in file",
             "legacy line without timestamp prefix",
         ]
 
-    def test_multi_agent_merge_sorts_by_timestamp(self, fake_home, tmp_path, capsys):
+    def test_lines_are_shown_in_the_machines_zone(self, fake_home, tmp_path, capsys, zone):
+        """The stored prefix is UTC; what reaches the terminal is the reader's
+        wall clock. An unparseable head still passes through byte-for-byte."""
+        zone("America/Los_Angeles")
+        root = tmp_path / "x"; root.mkdir()
+        save_registry({"claude": {"root": str(root)}})
+        log = agent_log_path("claude")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "2026-01-01T12:00:02Z winter line\n"
+            "2026-07-01T12:00:02Z summer line\n"
+            "legacy line without timestamp prefix\n"
+        )
+        assert cmd_logs(["claude"]) == 0
+        assert capsys.readouterr().out.splitlines() == [
+            "2026-01-01 04:00:02 PST winter line",
+            "2026-07-01 05:00:02 PDT summer line",
+            "legacy line without timestamp prefix",
+        ]
+        # Storage is untouched — the file still carries its UTC prefixes.
+        assert "2026-01-01T12:00:02Z" in log.read_text()
+
+    def test_multi_agent_merge_sorts_by_timestamp(self, fake_home, tmp_path, capsys, zone):
+        zone("UTC")
         a_root = tmp_path / "a"; a_root.mkdir()
         b_root = tmp_path / "b"; b_root.mkdir()
         save_registry({"claude": {"root": str(a_root)}, "gemini": {"root": str(b_root)}})
@@ -2303,8 +2609,27 @@ class TestCmdLogs:
         assert cmd_logs(["claude", "gemini"]) == 0
         out = capsys.readouterr().out.splitlines()
         assert out == [
-            "2026-01-01T12:00:01Z from gemini",
-            "2026-01-01T12:00:03Z from claude",
+            "2026-01-01 12:00:01 UTC from gemini",
+            "2026-01-01 12:00:03 UTC from claude",
+        ]
+
+    def test_merge_still_orders_by_the_stored_utc_instant(
+        self, fake_home, tmp_path, capsys, zone
+    ):
+        """Display went local; the merge key did not. Two agents' files
+        interleave by the instant they recorded, whatever zone shows them."""
+        zone("Asia/Kolkata")
+        a_root = tmp_path / "a"; a_root.mkdir()
+        b_root = tmp_path / "b"; b_root.mkdir()
+        save_registry({"claude": {"root": str(a_root)}, "gemini": {"root": str(b_root)}})
+        agent_log_path("claude").parent.mkdir(parents=True, exist_ok=True)
+        agent_log_path("gemini").parent.mkdir(parents=True, exist_ok=True)
+        agent_log_path("claude").write_text("2026-01-01T12:00:03Z from claude\n")
+        agent_log_path("gemini").write_text("2026-01-01T12:00:01Z from gemini\n")
+        assert cmd_logs(["claude", "gemini"]) == 0
+        assert capsys.readouterr().out.splitlines() == [
+            "2026-01-01 17:30:01 IST from gemini",
+            "2026-01-01 17:30:03 IST from claude",
         ]
 
     def test_tail_keeps_last_lines_of_single_agent_log(self, fake_home, tmp_path, capsys):

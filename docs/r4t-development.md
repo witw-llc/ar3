@@ -34,7 +34,7 @@ lands somewhere different in dispatch:
 | `exit` (default) | exits nonzero every turn | requeue the batch, trip the breaker, hold the queue |
 | `hang` | sleeps past its rig timeout | kill the process group at the timeout, requeue, trip the breaker |
 | `silent` | does the work, then answers on stdout without ever calling `tell` | stage the cleaned stdout as one reply to the sender, breaker closed, deliverable intact |
-| `mute` | prints tool chrome, stages nothing, exits 0 | let the quiet sweep nudge the leader so the originator still hears back |
+| `mute` | prints tool chrome, stages nothing, exits 0 | nudge nobody — the turn is spent and the message is gone; the mission-review heartbeat is what re-engages the org |
 
 Every shape also checks the turn was charged to the member's budget: a member
 that keeps failing pays for its attempts. Each has a pytest in
@@ -64,8 +64,8 @@ roster:
 - **VERIFIED is a regex.** Both modes read `VERIFIED:` out of the incoming
   text; a model that phrases its verdict any other way reads as unverified.
 - **Fake turns are instant.** Fake mode drops the cadence gate and every turn
-  returns in milliseconds, so throttling, concurrency and budget resting under
-  real latency go untested.
+  returns in milliseconds, so throttling and budget resting under real latency
+  go untested.
 - **Broken members break cleanly.** The `--break` shapes are a nonzero exit, a
   `sleep`, a `print` and chrome-only output. Real harnesses fail messier:
   partial output, tool loops, a CLI that blocks on stdin.
@@ -74,15 +74,12 @@ roster:
 
 ## Layout
 
-`r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging
-release, quiet-thread sweep, mission-review) · `tasks.py` (thread ledger) ·
-`state.py`
-(all on-disk state under `$R4T_HOME`) · `rig.py` (rig config, presets,
-model resolution) · `roster.py` · `org.py` (org dirs + settings) ·
-`check.py` (verification sweep) · `judge.py` (post-hoc MAST judge) ·
-`verdict.py` (health verdicts +
-dead-letter rollup, shared by status and chat) · `chat.py` (seat feed +
-line UI) · `chat_tui.py` (Textual front end) · `notify.py` (doorbell) ·
-`sandbox.py` + `sandbox/` (the end-to-end harness).
+`r4t.py` (CLI) · `dispatch.py` (enqueue, batch turns, staging release, flush,
+mission-review) · `state.py` (all on-disk state under `$R4T_HOME`) · `rig.py`
+(rig config, presets, model resolution, continuation grades) · `roster.py` ·
+`org.py` (org dirs + settings) · `check.py` (verification sweep) · `judge.py`
+(post-hoc MAST judge) · `verdict.py` (health verdicts + dead-letter rollup,
+behind `r4t status`) · `notify.py` (the outward `tell` seam and the a8s names
+one host can see) · `sandbox.py` + `sandbox/` (the end-to-end harness).
 Observability rides on a8s: traffic in the a8s txlog/convo, r4t decision
 lines in the node log via dispatch stdout, r4t-only state via `r4t status`.

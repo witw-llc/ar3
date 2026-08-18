@@ -90,11 +90,10 @@ FAILURE_SHAPES = {
     "exit": "rig always exits nonzero — breaker trips, queue holds",
     "hang": "rig sleeps past its timeout — turn killed, batch requeued",
     "silent": "member works but answers on stdout, never tells — stdout fallback",
-    "mute": "member's first turn stages nothing — quiet sweep nudges the leader",
+    "mute": "member's first turn stages nothing — the heartbeat re-engages it",
 }
 FAILURE_RIG_NAMES = {"exit": "broken", "hang": "hung", "silent": "silent", "mute": "mute"}
 FAILURE_BUDGET_MAX = 10
-QUIET_TASK_SECONDS = 10
 
 
 class SandboxError(Exception):
@@ -206,7 +205,7 @@ def _write_rig_config(
                     "{prompt}",
                 ]
                 value["timeout_seconds"] = 60
-        config["throttle"] = {"max_concurrent": 1, "min_seconds_between_turn_starts": 0}
+        config["throttle"] = {"min_seconds_between_turn_starts": 0}
     else:
         for value in config.values():
             if isinstance(value, dict) and "invoke" in value:
@@ -224,8 +223,6 @@ def _write_rig_config(
         # exits 0 must reach its recovery path with the breaker still closed,
         # and a cap of 2 makes any stray trip visible.
         config["breaker_cap"] = 2
-        if shape == "mute":
-            config["quiet_task_seconds"] = QUIET_TASK_SECONDS
     state.atomic_write_json(path, config)
 
 
@@ -485,7 +482,10 @@ def _scenario_pending(failure: tuple[str, str] | None) -> bool:
         )
     if shape == "silent":
         return not any(f"STDOUT-REPLY {member}" in line for line in gov)
-    return not any("QUIET thread=" in line for line in gov)
+    # Nothing watches for a reply that never came — a message carries no task
+    # and demands no answer. What re-engages a stalled org is the
+    # mission-review heartbeat, and that is the recovery worth missing.
+    return not any("MISSION-REVIEW fired" in line for line in gov)
 
 
 def _gov_detail(lines: list[str]) -> str:
@@ -563,6 +563,7 @@ def _failure_checks(
     else:
         silent = [line for line in gov if f"SILENT {member}" in line]
         nudged = [line for line in gov if "QUIET thread=" in line]
+        reviewed = [line for line in gov if "MISSION-REVIEW fired" in line]
         checks += [
             (
                 "Silent turn logged",
@@ -570,13 +571,14 @@ def _failure_checks(
                 _gov_detail(silent) if silent else f"{member} staged nothing and r4t said nothing",
             ),
             (
-                # The kickoff arrives through the human's a8s node, so every
-                # thread in this run descends from ingress and is owed
-                # nothing. Silence here is the ruling working, not a dropped
-                # ball — the sweep watches threads that begin inside.
-                "Quiet sweep left the ingress thread alone",
-                not nudged,
-                _gov_detail(nudged) if nudged else "no ingress thread was swept",
+                # Fire-and-forget inside the walls: no watchdog chases an
+                # unanswered message. A stalled org is re-engaged by the
+                # mission-review heartbeat instead — one general mechanism
+                # where there used to be two. A QUIET line here would mean
+                # the retired sweep came back.
+                "Heartbeat re-engaged the org, no watchdog nudge",
+                bool(reviewed) and not nudged,
+                _gov_detail(reviewed) if reviewed else "nothing re-engaged the leader",
             ),
             (
                 "Breaker stayed closed",
@@ -820,16 +822,8 @@ def run_sandbox(
                 ),
                 ("Program runs and exits 0", program_ok, program_detail),
             ]
-        # A muted leader is the one shape with nobody left to answer: the
-        # kickoff is ingress, owed nothing, and the member that would
-        # have replied is the broken one. Silence is the outcome the ruling
-        # buys, so the run states it rather than failing over it.
-        answered_label = (
-            "Leader stayed silent on an ingress thread"
-            if failure and failure == ("lead", "mute")
-            else "Leader answered the originator"
-        )
-        answered_ok = (final is None) if failure == ("lead", "mute") else (final is not None)
+        answered_label = "Leader answered the originator"
+        answered_ok = final is not None
         checks += [
             (
                 answered_label,

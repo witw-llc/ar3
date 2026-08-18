@@ -17,10 +17,11 @@ About 20 minutes.
 
 ## 3. Starting state
 
-- Chapter 2 complete: roster `silo` registered on a8s, Wren answering at the
-  seat, and the customize step left `Continue: 15m` in his roster block.
+- Chapter 2 complete: roster `silo` registered with `r4t add`, Wren answering
+  a `tell` from your seat at `~/ark/me`, and the customize step left
+  `Continue: 15m` in his runbook block.
 - Wren's conversation is live — if you just restarted the machine, send one
-  seat message so there is a conversation to flush.
+  message so there is a conversation to flush.
 
 ## 4. The change
 
@@ -32,7 +33,7 @@ setting and the wrong demo — you are not going to sit here watching a clock.
 `r4t flush` is the same cycle on your word:
 
 ```bash
-r4t flush --node silo wren
+r4t flush wren
 ```
 
 It runs the dump turn, retires the conversation, and archives Wren's
@@ -44,14 +45,14 @@ the rest of this chapter a test rather than a demonstration.
 
 ```bash
 cd ~/ark/silo
-r4t roster check
+r4t runbook check
 ```
 
 You should see:
 
 ```
-You: note — Human without an Address (roster cannot tell them)
-/home/you/ark/silo/ROSTER.md: OK (2 member(s), leader Wren)
+runbook: triforce -> r4t.md
+/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
 ```
 
 The idle window rides the same field that turns the conversation on, so a
@@ -64,29 +65,32 @@ Give Wren a fact to hold, and prove he has it:
 **Run**
 
 ```bash
-r4t seat send --node silo "Hold this fact for later: the supply cache is at grid square K-19. Confirm."
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "Hold this fact for later: the supply cache is at grid square K-19, and the codeword is TIDEPOOL. Confirm."
+tells --timeout 300
 ```
 
 You should see:
 
 ```
-── from silo:wren (2026-07-29T05:19:47.051352Z)
-Supply cache at grid square K-19 recorded. Confirming storage complete.
+tell -> silo: Hold this fact for later: the supply cache is at grid square K-19, and the code…
+silo:wren: Confirmed and holding both facts — cache at K-19, codeword TIDEPOOL.
 ```
 
-Now end the conversation:
+(`tell` echoes your own line back as an 80-character preview; the message
+that went out is whole.) Now end the conversation:
 
 **Run**
 
 ```bash
-r4t flush --node silo wren
+cd ~/ark/silo
+r4t flush wren
 ```
 
 You should see:
 
 ```
-flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T052013449271Z.md
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260817T064355959023Z.md
 ```
 
 One line per member. The full receipt lives in the roster log and on disk,
@@ -97,27 +101,30 @@ which is where the next section takes you.
 **Run**
 
 ```bash
-r4t logs --node silo -n 6
+r4t logs -n 7
 ```
 
 You should see:
 
 ```
+— log day 2026-08-17 UTC (this machine reads PDT)
 r4t: FLUSH dump turn -> wren (r4t flush)
 turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
-done: Wren, exit 0 in 28.8s
-r4t: SILENT wren (rig silo) answered only r4t-internal senders; its 674 bytes of stdout stay transcript, nothing staged
+r4t: PROMPT wren echo 3.3k — intro 0.2k mission 0.1k charter 1.4k persona 0.3k history 1.2k messages 0.1k
+done: Wren, exit 0 in 11.6s
+r4t: SILENT wren (rig silo) answered only r4t-internal senders; its 96 bytes of stdout stay transcript, nothing staged
 r4t: FLUSH retired wren's conversation — the next real message refounds it from state on disk
-r4t: FLUSH archived wren's history log as history-20260729T052013449271Z.md — a fresh one starts at the next turn
+r4t: FLUSH archived wren's history log as history-20260817T064355959023Z.md — a fresh one starts at the next turn
 ```
 
 Three `FLUSH` events around a real turn. The **dump turn** is an ordinary
 continuing turn whose prompt asks one thing: "Save your current state and
-progress to STATUS.md." It is logged, captured, and budgeted like any
-other turn, and only if it exits cleanly does the retirement — and the
-archiving — follow. The `SILENT` line is that turn answering r4t rather than a
-member: no one asked, so whatever Wren said on his way to disk stays in the
-turn capture instead of landing in someone's inbox. Look at what Wren wrote:
+progress to STATUS.md." It is logged, captured, priced on the `PROMPT` line
+and budgeted like any other turn, and only if it exits cleanly does the
+retirement — and the archiving — follow. The `SILENT` line is that turn
+answering r4t rather than a member: no one asked, so whatever Wren said on his
+way to disk stays in the turn capture instead of landing in someone's inbox.
+Look at what Wren wrote:
 
 **Run**
 
@@ -128,19 +135,16 @@ cat agents/wren/STATUS.md
 You should see:
 
 ```
-# STATUS.md — Wren
+# Wren - silo roster
 
-## Codeword
-TIDEPOOL (confirmed)
-
-## Supplied Facts
-- Supply cache location: grid square K-19
-
-## Current State
-Active. No open tasks. Waiting for instructions.
+## Codeword: TIDEPOOL
+## Supply cache location: grid square K-19
 
 ## Progress
-Session initialized. Stored codeword and supply cache location.
+No active project work in this session. Session started 2026-08-17 00:39 PDT.
+
+## Notes
+Holding two facts for the owner: codeword is TIDEPOOL, supply cache at K-19.
 ```
 
 Wren chose that structure himself — the dump prompt names the file, not the
@@ -155,15 +159,17 @@ path. Ask for the fact back:
 **Run**
 
 ```bash
-r4t seat send --node silo "What was the codeword, and where is the supply cache?"
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "What was the codeword, and where is the supply cache?"
+tells --timeout 300
 ```
 
 You should see:
 
 ```
-── from silo:wren (2026-07-29T05:23:14.719675Z)
-The codeword was **TIDEPOOL** and the supply cache is located at **grid square K-19**.
+tell -> silo: What was the codeword, and where is the supply cache?
+silo:wren: Codeword: **TIDEPOOL**
+Supply cache: grid square **K-19**
 ```
 
 That turn was a **refound**: no continue flag on the CLI (there is no
@@ -186,9 +192,8 @@ with only ollama can read along, the machinery is identical):
 **Run**
 
 ```bash
+cd ~/ark/silo
 r4t rig swap silo cursor --model claude-fable-5-medium
-r4t seat send --node silo "New rig, same Wren? Tell me the codeword and the cache location."
-r4t seat inbox --node silo
 ```
 
 You should see:
@@ -196,42 +201,42 @@ You should see:
 ```
 swapped rig 'silo' to cursor in /home/you/.config/r4t/rigs.json
   invoke: agent --model claude-fable-5-medium -p --trust --force --approve-mcps {prompt}
-── from silo:wren (2026-07-29T05:26:27.150992Z)
-Same Wren. Codeword: **TIDEPOOL**. Supply cache: **grid square K-19**. Both verified against STATUS.md.
 ```
 
-And the log names what happened:
+Then message him and read the log:
 
 **Run**
 
 ```bash
-r4t logs --node silo -n 8
+cd ~/ark/me
+tell silo "New rig, same Wren? Tell me the codeword and the cache location."
+tells --timeout 300
+cd ~/ark/silo
+r4t logs -n 4
 ```
 
-You should see:
+The answer comes back in Wren's own words. The interesting part is the log
+line above it, which explains how he still had one:
 
 ```
-r4t: QUEUED silo:you -> wren thread=01ABC... hop=0 "New rig, same Wren? Tell me the codeword and the cache location." (depth 1)
+— log day 2026-08-17 UTC (this machine reads PDT)
+r4t: QUEUED me -> wren thread=01ABC... hop=0 "New rig, same Wren? Tell me the codeword and the cache location." (depth 1)
 r4t: CONTINUE-SWAP wren (rig silo) drives 'agent' but the conversation lives on 'opencode' — retired; this turn refounds from state on disk
 turn: 1 message(s) -> Wren (threads 01ABC..., rig silo)
-done: Wren, exit 0 in 12.4s
-r4t: ECHO-REPLY wren (rig silo) 102 bytes of cleaned stdout staged as the reply to silo:you
-r4t: SEAT you <- silo:wren (parked)
-r4t: RELEASED-internal silo:wren -> silo:you thread=01ABC... hop=1
-r4t: ANSWERED thread=01ABC... silo:wren -> silo:you (originator answered, thread closed)
+r4t: PROMPT wren echo 2.5k — preamble 0.0k intro 0.2k mission 0.1k charter 1.4k persona 0.3k history 0.3k messages 0.1k
 ```
 
 `CONTINUE-SWAP`: the conversation lived on `opencode`, the rig now drives
 `agent`, so the old conversation is retired and this turn refounds — same
-mechanics as after a flush, minus the dump. Wren's identity crossed a CLI
-boundary on the strength of a markdown file. Swap back:
+mechanics as after a flush, minus the dump. The `preamble` field on the
+`PROMPT` line is the refound preamble itself, priced with everything else.
+Wren's identity crossed a CLI boundary on the strength of a markdown file.
+Swap back:
 
 **Run**
 
 ```bash
 r4t rig swap silo ollama-opencode --model qwen3.6
-r4t seat send --node silo "Back on the local rig. Codeword and cache location, one line."
-r4t seat inbox --node silo
 ```
 
 You should see:
@@ -239,19 +244,17 @@ You should see:
 ```
 swapped rig 'silo' to ollama-opencode in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
-── from silo:wren (2026-07-29T05:27:48.329830Z)
-Codeword: TIDEPOOL — Cache: grid square K-19
 ```
 
-The log shows the same `CONTINUE-SWAP` event with the CLIs reversed. One
-subtlety the event teaches: a swap that keeps the CLI (a model change, or
+The next message logs the same `CONTINUE-SWAP` event with the CLIs reversed.
+One subtlety the event teaches: a swap that keeps the CLI (a model change, or
 `opencode` ↔ `ollama-opencode`, which both drive `opencode`) keeps the
 conversation — only a real CLI change retires it.
 
 (If a send comes back with `queued — Wren is resting (member budget ...)`,
 you have simply outrun Wren's spend budget with all this demo traffic. The
-message is queued, not lost; wait the minutes it names and run
-`r4t clear --node silo`. Chapter 4 makes that machinery the main event.)
+message is queued, not lost; wait the minutes it names. Chapter 4 makes that
+machinery the main event.)
 
 ## 7. Break it
 
@@ -261,20 +264,31 @@ delete the state file, then send the recall:
 **Run**
 
 ```bash
-r4t flush --node silo wren
+cd ~/ark/silo
+r4t flush wren
 rm agents/wren/STATUS.md
-r4t seat send --node silo "What was the codeword?"
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "What was the codeword? Answer in one line."
+tells --timeout 300
 ```
 
 You should see:
 
 ```
-── from silo:wren (2026-07-29T05:34:01.509705Z)
-I have no record of a codeword — STATUS.md is missing and I have nothing else on file.
+tell -> silo: What was the codeword? Answer in one line.
+silo:wren: $ find /home/you/ark/silo/agents/wren -maxdepth 3 -iname '*.md' -o -iname '*.txt' -o -iname '*.json' | head -30
+(no output)
+
+$ ls /home/you/ark/silo/agents/wren/ 2>/dev/null || echo "EMPTY"
+(no output)
+
+No file contains a codeword for me to read. If you meant to attach or place a STATUS.md here, I'll load it when it's available.
 ```
 
-The lobotomy worked. Worth understanding rather than panicking over.
+The lobotomy worked. Watch what he did before answering, though: he went
+looking. A refounded member is told his state is on disk, so with the file
+gone he searches for it, finds nothing, and says so — which is the failure
+mode you want. He did not invent a codeword.
 
 ## 8. Diagnose
 
@@ -287,9 +301,10 @@ section r4t maintains for him,
 ## Your conversation so far (messages you received and sent)
 ```
 
-— the rolling message history, capped by the rig's history budget. `r4t
-flush` archives that log instead of carrying it forward, which is why the
-recall in section 6 proved anything at all:
+— the rolling message history, capped by the rig's history budget and priced
+as `history` on every `PROMPT` line you have been reading. `r4t flush`
+archives that log instead of carrying it forward, which is why the recall in
+section 6 proved anything at all:
 
 **Run**
 
@@ -300,8 +315,13 @@ ls ~/.config/r4t/rosters/silo/agents/wren/
 You should see:
 
 ```
-history-20260729T052013449271Z.md  history.md  meta.json
-history-20260729T053355901744Z.md  live.log    turns
+history-20260817T063458708898Z.md
+history.md
+live.log
+mcp
+meta.json
+queue
+turns
 ```
 
 Nothing is deleted — every archived word is still readable — but an
@@ -319,25 +339,32 @@ flush:
 **Run**
 
 ```bash
-r4t seat send --node silo "The codeword is TIDEPOOL and the supply cache is at grid square K-19."
-r4t flush --node silo wren
-head -8 agents/wren/STATUS.md
+cd ~/ark/me
+tell silo "The codeword is TIDEPOOL and the supply cache is at grid square K-19."
+tells --timeout 300
+cd ~/ark/silo
+r4t flush wren
+head -16 agents/wren/STATUS.md
 ```
 
 You should see:
 
 ```
-flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T053902117630Z.md
-# STATUS.md — Wren
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260817T064745606819Z.md
+---
+updated: 2026-08-17T06:47Z zone: PDT
+session: ongoing
+---
 
-## Codeword
-TIDEPOOL (confirmed)
+# STATUS
 
-## Supplied Facts
-- Supply cache location: grid square K-19
+Holding two facts for the owner: codeword is TIDEPOOL, supply cache at K-19. No active work to report — awaiting instructions.
 ```
 
-The dump turn wrote it back out of the live conversation.
+The dump turn wrote it back out of the live conversation. (Wren gave this one
+frontmatter and a different shape from the last dump — the prompt names the
+file, never the format, so the structure drifts between dumps and that is
+fine. What matters is that the facts survived.)
 
 ## 10. Check
 
@@ -347,15 +374,16 @@ chapter has been circling:
 **Run**
 
 ```bash
-r4t seat send --node silo "Codeword and cache location, one line."
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "Codeword and cache location, one line."
+tells --timeout 300
 ```
 
 You should see:
 
 ```
-── from silo:wren (2026-07-29T05:38:30.929831Z)
-Codeword: TIDEPOOL — Cache: grid square K-19
+tell -> silo: Codeword and cache location, one line.
+silo:wren: TIDEPOOL, K-19
 ```
 
 Flushed, refounded, swapped, swapped back, state file deleted and
@@ -368,14 +396,14 @@ Park the whole roster on your way out — one flag, every member:
 **Run**
 
 ```bash
-r4t flush --node silo --all
+cd ~/ark/silo
+r4t flush --all
 ```
 
 You should see:
 
 ```
-flushed wren — dumped state to disk, retired the conversation, archived history as history-20260729T054417338205Z.md
-skipped you — human member
+flushed wren — dumped state to disk, retired the conversation, archived history as history-20260817T064841984896Z.md
 ```
 
 That is the habit worth keeping: before a long break, after a run that
@@ -404,7 +432,7 @@ machine died right now:
 
 ```bash
 cd ~/ark/silo
-git add ROSTER.md agents/wren/STATUS.md
+git add r4t.md agents/wren/STATUS.md
 git commit -q -m "silo: Wren's first memory dump"
 ```
 

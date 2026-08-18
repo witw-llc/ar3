@@ -15,9 +15,8 @@ member's queue and back out. For governance rationale see
    it is addressed. A `node:member` sub-address from an outside sender is
    ignored (the namespace is the garden's outside address, not a way in to a
    specific member); the leader is the one who decides what to relay inward.
-   The lone exception is the roster human's own `Address:` — a reply from it
-   is the human speaking, so it lands in the seat path and routes exactly
-   like a chat/seat send (see [r4t-operations.md](r4t-operations.md)).
+   There is no second door: whoever sent it and however it is addressed,
+   external mail enters at the top.
 2. r4t opens or continues a thread (a conversation label; a fresh thread
    opens for external mail) and ENQUEUES the message into the leader's
    durable queue — unconditionally. When the leader is runnable (both its
@@ -44,16 +43,15 @@ member's queue and back out. For governance rationale see
    Inside the roster, agents address each other by bare first name
    (`tell gerry`) — the namespace prefix is the *outside* address of the
    walled garden, and roster agents never see it. Release canonicalizes
-   recipients: bare roster names become intra-roster routes, human members
-   resolve to their real a8s address, and anything else (`chatroom`,
-   external addresses) passes through untouched. Release *is* the recipient
-   authority — `tell` writing into a staging dir validates nothing, because
-   roster members are not a8s agents. A bare name matching no member is logged
-   `UNKNOWN-MEMBER` before it rides the egress path, an explicit
+   recipients: bare roster names become intra-roster routes, and anything else
+   (`chatroom`, external addresses) passes through untouched. Release *is* the
+   recipient authority — `tell` writing into a staging dir validates nothing,
+   because roster members are not a8s agents. A bare name matching no member is
+   logged `UNKNOWN-MEMBER` before it rides the egress path, an explicit
    `<node>:<nobody>` sub-address dead-letters, and a truly external name is
    a8s's to reject.
 4. Agents never wait for replies in a turn (actor doctrine): delegate, end
-   the turn, get woken when replies arrive, answer the originator when
+   the turn, get woken when replies arrive, answer whoever asked once
    there is enough. `tell --sync` to members is prohibited by prompt and
    pointless by design.
 5. Stdout fallback — `tell` always wins. A turn that staged even one
@@ -72,10 +70,12 @@ member's queue and back out. For governance rationale see
    instead of staging a reply, and the blank-output quota detection is
    untouched.
 6. Silence — a member that has nothing to say sends nothing, and no
-   machinery objects. A thread from outside the roster is owed no reply at
-   all, so the doctrine bullet is the whole protocol: *do not send
-   acknowledgment-only messages.* What is owed, and to whom, is decided by
-   the ledger at the wall, never by a verb the member has to remember.
+   machinery objects. Traffic is fire-and-forget: a message carries no task
+   and demands no answer, inside the walls or across them, so the doctrine
+   bullet is the whole protocol: *do not send acknowledgment-only messages.*
+   Nothing records whether a message was answered, and nothing chases a
+   member for a reply. When the whole org stops moving, the mission-review
+   heartbeat on an [idle pass](r4t-idle.md) is what re-engages it.
 
 ## The durable queue
 
@@ -100,23 +100,25 @@ dispatch and never written or parsed as prose. The only wire header is at
 egress, where an external release is converted to an a8s envelope carrying the
 bare body and `class` in the envelope's `meta` object — other a8s nodes must not
 need to know whether a name is one agent, a human, a device, or a whole roster.
-Symmetrically, external ingress is untrusted: a sub-address can't pick a member
-and nothing is parsed out of the body — everything from outside enters at the
-top lead on a fresh thread. One ingress point means one thing to reason about.
+Symmetrically, external ingress is untrusted: nothing is parsed out of the
+body, and everything from outside opens a fresh thread. A sub-address *can*
+pick a member, and only one the member consented to — `- **Ingress:** yes`, on
+by default for the leader alone. A `node:member` naming a member without it is
+refused with the reason rather than quietly landed on the leader, who would
+otherwise answer for a member that never saw it.
 
 ## When a name means two things
 
 The leader stands in the doorway: it addresses roster members and registered
 a8s nodes with the same `tell`. **A name inside the roster wins.** An outside
-node sharing a member's name is simply not reachable from that leader by name
-— by precedence, not by a block, and the outside node loses nothing else,
-since externals cannot address a non-top member in the first place.
+node sharing a member's name is reached by qualifying it — `:bob` is the global
+`bob` from any vantage, and it is stripped on resolution, so the recipient
+never sees the marker.
 
 Nothing prevents the collision, because on a single-owner network there
 usually is not one and the operator may well mean it. `r4t roster check`
 warns when a member's name also names an a8s node, alias, or namespace visible
-from the host, and says which. That is the whole treatment: a warning, and
-this sentence.
+from the host, says which, and names `:<name>` as the way to reach it.
 
 ## Class across the wall
 
@@ -125,14 +127,13 @@ directions. Releases carry `auto`, because everything a member sends is machine
 traffic; inbound mail is deliberate attention unless the sender marked it
 `auto`, so a human, a phone, or a peer that says nothing is heard as a person.
 
-**It is context for the member, not an obligation for the ledger.** The class
-rides the message so the reader knows what it is holding; it does not decide
-whether an answer is owed, because nothing on the wire decides that. Every
-thread opened from outside the roster is owed nothing regardless of its class
-(#58) — outside the wall a8s posts messages to nodes and carries no notion of
-a reply being expected, and building one in would mean a decision point on
-every node of a network r4t does not own. What r4t enforces is what it can
-see both ends of.
+**It is context for the member, not an instruction to the machinery.** The
+class rides the message so the reader knows what it is holding — a person
+asking, a relay, a piece of feedback — and the member decides what that is
+worth. It decides nothing about whether an answer is owed, because nothing
+decides that: a message demands no answer. Beyond the wall a8s posts messages
+to nodes and carries no notion of a reply being expected, and inside the walls
+r4t keeps none either.
 
 Metadata is advisory for governance and never for identity. A peer can only
 downgrade its own traffic, an unknown word means deliberate, and thread and hop

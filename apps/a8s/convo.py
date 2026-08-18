@@ -19,6 +19,8 @@ import sqlite_store
 from core import conversations_path, inbound_bundle_dir, out
 from settings import get_int
 
+from ark import clock
+
 __all__ = [
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
@@ -45,7 +47,7 @@ __all__ = [
 DEFAULT_HEADING_OUT = "## from {from} to {to} at {timestamp}"
 DEFAULT_HEADING_IN = "### from {from} to {to} at {timestamp}"
 
-HEADING_PLACEHOLDERS = ("from", "to", "timestamp", "date")
+HEADING_PLACEHOLDERS = ("from", "to", "timestamp", "date", "utc")
 
 
 def decode_template(text: str) -> str:
@@ -100,8 +102,9 @@ heading templates:
   Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
     {{from}}       sender name
     {{to}}         recipient or alias
-    {{timestamp}}  ISO UTC timestamp from the message
+    {{timestamp}}  the message's time in this machine's zone, e.g. 2026-08-16 13:22:04 PDT
     {{date}}       alias for {{timestamp}}
+    {{utc}}        the same instant as stored: ISO 8601 UTC
 
   Defaults:
     outbound: {DEFAULT_HEADING_OUT}
@@ -376,8 +379,9 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
         **{
             "from": entry.get("from", ""),
             "to": entry.get("to", ""),
-            "timestamp": ts,
-            "date": ts,
+            "timestamp": clock.stamp(ts, seconds=True),
+            "date": clock.stamp(ts, seconds=True),
+            "utc": ts,
         }
     )
 

@@ -8,6 +8,10 @@ Designed for debugging message flow end-to-end: trace a msg_id from
 sender outbox -> local routing -> file transfer -> remote publish -> remote
 receive -> recipient wake. `a8s trace` is the stable interface; nothing outside
 this module reads the rows.
+
+The log also carries runner lifecycle (`RUN_START`, `RUN_STOP`, `WAKE_START`,
+`WAKE_RETURN`, `HEARTBEAT`, `WEDGE`) so a dead or deaf dispatcher is visible
+from `a8s tx`.
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ Event = Literal[
     "ROUTED",
     "RECEIVED_REMOTE",
     "RESOLVED_REMOTE",
+    "NOT_LOCAL",
     "RECEIPT_PUBLISHED",
     "DELIVERY_RECEIPT",
     "FILE_DELIVERED",
@@ -41,12 +46,19 @@ Event = Literal[
     "DISCARDED",
     "DROPPED",
     "PROXY_DELIVERED",
+    "RUN_START",
+    "RUN_STOP",
+    "WAKE_START",
+    "WAKE_RETURN",
+    "HEARTBEAT",
+    "WEDGE",
 ]
 
 EVENTS: tuple[str, ...] = (
     "ROUTED",
     "RECEIVED_REMOTE",
     "RESOLVED_REMOTE",
+    "NOT_LOCAL",
     "RECEIPT_PUBLISHED",
     "DELIVERY_RECEIPT",
     "FILE_DELIVERED",
@@ -55,6 +67,12 @@ EVENTS: tuple[str, ...] = (
     "DISCARDED",
     "DROPPED",
     "PROXY_DELIVERED",
+    "RUN_START",
+    "RUN_STOP",
+    "WAKE_START",
+    "WAKE_RETURN",
+    "HEARTBEAT",
+    "WEDGE",
 )
 
 # Event dict keys, in trace display order. `from`/`to` are SQL keywords, so

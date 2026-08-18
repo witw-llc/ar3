@@ -12,4 +12,4 @@ Requirements:
 Who does what:
 - **Dev** writes battleship.py here, then tells Tester
 - **Tester** runs `python3 battleship.py` with test input, tells Lead whether it passed or failed
-- **Lead** delegates to Dev, then Tester, then answers the human after a pass
+- **Lead** delegates to Dev, then Tester, then tells `human` after a pass

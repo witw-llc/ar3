@@ -36,7 +36,7 @@ check is an ordinary failed turn: the batch stays queued, the breaker counts
 it, and `r4t status` shows the member unhealthy with the real error.
 
 Set the boundary by editing the org's `r4t-org.json` (the same file that carries
-`comms`, `egress`, and `doorbell_check`):
+`comms` and `egress`):
 
 ```json
 {

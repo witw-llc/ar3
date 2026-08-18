@@ -10,13 +10,11 @@ optional — every knob has a sane default; see README.md for the table):
 
 - `"pins"` — agent name → rig, silently overriding the roster's Rig
   line (an in-repo roster edit can't upgrade a pinned agent).
-- `"throttle"` — roster-wide `max_concurrent` + `min_seconds_between_turn_starts`
-  gates, enforced before any rig check.
+- `"throttle"` — `min_seconds_between_turn_starts`, the cadence gate enforced
+  before any rig check. Concurrency is not here and is not anywhere: one turn
+  at a time per node is a contract (dispatch.py), so there is no number to set.
 - `"cell_budget_max"` / `"cell_budget_earn_per_hour"` — the shared cell spend
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
-- `"quiet_task_seconds"` — an intra-roster thread quiet this long with its
-  originator still unanswered wakes the leader with a nudge to reply with
-  current state. 0 turns the sweep off; ingress threads are never swept.
 - `"log_retention_days"` — how many UTC days of roster transcript `r4t clear`
   keeps; older day files are deleted whole. 0 keeps every day forever.
 - `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
@@ -44,14 +42,15 @@ explicit on. Each idiom rides a different channel, so `apply_mcp` states what an
 org's isolation boundary has to carry across (`McpPlan`) and the wrapper in
 isolate.py honours it.
 
-`permissions` — the rig's permission stance in the Ark's own three words:
+`permissions` — the rig's permission stance in ar3's own three words:
 `ask` (the CLI's own default, no auto-approval), `auto` (approve tool use
 without prompting; the engine's deny rules still apply), `bypass` (its
 strongest auto-approval). Unset is the preset's own flags. Each word is
 translated into the engine's spelling by PERMISSION_TRANSLATION; a mode below
 the engine's floor fails the rig closed by name, and one above its ceiling
-resolves to the strongest the engine has. The stance lives HERE and never on a
-roster line, so an in-repo edit can raise nobody's permissions —
+resolves to the strongest the engine has. A ROSTER line still never carries a
+stance; a runbook's `## Rigs` block does, and the machine trust ceiling is what
+keeps that from being a way for a repo to raise its own permissions —
 docs/r4t-security.md draws the same boundary for argv.
 
 `allowed_tools` — the engine's own tool-allowlist string, replacing the
@@ -132,7 +131,6 @@ RESERVED_CONFIG_KEYS = frozenset({
     "cell_budget_earn_per_hour",
     "breaker_cap",
     "breaker_cooldown_seconds",
-    "quiet_task_seconds",
     "log_retention_days",
 })
 
@@ -146,15 +144,17 @@ RESERVED_CONFIG_KEYS = frozenset({
 # argv token instead of at the end, the way `model_anchor` does — a CLI whose
 # continuation is a subcommand cannot be appended to a finished argv.
 #
-# No preset gates continuation. Whether a member continues is the roster's
-# `Continue:` flag alone — an explicit operator acceptance of the cache-miss
-# risk — because measured production telemetry shows the miss is a
-# process-boundary phenomenon no warmth or size heuristic can prevent: a
-# resume seconds after a successful turn rewrites the whole conversation at
-# the premium rate about 16× as often as staying in-process (Engine pages on
-# the wiki hold the tables). `transcript.PROBES` measures what a turn did to
-# the cache so `dispatch._log_cache_usage` can report it; measurement, not
-# gating.
+# No preset carries a WARM WINDOW or a SIZE CAP. Those were heuristics that
+# tried to predict from outside whether a provider's cache would still be hot,
+# and measured production telemetry killed them: the miss is a process-boundary
+# phenomenon no warmth or size number can foresee (Engine pages on the wiki
+# hold the tables). `transcript.PROBES` measures what a turn did to the cache
+# so `dispatch._log_cache_usage` can report it — measurement, not prediction.
+#
+# What a preset DOES carry is `_CONTINUE_GRADES`: a measured statement about
+# whether resuming this CLI across a process boundary works at all. That is a
+# fact about the binary rather than a guess about a cache, which is why it is
+# allowed to gate where a warm window is not.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
         "text_tier": "big",
@@ -210,7 +210,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
         "model_argv": ["-m", "{model}"],
         "model_anchor": "exec",
-        "continue_argv": ["resume", "--last"],
+        "continue_argv": ["resume", "--last", "--include-non-interactive"],
         "continue_anchor": "exec",
         # `codex exec resume` is its own clap subcommand and takes no
         # -s/--sandbox (verified against codex-cli 0.147.0: "unexpected
@@ -431,7 +431,7 @@ HARNESS_PRESETS: dict[str, dict] = {
 
 # --- the permission vocabulary: one table, three words, nine spellings -------
 #
-# `ask` / `auto` / `bypass` are the Ark's words for a stance every engine CLI
+# `ask` / `auto` / `bypass` are ar3's words for a stance every engine CLI
 # spells differently. This table is the ONLY place those spellings live, so
 # flag drift is a one-place fix instead of a hunt through presets, a8s
 # definitions and docs (the codex `--full-auto` and opencode
@@ -451,6 +451,54 @@ HARNESS_PRESETS: dict[str, dict] = {
 # otherwise read them as the launcher's own.
 
 PERMISSION_MODES = ("ask", "auto", "bypass")
+
+# --- the trust ceiling -------------------------------------------------------
+#
+# A runbook is checked in, and a `## Rigs` block in it names a permission
+# stance. Reproducibility wants the repo to win; security wants the machine to.
+# Both get what they need by splitting the direction: the runbook PROPOSES and
+# the machine CAPS. The ceiling lives out of the repo, one file per node, and
+# only a person typing `r4t add --trust` raises it — so cloning a stranger's
+# repo and registering it cannot be a code-execution decision made silently.
+#
+# The check runs wherever the roster loads, which is every turn, so editing
+# `r4t.md` to `bypass` after an untrusted `add` fails closed at the next wake
+# instead of at the next `add`.
+
+PERMISSION_CEILING_DEFAULT = "auto"
+
+
+def permission_rank(mode: str | None) -> int:
+    """Where a stance sits on the ladder. Unset is the preset's own flags,
+    which no repo chose, so it ranks at the floor and never trips a ceiling."""
+    key = (mode or "").strip().lower()
+    return PERMISSION_MODES.index(key) if key in PERMISSION_MODES else 0
+
+
+def machine_ceiling(node: str | None) -> str:
+    """The strongest stance a repo may ask for on this node."""
+    from state import read_trust
+
+    raised = read_trust(node) if node else None
+    if raised in PERMISSION_MODES:
+        return raised
+    return PERMISSION_CEILING_DEFAULT
+
+
+def raise_machine_ceiling(node: str, mode: str = "bypass") -> None:
+    from state import stamp_trust
+
+    stamp_trust(node, mode)
+
+
+def ceiling_refusal(mode: str, ceiling: str, node: str | None) -> str:
+    where = f"node {node}" if node else "this machine"
+    return (
+        f"--permissions {mode} is above the trust ceiling — {where} caps a "
+        f"runbook at {ceiling}, because a checked-in file that could raise its "
+        f"own ceiling would not be one. Register with `r4t add <dir> --trust` "
+        f"to raise it"
+    )
 
 
 @dataclass(frozen=True)
@@ -612,6 +660,59 @@ _CONTINUE_REASONS = {
     "ollama": "bare `ollama run` keeps no conversation to continue",
 }
 
+# How well a CLI survives r4t's shape of continuation, from the measured
+# engine research. r4t runs every turn as a FRESH PROCESS, so a roster
+# continuation is always a process-boundary resume — the exact case the
+# research measured. A grade is a fact about the binary, not a heuristic knob:
+# it says whether resuming across a process boundary works, never when it is
+# warm enough to be worth it.
+#
+#   good      directory-scoped resume, verified against the installed binary
+#   moderate  works, with a caveat the preset has to honour
+#   poor      measured to fail often enough that a roster must not do it
+#
+# An engine with continuation tokens but no measurement is UNGRADED and runs
+# as before: silence here means "not researched", never "known bad".
+CONTINUE_GOOD = "good"
+CONTINUE_MODERATE = "moderate"
+CONTINUE_POOR = "poor"
+
+_CONTINUE_GRADES: dict[str, tuple[str, str]] = {
+    # Engine-Cursor §2: the resume namespace is an MD5 of the ABSOLUTE working
+    # directory, verified by construction, so two members in two workdirs can
+    # never resume into each other's chat.
+    "cursor": (CONTINUE_GOOD, "directory-scoped resume, verified by construction"),
+    # Engine-Codex §2: cwd filtering is the default (`resume --all` is
+    # documented as the thing that DISABLES it), but `--last` cannot see
+    # sessions created by `codex exec` unless --include-non-interactive is
+    # passed — which is the only kind of session a roster ever creates.
+    "codex": (
+        CONTINUE_MODERATE,
+        "directory-scoped, but `--last` needs --include-non-interactive to see "
+        "the roster's own `codex exec` turns",
+    ),
+    # Engine-Claude-Code §9/§10, finalized by the classified audit on #155:
+    # same-task process resumes under five minutes missed 40.6% (197
+    # boundaries) against a 2.5% same-process baseline (4,040 calls). The miss
+    # is indifferent to task shape, so no window or size heuristic prevents it,
+    # and one miss costs on the order of a hundred warm hits. r4t only ever
+    # resumes across a process boundary, so a roster must not.
+    "claude": (
+        CONTINUE_POOR,
+        "resuming `claude -p` across a process boundary re-wrote the whole "
+        "conversation 40.6% of the time against a 2.5% same-process baseline "
+        "(measured, #155) — a roster turn is always a new process, so "
+        "continuation costs more than it saves",
+    ),
+}
+
+
+def continue_grade(preset: str | None) -> tuple[str, str] | None:
+    """(grade, why) for a preset, or None when the engine is ungraded."""
+    if not preset:
+        return None
+    return _CONTINUE_GRADES.get(preset)
+
 
 def _wrapped_engine(preset: str) -> str:
     """The CLI an `ollama-*` launcher preset drives, else the preset itself."""
@@ -758,7 +859,6 @@ def resolve_override(flag: str | None, rig_value: str | None) -> str | None:
 
 
 DEFAULT_TIMEOUT_SECONDS = 900
-DEFAULT_CONCURRENCY = 1
 DEFAULT_MAX_SENDS_PER_TURN = 6
 DEFAULT_HISTORY_MAX_BYTES = 8192
 DEFAULT_HISTORY_BODY_MAX = 2000
@@ -856,13 +956,15 @@ def resolve_framing(member: Member, rig: "Rig | None") -> FramingSpec:
 DEFAULT_BUDGET_MAX = 8.0
 DEFAULT_BUDGET_EARN_PER_HOUR = 4.0
 DEFAULT_ECHO_MAX_CHARS = 1500
-DEFAULT_MAX_CONCURRENT = 1
-DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 15.0
+# Off by default. Under serialization there is no pile-up left to defend
+# against, so a standing gap between turns is pure dead air that also makes
+# "who is next" stop being immediate. It stays as an opt-in: deliberate slow
+# motion, for watching a rotation go by.
+DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 0.0
 DEFAULT_CELL_BUDGET_MAX = 16.0
 DEFAULT_CELL_BUDGET_EARN_PER_HOUR = 8.0
 DEFAULT_BREAKER_CAP = 5
 DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
-DEFAULT_QUIET_TASK_SECONDS = 1800.0
 DEFAULT_LOG_RETENTION_DAYS = 14
 
 
@@ -872,11 +974,12 @@ class RigError(Exception):
 
 @dataclass
 class Throttle:
-    """Roster-wide gate applied before any rig check. `max_concurrent` caps
-    live turns across ALL rigs (0 = unlimited); the cadence field spaces
-    turn STARTS so a human can watch and intervene (0 = no gate)."""
+    """Roster-wide gate applied before any rig check: the cadence field spaces
+    turn STARTS so a human can watch and intervene (0 = no gate, the default).
+    There is no concurrency cap here — one live turn per node is the contract,
+    held by the admission lock, and a knob that can only hold one value is an
+    invitation to ask what a second value would do."""
 
-    max_concurrent: int = DEFAULT_MAX_CONCURRENT
     min_seconds_between_turn_starts: float = DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS
 
 
@@ -885,7 +988,6 @@ class Rig:
     name: str
     invoke: list = field(default_factory=list)
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    concurrency: int = DEFAULT_CONCURRENCY
     max_sends_per_turn: int = DEFAULT_MAX_SENDS_PER_TURN
     budget_max: float = DEFAULT_BUDGET_MAX
     budget_earn_per_hour: float = DEFAULT_BUDGET_EARN_PER_HOUR
@@ -1050,26 +1152,44 @@ class RigConfig:
     cell_budget_earn_per_hour: float = DEFAULT_CELL_BUDGET_EARN_PER_HOUR
     breaker_cap: int = DEFAULT_BREAKER_CAP
     breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
-    quiet_task_seconds: float = DEFAULT_QUIET_TASK_SECONDS
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     missing: bool = False
 
     def rig_for(self, member: Member) -> tuple[Rig | None, str | None, bool]:
         """Resolve a member to a runnable rig. Returns (rig, error, pinned).
-        Any failure fails closed with rig=None and a human-readable error."""
+        Any failure fails closed with rig=None and a human-readable error.
+
+        Three sources, in order. A pin is the machine operator's explicit
+        out-of-repo override and wins over everything. Then the member's own
+        `rig_override` — a runbook's inline `Engine:` line, or a `## Rigs`
+        block, which shadows a machine rig of the same name whole. Otherwise
+        the symbolic name resolves against this config."""
         pinned_rig = self.pins.get(member.name.lower())
         pinned = pinned_rig is not None
-        rig_name = pinned_rig if pinned else (member.rig or "")
+        rig: Rig | None = None
+        if pinned:
+            rig_name = pinned_rig or ""
+        elif member.rig_override is not None:
+            rig = member.rig_override
+            rig_name = rig.name
+        else:
+            rig_name = member.rig or ""
         if not rig_name:
-            return None, f"{member.name} has no Rig line in the roster", pinned
-        if self.missing:
+            return (
+                None,
+                f"{member.name} names neither a Rig: nor an Engine: — there is "
+                f"nothing to run",
+                pinned,
+            )
+        if rig is None and self.missing:
             return (
                 None,
                 f"rig {rig_name!r} not found (fail closed) — "
                 f"try: r4t rig add {rig_name} <preset>",
                 pinned,
             )
-        rig = self.rigs.get(rig_name.lower())
+        if rig is None:
+            rig = self.rigs.get(rig_name.lower())
         if rig is None:
             return (
                 None,
@@ -1088,6 +1208,17 @@ class RigConfig:
                 f"try: r4t rig swap {rig_name} <preset>",
                 pinned,
             )
+        if member.continue_conversation:
+            graded = continue_grade(rig.preset)
+            if graded is not None and graded[0] == CONTINUE_POOR:
+                return (
+                    None,
+                    f"{member.name} has Continue: on but preset "
+                    f"{rig.preset!r} continues poorly in a roster: {graded[1]} "
+                    f"— drop the Continue: line, or swap to a preset that "
+                    f"continues well ({', '.join(well_continuing_presets())})",
+                    pinned,
+                )
         return rig, None, pinned
 
 
@@ -1097,6 +1228,15 @@ def default_config_path() -> Path:
 
 def preset_names() -> list[str]:
     return sorted(HARNESS_PRESETS)
+
+
+def well_continuing_presets() -> list[str]:
+    """Presets a roster may continue on: graded good or moderate, plus the
+    ungraded ones that carry tokens (not researched is not known-bad)."""
+    return [
+        n for n in continue_presets()
+        if (continue_grade(n) or (CONTINUE_GOOD,))[0] != CONTINUE_POOR
+    ]
 
 
 def continue_presets() -> list[str]:
@@ -1400,7 +1540,7 @@ def continue_collisions(roster: Roster, config: RigConfig, workplace: Path) -> l
     there. Distinct workdirs keep members on one CLI apart."""
     seats: list[tuple[Member, Rig, Path]] = []
     for m in roster.members:
-        if m.is_human or m.errors:
+        if m.errors:
             continue
         rig, _err, _pinned = config.rig_for(m)
         if rig is not None:
@@ -1573,9 +1713,9 @@ def _validate_rig_name(name: str) -> str:
 
 
 def _load_config_payload(path: Path) -> dict:
-    """A missing file is an EMPTY config, not the `r4t init` starter payload —
-    seeding starter rigs here made a fresh `rig add leader ...` collide
-    with a phantom 'leader' the user never created."""
+    """A missing file is an EMPTY config, never a seeded one — seeding
+    starter rigs here made a fresh `rig add leader ...` collide with a
+    phantom 'leader' the user never created."""
     if path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -1641,7 +1781,7 @@ def swap_preset_rig(
     model: str | None = None,
 ) -> str:
     """Switch an existing rig's invoke to a preset's, preserving every other
-    key (concurrency, timeout_seconds, ...). Returns rig key."""
+    key (timeout_seconds, budget_max, ...). Returns rig key."""
     rig_key = _validate_rig_name(rig_name)
     preset_key = preset.strip().lower()
     if preset_key not in HARNESS_PRESETS:
@@ -1742,7 +1882,6 @@ def _split_env_key(key: str) -> str | None:
 
 
 CONFIGURABLE_INT_KEYS = (
-    "concurrency",
     "history_max_bytes",
     "history_body_max",
     "prompt_body_max",
@@ -1755,7 +1894,6 @@ CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
 # syntax and stays opaque to r4t.
 CONFIGURABLE_STR_KEYS = ("permissions", "allowed_tools")
 CONFIGURABLE_RIG_KEYS = (
-    "concurrency",
     "rig_budget_max",
     "rig_budget_earn_per_hour",
     "history_max_bytes",
@@ -1883,10 +2021,6 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
         return RigSetting(
             "model", None, "preset default" if preset else "built-in default", False
         )
-    if key == "concurrency":
-        if "concurrency" in entry:
-            return RigSetting(key, int(entry["concurrency"]), "explicit", True)
-        return RigSetting(key, DEFAULT_CONCURRENCY, "built-in default", False)
     if key == "mcp":
         if key in entry:
             return RigSetting(key, bool(entry[key]), "explicit", True)
@@ -2150,10 +2284,6 @@ def _parse_rig(name: str, raw: object) -> Rig:
     )
     if err:
         problems.append(f"timeout_seconds: {err}")
-    concurrency, err = _positive_number(raw.get("concurrency"), DEFAULT_CONCURRENCY)
-    if err:
-        problems.append(f"concurrency: {err}")
-    rig.concurrency = int(concurrency)
     max_sends, err = _positive_number(
         raw.get("max_sends_per_turn"), DEFAULT_MAX_SENDS_PER_TURN
     )
@@ -2291,19 +2421,22 @@ def _parse_throttle(raw: object) -> Throttle:
     if not isinstance(raw, dict):
         raise RigError('"throttle" must be an object')
     return Throttle(
-        max_concurrent=int(
-            _non_negative_number(
-                raw.get("max_concurrent"),
-                DEFAULT_MAX_CONCURRENT,
-                "throttle.max_concurrent",
-            )
-        ),
         min_seconds_between_turn_starts=_non_negative_number(
             raw.get("min_seconds_between_turn_starts"),
             DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS,
             "throttle.min_seconds_between_turn_starts",
         ),
     )
+
+
+def rig_from_spec(name: str, spec: dict) -> Rig:
+    """A Rig from the same object shape `rigs.json` carries. The runbook's
+    `## Rigs` blocks and inline engine lines build one of these and hand it
+    here, so both formats meet the same validator — a permission stance the
+    preset cannot reach, an allowlist a CLI takes only from a config file, or
+    an env name the turn owns fails the rig closed identically wherever it was
+    written."""
+    return _parse_rig(name, spec)
 
 
 def load_rig_config(path: Path) -> RigConfig:
@@ -2342,15 +2475,6 @@ def load_rig_config(path: Path) -> RigConfig:
                 _non_negative_number(value, DEFAULT_LOG_RETENTION_DAYS, key)
             )
             continue
-        if key == "quiet_task_seconds":
-            # 0 is OFF, matching what the sweep has always done with <= 0.
-            # The loader used to reject it, so the obvious way to disable the
-            # sweep was a config error — and a config error fails the WHOLE
-            # dispatch path, which is an outage.
-            config.quiet_task_seconds = _non_negative_number(
-                value, DEFAULT_QUIET_TASK_SECONDS, key
-            )
-            continue
         if key in (
             "cell_budget_max",
             "cell_budget_earn_per_hour",
@@ -2363,27 +2487,3 @@ def load_rig_config(path: Path) -> RigConfig:
             continue
         config.rigs[key.lower()] = _parse_rig(key, value)
     return config
-
-
-def default_config_payload() -> dict:
-    """The `r4t init` starter config: two symbolic rigs on the cheapest
-    common harness CLI, plus notes for swapping in other CLIs. Every governance
-    knob is left to its default."""
-    return {
-        "_notes": [
-            "Generated by `r4t init`. Rig names are SYMBOLIC — the roster's",
-            "Rig lines reference them; only this out-of-repo file says what",
-            "actually runs. Swap invoke for your CLI, or run:",
-            "  r4t rig presets",
-            "  r4t rig add <rig> <preset>",
-            "Presets mirror apps/a8s/definitions/ (claude, codex, cursor, ...).",
-            "invoke may also be a LIST of argvs (a pool, rotated round-robin).",
-            "All governance knobs default sanely; see docs/r4t-rigs.md.",
-        ],
-        "leader": {
-            "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
-        },
-        "member": {
-            "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
-        },
-    }

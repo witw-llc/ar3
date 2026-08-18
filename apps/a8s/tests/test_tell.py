@@ -494,7 +494,8 @@ def _outbox_dirs(outbox: Path) -> list[Path]:
 
 
 requires_unprivileged = pytest.mark.skipif(
-    os.geteuid() == 0, reason="root ignores file permission bits"
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root ignores file permission bits",
 )
 
 
@@ -649,10 +650,41 @@ def test_tell_warns_when_a_leaked_outbox_dir_points_at_another_seat(
     fake_home, tmp_path, monkeypatch
 ):
     """The stale-variable hijack: a live seat's TELL_OUTBOX_DIR is inherited by
-    a shell that is nowhere near that seat, so mail leaves under the wrong name
-    with every check passing. The pair is the tell — a registered outbox plus a
-    CWD outside its owner. Warn; never refuse, since a deliberate operator may
-    mean it."""
+    a shell sitting inside a DIFFERENT registered seat's root, so mail leaves
+    under the wrong name with every check passing. The pair is the tell — two
+    registered identities competing for the same send. Warn; never refuse,
+    since a deliberate operator may mean it."""
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    seat_outbox = seat / ".outbox"
+    seat_outbox.mkdir(parents=True)
+    other_seat = tmp_path / "other-seat"
+    other_seat.mkdir()
+    save_registry({
+        "MOSS": {"root": str(seat)},
+        "FERN": {"root": str(other_seat)},
+    })
+    monkeypatch.chdir(other_seat)
+
+    res = _run_a8s(other_seat, "MOSS", "hi", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
+    assert res.returncode == 0, res.stderr
+    assert "warning" in res.stderr
+    assert "MOSS's outbox" in res.stderr
+    assert "FERN's" in res.stderr
+    assert "unset TELL_OUTBOX_DIR" in res.stderr
+    # A warning, not a refusal — the message still goes.
+    _name, msg = _read_outbox(seat_outbox)
+    assert msg["to"] == "MOSS"
+
+
+def test_tell_from_an_unregistered_directory_is_not_a_hijack(
+    fake_home, tmp_path, monkeypatch
+):
+    """An explicit `TELL_OUTBOX_DIR` naming a registered agent's outbox, sent
+    from a directory that is no registered agent's root, has only one
+    identity in play — the env var. That is configuration, not a leak, so it
+    stays silent even though the outbox itself is a real agent's."""
     from registry import save_registry
 
     seat = tmp_path / "seat"
@@ -665,10 +697,7 @@ def test_tell_warns_when_a_leaked_outbox_dir_points_at_another_seat(
 
     res = _run_a8s(elsewhere, "MOSS", "hi", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
     assert res.returncode == 0, res.stderr
-    assert "warning" in res.stderr
-    assert "MOSS's outbox" in res.stderr
-    assert "unset TELL_OUTBOX_DIR" in res.stderr
-    # A warning, not a refusal — the message still goes.
+    assert "warning" not in res.stderr
     _name, msg = _read_outbox(seat_outbox)
     assert msg["to"] == "MOSS"
 
@@ -690,6 +719,29 @@ def test_tell_from_a_seats_own_root_is_not_a_hijack(fake_home, tmp_path, monkeyp
     res = _run_a8s(workplace, "MOSS", "hi", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
     assert res.returncode == 0, res.stderr
     assert "warning" not in res.stderr
+
+
+def test_tell_shared_root_sibling_is_not_a_hijack(fake_home, tmp_path, monkeypatch):
+    """Two nodes rooted at one repo: sending from that root with the variable
+    naming one node's own outbox is the owner working in its own root. The
+    sibling sharing the root is not a competing identity, so no warning."""
+    from registry import save_registry
+
+    repo = tmp_path / "repo"
+    moss_outbox = repo / ".outbox"
+    moss_outbox.mkdir(parents=True)
+    (repo / ".outbox-fern").mkdir()
+    save_registry({
+        "MOSS": {"root": str(repo)},
+        "FERN": {"root": str(repo), "outbox": str(repo / ".outbox-fern")},
+    })
+    monkeypatch.chdir(repo)
+
+    res = _run_a8s(repo, "FERN", "hi", env={"TELL_OUTBOX_DIR": str(moss_outbox)})
+    assert res.returncode == 0, res.stderr
+    assert "warning" not in res.stderr
+    _name, msg = _read_outbox(moss_outbox)
+    assert msg["to"] == "FERN"
 
 
 def test_tell_staging_outbox_is_not_a_hijack(fake_home, tmp_path, monkeypatch):
@@ -718,15 +770,19 @@ def test_tell_check_reports_the_hijack_shape(fake_home, tmp_path, monkeypatch):
     seat = tmp_path / "seat"
     seat_outbox = seat / ".outbox"
     seat_outbox.mkdir(parents=True)
-    save_registry({"MOSS": {"root": str(seat)}})
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
+    other_seat = tmp_path / "other-seat"
+    other_seat.mkdir()
+    save_registry({
+        "MOSS": {"root": str(seat)},
+        "FERN": {"root": str(other_seat)},
+    })
+    monkeypatch.chdir(other_seat)
 
-    res = _run_a8s(elsewhere, "--check", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
+    res = _run_a8s(other_seat, "--check", env={"TELL_OUTBOX_DIR": str(seat_outbox)})
     assert res.returncode == 0, res.stderr
     assert "warning:" in res.stdout
     assert "MOSS's outbox" in res.stdout
+    assert "FERN's" in res.stdout
 
 
 def test_tell_check_defers_recipient_on_staging_outbox(
@@ -818,6 +874,52 @@ def test_tell_stdin_dash(tmp_path):
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     assert msg["content"] == "payload from stdin"
+
+
+def test_tell_stdin_utf8_survives_a_locale_codepage(tmp_path):
+    """The Windows-seat mojibake: without the stdin re-pin, a UTF-8 body piped
+    into a cp1252 process decodes wrong and is STORED wrong — permanent, and
+    nothing tells the sender. PYTHONIOENCODING=cp1252 forces the same codec on
+    any platform; the envelope must still carry the body byte for byte."""
+    (tmp_path / ".outbox").mkdir()
+    body = "→ ⇒ 中 é —"
+    res = subprocess.run(
+        [*A8S_TELL, "gerry", "-"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        input=body.encode("utf-8"),
+        env={**_merge_tell_env(tmp_path, None), "PYTHONIOENCODING": "cp1252"},
+    )
+    assert res.returncode == 0, res.stderr.decode("utf-8", "replace")
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == body
+
+
+def test_tell_registered_echo_survives_a_raising_stdout(fake_home, tmp_path):
+    """The send must exit 0 once the envelope is committed, no matter what the
+    console does with the echo line. cp1252:surrogateescape is the raising
+    stdout state the strict-only floor missed in the field: the echo's arrow
+    crashed a SUCCESSFUL send, the exit code lied, and a retrying caller
+    would double-send."""
+    from registry import save_registry
+
+    seat = tmp_path / "seat"
+    outbox = seat / ".outbox"
+    outbox.mkdir(parents=True)
+    save_registry({"MOSS": {"root": str(seat)}, "CLARK": {"root": str(tmp_path / "clark")}})
+    res = subprocess.run(
+        [*A8S_TELL, "clark", "over → there"],
+        cwd=str(seat),
+        capture_output=True,
+        env={
+            **_merge_tell_env(seat, None, outbox=outbox),
+            "PYTHONIOENCODING": "cp1252:surrogateescape",
+        },
+    )
+    assert res.returncode == 0, res.stderr.decode("utf-8", "replace")
+    assert b"\\u2192" in res.stdout
+    _name, msg = _read_outbox(outbox)
+    assert msg["content"] == "over → there"
 
 
 def test_tell_stdin_auto_detect(tmp_path):

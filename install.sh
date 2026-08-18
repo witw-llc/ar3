@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source this from your shell rc to put The Ark on PATH.
+# Source this from your shell rc to put ar3 on PATH.
 #
 #   source <path-to-repo>/install.sh            # PATH only
 #   source <path-to-repo>/install.sh --skills   # PATH + install tool docs as agent skills

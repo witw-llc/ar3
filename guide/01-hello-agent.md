@@ -36,7 +36,7 @@ wait in the chapter.
 unset TELL_OUTBOX_DIR
 ```
 
-- The Ark installed and on your PATH:
+- ar3 installed and on your PATH:
 
 **Run**
 
@@ -90,7 +90,7 @@ A R K
 8 4 7
 S T E
 
-The Ark — a8s routes the messages, r4t governs the roster,
+ar3 — a8s routes the messages, r4t governs the roster,
 k7e keeps what they learn. ar3 reads; each product owns its own verbs.
 
 a8s — agent message router  (/home/you/.config/a8s)
@@ -99,8 +99,8 @@ a8s — agent message router  (/home/you/.config/a8s)
 
 r4t — the roster  (/home/you/.config/r4t)
   ✓ cli      r4t -> /home/you/.ar3/r4t
-  ✗ rigs     no rig config at /home/you/.config/r4t/rigs.json   (try: r4t init)
-  ✗ rosters  none under /home/you/.config/r4t/rosters   (try: r4t init)
+  ✗ rigs     no rig config at /home/you/.config/r4t/rigs.json   (try: r4t rig add <rig> <preset>)
+  ✗ rosters  none under /home/you/.config/r4t/rosters   (try: r4t add <dir> [<runbook>])
 
 k7e — knowledge engine  (/home/you/.config/k7e)
   ✓ cli    k7e -> /home/you/.ar3/k7e
@@ -123,7 +123,7 @@ You should see:
 
 ```
 ar3 doctor — probes only; nothing here is installed, started, or changed
-suite: 0.1.69 (latest)
+suite: 0.1.70 (latest)
 
 Harnesses
   ✓ claude    2.1.226 (Claude Code)  (/home/you/.local/bin/claude)
@@ -180,7 +180,7 @@ rest.
 ### One turn, no roster
 
 `r4t engine <id> run` is the bare-metal layer: one CLI, one headless turn, no
-`ROSTER.md`, no dispatcher, no budgets, nothing to set up first. Give it a
+`r4t.md`, no dispatcher, no budgets, nothing to set up first. Give it a
 prompt, get an answer.
 
 **Run**
@@ -481,7 +481,7 @@ You should see:
   "invoke": [
     "python3", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
     "--agent", "$RECIPIENT",
-    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "batch": {
     "limit": 20,
@@ -502,7 +502,7 @@ You should see:
 
 Two more substitutions appear there. `$A8S_DIR` is a8s's own directory inside
 the suite, which is how the definition reaches `r4t.py` without a path that
-depends on where you installed The Ark; `$AGE` is how long the message sat
+depends on where you installed ar3; `$AGE` is how long the message sat
 before this wake, in words (`3 minutes ago`), so the turn can tell fresh mail
 from a backlog it is only now getting to.
 
@@ -552,10 +552,13 @@ The routed input names who is asking. Your last act on every wake is to
 Run it. Printing that line instead of running it means nobody hears you.
 ```
 
-`$SENDER` is what puts a name in front of solo — that is why the definition's
-prompt is `"$SENDER tells $RECIPIENT ($AGE): $MESSAGE"` rather than the bare
-message. r4t's roster does this from outside the turn in chapter 2, where a
-member cannot forget to answer; here it is a rule in a file you own.
+`$SENDER` is what puts a name in front of solo, and `$NOW` is what puts a date
+in front of it — that is why the definition's prompt is
+`"[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"` rather than the bare
+message. A model told only that a message is *5 minutes old* has no way to
+answer *what did I do yesterday*. r4t's roster does this from outside the turn
+in chapter 2, where a member cannot forget to answer; here it is a rule in a
+file you own.
 
 Registered but stopped: nothing routes until a **handler** process is
 attached. Start one for each:

@@ -32,10 +32,12 @@ home — this file is the org-level home):
 - `egress` (bool, default `true`): when on, the topmost leader alone may
   originate external mail; when off, no member may, and external `to`s redirect
   to the top leader (the garden's single voice).
-- `doorbell_check` (string, default absent): a shell command run before the org
-  may ring an absent human's doorbell. Exit 0 lets the ring through; nonzero
-  parks the message without ringing (the gate protects attention, not the
-  mailbox). Absent or empty is today's behavior — no gate.
+- `priority_senders` (list of globs, default `[]`): tier 1 of the rotation —
+  a member holding mail from a matching sender goes next, always
+  (schedule.py). Who the org answers to first is a property of the org, not of
+  the machine or the rig, so the list lives here. The shipped default is
+  empty — no name ships in the public mirror as a standing priority — so an
+  org that wants a Tier-1 sender states one explicitly.
 - `run_as` / `container` (+ `container_args`, all default absent): OS-level
   isolation for every member turn. Isolation is a
   per-project decision — one Unix user or one container image serves the org's
@@ -46,6 +48,11 @@ home — this file is the org-level home):
 Graduation is trivial: copy ROSTER.md + MISSION.md into the repo and drop the
 `repo` key (or the whole file, if it carries no settings). Resolution falls
 back to the in-repo default with no other change.
+
+A node carrying a `r4t.md` runbook has no `r4t-org.json`: every key above
+lives in the runbook's frontmatter, where `workdir:` is what `repo` was. The
+runbook wins outright when both are present — this module reads one file or
+the other, never a blend of the two.
 """
 from __future__ import annotations
 
@@ -54,6 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from isolate import Isolation
+from schedule import DEFAULT_PRIORITY_SENDERS
 
 ORG_CONFIG_NAME = "r4t-org.json"
 
@@ -73,8 +81,15 @@ class Org:
     comms: str = COMMS_OPEN
     leader_sees_lateral: bool = False
     egress: bool = True
-    doorbell_check: str | None = None
+    priority_senders: list[str] = field(
+        default_factory=lambda: list(DEFAULT_PRIORITY_SENDERS)
+    )
     isolation: Isolation = field(default_factory=Isolation)
+    # Settings `_parse_settings` could not read, carried along rather than
+    # discarded — a malformed `comms:`/`egress:` still degrades to the
+    # default here (dispatch has to proceed), but the caller can print these
+    # rather than the operator finding out only by running `roster check`.
+    errors: list[str] = field(default_factory=list)
 
     @property
     def is_portable(self) -> bool:
@@ -85,7 +100,27 @@ def org_config_path(root: Path) -> Path:
     return root / ORG_CONFIG_NAME
 
 
+def _runbook_settings(root: Path) -> dict | None:
+    """The runbook's frontmatter in `r4t-org.json`'s vocabulary, or None when
+    the node carries no runbook. `workdir:` is the old `repo`, and `"."` means
+    the node dir is also the workplace — the in-repo default, stated rather
+    than inferred from an absent key."""
+    from runbook import org_settings
+
+    data = org_settings(root)
+    if data is None:
+        return None
+    out = {k: v for k, v in data.items() if k not in ("name", "workdir")}
+    workdir = str(data.get("workdir") or "").strip()
+    if workdir and workdir != ".":
+        out["repo"] = workdir
+    return out
+
+
 def _read_config(root: Path) -> dict:
+    settings = _runbook_settings(root)
+    if settings is not None:
+        return settings
     cfg = org_config_path(root)
     if not cfg.is_file():
         return {}
@@ -113,14 +148,6 @@ def _parse_bool(raw: object, default: bool, key: str) -> tuple[bool, str | None]
         return default, None
     if not isinstance(raw, bool):
         return default, f'org config "{key}" must be true or false (got {raw!r})'
-    return raw, None
-
-
-def _parse_str(raw: object, key: str) -> tuple[str | None, str | None]:
-    if raw is None:
-        return None, None
-    if not isinstance(raw, str):
-        return None, f'org config "{key}" must be a string (got {raw!r})'
     return raw, None
 
 
@@ -173,16 +200,24 @@ def _parse_settings(data: dict) -> tuple[dict, list[str]]:
     egress, err = _parse_bool(data.get("egress"), True, "egress")
     if err:
         errors.append(err)
-    doorbell_check, err = _parse_str(data.get("doorbell_check"), "doorbell_check")
-    if err:
-        errors.append(err)
+    priority = list(DEFAULT_PRIORITY_SENDERS)
+    raw_priority = data.get("priority_senders")
+    if raw_priority is not None:
+        if not isinstance(raw_priority, list) or not all(
+            isinstance(p, str) for p in raw_priority
+        ):
+            errors.append(
+                'org config "priority_senders" must be a list of glob strings'
+            )
+        else:
+            priority = [p.strip() for p in raw_priority if p.strip()]
     isolation, iso_errors = _parse_isolation(data)
     errors.extend(iso_errors)
     return {
         "comms": comms,
         "leader_sees_lateral": lsl,
         "egress": egress,
-        "doorbell_check": doorbell_check,
+        "priority_senders": priority,
         "isolation": isolation,
     }, errors
 
@@ -190,7 +225,10 @@ def _parse_settings(data: dict) -> tuple[dict, list[str]]:
 def load_org(root: Path) -> Org:
     """Resolve `root` to (org dir, workplace) and org settings for path building
     and dispatch. Never raises — a malformed org config degrades to the in-repo
-    default with default settings; `check_org` is the boundary that reports it."""
+    default with default settings, and the messages ride along on `Org.errors`
+    instead of vanishing, so a caller that dispatches on this can still say so
+    out loud. `check_org` re-derives the same problems for `roster check` /
+    `runbook check`, which treat them as blocking; a live dispatch does not."""
     try:
         data = _read_config(root)
     except OrgError:
@@ -199,8 +237,8 @@ def load_org(root: Path) -> Org:
         repo = _resolve_repo(root, data)
     except (OSError, ValueError):
         repo = None
-    settings, _errors = _parse_settings(data)
-    return Org(dir=root, workplace=repo or root, **settings)
+    settings, errors = _parse_settings(data)
+    return Org(dir=root, workplace=repo or root, errors=errors, **settings)
 
 
 def check_org(root: Path) -> list[str]:
@@ -214,7 +252,8 @@ def check_org(root: Path) -> list[str]:
     _settings, problems = _parse_settings(data)
     repo = _resolve_repo(root, data)
     if repo is not None and not repo.is_dir():
+        source = "r4t.md" if _runbook_settings(root) is not None else ORG_CONFIG_NAME
         problems.append(
-            f"org workplace {repo} does not exist (create it or fix {ORG_CONFIG_NAME})"
+            f"org workplace {repo} does not exist (create it or fix {source})"
         )
     return problems

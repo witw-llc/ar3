@@ -30,6 +30,7 @@ from core import (
     kill_request_path,
     pid_path,
     trash_dir,
+    unique_path,
 )
 from daemon import (
     _pause_ready_for_wake,
@@ -48,6 +49,24 @@ from daemon import (
 )
 from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
 from registry import save_aliases, save_registry
+
+
+def _main_thread_only(patched):
+    """Scope an Event.wait monkeypatch to the loop under test.
+
+    These tests replace `threading.Event.wait` process-wide to script the
+    attached loop's iteration clock, but the runner's watchdog thread waits
+    on the same event class — an unscoped patch runs the script from that
+    thread too, racing the loop it is scripting (double refills, early
+    stops). Any thread but the main one falls through to the real wait."""
+    real_wait = threading.Event.wait
+
+    def gated(self, timeout=None):
+        if threading.current_thread() is not threading.main_thread():
+            return real_wait(self, timeout)
+        return patched(self, timeout)
+
+    return gated
 
 
 # ---------- pid-file lifecycle ----------
@@ -763,7 +782,7 @@ class TestAttachedLoopKillRequest:
                 _write_kill_request("A", foreign_pid)
             return False
 
-        monkeypatch.setattr(threading.Event, "wait", write_kill_request_once)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(write_kill_request_once))
 
         started = time.monotonic()
         rc = attached_loop(["A"], 0.05, single_pass=False)
@@ -1013,7 +1032,7 @@ class TestIdleFairness:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", keep_a_always_ready)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(keep_a_always_ready))
         attached_loop(["A", "B"], 0.01, single_pass=False)
 
         assert "B" in fired, f"A took every idle slot; fired={fired}"
@@ -1322,7 +1341,7 @@ class TestAsyncAttachedLoop:
                     daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", stop_after_wake_started)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(stop_after_wake_started))
 
         attached_loop(["A", "B"], 0.05, single_pass=False)
 
@@ -1370,7 +1389,7 @@ class TestAsyncAttachedLoop:
                     daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", stop_when_killed)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(stop_when_killed))
 
         attached_loop(["A"], 0.05, single_pass=False)
 
@@ -1445,7 +1464,7 @@ class TestSharedHandlerStarvation:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", stop_when_delivered)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(stop_when_delivered))
         attached_loop(["A", "B"], 0.05, single_pass=False)
 
         assert "exec:" in _read_log("A")
@@ -1474,7 +1493,7 @@ class TestSharedHandlerStarvation:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", stop_once_wake_started)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(stop_once_wake_started))
         attached_loop(["A", "B"], 0.05, single_pass=False)
 
         assert saw_in_flight
@@ -1551,7 +1570,7 @@ class TestSharedHandlerWakeFairness:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", keep_a_busy_stop_when_c_wakes)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(keep_a_busy_stop_when_c_wakes))
         attached_loop(["A", "B", "C"], 0.01, single_pass=False)
 
         assert "C" in woke
@@ -1595,7 +1614,7 @@ class TestSharedHandlerWakeFairness:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", mail_both_after_a_lull)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(mail_both_after_a_lull))
         attached_loop(["A", "B"], 0.01, single_pass=False)
 
         assert woke[:1] == ["A"], (
@@ -1635,13 +1654,20 @@ class TestSharedHandlerWakeFairness:
         queue("B", "b0")
 
         woke: list[str] = []
-        orig = daemon_mod.wake_once
 
-        def track_wake(p, msg_path, *, async_wake=False):
+        def instant_wake(p, msg_path, *, async_wake=False):
+            # A real subprocess makes strict alternation a race: on a loaded
+            # runner a wake's completion can slip a pass, an agent can be
+            # transiently unready at its turn, and the sibling legitimately
+            # goes twice. That fairness-under-timing property has its own
+            # test (the starvation bound below); THIS test asserts the
+            # rotation arithmetic, so the wake is a no-op consume — every
+            # pass dispatches exactly one agent, deterministically.
             woke.append(p.name)
-            return orig(p, msg_path, async_wake=async_wake)
+            msg_path.rename(unique_path(trash_dir(p.name) / msg_path.name))
+            return True
 
-        monkeypatch.setattr(daemon_mod, "wake_once", track_wake)
+        monkeypatch.setattr(daemon_mod, "wake_once", instant_wake)
 
         wait_calls = 0
 
@@ -1655,7 +1681,7 @@ class TestSharedHandlerWakeFairness:
                 daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", refill_and_stop)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(refill_and_stop))
         attached_loop(["A", "B"], 0.01, single_pass=False)
 
         assert len(woke) >= 4

@@ -137,13 +137,12 @@ def _seed_query(ctx, member, batch: list[dict]) -> str:
     """Retrieval seed per the research gate: newest message + who is waking +
     the mission's first line. The member never sees this — it only steers
     which notes surface."""
+    from runbook import mission_text
+
     parts = [member.name, member.role]
-    try:
-        mission = (ctx.root / "MISSION.md").read_text(encoding="utf-8").strip()
-        if mission:
-            parts.append(mission.splitlines()[0].lstrip("# ").strip())
-    except OSError:
-        pass
+    mission = mission_text(ctx.root, ctx.node)
+    if mission:
+        parts.append(mission.splitlines()[0].lstrip("# ").strip())
     if batch:
         parts.append(str(batch[-1].get("body", ""))[:SEED_BODY_MAX])
     return " ".join(p for p in parts if p)
@@ -444,7 +443,7 @@ def dream_sweep(ctx, roster, config: RigConfig) -> list[str]:
     members that dreamed."""
     dreamed: list[str] = []
     for m in roster.members:
-        if m.is_human or not m.knowledge_on:
+        if not m.knowledge_on:
             continue
         home = store_home(ctx.node, m.name)
         if _distill_fresh(ctx, m, home, config):

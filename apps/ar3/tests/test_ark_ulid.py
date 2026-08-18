@@ -1,4 +1,4 @@
-"""Tests for the pure-stdlib ULID module — The Ark's foundation layer.
+"""Tests for the pure-stdlib ULID module — ar3's foundation layer.
 
 `ark` lives at the repo root because every app shares it (a8s and r4t both
 generated their own copy of this exact module before the extraction).

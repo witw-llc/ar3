@@ -170,9 +170,8 @@ class TestBuildContainer:
 
 
 class TestOrgConfigValidation:
-    """Isolation now parses out of r4t-org.json (org.py), validated where
-    `doorbell_check` is: load_org degrades to no isolation on a bad value,
-    check_org reports it."""
+    """Isolation parses out of r4t-org.json (org.py): load_org degrades to no
+    isolation on a bad value, and check_org reports it."""
 
     def _write(self, tmp_path, settings: dict) -> Path:
         (tmp_path / ORG_CONFIG_NAME).write_text(json.dumps(settings), encoding="utf-8")

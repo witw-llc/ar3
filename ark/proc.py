@@ -1,4 +1,4 @@
-"""One spawn-in-its-own-group + kill-the-group primitive for every Ark app.
+"""One spawn-in-its-own-group + kill-the-group primitive for every ar3 app.
 
 `spawn` starts a child in its own POSIX process group (`start_new_session`)
 so a later `terminate_group` can reach whatever it forks, not just the

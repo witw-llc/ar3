@@ -20,6 +20,14 @@ neither a built-in placeholder nor a set a8s var is a hard error. Process
 environment for a wake is a separate knob, `definition.env`, and the two never
 meet: a var reaches argv, an `env` entry reaches the child's environment.
 
+Vars also reach the three mailbox path fields — `outbox_dir`, `inbox_dir`,
+`files_dir` — through `_expand_path_field`, which adds one built-in of its own,
+`$NODE` (the registered node name), and refuses the per-message built-ins. That
+is what lets two nodes rooted at one repo share a definition and still own
+separate mailboxes. The line the asymmetry follows: a mailbox path is a value
+a8s itself computes and consumes, so a8s may interpolate into it; `env` is a
+value a8s hands to a stranger unread, so a8s must not.
+
 Strict opacity: the recipient sees only sender + message
 content — no `alias` or `others_count` leak. A direct tell and an
 alias-fanned tell produce the same prompt shape, distinguished only by what
@@ -50,6 +58,8 @@ from core import (
 from registry import load_registry, resolve_recipient
 from settings import get_setting
 
+from ark import clock
+
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
 ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "
 
@@ -60,9 +70,23 @@ BUILTIN_PLACEHOLDERS = frozenset({
     "TIMESTAMP",
     "AGE",
     "META",
+    "NOW",
     "A8S_DIR",
     "DEFINITION_PATH",
 })
+
+# Built-ins for the three mailbox path fields. `$NODE` is per-node and always
+# defined, which is what makes it collision-free between two registrations on
+# one root; the argv built-ins above are per-message and have no value at the
+# time a path is resolved. Kept out of BUILTIN_PLACEHOLDERS so `_expand_argv`
+# still refuses `$NODE` in argv rather than substituting a value it does not
+# have — the name is reserved from `a8s vars` either way, so promoting it to
+# argv later stays compatible.
+PATH_FIELD_PLACEHOLDERS = frozenset({"NODE"})
+
+RESERVED_PLACEHOLDERS = BUILTIN_PLACEHOLDERS | PATH_FIELD_PLACEHOLDERS
+
+MAILBOX_PATH_FIELDS = ("outbox_dir", "inbox_dir", "files_dir")
 
 PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -88,7 +112,7 @@ def validate_var_name(name: str) -> str:
             f"var name must match [A-Za-z_][A-Za-z0-9_]*: {name!r}"
         )
     canon = name.upper()
-    if canon in BUILTIN_PLACEHOLDERS:
+    if canon in RESERVED_PLACEHOLDERS:
         raise ValueError(f"var name {name!r} is reserved for built-in interpolation")
     return canon
 
@@ -204,14 +228,48 @@ def files_ttl_seconds(definition: dict) -> float:
     return max(0.0, h * 3600)
 
 
-def resolve_outbox_dir(agent_root: Path, definition: dict) -> Path:
+def _expand_path_field(
+    spec: object, field: str, node: str, vars: dict[str, str] | None
+) -> str | None:
+    """Interpolate a mailbox path field. Node vars plus `$NODE`; nothing else.
+
+    Returns None for an absent field, so the caller's `.outbox` / `.inbox` /
+    `.files` default applies. Raises ValueError for a non-string or empty
+    field, and UndefinedVarsError for a `$NAME` that is neither `$NODE` nor a
+    set var.
+
+    There is no partial expansion and no fallback to the default: a path that
+    half-resolves is a plausible directory that is silently the wrong one, and
+    two nodes on one root whose paths both collapse to the default share a
+    mailbox again — the collision this interpolation exists to remove.
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, str):
+        raise ValueError(f"definition {field} must be a string")
+    if not spec.strip():
+        raise ValueError(f"definition {field} must not be empty")
+    values = {k.upper(): v for k, v in (vars or {}).items()}
+    values["NODE"] = node
+    refs = {n.upper() for n in placeholder_names([spec])}
+    missing = sorted(n for n in refs if n not in values)
+    if missing:
+        raise UndefinedVarsError(missing)
+    out = PLACEHOLDER_RE.sub(lambda m: values[m.group(1).upper()], spec)
+    if not out.strip():
+        raise ValueError(f"definition {field} expanded to empty")
+    return out
+
+
+def resolve_outbox_dir(
+    agent_root: Path,
+    definition: dict,
+    node: str = "",
+    vars: dict[str, str] | None = None,
+) -> Path:
     """Outbox path from definition `outbox_dir` (default `.outbox` under root)."""
-    spec = definition.get("outbox_dir")
-    if spec is not None and not isinstance(spec, str):
-        raise ValueError("definition outbox_dir must be a string")
-    if isinstance(spec, str) and not spec.strip():
-        raise ValueError("definition outbox_dir must not be empty")
-    return resolve_outbox_path(agent_root, spec if isinstance(spec, str) else None)
+    spec = _expand_path_field(definition.get("outbox_dir"), "outbox_dir", node, vars)
+    return resolve_outbox_path(agent_root, spec)
 
 
 def resolve_outbox_dir_for_agent(name: str, agent_root: Path) -> Path:
@@ -219,17 +277,18 @@ def resolve_outbox_dir_for_agent(name: str, agent_root: Path) -> Path:
         definition = load_definition(name)
     except (FileNotFoundError, RuntimeError):
         definition = {}
-    return resolve_outbox_dir(agent_root, definition)
+    return resolve_outbox_dir(agent_root, definition, name, load_agent_vars(name))
 
 
-def resolve_files_dir(agent_root: Path, definition: dict) -> Path:
+def resolve_files_dir(
+    agent_root: Path,
+    definition: dict,
+    node: str = "",
+    vars: dict[str, str] | None = None,
+) -> Path:
     """Incoming attachment root from definition `files_dir` (default `.files`)."""
-    spec = definition.get("files_dir")
-    if spec is not None and not isinstance(spec, str):
-        raise ValueError("definition files_dir must be a string")
-    if isinstance(spec, str) and not spec.strip():
-        raise ValueError("definition files_dir must not be empty")
-    return resolve_files_path(agent_root, spec if isinstance(spec, str) else None)
+    spec = _expand_path_field(definition.get("files_dir"), "files_dir", node, vars)
+    return resolve_files_path(agent_root, spec)
 
 
 def resolve_files_dir_for_agent(name: str, agent_root: Path) -> Path:
@@ -237,17 +296,18 @@ def resolve_files_dir_for_agent(name: str, agent_root: Path) -> Path:
         definition = load_definition(name)
     except (FileNotFoundError, RuntimeError):
         definition = {}
-    return resolve_files_dir(agent_root, definition)
+    return resolve_files_dir(agent_root, definition, name, load_agent_vars(name))
 
 
-def resolve_inbox_dir(agent_root: Path, definition: dict) -> Path:
+def resolve_inbox_dir(
+    agent_root: Path,
+    definition: dict,
+    node: str = "",
+    vars: dict[str, str] | None = None,
+) -> Path:
     """File-proxy delivery dir from definition `inbox_dir` (default `.inbox`)."""
-    spec = definition.get("inbox_dir")
-    if spec is not None and not isinstance(spec, str):
-        raise ValueError("definition inbox_dir must be a string")
-    if isinstance(spec, str) and not spec.strip():
-        raise ValueError("definition inbox_dir must not be empty")
-    return resolve_inbox_path(agent_root, spec if isinstance(spec, str) else None)
+    spec = _expand_path_field(definition.get("inbox_dir"), "inbox_dir", node, vars)
+    return resolve_inbox_path(agent_root, spec)
 
 
 def resolve_inbox_dir_for_agent(name: str, agent_root: Path) -> Path:
@@ -255,7 +315,7 @@ def resolve_inbox_dir_for_agent(name: str, agent_root: Path) -> Path:
         definition = load_definition(name)
     except (FileNotFoundError, RuntimeError):
         definition = {}
-    return resolve_inbox_dir(agent_root, definition)
+    return resolve_inbox_dir(agent_root, definition, name, load_agent_vars(name))
 
 
 def resolve_definition_path(name: str) -> str:
@@ -389,6 +449,7 @@ def _expand_argv(
       - `$TIMESTAMP`  ISO 8601 UTC time the message was queued
       - `$AGE`        human-readable age relative to now
       - `$META`       the envelope's `meta` object as JSON (empty when absent)
+      - `$NOW`        wake time in this machine's zone, e.g. `2026-08-16 13:22 PDT`
       - `$A8S_DIR`    the apps/a8s/ directory
       - `$DEFINITION_PATH`  this agent's definition file path
 
@@ -412,6 +473,11 @@ def _expand_argv(
         "TIMESTAMP": timestamp,
         "AGE": age,
         "META": meta,
+        # `$TIMESTAMP` stays the message's stored UTC — definitions pick it
+        # deliberately because it is machine-readable and stable. `$NOW` is the
+        # wake's own local reading, which is what makes *tomorrow* resolvable
+        # for the model beside `$AGE`'s relative one.
+        "NOW": clock.stamp(),
         "A8S_DIR": str(SCRIPT_DIR),
         "DEFINITION_PATH": definition_path,
     }
@@ -425,13 +491,18 @@ def _expand_argv(
 def build_command(
     definition: dict,
     msg: dict,
-    agent_root: Path,
+    files_root: Path,
     definition_path: str = "",
     vars: dict[str, str] | None = None,
 ) -> list[str]:
     """Pick the `invoke` argv from `definition` and expand interpolation
     variables. There is one verb — every routed message is a `tell` — so
     no dispatch table is needed.
+
+    `files_root` is the node's already-resolved attachment root
+    (`Participant.files_path()`). Resolving it here instead would mean
+    re-interpolating `files_dir` from a node name and vars this function does
+    not carry; the registry resolves every mailbox path exactly once.
 
     `$TIMESTAMP` and `$AGE` come from `msg["date"]`; both fall back to
     empty for messages that somehow lack a date field (defensive — every
@@ -441,7 +512,6 @@ def build_command(
         raise ValueError("definition missing 'invoke'")
     sender = (msg.get("from") or "").strip()
     recipient = (msg.get("to") or "").strip()
-    files_root = resolve_files_dir(agent_root, definition)
     body = _message_body(msg, files_root)
     date_str = (msg.get("date") or "").strip()
     age = _format_age(date_str)
@@ -586,12 +656,18 @@ def build_batch_prompt(recipient: str, entries: list[BatchEntry]) -> str:
     followed by one '----' block per entry (or a placeholder for one that
     failed to parse).
 
+    The header opens with the local time because this string is read by a
+    model, and a model handed nothing but UTC concludes it lives there — after
+    which every *today* and *tomorrow* it writes lands a day off.
+
     This replaces the old contract of handing the invoked command N raw
     envelope file paths and trusting it to re-parse them — that second,
     schema-divergent parser (in the external `bulk-invoke` helper) is what
     silently broke batch delivery. Composing the prompt here means there is
     only one place in the pipeline that understands the envelope schema."""
     header = (
+        f"Local time is {clock.stamp()}. Every date and time you read or write "
+        "is this zone unless it carries an explicit offset.\n"
         f"You are receiving messages as '{recipient}'. Send with the bash CLI "
         "`tell`, body on stdin with the delimiter quoted so nothing expands "
         "($ ` \\ arrive byte-exact):\n"

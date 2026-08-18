@@ -10,7 +10,7 @@
     "bypass",
     "--agent",
     "$RECIPIENT",
-    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "batch": {
     "limit": 20,

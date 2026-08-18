@@ -41,7 +41,7 @@ def version_line(app: str) -> str:
     """What every `<app> --version` prints: the app, the suite semver, and the
     Python running it — argparse behavior differs by interpreter version, so a
     field report's `--version` paste should answer that question by itself."""
-    return f"{app} {suite_version()} (The Ark, python {platform.python_version()})"
+    return f"{app} {suite_version()} (ar3, python {platform.python_version()})"
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:

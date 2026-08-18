@@ -42,6 +42,7 @@ from core import (
     user_definitions_dir,
 )
 from definitions import (
+    MAILBOX_PATH_FIELDS,
     _autodiscover_definition,
     builtin_definition_stems,
     default_definition_path,
@@ -50,7 +51,11 @@ from definitions import (
     harness_program,
     list_definition_entries,
     load_definition,
+    placeholder_names,
     resolve_definition_arg,
+    resolve_files_dir,
+    resolve_inbox_dir,
+    resolve_outbox_dir,
     validate_var_name,
     wake_env,
     wake_shell,
@@ -92,8 +97,10 @@ from registry import (
     save_registry,
     load_namespace_options,
     save_namespace_options,
+    unresolved_mailboxes,
 )
 from txlog import read_events
+from ark import clock
 from ark.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
 
@@ -580,12 +587,166 @@ def _cmd_vars_list(agent_key: str, info: dict) -> int:
     return 0
 
 
+def _mailbox_path_vars(agent_key: str) -> set[str]:
+    """Var names the node's three mailbox path fields interpolate."""
+    try:
+        definition = load_definition(agent_key)
+    except (FileNotFoundError, RuntimeError):
+        return set()
+    refs: set[str] = set()
+    for field in MAILBOX_PATH_FIELDS:
+        spec = definition.get(field)
+        if isinstance(spec, str):
+            refs |= {n.upper() for n in placeholder_names([spec])}
+    return refs
+
+
+def _mailbox_paths_with(agent_key: str, info: dict, vars_map: dict) -> dict[str, Path]:
+    """The node's three mailbox paths under a hypothetical `vars_map`."""
+    root_str = info.get("root", "")
+    if not root_str:
+        return {}
+    try:
+        root = Path(root_str).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return {}
+    try:
+        definition = load_definition(agent_key)
+    except (FileNotFoundError, RuntimeError):
+        definition = {}
+    canon = {k.upper(): v for k, v in vars_map.items() if isinstance(k, str) and isinstance(v, str)}
+    out: dict[str, Path] = {}
+    for field, resolve in (
+        ("outbox_dir", resolve_outbox_dir),
+        ("inbox_dir", resolve_inbox_dir),
+        ("files_dir", resolve_files_dir),
+    ):
+        try:
+            out[field] = resolve(root, definition, agent_key, canon)
+        except ValueError:
+            continue
+    return out
+
+
+def _refuse_live_mailbox_var(agent_key: str, key: str) -> bool:
+    """True when `key` feeds a mailbox path field and a handler holds the node.
+
+    Re-pointing a mailbox under a running handler orphans whatever a wake wrote
+    into the old directory between the last routing pass and now: nothing owns
+    that path afterwards, so nothing ever scans it again. Refuse rather than
+    move underneath a live writer."""
+    if key not in _mailbox_path_vars(agent_key):
+        return False
+    pid = _read_handler_pid(agent_key)
+    if pid is None:
+        return False
+    print(
+        f"{agent_key}: {key} feeds a mailbox path field and a handler holds this "
+        f"node (PID {pid}).\n"
+        f"         `a8s drain {agent_key}` then `a8s stop {agent_key}` first — "
+        f"mail left in the old directory has no owner once the path moves.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _move_mailboxes(before: dict[str, Path], after: dict[str, Path]) -> bool:
+    """Carry mail and bundles from each moved mailbox path to its new one.
+
+    Transactional: every field whose resolved path changed is preflighted
+    first — a name already present at the destination, or a source that can't
+    be read, blocks the whole switch and moves nothing. A collision here means
+    the operator pointed two nodes at one directory; overwriting would destroy
+    the message. Once preflight clears, the moves run; an OSError partway
+    through rolls back what was already moved (best-effort) and the switch
+    still fails. Callers must not save state unless this returns True — a
+    caller that does can never observe the switch half-applied."""
+    plans: list[tuple[str, Path, Path, list[Path]]] = []
+    blockers: list[str] = []
+    for field, old in before.items():
+        new = after.get(field)
+        if new is None or new == old or not old.is_dir():
+            continue
+        try:
+            entries = sorted(old.iterdir())
+        except OSError as e:
+            blockers.append(f"{field}: cannot read {old}: {e}")
+            continue
+        if not entries:
+            continue
+        collisions = [item.name for item in entries if (new / item.name).exists()]
+        if collisions:
+            for name in collisions:
+                blockers.append(f"{field}: {name} already present at {new}")
+            continue
+        plans.append((field, old, new, entries))
+    if blockers:
+        for b in blockers:
+            print(f"  {b}", file=sys.stderr)
+        return False
+
+    done: list[tuple[Path, Path]] = []  # (dest, original_src), for rollback
+    moved = 0
+    for field, old, new, entries in plans:
+        try:
+            new.mkdir(parents=True, exist_ok=True)
+            for item in entries:
+                dest = new / item.name
+                shutil.move(str(item), str(dest))
+                done.append((dest, item))
+                moved += 1
+        except OSError as e:
+            print(f"  {field}: could not move into {new}: {e}", file=sys.stderr)
+            for dest, original in reversed(done):
+                try:
+                    shutil.move(str(dest), str(original))
+                except OSError as rollback_err:
+                    print(
+                        f"  could not roll back {dest} -> {original}: {rollback_err}",
+                        file=sys.stderr,
+                    )
+            return False
+        print(f"  {field}: {old} -> {new}")
+    if moved:
+        print(f"  moved {moved} item{'s' if moved != 1 else ''}")
+    return True
+
+
+def _retire_mailbox_path(entry: dict, path: Path) -> None:
+    """Append `path` to the agent entry's `retired_mailboxes`, most recent
+    last, deduped, capped at 20 — the trail `a8s health` walks to find mail
+    stranded by a path field the tool itself moved or dropped."""
+    s = str(path)
+    raw = entry.get("retired_mailboxes")
+    lst = [p for p in raw if isinstance(p, str)] if isinstance(raw, list) else []
+    lst = [p for p in lst if p != s]
+    lst.append(s)
+    entry["retired_mailboxes"] = lst[-20:]
+
+
+def _retire_changed_mailboxes(
+    entry: dict, before: dict[str, Path], after: dict[str, Path]
+) -> None:
+    """Record the OLD resolved path for every mailbox field whose location
+    changed or dropped out of resolution. Called only once the switch that
+    produced `after` has actually gone through (a moved switch that returned
+    True from `_move_mailboxes`, or an unset that left a field unresolvable
+    with nothing to move) — never on a switch a caller is about to discard."""
+    for field, old in before.items():
+        new = after.get(field)
+        if new == old:
+            continue
+        _retire_mailbox_path(entry, old)
+
+
 def _cmd_vars_set(agent_key: str, info: dict, key: str, value: str) -> int:
     try:
         key = validate_var_name(key)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
+    if _refuse_live_mailbox_var(agent_key, key):
+        return 1
     reg = load_registry()
     entry = reg.get(agent_key)
     if entry is None:
@@ -595,12 +756,18 @@ def _cmd_vars_set(agent_key: str, info: dict, key: str, value: str) -> int:
     if not isinstance(vars_map, dict):
         vars_map = {}
         entry["vars"] = vars_map
+    before = _mailbox_paths_with(agent_key, entry, vars_map)
     overwriting = False
     for existing in list(vars_map):
         if isinstance(existing, str) and existing.upper() == key:
             del vars_map[existing]
             overwriting = True
     vars_map[key] = value
+    after = _mailbox_paths_with(agent_key, entry, vars_map)
+    if not _move_mailboxes(before, after):
+        print(f"{agent_key}: var change aborted — mailbox move blocked, see above", file=sys.stderr)
+        return 1
+    _retire_changed_mailboxes(entry, before, after)
     save_registry(reg)
     verb = "updated" if overwriting else "set"
     print(f"{agent_key}: {verb} {key}={value}")
@@ -613,6 +780,8 @@ def _cmd_vars_unset(agent_key: str, info: dict, key: str) -> int:
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
+    if _refuse_live_mailbox_var(agent_key, key):
+        return 1
     reg = load_registry()
     entry = reg.get(agent_key)
     if entry is None:
@@ -622,6 +791,7 @@ def _cmd_vars_unset(agent_key: str, info: dict, key: str) -> int:
     if not isinstance(vars_map, dict):
         print(f"{agent_key}: no var named {key!r}", file=sys.stderr)
         return 1
+    before = _mailbox_paths_with(agent_key, entry, vars_map)
     found = False
     for existing in list(vars_map):
         if isinstance(existing, str) and existing.upper() == key:
@@ -630,6 +800,15 @@ def _cmd_vars_unset(agent_key: str, info: dict, key: str) -> int:
     if not found:
         print(f"{agent_key}: no var named {key!r}", file=sys.stderr)
         return 1
+    after = _mailbox_paths_with(agent_key, entry, vars_map)
+    # An unset that makes a path field unresolvable has no destination to move
+    # to; `_mailbox_paths_with` drops that field, so `_move_mailboxes` leaves
+    # the mail where it is. `_retire_changed_mailboxes` below still records the
+    # old path so `a8s health` reports it as unowned once it's non-empty.
+    if not _move_mailboxes(before, after):
+        print(f"{agent_key}: var change aborted — mailbox move blocked, see above", file=sys.stderr)
+        return 1
+    _retire_changed_mailboxes(entry, before, after)
     if not vars_map:
         entry.pop("vars", None)
     save_registry(reg)
@@ -683,7 +862,11 @@ def cmd_ls(args: list[str] | None = None) -> int:
     prefix is bound. `-q` prints just names, one per line, for scripting.
 
     STATUS is `running (pid N)` or `stopped`; DEFINITION is the definition
-    basename (default fallback when the registry has no `definition` field)."""
+    basename (default fallback when the registry has no `definition` field).
+
+    A node whose mailbox path field references an unset a8s var reads
+    `unresolved: $KEY` instead of either — it is registered but absent from
+    routing, and that is the fact an operator needs before the pid."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
@@ -702,11 +885,15 @@ def cmd_ls(args: list[str] | None = None) -> int:
     for prefix, agent in load_namespaces().items():
         bindings.setdefault(agent.lower(), []).append(f"{prefix}:")
 
+    problems = unresolved_mailboxes()
     rows: list[tuple[str, ...]] = []
     for name in names:
         info = reg[name]
         pid = _read_handler_pid(name)
         status = f"running (pid {pid})" if pid is not None else "stopped"
+        if name in problems:
+            refs = ", ".join(f"${n}" for n in sorted(placeholder_names([problems[name]])))
+            status = f"unresolved: {refs}"
         defn = info.get("definition") or str(default_definition_path("default"))
         definition = Path(defn).stem
         root = info.get("root", "?")
@@ -1157,7 +1344,7 @@ def cmd_start(args: list[str]) -> int:
     if not members:
         print(f"start: {name!r} resolves to no agents", file=sys.stderr)
         return 1
-    if _refuse_bad_wake_shell(members):
+    if _refuse_bad_wake_shell(members) or _refuse_unresolved_mailboxes(members):
         return 1
     _warn_unresolvable_harnesses(members)
     # NOTE: the child must launch the entrypoint script (a8s.py), NOT this
@@ -1229,6 +1416,28 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
                 f"resolves it. `ar3 doctor` lists what it can find.",
                 file=sys.stderr,
             )
+
+
+def _refuse_unresolved_mailboxes(members: list[str]) -> bool:
+    """True when a member's mailbox path field references an unset a8s var.
+
+    The router skips such a node entirely, so starting a handler for it would
+    attach a process that can never send or receive. Say which field and which
+    var instead."""
+    problems = unresolved_mailboxes()
+    bad = False
+    for member in members:
+        reason = problems.get(member)
+        if reason is None:
+            continue
+        print(
+            f"start: {member}: {reason}\n"
+            f"       `a8s vars {member} set <KEY> <value>`, or drop the "
+            f"placeholder from the definition's path field.",
+            file=sys.stderr,
+        )
+        bad = True
+    return bad
 
 
 def _refuse_bad_wake_shell(members: list[str]) -> bool:
@@ -2027,6 +2236,21 @@ def _parse_log_line_ts(line: str) -> datetime | None:
         return None
 
 
+def _render_log_line(line: str) -> str:
+    """Re-emit one agent log line with its leading UTC stamp read locally.
+
+    Only the terminal changes. The stored line keeps its UTC prefix — that
+    prefix is the merge key `_merge_log_lines` sorts two agents' files by, and
+    two agents under different `TZ` would interleave wrongly if it were local.
+    A head that does not parse passes through byte-for-byte.
+    """
+    ts = _parse_log_line_ts(line)
+    if ts is None:
+        return line
+    _head, sep, rest = line.partition(" ")
+    return f"{clock.stamp(ts, seconds=True)}{sep}{rest}"
+
+
 def _read_agent_log(path: Path) -> list[str]:
     if not path.is_file():
         return []
@@ -2053,7 +2277,7 @@ def _dump_logs(paths: list[Path], tail_n: int | None) -> None:
     if tail_n is not None:
         lines = lines[-tail_n:]
     for line in lines:
-        sys.stdout.write(line)
+        sys.stdout.write(_render_log_line(line))
     sys.stdout.flush()
 
 
@@ -2144,7 +2368,7 @@ def cmd_logs(args: list[str]) -> int:
                     if not ln:
                         time.sleep(0.25)
                         continue
-                    sys.stdout.write(ln)
+                    sys.stdout.write(_render_log_line(ln))
                     sys.stdout.flush()
             except KeyboardInterrupt:
                 return 0
@@ -2168,7 +2392,7 @@ def cmd_logs(args: list[str]) -> int:
                 if buf and (not progress or now - last_emit >= 1.0):
                     buf.sort(key=lambda item: item[0])
                     for _key, ln in buf:
-                        sys.stdout.write(ln)
+                        sys.stdout.write(_render_log_line(ln))
                     sys.stdout.flush()
                     buf.clear()
                     last_emit = now
@@ -2178,7 +2402,7 @@ def cmd_logs(args: list[str]) -> int:
             if buf:
                 buf.sort(key=lambda item: item[0])
                 for _key, ln in buf:
-                    sys.stdout.write(ln)
+                    sys.stdout.write(_render_log_line(ln))
                 sys.stdout.flush()
             return 0
     finally:
@@ -2259,7 +2483,7 @@ def _joined_display(joined: str) -> str:
     if not is_ulid(joined):
         return joined
     stamped = datetime.fromtimestamp(parse_ulid(joined)[0] / 1000, tz=timezone.utc)
-    return f"{joined} ({stamped.strftime('%Y-%m-%d %H:%M:%SZ')})"
+    return f"{joined} ({clock.stamp(stamped, seconds=True)})"
 
 
 def cmd_remote(args: list[str]) -> int:
@@ -2931,13 +3155,118 @@ def cmd_health() -> int:
             tmp_path.unlink(missing_ok=True)
 
     agents = load_registry()
+    problems = unresolved_mailboxes()
     print(f"agents: {len(agents)} registered")
     for name, info in agents.items():
         root = Path(info.get("root", ""))
         if not root.is_dir():
             print(f"  {name}: WARN (root missing: {root})")
             errors += 1
+        elif name in problems:
+            print(f"  {name}: WARN (not routing: {problems[name]})")
+            errors += 1
         else:
             print(f"  {name}: OK ({root})")
 
+    errors += _report_orphan_mailboxes()
     return 1 if errors else 0
+
+
+def _report_orphan_mailboxes() -> int:
+    """Report non-empty mailbox directories no current participant owns.
+    Returns the count.
+
+    This is the standing detector for the one data-loss path interpolated
+    mailbox paths open: routing only scans directories a live Participant
+    resolves to, so re-pointing a var leaves whatever is already in the old
+    directory unscanned, undelivered, and unreported. Nothing else notices,
+    because there is no error to raise.
+
+    Two nets, covering different territory. The dot-prefix scan below checks
+    immediate children of each registered root named `.outbox*` / `.inbox*` /
+    `.files*` — it catches hand-created litter in the obvious place, but an
+    interpolated path field can be nested (`mail/$SEAT/outbox`) or point
+    outside the root entirely, and this scan cannot see either. For that,
+    every path this tool itself retired is checked directly: `a8s vars
+    set`/`unset` records the OLD resolved path to each agent's
+    `retired_mailboxes` whenever a mailbox path field moves or drops out of
+    resolution, and that list is exact regardless of nesting or location. A
+    hand-edited registry field pointing somewhere nested stays out of scope —
+    the dot-prefix scan is the best-effort net for hand edits, not a promise
+    to catch them."""
+    owned = set()
+    roots = set()
+    for p in participants_from_registry():
+        roots.add(p.root)
+        for path in (p.outbox_path(), p.inbox_path(), p.files_path()):
+            owned.add(path.resolve())
+    reg = load_registry()
+    for info in reg.values():
+        root_str = info.get("root", "")
+        if root_str:
+            try:
+                roots.add(Path(root_str).expanduser().resolve())
+            except (OSError, RuntimeError):
+                continue
+
+    found = 0
+    for root in sorted(roots):
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            continue
+        for d in entries:
+            if not d.is_dir() or not d.name.startswith((".outbox", ".inbox", ".files")):
+                continue
+            if d.resolve() in owned:
+                continue
+            try:
+                if not any(d.iterdir()):
+                    continue
+            except OSError:
+                continue
+            print(f"  orphan mailbox: {d} (no registered node owns it, and it is not empty)")
+            found += 1
+
+    changed = False
+    for info in reg.values():
+        raw = info.get("retired_mailboxes")
+        if not isinstance(raw, list):
+            continue
+        kept: list[str] = []
+        for item in raw:
+            if not isinstance(item, str) or not item:
+                changed = True
+                continue
+            try:
+                path = Path(item).expanduser().resolve()
+            except (OSError, RuntimeError):
+                changed = True
+                continue
+            if path in owned or not path.is_dir():
+                changed = True
+                continue
+            try:
+                has_contents = any(path.iterdir())
+            except OSError:
+                changed = True
+                continue
+            if not has_contents:
+                changed = True
+                continue
+            print(
+                f"  orphan mailbox: {path} "
+                f"(retired by a8s, no registered node owns it, and it is not empty)"
+            )
+            found += 1
+            kept.append(item)
+        if kept != raw:
+            changed = True
+            if kept:
+                info["retired_mailboxes"] = kept
+            else:
+                info.pop("retired_mailboxes", None)
+    if changed:
+        save_registry(reg)
+
+    return found

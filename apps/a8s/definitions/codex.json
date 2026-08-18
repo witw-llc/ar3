@@ -4,6 +4,6 @@
     "codex", "exec",
     "--sandbox", "workspace-write",
     "--skip-git-repo-check",
-    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

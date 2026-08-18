@@ -6,6 +6,6 @@
     "--trust",
     "--force",
     "--approve-mcps",
-    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

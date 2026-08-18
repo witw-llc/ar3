@@ -11,6 +11,8 @@ Mutable module-level state:
 """
 from __future__ import annotations
 
+import codecs
+import io
 import json
 import os
 import re
@@ -32,7 +34,7 @@ except ImportError:
     def version_line(app: str) -> str:
         import platform
 
-        return f"{app} unknown (The Ark, python {platform.python_version()})"
+        return f"{app} unknown (ar3, python {platform.python_version()})"
 
 from ark import envseam  # noqa: E402
 from ark.home import app_home  # noqa: E402
@@ -500,6 +502,55 @@ def unique_path(p: Path) -> Path:
 
 def _pid_alive(pid: int) -> bool:
     return ark_pid_alive(pid)
+
+
+def harden_stdio() -> None:
+    """Floor stdout's error handler at backslashreplace, and decode stdin as
+    UTF-8.
+
+    Out: an unencodable glyph (e.g. a redirected Windows console stuck on
+    cp1252) gets a lossless, reversible escape instead of crashing the
+    process — stderr already defaults to backslashreplace, so only stdout
+    needs the floor. Both raising modes are floored: "strict", and
+    "surrogateescape" (the interpreter's own stdio default under a C locale
+    and on some Windows pipe setups), which passes lone surrogates through
+    but raises exactly like strict on any real unencodable character — a
+    field crash rode in on that difference, killing a send AFTER it had
+    committed, so the exit code lied and a retrying caller double-sent. The
+    guard never fires once a caller has set a deliberate non-raising error
+    handler, and skips a replaced ``sys.stdout`` (e.g. ``io.StringIO`` under
+    embedding) cleanly instead of raising AttributeError. Every ``--json``
+    path in the suite is ensure_ascii, and `out_agent` mirrors console lines
+    into a UTF-8 log, so the durable record keeps the real characters — only
+    the console degrades.
+
+    In: a message body piped through stdin is stored, byte for byte, in a
+    UTF-8 envelope — so stdin must decode as UTF-8 no matter what the locale
+    says, or a Windows seat's cp1252 decode turns every non-ASCII character
+    into permanent mojibake with nothing telling the sender. This overrides
+    even a deliberate ``PYTHONIOENCODING``: the store's contract is UTF-8,
+    and text in another encoding must be re-encoded before the pipe, not
+    smuggled through the locale. Invalid UTF-8 bytes become ``\\xNN``
+    escapes (backslashreplace decodes too) — reversible, never replaced with
+    U+FFFD. The interactive Windows console is already UTF-16-to-UTF-8
+    underneath (PEP 528) and passes through untouched.
+    """
+    if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.errors in (
+        "strict",
+        "surrogateescape",
+    ):
+        sys.stdout.reconfigure(errors="backslashreplace")
+    stdin = sys.stdin
+    if isinstance(stdin, io.TextIOWrapper) and stdin.encoding is not None:
+        try:
+            already_utf8 = codecs.lookup(stdin.encoding).name == "utf-8"
+        except LookupError:
+            already_utf8 = False
+        if not already_utf8:
+            try:
+                stdin.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
 
 
 # ---------- logging ----------

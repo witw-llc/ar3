@@ -157,9 +157,11 @@ class TestSyntheticRecords:
 
 
 class TestPresets:
-    def test_no_preset_gates_continuation(self):
-        # The roster's Continue: flag is the only switch; presets carry no
-        # warmth or size knobs for dispatch to gate on.
+    def test_no_preset_carries_a_warm_or_size_knob(self):
+        # Warmth and size heuristics tried to predict a provider's cache from
+        # outside and were measured wrong; they must not come back as preset
+        # keys. The per-engine GRADE lives in its own dict (_CONTINUE_GRADES)
+        # because it is a measured fact about the binary, not a prediction.
         from rig import HARNESS_PRESETS
 
         for name, preset in HARNESS_PRESETS.items():
@@ -169,6 +171,22 @@ class TestPresets:
             gates = [k for k in preset if k.startswith("continue_") and k not in
                      ("continue_argv", "continue_anchor", "continue_drop_pair")]
             assert not gates, f"{name} carries continuation gates: {gates}"
+
+    def test_the_measured_engines_carry_their_grade(self):
+        # The three engines the wiki research measured, and nothing invented
+        # for the ones it did not: an ungraded engine is "not researched".
+        from rig import (
+            CONTINUE_GOOD, CONTINUE_MODERATE, CONTINUE_POOR, continue_grade,
+        )
+
+        assert continue_grade("cursor")[0] == CONTINUE_GOOD
+        assert continue_grade("codex")[0] == CONTINUE_MODERATE
+        assert continue_grade("claude")[0] == CONTINUE_POOR
+        assert continue_grade("opencode") is None
+        assert continue_grade(None) is None
+        # every grade states its evidence
+        for preset in ("cursor", "codex", "claude"):
+            assert continue_grade(preset)[1].strip()
 
     def test_the_claude_preset_stabilizes_its_prefix(self):
         from rig import HARNESS_PRESETS

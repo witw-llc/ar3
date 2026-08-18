@@ -207,14 +207,55 @@ back against the `buckets` list.
 A member with `- **Continue:** on` in the roster runs its turns inside its
 CLI's own conversation instead of a cold prompt every wake: the agent keeps
 its recent work, and the provider cache prices the wake as a continuation.
-It needs a rig whose preset supports it — `claude`, `codex`, `cursor`,
-`opencode`, `ollama-opencode`, `agy` (`r4t rig presets` marks them); anything
-else fails closed at `r4t roster check` and at dispatch. Most presets append a
-`--continue` flag; `codex` resumes through the `exec resume --last` subcommand,
-so its tokens are inserted after `exec` instead. `copilot` is the one
-unsupported CLI: its `--continue` resumes the machine's most recent session
-whatever the directory, so members cannot be kept apart, and supporting it
-cleanly means pinning a session id per member (bin#256).
+It needs a rig whose preset carries continuation tokens — `r4t rig presets`
+prints a `continue:` line for each one that does (`agy`, `claude`, `codex`,
+`cursor`, `opencode`, `ollama-opencode`); anything else fails closed at
+`r4t roster check` and at dispatch. Most presets append a `--continue` flag;
+`codex` resumes through the `exec resume --last --include-non-interactive`
+subcommand, so its tokens are inserted after `exec` instead. `copilot` is the
+CLI with no usable tokens at all: its `--continue` resumes the machine's most
+recent session whatever the directory, so members cannot be kept apart, and
+supporting it cleanly means pinning a session id per member (bin#256).
+
+Carrying tokens is not enough on its own. `claude` has them and a roster may
+not use them, because its measured grade disables the member (below). And
+`Continue:` is the opt-in, not a guarantee that any given turn resumes: three
+gates send a turn back to a cold start.
+
+### The three refound gates
+
+A turn founds the conversation cold — no continue argv, a read-your-state
+preamble on the prompt — whenever one of these holds, and says so in the log:
+
+| Log line | When | Why |
+|---|---|---|
+| `CONTINUE-SWAP` | the rig now drives a different CLI than the conversation lives on | the conversation is keyed on the CLI; the old one may be quota-dead, so there is no dump turn and state on disk is whatever the last flush left. A swap that keeps the CLI (model-only, launcher variant) keeps the conversation |
+| `CONTINUE-DIRTY` | the member's previous turn exited nonzero or timed out | r4t never saw that conversation finish; resuming carries the wreckage into every later turn, so the member reads its state off disk instead |
+| `CONTINUE-STALE` | the conversation sat idle past the member's `Continue: <duration>` window | the graceful path is the idle pass's flush, which spends a dump turn first; this is the backstop for a roster whose idle pass has not run. The flush's own dump turn is exempt — it is the turn that still needs the conversation |
+
+`Continue: on` has no window, so it never trips `CONTINUE-STALE` — and never
+flushes either (see [idle pass](r4t-idle.md)).
+
+### The continuation grade
+
+Every r4t turn is a **new process**, so a roster continuation is always a
+process-boundary resume. Presets the engine research measured against that
+exact case carry a grade, and the grade is a fact about the binary rather than
+a knob:
+
+| Preset | Grade | What was measured |
+|---|---|---|
+| `cursor` | **good** | the resume namespace is an MD5 of the absolute working directory, so two members in two workdirs can never resume into each other's chat — verified by construction |
+| `codex` | **moderate** | cwd filtering is the default, but `--last` cannot see sessions created by `codex exec` unless `--include-non-interactive` is passed, which is the only kind of session a roster creates. The preset passes it |
+| `claude` | **poor** | resuming `claude -p` across a process boundary re-wrote the whole conversation 40.6% of the time (197 boundaries) against a 2.5% same-process baseline (4,040 calls). The miss is indifferent to task shape, and one miss costs on the order of a hundred warm hits |
+
+A **poor** grade makes `Continue:` on that preset a member-disabling config
+error naming the measurement: drop the `Continue:` line, or swap to a preset
+that continues well. Presets the research did not measure are **ungraded** and
+continue as before — silence here means "not researched", never "known bad".
+
+`r4t engine run --continue` is untouched by any of this: that is one process
+and the operator's own choice (see [engine](r4t-engine.md#--continue)).
 
 ### What a continuation costs
 
@@ -228,12 +269,14 @@ Measured production telemetry (tables on the wiki's Engine pages) shows that
 miss is a **process-boundary phenomenon**: a resume seconds after a successful
 turn — inside every cache lifetime, on the same task — re-writes the whole
 conversation roughly 16× as often as staying in one process. No warmth window
-or size cap prevents it, so r4t has none. Writing `Continue:` on a member IS
-the acceptance of that risk; the default (no flag) founds fresh from durable
-state on every wake, which is the safe regime. Engines where continuation is
-observably cheap (cursor, local models) are the reasonable use.
+or size cap foresees it, so r4t carries none; what it carries instead is the
+grade above, which refuses the engines where the miss was measured. On an
+ungraded preset, writing `Continue:` on a member IS the acceptance of that
+risk; the default (no flag) founds fresh from durable state on every wake,
+which is the safe regime. Engines where continuation is observably cheap
+(cursor, local models) are the reasonable use.
 
-What r4t does instead of gating is measure. Every completed turn on a probed
+What r4t does beyond the grade is measure. Every completed turn on a probed
 harness logs a `CACHE` line — tokens read, tokens written, and the size of the
 context now in play. A continued turn that read only a stable prefix while
 re-creating most of its own history — the miss signature — logs `CACHE-MISS`
@@ -253,9 +296,9 @@ duration is a roster error, so an idle window can never ride a member that
 runs cold. That retirement is the **flush** on an
 [idle pass](r4t-idle.md): the pass retires a conversation idle past the
 duration by running a budget-gated dump turn (a normal continuing turn
-prompting the member to save its state to STATUS.md). A rig swap that changes the CLI retires the conversation
-immediately, with no dump turn — the old CLI may be quota-dead. A retired
-member's next turn runs cold with a read-your-state preamble; the dump prompt
+prompting the member to save its state to STATUS.md). A retired
+member's next turn runs cold with a read-your-state preamble, the same shape
+the three gates above produce; the dump prompt
 and preamble are overridable via the node definition's `prompts` object (keys
 `flush_dump` and `refound_preamble`).
 
@@ -347,7 +390,7 @@ other r4t preset, agy is trusted with normal filesystem permissions.
 ## Editing a rig's settings (`configure` / `set` / `get` / `unset`)
 
 Rig settings never need hand-edited JSON. The configurable keys are
-`concurrency`, `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
+`rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
 `history_max_bytes` / `history_body_max` / `prompt_body_max`, `model`, `mcp`,
 the echo keys `echo` / `echo_max_chars`, the harness stance keys
 `permissions` / `allowed_tools`, and `env.<NAME>` for a
@@ -355,11 +398,11 @@ the echo keys `echo` / `echo_max_chars`, the harness stance keys
 (each detailed in the [knob table](#governance-knobs) below).
 
 ```bash
-r4t rig configure specialist          # walk every setting, Enter keeps each
-r4t rig set specialist concurrency 2  # write one explicit value
-r4t rig get specialist                # list effective settings, source-annotated
-r4t rig get specialist concurrency    # one value on stdout (script-friendly)
-r4t rig unset specialist concurrency  # drop it back to the default
+r4t rig configure specialist             # walk every setting, Enter keeps each
+r4t rig set specialist rig_budget_max 20 # write one explicit value
+r4t rig get specialist                   # list effective settings, source-annotated
+r4t rig get specialist rig_budget_max    # one value on stdout (script-friendly)
+r4t rig unset specialist rig_budget_max  # drop it back to the default
 ```
 
 `configure` prompts one key at a time, showing the effective value and its
@@ -374,7 +417,7 @@ the rest), so an agent can drive it non-interactively.
 context knob inheriting the preset's text tier), `built-in default`, or
 `not set` (an `env.<NAME>` the rig does not carry). With a
 key it prints the bare value on stdout and the source on stderr, so
-`conc=$(r4t rig get specialist concurrency)` captures cleanly.
+`cap=$(r4t rig get specialist rig_budget_max)` captures cleanly.
 
 `model` is special: `set`/`configure` re-resolve the invoke through the rig's
 recorded preset, exactly like `rig add --model` (agy keeps its live fuzzy match
@@ -389,7 +432,7 @@ r4t rig set ark-eng permissions bypass
 r4t rig set ark-eng allowed_tools "Bash(git:*) Bash(gh:*) Read Edit Write"
 ```
 
-`permissions` takes `ask`, `auto` or `bypass` — the Ark's three words for a
+`permissions` takes `ask`, `auto` or `bypass` — ar3's three words for a
 stance each CLI spells its own way. r4t translates the word into the harness's
 own flags for every turn on the rig; the table, the asymmetry rule (a mode
 below the engine's floor errors, one above its ceiling proceeds with a note),
@@ -407,10 +450,13 @@ preset, so a swap onto a harness that cannot express the stance is refused
 rather than silently dropped.
 
 **Neither is a roster field, deliberately.** A rig lives out-of-repo in
-`~/.config/r4t/rigs.json`, and `ROSTER.md` may only NAME a rig. A member
-editing the repo therefore cannot raise its own permissions — the same
-boundary [r4t-security.md](r4t-security.md) draws for argv. Choosing the rig
-is choosing the stance, and `r4t rig get <rig> permissions` says what it is.
+`~/.config/r4t/rigs.json`, and a roster may only NAME a rig. A runbook's
+`## Rigs` block is the one in-repo place a stance is written, and the machine
+trust ceiling caps it: `auto` unless `r4t add <dir> --trust` raised it for that
+node, re-checked every turn. So a member editing the repo still cannot raise
+its own permissions — the same boundary
+[r4t-security.md](r4t-security.md) draws for argv. Choosing the rig is choosing
+the stance, and `r4t rig get <rig> permissions` says what it is.
 
 ## Echo rigs
 
@@ -532,14 +578,15 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
 | `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo) and for agy / bare ollama (no per-turn idiom) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on agy and bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
-| `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance that lives out-of-repo, where a member editing ROSTER.md cannot raise it |
+| `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance the machine caps: a runbook may name one, and the trust ceiling (`auto` unless `r4t add --trust`) is what a repo cannot raise |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
-| `concurrency` (rig) | 1 | Live turns within one rig | Rig-wide pile-ups |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
-| `throttle.max_concurrent` | 1 | Live turns across ALL rigs | Roster-wide pile-ups |
-| `throttle.min_seconds_between_turn_starts` | 15 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later | Invisible burn — a storm degrades into a watchable drip |
-| `quiet_task_seconds` | 1800 | Backstop: an open thread whose originator has not been answered and that has seen no activity for this long wakes the leader with a nudge to report current state. 0 disables the sweep | A thread that dangles — a turn "succeeds" without replying and the originator never hears back |
+| `throttle.min_seconds_between_turn_starts` | 0 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later. Off by default: one turn at a time already rules out pile-ups, so a standing gap is dead air. Opt in to watch a rotation in slow motion | Invisible burn — a storm degrades into a watchable drip |
+
+There is no concurrency knob at either level. One turn at a time per node is a
+contract held by the admission lock, not a setting (see
+[the rotation](r4t-operations.md#the-rotation)); parallelism is a second node.
 | `log_retention_days` | 14 | Days of roster transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
 | `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |

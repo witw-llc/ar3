@@ -398,6 +398,58 @@ class TestParticipantsFromRegistry:
         assert parts[0].inbox_path() == external.resolve()
 
 
+class TestUnresolvableNodes:
+    """A path field naming an unset var makes the node unresolvable, and
+    unresolvable means not participating. Falling back to `.outbox` would put
+    two nodes on one root back in one directory — silently."""
+
+    def _register(self, tmp_path, spec_by_name):
+        import json
+
+        root = tmp_path / "repo"
+        root.mkdir(exist_ok=True)
+        reg = {}
+        for name, spec in spec_by_name.items():
+            defn = tmp_path / f"{name}.json"
+            body = {"invoke": ["echo", "x"]}
+            if spec is not None:
+                body["outbox_dir"] = spec
+            defn.write_text(json.dumps(body))
+            reg[name] = {"root": str(root), "definition": str(defn)}
+        save_registry(reg)
+        return root
+
+    def test_unresolvable_node_is_skipped(self, fake_home, tmp_path):
+        self._register(tmp_path, {"bad": ".outbox-$SEAT", "good": ".outbox-$NODE"})
+        assert {p.name for p in participants_from_registry()} == {"good"}
+
+    def test_unresolvable_node_does_not_fall_back_to_the_default(self, fake_home, tmp_path):
+        root = self._register(tmp_path, {"bad": ".outbox-$SEAT", "plain": None})
+        parts = {p.name: p for p in participants_from_registry()}
+        assert "bad" not in parts
+        assert parts["plain"].outbox_path() == (root / ".outbox").resolve()
+
+    def test_reason_names_the_field_and_the_var(self, fake_home, tmp_path):
+        from registry import unresolved_mailboxes
+
+        self._register(tmp_path, {"bad": ".outbox-$SEAT", "good": ".outbox-$NODE"})
+        problems = unresolved_mailboxes()
+        assert set(problems) == {"bad"}
+        assert "outbox_dir" in problems["bad"]
+        assert "$SEAT" in problems["bad"]
+
+    def test_setting_the_var_makes_it_resolve(self, fake_home, tmp_path):
+        from registry import unresolved_mailboxes
+
+        root = self._register(tmp_path, {"bad": ".outbox-$SEAT"})
+        reg = load_registry()
+        reg["bad"]["vars"] = {"SEAT": "a"}
+        save_registry(reg)
+        assert unresolved_mailboxes() == {}
+        parts = participants_from_registry()
+        assert parts[0].outbox_path() == (root / ".outbox-a").resolve()
+
+
 # ---------- parse_name + _scan_for_markers ----------
 
 class TestParseName:

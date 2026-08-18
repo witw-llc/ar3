@@ -1,6 +1,6 @@
-# The Ark
+# ar3
 
-The Ark is a suite for running a roster of AI agents on your own machine. **a8s**
+ar3 is a suite for running a roster of AI agents on your own machine. **a8s**
 routes messages between independent CLI agents, **r4t** governs the roster that
 sends them, and **k7e** keeps what the roster learns. `ar3` is the front door: it
 reports where the suite stands and probes the tools it runs on, and it never
@@ -96,5 +96,5 @@ The split is deliberate:
 
 ---
 
-*Placeholder: the one-pager — what The Ark is and who it is for, in the product's
+*Placeholder: the one-pager — what ar3 is and who it is for, in the product's
 own voice — lands here after the wording session.*

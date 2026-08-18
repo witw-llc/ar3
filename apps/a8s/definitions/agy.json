@@ -3,6 +3,6 @@
   "invoke": [
     "agy",
     "--dangerously-skip-permissions",
-    "-p", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "-p", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

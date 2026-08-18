@@ -1,3 +1,3 @@
 pytest
-# Runtime deps the suite exercises (textual TUI tests skip without it).
+# Runtime deps the suite exercises — currently none beyond pytest itself.
 -r ../../../requirements/r4t.txt

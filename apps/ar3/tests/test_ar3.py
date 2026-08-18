@@ -116,14 +116,14 @@ def test_a8s_panel_flags_an_unreadable_registry(homes):
 
 def test_r4t_panel_points_at_init_when_nothing_exists(homes):
     rows = ar3.r4t_rows()
-    assert _row(rows, "rigs")[3] == "r4t init"
-    assert _row(rows, "rosters")[3] == "r4t init"
+    assert _row(rows, "rigs")[3] == "r4t rig add <rig> <preset>"
+    assert _row(rows, "rosters")[3] == "r4t add <dir> [<runbook>]"
 
 
 def test_r4t_panel_counts_only_rig_entries_not_governance_knobs(homes):
     (homes["r4t"] / "rigs.json").write_text(json.dumps({
         "_notes": ["ignored"],
-        "throttle": {"max_concurrent": 1},
+        "throttle": {"min_seconds_between_turn_starts": 0},
         "cell_budget_max": 16,
         "leader": {"invoke": ["claude", "-p", "{prompt}"]},
         "worker": {"invoke": [["opencode", "run", "{prompt}"]]},

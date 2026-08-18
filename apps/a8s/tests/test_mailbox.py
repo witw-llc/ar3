@@ -511,6 +511,95 @@ class TestSharedOutboxAttribution:
         assert not pending_bundle_dir("neil-email", msg_id).exists()
 
 
+class TestTwoNodesOneRepo:
+    """The owner's case: a Codex seat and a Claude seat rooted at one repo.
+
+    Before path-field interpolation both resolved `<repo>/.outbox`, one handler
+    won the scan race and renamed the other's mail into its own pending, and
+    `_stamp_from` put the winner's name on the loser's message. `$NODE` gives
+    each node a directory of its own, and every stage downstream already keys
+    on the resolved path.
+    """
+
+    @pytest.fixture
+    def two_seats(self, fake_home, tmp_path):
+        repo = tmp_path / "ar3-private"
+        repo.mkdir()
+        reg = {}
+        for name in ("codex-ares", "claude-ares"):
+            defn = tmp_path / f"two-seat-{name}.json"
+            defn.write_text(json.dumps({
+                "invoke": ["harness", "-p", "$MESSAGE"],
+                "outbox_dir": ".outbox-$NODE",
+                "inbox_dir": ".inbox-$NODE",
+                "files_dir": ".files-$NODE",
+                # The env lie: routing still wins, and what it now injects is
+                # the interpolated path.
+                "env": {"TELL_OUTBOX_DIR": str(tmp_path / "bogus")},
+            }))
+            reg[name] = {"root": str(repo), "definition": str(defn)}
+        save_registry(reg)
+        parts = {p.name: p for p in participants_from_registry()}
+        return repo, parts["codex-ares"], parts["claude-ares"]
+
+    def test_resolution_is_distinct_and_absolute(self, two_seats):
+        repo, codex, claude = two_seats
+        assert codex.outbox_path() == (repo / ".outbox-codex-ares").resolve()
+        assert claude.outbox_path() == (repo / ".outbox-claude-ares").resolve()
+        assert codex.inbox_path() != claude.inbox_path()
+        assert codex.files_path() != claude.files_path()
+
+    def test_wake_env_carries_the_nodes_own_outbox(self, two_seats):
+        import daemon
+        from definitions import load_definition
+
+        _repo, codex, _claude = two_seats
+        env = daemon._wake_env(codex, load_definition("codex-ares"))
+        assert env["TELL_OUTBOX_DIR"] == str(codex.outbox_path())
+
+    def test_each_seat_is_stamped_by_the_owner_of_its_outbox(self, two_seats):
+        # The load-bearing assertion. On a shared `.outbox` one of these two
+        # envelopes comes out with the other seat's name on it.
+        from tell import write_outbox_envelope
+
+        _repo, codex, claude = two_seats
+        for p in (codex, claude):
+            ensure_mailboxes(p)
+        write_outbox_envelope(codex.outbox_path(), "claude-ares", "from codex", [])
+        write_outbox_envelope(claude.outbox_path(), "codex-ares", "from claude", [])
+
+        route_outboxes([codex, claude], all_agents=[codex, claude])
+
+        to_claude = json.loads(next(inbox_dir("claude-ares").iterdir()).read_text())
+        to_codex = json.loads(next(inbox_dir("codex-ares").iterdir()).read_text())
+        assert to_claude["from"] == "codex-ares"
+        assert to_claude["content"] == "from codex"
+        assert to_codex["from"] == "claude-ares"
+        assert to_codex["content"] == "from claude"
+
+    def test_neither_outbox_is_emptied_by_the_other_handler(self, two_seats):
+        # One handler holding only `codex-ares` must not ingest the Claude
+        # seat's outbox: the two are separate keys in `owners_by_outbox`.
+        from tell import write_outbox_envelope
+
+        _repo, codex, claude = two_seats
+        for p in (codex, claude):
+            ensure_mailboxes(p)
+        write_outbox_envelope(claude.outbox_path(), "codex-ares", "mine", [])
+        route_outboxes([codex], all_agents=[codex, claude])
+        assert [f.name for f in claude.outbox_path().iterdir()]
+        assert list(inbox_dir("codex-ares").iterdir()) == []
+
+    def test_a_tell_typed_in_the_repo_still_refuses_to_guess(self, two_seats, monkeypatch):
+        # `TELL_OUTBOX_DIR` unset and CWD inside the shared root matches both
+        # seats. Ambiguity is reported, never resolved by dict order.
+        from tell import _outboxes_matching_cwd
+
+        repo, _codex, _claude = two_seats
+        monkeypatch.chdir(repo)
+        assert len(_outboxes_matching_cwd(repo.resolve())) == 2
+
+
 class TestNamespaceRouting:
     """Issue #148 — a `<prefix>:<sub-address>` recipient delivers to the
     single agent bound to the prefix, with the full address preserved in

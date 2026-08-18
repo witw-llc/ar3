@@ -1,4 +1,4 @@
-"""One config-home resolver for every Ark app.
+"""One config-home resolver for every ar3 app.
 
 Every product's state root resolves the same way: the app's own override env
 var wins outright; otherwise `XDG_CONFIG_HOME` (or its `~/.config` default)

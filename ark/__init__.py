@@ -1,4 +1,4 @@
-"""The Ark's foundation layer — code every app shares.
+"""ar3's foundation layer — code every app shares.
 
 Apps reach this package the same way they reach `arkver`: the repo root is
 appended to sys.path by each entry point, and a relocated copy of one app

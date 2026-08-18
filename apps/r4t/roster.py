@@ -1,4 +1,9 @@
-"""Roster parsing — in-repo ROSTER.md describing roster members.
+"""Roster parsing — the members a node dispatches, and the fields they carry.
+
+Two files produce one Roster. `ROSTER.md` is the flat form parsed here; a
+`r4t.md` runbook (runbook.py) is the whole team in one file and wins when both
+sit at the node dir. Both build their members through `member_from_fields`, so
+`Continue:`, `Knowledge:`, `Framing:` and the rest mean exactly one thing.
 
 Format: `### <Name>` blocks with bullet fields:
 
@@ -35,19 +40,32 @@ persona (who the member is). The value is kept verbatim; `r4t roster check`
 warns past 200 characters, because a paragraph is a mission, not a
 reinforcement.
 
-AI is the default and carries no marker. The human seat is marked
-`- **Human:** yes` and is never dispatched; an optional
-`- **Address:** <a8s-name>` tells members how to reach them. A human with
-a `Rig:` is an error — humans sit outside the turn system. The Rig
-value is a SYMBOLIC rig name resolved against the out-of-repo rig
-config — never a command. Parsing is defensive: a malformed block disables
-that one member (Member.error set) without crashing dispatch.
+Every member is dispatchable and says what runs it. In `ROSTER.md` that is
+always a `Rig:` — a SYMBOLIC rig name resolved against the out-of-repo rig
+config, never a command. A runbook member may instead carry an inline
+`Engine:` line, which arrives here as a resolved `rig_override`. Parsing is
+defensive either way: a malformed block disables that one member
+(Member.error set) without crashing dispatch.
+
+The operator is not a member. They speak into the roster with
+`r4t tell --as <member>` and read it with `r4t logs` — a roster is a set of
+agents that take turns, and someone who never takes one has no row in it.
+
+Exactly one member carries `- **Leader:** yes`, and `load_roster` refuses
+a roster that does not have one. The leader is the apex: mail addressed to
+the node with nothing past the colon lands on its queue, so a roster with no
+leader has no door, and a roster with two has a door the router would have to
+guess at. This is the one check that stops at the roster rather than the
+member: a malformed block costs its own member, but a roster nobody can
+address costs the whole load.
 
 An optional `- **Workdir:** <path>` gives the member its own working
-directory for turns. Relative paths resolve against the org workplace
-(`agents/bob/`, `.bob/`); absolute and `~` paths are allowed and may live
-outside the repo entirely. Absent means the member runs from the workplace
-root. The directory is created on demand at the start of a turn.
+directory for turns. In `ROSTER.md`, relative paths resolve against the org
+workplace (`agents/bob/`, `.bob/`); a runbook resolves them against the node
+dir instead — one base, no second rule — and hands them here already
+absolute. Absolute and `~` paths are allowed and may live outside the repo
+entirely. Absent means the member runs from the workplace root. The directory
+is created on demand at the start of a turn.
 It sets the turn's cwd — which every rig receives, `ollama launch` wrappers
 included — fills a `{workdir}` in the rig's invoke for a CLI that takes its
 working directory as an argument, and the prompt names it as the member's root.
@@ -82,6 +100,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rig import Rig
 
 DEFAULT_ROSTER_NAME = "ROSTER.md"
 
@@ -97,6 +119,11 @@ FLUSH_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 CONTINUE_ERROR = (
     "Continue must be on, off, or an idle window like 15m "
     "(seconds or a duration with an s/m/h/d suffix)"
+)
+
+LEADER_REMEDY = (
+    "mark exactly one member with `- **Leader:** yes` — mail addressed to "
+    "the node itself lands on the leader"
 )
 
 
@@ -235,11 +262,9 @@ class RosterError(Exception):
 @dataclass
 class Member:
     name: str
-    human: bool = False
     rig: str | None = None
     role: str = ""
     leader: bool = False
-    address: str | None = None
     continue_conversation: bool = False
     flush_seconds: float | None = None
     prose_reply: bool = True
@@ -252,11 +277,16 @@ class Member:
     lead: str = ""
     workdir: str = ""
     persona: str = ""
+    # Whether `tell <node>:<member>` from outside the roster delivers to this
+    # member. Off by default, and on by default for the leader — the node's
+    # door, which bare mail already reaches.
+    ingress: bool = False
+    # A rig the roster itself declared — a runbook's inline `Engine:` line, or
+    # a `## Rigs` block shadowing the machine config. None means `rig` is a
+    # symbolic name the machine config resolves, which is the only shape
+    # ROSTER.md can produce.
+    rig_override: "Rig | None" = None
     errors: list[str] = field(default_factory=list)
-
-    @property
-    def is_human(self) -> bool:
-        return self.human
 
     @property
     def error(self) -> str | None:
@@ -267,6 +297,11 @@ class Member:
 class Roster:
     path: Path
     members: list[Member] = field(default_factory=list)
+    # Cell names, in declaration order. Members and cells share one name space
+    # inside a node, so the router needs both lists to tell `node:eng` naming a
+    # cell apart from `node:eng` naming nothing at all. A ROSTER.md declares
+    # none; only a runbook's `## Cells` fills this in.
+    cells: list[str] = field(default_factory=list)
 
     def find(self, name: str) -> Member | None:
         key = name.strip().lower()
@@ -277,8 +312,21 @@ class Roster:
 
     def leader(self) -> Member | None:
         for m in self.members:
-            if m.leader and not m.is_human:
+            if m.leader:
                 return m
+        return None
+
+    def leader_problem(self) -> str | None:
+        """Why this roster has no single addressable apex, or None when it
+        has one. `load_roster` turns a non-None answer into a RosterError;
+        `r4t roster check` prints it instead, because the tool that diagnoses
+        a broken roster has to be able to read one."""
+        marked = [m for m in self.members if m.leader]
+        if len(marked) > 1:
+            names = ", ".join(m.name for m in marked)
+            return f"marks {len(marked)} leaders ({names}) — {LEADER_REMEDY}"
+        if not marked:
+            return f"marks no leader — {LEADER_REMEDY}"
         return None
 
     def names(self) -> list[str]:
@@ -286,24 +334,23 @@ class Roster:
 
     @property
     def declares_tree(self) -> bool:
-        """True once any AI member carries a `Lead:` line. A roster without
+        """True once any member carries a `Lead:` line. A roster without
         Lead lines is a flat roster — one cell under the leader — and every
         tree behavior (information hiding, hard rerouting, tree lint) is off."""
-        return any(m.lead for m in self.members if not m.is_human)
+        return any(m.lead for m in self.members)
 
     def _ai_members(self) -> list[Member]:
-        return [m for m in self.members if not m.is_human and not m.errors]
+        return [m for m in self.members if not m.errors]
 
     def reports_to(self, member: Member) -> list[Member]:
-        """AI members whose `Lead:` names this member (its direct reports)."""
+        """Members whose `Lead:` names this member (its direct reports)."""
         key = member.name.lower()
         return [m for m in self._ai_members() if m.lead.lower() == key]
 
     def adjacent(self, member: Member) -> list[Member]:
         """The members a tree node may reach directly: its lead, its direct
-        reports, and its cell-mates — plus every roster human (the seat is
-        always visible and reachable). Excludes the member itself and errored
-        AI members. Order: lead, reports, remaining cell-mates, humans."""
+        reports, and its cell-mates. Excludes the member itself and errored
+        members. Order: lead, reports, remaining cell-mates."""
         picked: dict[str, Member] = {}
 
         def add(m: Member) -> None:
@@ -312,7 +359,7 @@ class Roster:
 
         if member.lead:
             led = self.find(member.lead)
-            if led is not None and not led.is_human and not led.errors:
+            if led is not None and not led.errors:
                 add(led)
         for m in self.reports_to(member):
             add(m)
@@ -320,9 +367,6 @@ class Roster:
             for m in self._ai_members():
                 if m.cell.lower() == member.cell.lower():
                     add(m)
-        for m in self.members:
-            if m.is_human:
-                add(m)
         return list(picked.values())
 
     def _max_tree_depth(self) -> int:
@@ -385,8 +429,32 @@ class Roster:
         return out
 
 
-def resolve_roster_path(root: Path, raw: str | None) -> Path:
+def resolve_roster_path(root: Path, raw: str | None, node: str | None = None) -> Path:
+    """Where this node's roster lives, in one order and no second one:
+
+    1. an explicit `--roster`
+    2. `r4t.md` at the node dir — the checked-in runbook always wins, which is
+       the whole reproducibility ruling: a repo that states how it runs runs
+       that way
+    3. the runbook `r4t add` named for this node — a built-in, or a path
+       elsewhere on disk, recorded out of the repo
+    4. `ROSTER.md`
+
+    A legacy roster beside a runbook is named as ignored rather than quietly
+    obeyed (`runbook.legacy_conflict`).
+    """
     if not raw:
+        from runbook import RUNBOOK_NAME
+
+        book = root / RUNBOOK_NAME
+        if book.is_file():
+            return book
+        if node:
+            from state import read_runbook
+
+            recorded = read_runbook(node)
+            if recorded is not None and recorded.is_file():
+                return recorded
         return root / DEFAULT_ROSTER_NAME
     p = Path(raw).expanduser()
     if p.is_absolute():
@@ -394,7 +462,10 @@ def resolve_roster_path(root: Path, raw: str | None) -> Path:
     return root / p
 
 
-def _clean(value: str) -> str:
+def clean_field(value: str) -> str:
+    """A field value with the markdown a person types around it removed —
+    backticks and emphasis. Shared with the runbook so `Rig: `big`` and
+    `Rig: big` are one value in both formats."""
     return value.strip().strip("`").strip("*").strip()
 
 
@@ -406,28 +477,62 @@ def _is_false(value: str) -> bool:
     return value.strip().lower() in ("", "no", "false", "n", "off")
 
 
-def _member_from_block(name: str, lines: list[str]) -> Member:
-    m = Member(name=name)
-    m.persona = "\n".join([f"### {name}"] + lines).rstrip()
-    fields: dict[str, str] = {}
-    for line in lines:
-        match = FIELD_RE.match(line)
-        if not match:
-            continue
-        key = match.group(1).lower()
-        if key not in fields:
-            fields[key] = _clean(match.group(2))
+# The one boolean vocabulary for every runbook/roster boolean field: member
+# `Leader:`/`Ingress:`/`ProseReply:`, cell `Ingress:`, rig `MCP:`/`Echo:`.
+# `Continue:` is NOT a member of this set — it is time-valued (`on` is a
+# synonym for "no idle bound", but a duration like `15m` is a legal value too)
+# and keeps its own parsing below, unaffected by this vocabulary.
+BOOL_WORDS = "yes/no/true/false/y/n/1/0/on/off"
+_BOOL_TRUE_WORDS = ("yes", "true", "y", "1", "on")
+_BOOL_FALSE_WORDS = ("no", "false", "n", "0", "off")
 
+
+def parse_bool_field(raw: str, field: str) -> tuple[bool, str | None]:
+    """Parse one loose boolean field. Unset (empty string) reads as False
+    with no error. A value that IS present and outside the accepted set is a
+    field-level error naming the field, the value, and the set — the same
+    loud style every other field error uses — rather than silently reading as
+    False, which is how `Leader: maybe` used to become "marks no leader"
+    somewhere else entirely, with no line to point at."""
+    value = raw.strip().lower()
+    if not value:
+        return False, None
+    if value in _BOOL_TRUE_WORDS:
+        return True, None
+    if value in _BOOL_FALSE_WORDS:
+        return False, None
+    return False, f"{field} must be {BOOL_WORDS} (got {raw!r})"
+
+
+def member_from_fields(
+    name: str, fields: dict[str, str], *, require_rig: bool = True
+) -> Member:
+    """One member from its already-collected fields, shared by ROSTER.md and
+    the runbook so the two formats can never drift on what `Continue:` or
+    `Knowledge:` mean. Keys are lowercase and space-free.
+
+    `require_rig=False` is the runbook, where a member may instead carry an
+    inline `Engine:` line — the presence check moves to the caller, which is
+    the layer that knows both spellings.
+    """
+    m = Member(name=name)
     if "status" in fields:
+        m.errors.append("Status: is gone — members carry no marker")
+    if "human" in fields:
         m.errors.append(
-            "Status: is gone — mark the human seat with **Human:** yes; "
-            "AI members carry no marker"
+            "Human: is gone — a roster is members that take turns. "
+            "Speak into it with `r4t tell --as <member>`"
         )
-    m.human = _is_true(fields.get("human", ""))
+    if "address" in fields:
+        m.errors.append(
+            "Address: is gone with the seat doorbell — mail crossing the "
+            "wall is a8s's job, not a member field"
+        )
 
     m.role = fields.get("role", fields.get("mandate", ""))
-    m.leader = _is_true(fields.get("leader", ""))
-    m.address = fields.get("address") or None
+    m.leader, leader_err = parse_bool_field(fields.get("leader", ""), "Leader")
+    if leader_err:
+        m.errors.append(leader_err)
     if "flush" in fields:
         m.errors.append(
             "Flush: is not a field — the idle window rides Continue: "
@@ -449,12 +554,12 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
             "(try: ProseReply: off)"
         )
     pr = fields.get("prosereply", "")
-    if pr and _is_false(pr):
-        m.prose_reply = False
-    elif pr and not _is_true(pr):
-        m.errors.append(
-            f"ProseReply must be on or off, got {pr!r} (try: ProseReply: off)"
-        )
+    if pr:
+        pr_value, pr_err = parse_bool_field(pr, "ProseReply")
+        if pr_err:
+            m.errors.append(f"{pr_err} (try: ProseReply: off)")
+        else:
+            m.prose_reply = pr_value
     m.reinforce = fields.get("reinforce", "")
     kn = fields.get("knowledge", "")
     if kn:
@@ -477,20 +582,42 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
     m.lead = fields.get("lead", "")
     m.workdir = fields.get("workdir", "")
 
+    ing = fields.get("ingress", "")
+    if ing:
+        ing_value, ing_err = parse_bool_field(ing, "Ingress")
+        if ing_err:
+            m.errors.append(ing_err)
+        else:
+            m.ingress = ing_value
+    else:
+        # The leader's default is on: bare mail to the node already lands
+        # there, so `node:leader` naming the same mailbox costs nothing.
+        m.ingress = m.leader
+
     rig = fields.get("rig", "")
-    if rig and m.is_human:
-        m.errors.append(
-            "Human members carry no Rig — humans are outside the turn system"
-        )
-    elif rig:
+    if rig:
         if RIG_RE.match(rig):
             m.rig = rig.lower()
         else:
             m.errors.append(
                 f"Rig must be a symbolic rig name, not a command (got {rig!r})"
             )
-    elif not m.is_human:
+    elif require_rig:
         m.errors.append("missing Rig line")
+    return m
+
+
+def _member_from_block(name: str, lines: list[str]) -> Member:
+    fields: dict[str, str] = {}
+    for line in lines:
+        match = FIELD_RE.match(line)
+        if not match:
+            continue
+        key = match.group(1).lower()
+        if key not in fields:
+            fields[key] = clean_field(match.group(2))
+    m = member_from_fields(name, fields)
+    m.persona = "\n".join([f"### {name}"] + lines).rstrip()
     return m
 
 
@@ -530,11 +657,34 @@ def parse_roster(text: str, path: Path) -> Roster:
     return Roster(path=path, members=members)
 
 
-def load_roster(path: Path) -> Roster:
+def load_roster(path: Path, *, validate: bool = True, node: str | None = None) -> Roster:
+    """Parse the roster and refuse one with no single leader.
+
+    `validate=False` is for `r4t roster check`, which must load exactly the
+    roster the operator has to fix.
+
+    A runbook (`runbook.is_runbook`) goes through the runbook loader and comes
+    back as the same Roster every caller here already handles, members
+    carrying resolved rigs instead of bare names. `node` names the a8s node
+    whose vars the runbook's `${VAR}` references resolve against; without one,
+    only `A8S_VAR_*` in the environment answers.
+    """
+    from runbook import RunbookError, is_runbook, load_runbook
+
+    if is_runbook(path):
+        try:
+            return load_runbook(path, node=node, validate=validate).roster
+        except RunbookError as e:
+            raise RosterError(str(e)) from e
     if not path.is_file():
         raise RosterError(f"roster not found: {path}")
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         raise RosterError(f"cannot read roster {path}: {e}") from e
-    return parse_roster(text, path)
+    roster = parse_roster(text, path)
+    if validate:
+        problem = roster.leader_problem()
+        if problem is not None:
+            raise RosterError(f"{path}: {problem}")
+    return roster

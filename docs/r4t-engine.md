@@ -67,7 +67,7 @@ which composes through this very path and gates it on the rig's bucket.
 ### The three translated parameters
 
 Each engine spells "do not ask me" and "pick up where you left off" its own
-way. These three flags are the Ark's words for those stances, translated per
+way. These three flags are ar3's words for those stances, translated per
 engine from one table (`PERMISSION_TRANSLATION` in `apps/r4t/rig.py`, beside
 the preset table). **Every one is unset by default, and unset means the
 preset's own flags** — naming none of them composes exactly the argv the preset
@@ -115,7 +115,7 @@ or `git`.
 into `--dangerously-bypass-approvals-and-sandbox`, so a user who learns
 `bypass` on claude — where it means "stop asking" inside whatever
 `settings.json` configures — gets something materially stronger on codex. This
-is the one place the Ark cannot keep permissions and isolation apart.
+is the one place ar3 cannot keep permissions and isolation apart.
 
 claude's `auto` is fail-closed and every other engine's is fail-open.
 `--permission-mode dontAsk` denies whatever the allowlist does not cover, while
@@ -147,13 +147,18 @@ per tool; cursor, opencode and agy express tool policy only in config files).
 #### `--continue`
 
 Resumes the conversation the CLI already has in `--dir`, in the preset's own
-idiom — `--continue` for claude, cursor, agy and opencode, `exec resume --last`
-for codex. **The caller asserts this turn continues live work; an idle or
-independent wake must not pass it.** `engine run` is one CLI with no task model
-([#155](https://github.com/witw-llc/ar3-private/issues/155) puts continuation
-under the task's message chain), so the engine layer cannot enforce that rule —
-it can only refuse to pretend otherwise. `--idle --continue` is an error, since
-an idle wake is a cold start by definition.
+idiom — `--continue` for claude, cursor, agy and opencode,
+`exec resume --last --include-non-interactive` for codex. **The caller asserts
+this turn continues live work; an idle or independent wake must not pass it.**
+`engine run` is one CLI and one operator decision, so the engine layer cannot
+enforce that rule — it can only refuse to pretend otherwise. `--idle
+--continue` is an error, since an idle wake is a cold start by definition.
+
+This is why the flag is unaffected by the roster's continuation grades: a
+roster turn is always a new process, and `r4t engine run --continue` is one
+process the operator chose to resume. A member on a roster is gated instead —
+see [the three refound gates](r4t-rigs.md#the-three-refound-gates) and the
+per-engine grades.
 
 An engine with no verified continuation errors, naming the ones that have it.
 copilot is the notable refusal, and its message says why: `copilot --continue`
@@ -323,15 +328,15 @@ fails. The three translated parameters are how a node is tuned:
            "--permissions", "bypass",
            "--allowed-tools", "Bash(git:*) Read Edit",
            "--agent", "$RECIPIENT",
-           "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
+           "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
 ```
 
 Rules that keep a node's wiring right:
 
 - The composed prompt is the LAST element, because `PROMPT` is a positional.
-  `$SENDER tells $RECIPIENT ($AGE): $MESSAGE` is the shape every bundled
-  definition uses — a bare `$MESSAGE` gives the node no way to know who it is
-  answering.
+  `[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE` is the shape every
+  bundled definition uses — a bare `$MESSAGE` gives the node no way to know
+  who it is answering, and no absolute time to resolve *tomorrow* against.
 - Never put `--continue` in a definition. Every wake a8s fires is an
   independent message, and the idle wake is a cold start; `--idle --continue`
   is refused outright.

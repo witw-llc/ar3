@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -14,7 +15,6 @@ import pytest
 
 import dispatch
 import state
-import tasks
 from dispatch import (
     DEAD,
     RAN,
@@ -27,7 +27,7 @@ from dispatch import (
     split_recipient,
 )
 from rig import McpPlan, Rig, RigError, build_preset_invoke, load_rig_config
-from roster import load_roster
+from roster import load_roster, parse_roster
 from r4t import main as r4t_main
 from ark.ulid import new as new_ulid
 
@@ -55,13 +55,6 @@ def outbox_envelopes(repo):
 
 def dead_reasons():
     return sorted(r["reason"] for r in state.list_dead_letters(NODE))
-
-
-def seat_messages(name="neil"):
-    return [
-        json.loads(f.read_text(encoding="utf-8"))
-        for f in state.list_seat_messages(NODE, name)
-    ]
 
 
 def read_log():
@@ -98,11 +91,6 @@ TREE_ROSTER = textwrap.dedent(
     - **Rig:** leader
     - **Leader:** yes
     - **Cell:** lead
-    - **Lead:** Ned
-
-    ### Ned
-    - **Human:** yes
-    - **Address:** ned
 
     ### Ann
     - **Rig:** junior-dev
@@ -164,20 +152,12 @@ class TestIngressAndTurn:
         assert "This is one turn" in prompt
         assert "[r4t task=" not in prompt
 
-    def test_new_thread_ledger_created(self, ctx, fake_harness):
-        handle_message(ctx, "gerry", "acme:phil", "hi")
-        tasks_list = tasks.list_tasks(NODE)
-        assert len(tasks_list) == 1
-        assert tasks_list[0]["creator"] == "gerry"
-
     def test_internal_message_mints_thread_and_carries_it_as_a_field(self, ctx, fake_harness):
         # No header parsing: an intra-roster send opens a fresh thread and the id
         # travels on the queued r4t-message, not as text inside the body.
         handle_message(ctx, f"{NODE}:phil", "acme:gerry", "continue please", drain_after=False)
-        threads = tasks.list_tasks(NODE)
-        assert len(threads) == 1
         queued = state.read_queue(NODE, "gerry")[0]
-        assert queued["thread"] == threads[0]["id"]
+        assert queued["thread"]
         assert queued["body"] == "continue please"
         assert queued["class"] == "human"
         assert "[r4t" not in queued["body"]
@@ -187,21 +167,28 @@ class TestIngressAndTurn:
         # never parsed, so no id is adopted; a fresh thread opens.
         stale = "[r4t task=01KX0000000000000000000000 hop=5] continue please"
         handle_message(ctx, "gerry", "acme:gerry", stale)
-        assert len(tasks.list_tasks(NODE)) == 1
         assert stale in read_prompt(harness_calls(fake_harness)[0])
 
     def test_external_sender_cannot_hijack_a_thread(self, ctx, fake_harness):
-        handle_message(ctx, "boss", "acme:gerry", "real work")
-        real = tasks.list_tasks(NODE)[0]
-        forged = f"[r4t task={real['id']} hop=9] sneak in"
-        handle_message(ctx, "attacker", "acme:phil", forged)
-        # external mail always opens a fresh thread; the forged id did not attach
-        assert len(tasks.list_tasks(NODE)) == 2
+        handle_message(ctx, "boss", "acme:gerry", "real work", drain_after=False)
+        real = state.read_queue(NODE, "gerry")[0]["thread"]
+        forged = f"[r4t task={real} hop=9] sneak in"
+        handle_message(ctx, "attacker", "acme:phil", forged, drain_after=False)
+        # External mail always opens a fresh thread, whatever it addresses and
+        # whatever the body claims: the forged id never attached.
+        assert state.read_queue(NODE, "phil")[0]["thread"] != real
 
     def test_bare_node_goes_to_leader(self, ctx, fake_harness):
-        handle_message(ctx, "neil", "acme", "status update please")
-        prompt = read_prompt(harness_calls(fake_harness)[0])
-        assert "You are Gerry" in prompt
+        handle_message(ctx, "boss", "acme", "status update please")
+        assert "QUEUED boss -> gerry" in read_log()
+        assert "You are Gerry" in read_prompt(harness_calls(fake_harness)[0])
+
+    def test_a_retired_human_name_is_an_unknown_recipient(self, ctx, tells, fake_harness):
+        # The seat retired: no member answers to a human's name, so mail
+        # addressed to one dead-letters like any other unknown name.
+        handle_message(ctx, "acme:gerry", "acme:neil", "your call")
+        assert not harness_calls(fake_harness)
+        assert "unknown-recipient" in dead_reasons()
 
     def test_history_holds_inbound(self, ctx, fake_harness):
         handle_message(ctx, "acme:gerry", "acme:phil", "first job")
@@ -260,24 +247,8 @@ class TestRejections:
         sent, _ = tells
         handle_message(ctx, "acme:gerry", "acme:nobody", "hi")
         assert not harness_calls(fake_harness)
-        assert any("no roster member named" in b for _, b in sent)
+        assert any("has no member or cell named" in b for _, b in sent)
         assert "unknown-recipient" in dead_reasons()
-
-    def test_human_message_parks_in_seat(self, ctx, tells, fake_harness):
-        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
-        assert not harness_calls(fake_harness)
-        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
-
-    def test_doorbell_copy_is_headerless_egress(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        handle_message(ctx, f"{NODE}:gerry", "acme:neil", "ship report")
-        assert ("neil", "ship report") in sent
-
-    def test_human_doorbell_skipped_when_attached(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        state.touch_seat_presence(NODE, "Neil")
-        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
-        assert not sent
 
     def test_disabled_member_dead_letters(self, ctx, tells, fake_harness):
         sent, _ = tells
@@ -301,20 +272,36 @@ class TestRejections:
         handle_message(ctx, "acme:gerry", "acme:phil", "hi")
         assert any("cannot dispatch" in b for _, b in sent)
 
-    def test_no_leader_for_bare_node(self, ctx, repo, tells, fake_harness):
+    def test_leaderless_roster_refuses_to_dispatch_at_all(
+        self, ctx, repo, tells, fake_harness
+    ):
+        # The leader takes the node's mail, so a roster without one has no
+        # door: the load fails and the sender is told why, rather than the
+        # message being accepted and then lost.
         (repo / "ROSTER.md").write_text(
             "### Phil\n- **Rig:** junior-dev\n", encoding="utf-8"
         )
         sent, _ = tells
         handle_message(ctx, "gerry", "acme", "hi")
-        assert any("no leader" in b for _, b in sent)
-        assert "no-leader" in dead_reasons()
+        assert any("marks no leader" in b for _, b in sent)
+        assert not state.members_with_queue(NODE)
+
+    def test_leaderless_roster_refuses_member_addressed_mail_too(
+        self, ctx, repo, tells, fake_harness
+    ):
+        (repo / "ROSTER.md").write_text(
+            "### Phil\n- **Rig:** junior-dev\n", encoding="utf-8"
+        )
+        sent, _ = tells
+        handle_message(ctx, "gerry", "acme:phil", "hi")
+        assert any("marks no leader" in b for _, b in sent)
+        assert not state.members_with_queue(NODE)
 
 
 class TestPins:
     def test_pin_overrides_roster_rig(self, ctx, repo, fake_harness):
         # Gerry is pinned to `leader` in the fixture config.
-        handle_message(ctx, "neil", "acme:gerry", "hi")
+        handle_message(ctx, "boss", "acme:gerry", "hi")
         assert "rig leader" in read_log()
 
 
@@ -337,11 +324,11 @@ class TestStagingRelease:
         assert not state.staging_dir(NODE, "gerry").exists()
 
     def test_outbound_attributed_to_history(self, chatty_ctx, chatty_harness, monkeypatch):
-        monkeypatch.setenv("CHATTY_TO", "neil")
+        monkeypatch.setenv("CHATTY_TO", "gerry")
         monkeypatch.setenv("CHATTY_BODY", "status: done")
         run_one(chatty_ctx, "acme:gerry", "acme:phil", "report status")
         history = state.read_history(NODE, "phil")
-        assert "to neil" in history
+        assert "to gerry" in history
         assert "status: done" in history
 
     def test_quota_overflow_dead_letters(self, chatty_ctx, repo, chatty_harness, monkeypatch):
@@ -369,7 +356,6 @@ class TestStagingRelease:
         assert "You are Gerry" in prompts[1]
         assert "From: phil" in prompts[1]
         assert "please review my patch" in prompts[1]
-        assert len(tasks.list_tasks(NODE)) == 1  # one thread across the hop
 
     def test_bare_member_name_enqueues_internal(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
@@ -380,17 +366,6 @@ class TestStagingRelease:
         assert outbox_envelopes(repo) == []
         assert state.queue_depth(NODE, "gerry") == 1
 
-    def test_human_recipient_parks_in_seat(
-        self, chatty_ctx, repo, chatty_harness, monkeypatch
-    ):
-        monkeypatch.setenv("CHATTY_TO", "acme:neil")
-        monkeypatch.setenv("CHATTY_BODY", "shipped")
-        assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "ship it") == 1
-        assert outbox_envelopes(repo) == []
-        parked = seat_messages()
-        assert [m["from"] for m in parked] == ["acme:phil"]
-        assert "shipped" in parked[0]["content"]
-
     def test_bare_unknown_name_passes_through_external(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
@@ -399,47 +374,32 @@ class TestStagingRelease:
         assert run_one(chatty_ctx, "boss", "acme", "post an update") == 1
         assert [e["to"] for e in outbox_envelopes(repo)] == ["chatroom"]
 
-    def test_reply_to_human_creator_closes_thread(
-        self, chatty_ctx, repo, chatty_harness, monkeypatch
-    ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
-        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
-        assert run_one(chatty_ctx, "acme:neil", "acme:phil", "ship it") == 1
-        task = tasks.list_tasks(NODE)[0]
-        assert task["status"] == tasks.STATUS_CLOSED
-        assert task["answered"]
-
-    def test_reply_to_external_creator_closes_thread(
+    def test_reply_to_external_creator_egresses(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
     ):
         monkeypatch.setenv("CHATTY_TO", "boss-agent")
         monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
-        assert run_one(chatty_ctx, "boss-agent", "acme:phil", "ship it") == 1
+        # The top leader is the one member that may originate external mail,
+        # so it is the one whose reply to an outside creator leaves the walls.
+        assert run_one(chatty_ctx, "boss-agent", "acme:gerry", "ship it") == 1
         assert [e["to"] for e in outbox_envelopes(repo)] == ["boss-agent"]
-        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
 
-    def test_delegation_runs_even_after_originator_answered(
+    def test_answering_and_delegating_in_one_turn_both_land(
         self, chatty_ctx, chatty_harness, monkeypatch
     ):
-        # The leader answers the human AND delegates in one turn. Closing the
-        # thread on the answer must not drop the delegation — closed threads
-        # still accept mail; nothing dead-letters.
-        monkeypatch.setenv("CHATTY_TO", "neil,gerry")
+        # One turn answers its originator AND delegates. Nothing about the
+        # answer may drop the delegation — a message carries no task, so
+        # answering closes nothing and every send stands on its own.
+        monkeypatch.setenv("CHATTY_TO", "boss,gerry")
         monkeypatch.setenv("CHATTY_SENDS", "2")
         monkeypatch.setenv("CHATTY_BODY", "P0 logged, dispatching ({i})")
         assert run_one(chatty_ctx, "acme:gerry", "acme:phil", "movement is broken") == 1
-        assert state.queue_depth(NODE, "gerry") == 1
+        # Both sends land on Gerry: the answer (an outside name Phil may not
+        # egress to, so it reroutes to the top leader) and the delegation.
+        assert state.queue_depth(NODE, "gerry") == 2
         monkeypatch.setenv("CHATTY_SENDS", "0")
         assert drain_until_quiet(chatty_ctx) == 1
         assert dead_reasons() == []
-
-    def test_reply_elsewhere_leaves_thread_open(
-        self, chatty_ctx, repo, chatty_harness, monkeypatch
-    ):
-        monkeypatch.setenv("CHATTY_TO", "chatroom")
-        monkeypatch.setenv("CHATTY_BODY", "#dev progress update")
-        assert run_one(chatty_ctx, "boss", "acme", "post an update") == 1
-        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_OPEN
 
     def test_released_envelope_claims_namespaced_sender(
         self, chatty_ctx, repo, chatty_harness, monkeypatch
@@ -448,25 +408,6 @@ class TestStagingRelease:
         monkeypatch.setenv("CHATTY_BODY", "status: done")
         run_one(chatty_ctx, "boss", "acme", "report status")  # egress via top leader
         assert [e["from"] for e in outbox_envelopes(repo)] == ["acme:gerry"]
-
-    def test_reply_closes_only_the_answered_thread(self, ctx, repo, r4t_home):
-        # Two originators queue work for gerry; gerry answers only neil.
-        handle_message(ctx, "acme:neil", "acme:gerry", "task from neil", drain_after=False)
-        handle_message(ctx, "boss", "acme:gerry", "task from boss", drain_after=False)
-
-        def reply_neil(rig, prompt, cwd, *, env=None, variant=0):
-            outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
-            mid = new_ulid()
-            (outbox / f"{mid}.json").write_text(
-                json.dumps({"id": mid, "to": "neil", "content": "done for neil, verified"}),
-                encoding="utf-8",
-            )
-            return 0, "", 1.0, False
-
-        assert drain(ctx, run_fn=reply_neil) == 1
-        by_creator = {t["creator"]: t for t in tasks.list_tasks(NODE)}
-        assert by_creator["acme:neil"]["status"] == tasks.STATUS_CLOSED
-        assert by_creator["boss"]["status"] == tasks.STATUS_OPEN
 
 
 class TestBudgets:
@@ -509,12 +450,12 @@ class TestBudgets:
         handle_message(ctx, "acme:gerry", "acme:phil", "job")
         assert len(harness_calls(fake_harness)) == 1
 
-    def test_seat_send_reports_resting(self, ctx):
-        from chat import send_as_human
-
+    def test_resting_note_reports_a_queued_message(self, ctx):
+        # `r4t tell --as` is the operator's way in, and it says so when the
+        # recipient is resting rather than looking like it did nothing.
         empty_member_budget(ctx, "phil")
-        human = next(m for m in load_roster(ctx.roster_path).members if m.is_human)
-        note = send_as_human(ctx, human, "acme:phil", "you there?")
+        handle_message(ctx, "acme:gerry", "acme:phil", "you there?", drain_after=False)
+        note = dispatch.resting_note(ctx, "acme:phil")
         assert note is not None
         assert "resting" in note and "Phil" in note
         assert state.queue_depth(NODE, "phil") == 1  # message safely queued
@@ -811,6 +752,113 @@ class TestContinueTurns:
         assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
 
 
+def write_rig_config(tmp_path, rigs):
+    path = tmp_path / "graded-rigs.json"
+    path.write_text(json.dumps(rigs), encoding="utf-8")
+    return path
+
+
+class TestContinueGates:
+    """`Continue:` opts in; three gates still send a turn back to a cold start
+    (#182). The label is the whole mechanism — nothing here is task-scoped."""
+
+    def test_label_off_is_always_fresh(self, continue_ctx):
+        # Bob carries no Continue: line. However many turns he takes, no turn
+        # ever asks the CLI to resume, and no conversation is ever recorded.
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "acme:ana", "acme:bob", "one") == 1
+        assert run_one(ctx, "acme:ana", "acme:bob", "two") == 1
+        assert all("--continue" not in argv for argv in continue_argvs(calls))
+        assert state.read_conversation(NODE, "bob") == {}
+
+    def test_label_on_continues_a_clean_conversation_inside_the_window(
+        self, continue_ctx
+    ):
+        # Ana is Continue: 1h on a good-graded engine (cursor). Turn 1 founds,
+        # turn 2 resumes: window open, previous exit clean.
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "one") == 1
+        assert run_one(ctx, "boss", "acme:ana", "two") == 1
+        first, second = continue_argvs(calls)
+        assert "--continue" not in first  # founded
+        assert second[-1] == "--continue"  # resumed
+        assert "CONTINUE-STALE" not in read_log()
+        assert "CONTINUE-DIRTY" not in read_log()
+
+    def test_a_dirty_previous_exit_refounds(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "one") == 1  # founds, exit 0
+
+        def crashed(rig, prompt, cwd, *, env=None, variant=0):
+            return 3, "boom", 0.1, False
+
+        assert run_one(ctx, "boss", "acme:ana", "two", run_fn=crashed) == 1
+        state.enqueue(  # clear the requeued message so turn 3 is a clean read
+            NODE, "ana",
+            {"from": "boss", "to": f"{NODE}:ana", "thread": new_ulid(), "hop": 0,
+             "class": "human", "body": "three"},
+        )
+        assert drain(ctx) == 1
+        third = continue_argvs(calls)[-1]
+        assert "--continue" not in third  # no resume after a crash
+        assert third[0].startswith(REFOUND_PREAMBLE)
+        assert "CONTINUE-DIRTY ana" in read_log()
+
+    def test_a_conversation_past_its_window_refounds(self, continue_ctx):
+        ctx, calls = continue_ctx
+        assert run_one(ctx, "boss", "acme:ana", "one") == 1
+        age_last_turn("ana")  # idle far past Ana's 1h window
+        assert run_one(ctx, "boss", "acme:ana", "two") == 1
+        second = continue_argvs(calls)[-1]
+        assert "--continue" not in second
+        assert second[0].startswith(REFOUND_PREAMBLE)
+        assert "CONTINUE-STALE ana" in read_log()
+
+    def test_a_poor_graded_engine_refuses_to_continue_in_a_roster(self, tmp_path):
+        # Engine-Claude-Code: resuming `claude -p` across a process boundary
+        # missed 40.6% of the time, and every roster turn is a new process.
+        # `Continue:` on that preset disables the member rather than quietly
+        # costing more than it saves.
+        config = load_rig_config(write_rig_config(tmp_path, {
+            "solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]},
+        }))
+        roster = parse_roster(
+            "### Ana\n- **Rig:** solo\n- **Leader:** yes\n- **Continue:** on\n",
+            Path("ROSTER.md"),
+        )
+        rig, err, _pinned = config.rig_for(roster.find("ana"))
+        assert rig is None
+        assert "continues poorly" in err and "40.6%" in err
+
+    def test_a_moderate_graded_engine_still_continues(self, tmp_path):
+        # Codex is directory-scoped; its caveat is a flag the preset carries,
+        # not a reason to refuse.
+        config = load_rig_config(write_rig_config(tmp_path, {
+            "solo": {"preset": "codex",
+                     "invoke": ["codex", "exec", "{prompt}"]},
+        }))
+        roster = parse_roster(
+            "### Ana\n- **Rig:** solo\n- **Leader:** yes\n- **Continue:** on\n",
+            Path("ROSTER.md"),
+        )
+        rig, err, _pinned = config.rig_for(roster.find("ana"))
+        assert err is None and rig is not None
+        assert "--include-non-interactive" in rig.argv(
+            "hi", continue_conversation=True
+        )
+
+    def test_rig_presets_shows_the_grade(self, capsys):
+        # A reader picking a preset here must learn about a poor grade now,
+        # not when `roster check` disables the member.
+        assert r4t_main(["rig", "presets"]) == 0
+        lines = [l for l in capsys.readouterr().out.splitlines() if "continue:" in l]
+        poor = [l for l in lines if "NOT for a roster" in l]
+        assert len(poor) == 1 and "40.6%" in poor[0]
+        assert any("resume --last --include-non-interactive" in l and "moderate" in l
+                   for l in lines)
+        assert any(l.rstrip().endswith("good)") for l in lines)
+
+
 class TestCacheLog:
     def _log(self, r4t_home, tmp_path, monkeypatch, *, read, created, continued):
         import transcript
@@ -921,6 +969,62 @@ class TestContinuedTurnHistory:
         )
         assert "earlier chatter" in prompt
         assert IN_HARNESS not in prompt
+
+
+class TestPromptStatesTheLocalTime:
+    """The owner has corrected four time errors that all trace to the same
+    thing: a member reads UTC everywhere and concludes it lives there, after
+    which *today* and *tomorrow* land a day off. The intro says the zone
+    outright — in the intro rather than the doctrine block, because it is a
+    framing statement and `reinforce` keeps its last-read primacy."""
+
+    @pytest.fixture
+    def zone(self, monkeypatch):
+        import time as _time
+
+        def use(name: str) -> None:
+            monkeypatch.setenv("TZ", name)
+            _time.tzset()
+
+        yield use
+        monkeypatch.undo()
+        _time.tzset()
+
+    LINE = re.compile(
+        r"Local time is \d{4}-\d{2}-\d{2} \d{2}:\d{2} IST\. Every relative time "
+        r"you read or write — today, tomorrow, this morning — resolves in that "
+        r"zone, not UTC\."
+    )
+
+    def test_the_intro_states_it(self, ctx, zone):
+        zone("Asia/Kolkata")
+        roster = load_roster(ctx.roster_path)
+        prompt = dispatch.build_prompt(ctx, roster, roster.find("phil"), [], Rig(name="t"))
+        assert self.LINE.search(prompt)
+
+    def test_an_echo_member_hears_it_too(self, ctx, zone):
+        zone("Asia/Kolkata")
+        roster = load_roster(ctx.roster_path)
+        prompt = dispatch.build_prompt(
+            ctx, roster, roster.find("phil"), [], Rig(name="t", echo=True)
+        )
+        assert self.LINE.search(prompt)
+
+    def test_it_rides_in_the_intro_section(self, ctx, zone):
+        zone("Asia/Kolkata")
+        roster = load_roster(ctx.roster_path)
+        sections = dict(
+            dispatch.prompt_sections(ctx, roster, roster.find("phil"), [], Rig(name="t"))
+        )
+        assert self.LINE.search("\n".join(sections["intro"]))
+
+    def test_an_override_written_before_now_existed_still_renders(self, ctx):
+        # `str.format` ignores extra keyword arguments, so a node definition
+        # carrying its own `prompts.intro` keeps working untouched.
+        ctx._prompts = {"intro": "You are {name} on {node}."}
+        roster = load_roster(ctx.roster_path)
+        prompt = dispatch.build_prompt(ctx, roster, roster.find("phil"), [], Rig(name="t"))
+        assert "You are Phil on acme." in prompt
 
 
 class TestPromptStats:
@@ -1251,14 +1355,14 @@ class TestFlushVerb:
         assert "first task" in state.read_history(NODE, "ana")
         assert history_archives() == []
 
-    def test_human_and_broken_members_are_skipped_by_name(self, continue_ctx):
+    def test_broken_members_are_skipped_by_name(self, continue_ctx):
         ctx, calls = continue_ctx
         ctx.roster_path.write_text(
-            CONTINUE_ROSTER + "\n### Zoe\n- **Human:** yes\n\n### Rex\n- **Continue:** on\n",
+            CONTINUE_ROSTER + "\n### Zoe\n- **Role:** no rig\n\n### Rex\n- **Continue:** on\n",
             encoding="utf-8",
         )
         results = flush(ctx, "zoe", "rex")
-        assert results[0]["skipped"] == "human member"
+        assert "missing Rig line" in results[0]["skipped"]
         assert "Rig" in results[1]["skipped"]
         assert continue_argvs(calls) == []
 
@@ -1373,11 +1477,6 @@ class TestStdoutFallback:
         assert "[r4t" not in envelopes[0]["content"]
         assert "r4t: STDOUT-REPLY gerry" in read_log()
 
-    def test_stdout_reply_to_creator_answers_the_thread(self, ctx, r4t_home):
-        handle_message(ctx, "boss", "acme:gerry", "question", run_fn=stdout_only)
-        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
-        assert "r4t: ANSWERED" in read_log()
-
     def test_tell_always_wins(self, ctx, repo, r4t_home):
         def tell_and_chatter(rig, prompt, cwd, *, env=None, variant=0):
             outbox = dispatch.Path(env["TELL_OUTBOX_DIR"])
@@ -1434,13 +1533,6 @@ class TestStdoutFallback:
         drain(ctx)  # gerry's turn runs on the fake harness (no reply loop)
         prompts = [read_prompt(p) for p in harness_calls(fake_harness)]
         assert any("From: phil" in p and ANSWER.strip() in p for p in prompts)
-
-    def test_fallback_reply_to_human_parks_in_seat(self, ctx, fake_harness, r4t_home):
-        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
-        parked = seat_messages()
-        assert [m["from"] for m in parked] == ["acme:gerry"]
-        assert parked[0]["content"] == ANSWER.strip()
-        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
 
     def test_two_stdout_replies_are_not_suppressed(self, ctx, repo, r4t_home):
         handle_message(ctx, "boss", "acme:gerry", "question one", run_fn=stdout_only)
@@ -1595,7 +1687,6 @@ class TestEchoRig:
         assert envelopes[0]["files"] == []
         assert "r4t: ECHO-REPLY gerry" in read_log()
         assert "STDOUT-REPLY" not in read_log()
-        assert tasks.list_tasks(NODE)[0]["status"] == tasks.STATUS_CLOSED
 
     def test_short_answer_still_replies(self, ctx, repo, r4t_home):
         # No STDOUT_REPLY_MIN_CHARS floor: an echo member answering "4" to a
@@ -1657,16 +1748,15 @@ class TestEchoRig:
             return 0, ANSWER, 1.0, False
 
         handle_message(ctx, "acme:phil", "acme:gerry", "q one", drain_after=False)
-        handle_message(ctx, "acme:neil", "acme:gerry", "q two", drain_after=False)
+        handle_message(ctx, "boss", "acme:gerry", "q two", drain_after=False)
         assert drain(ctx, run_fn=capture) == 1
         assert len(prompts) == 1
         assert "q one" in prompts[0] and "q two" in prompts[0]
         # Same resolution as the stdout fallback: ONE reply to the newest
-        # message's sender — here the human seat, so it parks there.
-        parked = seat_messages()
-        assert [m["from"] for m in parked] == ["acme:gerry"]
-        assert parked[0]["content"] == ANSWER.strip()
-        assert outbox_envelopes(repo) == []
+        # message's sender — here an outside agent, so it egresses.
+        envelopes = outbox_envelopes(repo)
+        assert [e["to"] for e in envelopes] == ["boss"]
+        assert envelopes[0]["content"] == ANSWER.strip()
 
     def test_dump_turn_stages_nothing(self, ctx, repo, r4t_home):
         # The flush leak (#293): a dump turn's only sender is `r4t:acme`, which
@@ -1684,7 +1774,6 @@ class TestEchoRig:
         enqueue_internal(ctx, "gerry")
         assert drain(ctx, run_fn=tell_and_chatter) == 1
         assert outbox_envelopes(repo) == []  # staged noise still discarded
-        assert seat_messages() == []
         text = read_log()
         assert "r4t: SILENT gerry" in text
         assert "r4t-internal senders" in text
@@ -1733,36 +1822,6 @@ class TestEchoRig:
         assert envelope["files"] == []
         assert "truncated" not in envelope["content"]
         assert not (repo / ".outbox" / envelope["id"]).is_dir()
-
-    def test_long_reply_to_human_parks_with_attachment(
-        self, ctx, repo, r4t_home, capsys
-    ):
-        set_echo(ctx.config_path, echo_max_chars=100)
-        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
-        assert r4t_main([
-            "seat", "inbox", "--peek", "--json", "--node", NODE,
-            "--root", str(repo), "--rig-config", str(ctx.config_path),
-            "--simulate-tell",
-        ]) == 0
-        envelope = json.loads(capsys.readouterr().out.strip())
-        assert "truncated by r4t at 100 chars" in envelope["content"]
-        (entry,) = envelope["files"]
-        assert entry["filename"] == "reply.md"
-        stored = Path(entry["path"])
-        assert stored.read_text(encoding="utf-8").strip() == ANSWER.strip()
-        assert "WARN attachments dropped" not in read_log()
-        assert r4t_main([
-            "seat", "inbox", "--node", NODE, "--root", str(repo),
-            "--rig-config", str(ctx.config_path), "--simulate-tell",
-        ]) == 0
-        assert f"(attachment: reply.md at {stored})" in capsys.readouterr().out
-
-    def test_short_reply_to_human_parks_without_files(self, ctx, r4t_home):
-        set_echo(ctx.config_path)
-        handle_message(ctx, "acme:neil", "acme:gerry", "question", run_fn=stdout_only)
-        (parked,) = seat_messages()
-        assert parked["content"] == ANSWER.strip()
-        assert parked["files"] == []
 
     def test_failed_turn_stages_no_echo_reply(self, ctx, repo, r4t_home):
         def crashed(rig, prompt, cwd, *, env=None, variant=0):
@@ -1815,7 +1874,7 @@ def make_ctx(repo, config_path, tell_fn):
     )
 
 
-class TestRosterThrottle:
+class TestOneTurnAtATime:
     def _ctx(self, repo, fake_harness, tells, tmp_path, **throttle):
         script, _out = fake_harness
         config = _local_base_config(script)
@@ -1825,22 +1884,37 @@ class TestRosterThrottle:
         _sent, capture = tells
         return make_ctx(repo, path, capture)
 
-    def test_max_concurrent_holds_queue(self, repo, fake_harness, tells, tmp_path, r4t_home):
+    def test_a_live_turn_holds_every_other_member(
+        self, repo, fake_harness, tells, tmp_path, r4t_home
+    ):
+        # The contract, not a setting: no number in the config can admit a
+        # second live turn on this node.
         ctx = self._ctx(repo, fake_harness, tells, tmp_path,
-                        max_concurrent=1, min_seconds_between_turn_starts=0)
+                        min_seconds_between_turn_starts=0)
         live = state.AgentLock(NODE, "gerry")
         assert live.acquire("leader")  # one turn already live
         handle_message(ctx, "acme:gerry", "acme:phil", "job", drain_after=False)
-        assert drain(ctx) == 0  # throttle blocks the second start
+        assert drain(ctx) == 0
         assert state.queue_depth(NODE, "phil") == 1
         live.release()
         assert drain(ctx) == 1
 
+    def test_the_held_start_names_who_is_running(
+        self, repo, fake_harness, tells, tmp_path, r4t_home
+    ):
+        ctx = self._ctx(repo, fake_harness, tells, tmp_path,
+                        min_seconds_between_turn_starts=0)
+        live = state.AgentLock(NODE, "gerry")
+        assert live.acquire("leader")
+        handle_message(ctx, "acme:gerry", "acme:phil", "job", drain_after=False)
+        drain(ctx)
+        assert "one turn at a time: gerry is already running" in read_log()
+
     def test_cadence_spaces_turn_starts(self, repo, fake_harness, tells, tmp_path, r4t_home):
         ctx = self._ctx(repo, fake_harness, tells, tmp_path,
-                        max_concurrent=0, min_seconds_between_turn_starts=30)
+                        min_seconds_between_turn_starts=30)
         assert run_one(ctx, "acme:gerry", "acme:phil", "one") == 1
-        handle_message(ctx, "neil", "acme:gerry", "two", drain_after=False)
+        handle_message(ctx, "boss", "acme:gerry", "two", drain_after=False)
         assert drain(ctx) == 0  # cadence window still shut
         assert state.queue_depth(NODE, "gerry") == 1
 
@@ -1868,7 +1942,7 @@ class TestAttachmentRelease:
         dispatch._release_one(
             ctx, outbox, staging,
             {"id": "message-1", "to": "outside", "files": ["report.txt"]},
-            f"{NODE}:phil", new_ulid(), 1, "result", roster, config,
+            f"{NODE}:phil", new_ulid(), 1, "result", roster, config, inside=False,
         )
         assert (outbox / "message-1.json").is_file()
 
@@ -1895,7 +1969,7 @@ class TestAttachmentRelease:
         dispatch._release_one(
             ctx, outbox, staging,
             {"id": "message-2", "to": "outside", "files": ["report.txt"]},
-            f"{NODE}:phil", new_ulid(), 1, "result", roster, config,
+            f"{NODE}:phil", new_ulid(), 1, "result", roster, config, inside=False,
         )
         assert attempted
         assert not bundle.exists()
@@ -1930,7 +2004,7 @@ class TestAttachmentRelease:
         try:
             dispatch._release_one(
                 ctx, outbox, staging, envelope, f"{NODE}:phil",
-                new_ulid(), 1, "result", roster, config,
+                new_ulid(), 1, "result", roster, config, inside=False,
             )
         except OSError as exc:
             assert str(exc) == "copy failed"
@@ -1944,7 +2018,7 @@ class TestAttachmentRelease:
         monkeypatch.setattr(dispatch.shutil, "copytree", real_copytree)
         dispatch._release_one(
             ctx, outbox, staging, envelope, f"{NODE}:phil",
-            new_ulid(), 1, "result", roster, config,
+            new_ulid(), 1, "result", roster, config, inside=False,
         )
         assert (outbox / "message-3" / "report.txt").read_text() == "result"
         assert (outbox / "message-3.json").is_file()
@@ -1976,7 +2050,7 @@ class TestAttachmentRelease:
         dispatch._release_one(
             ctx, outbox, staging,
             {"id": "message-4", "to": "outside", "files": ["report.txt"]},
-            f"{NODE}:phil", new_ulid(), 1, "result", roster, config,
+            f"{NODE}:phil", new_ulid(), 1, "result", roster, config, inside=False,
         )
         assert bundle.is_dir()
         assert (outbox / "message-4" / "report.txt").is_file()
@@ -2010,118 +2084,59 @@ class TestExternalClassIngress:
         # silently acquire meaning.
         assert dispatch.class_from_meta(raw) == "human"
 
-    def test_ingress_owes_nothing_whatever_class_it_claims(self, ctx, r4t_home):
-        # The wire's class still rides the envelope for the member to read; it
-        # no longer decides whether an answer is owed. Outside is outside (#58).
+    def test_the_wires_class_reaches_the_queue(self, ctx, r4t_home):
+        # The wire's class rides the envelope for the member to read. It never
+        # decided whether an answer is owed, and now nothing does: a message
+        # carries no task (#58, #182).
         handle_message(ctx, "beta", "acme", "roster sync", klass="auto", drain_after=False)
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["auto"]
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_deliberate_ingress_owes_nothing_either(self, ctx, r4t_home):
-        # The case that closes #58: an unmarked outside sender used to open a
-        # thread the sweep chased forever. a8s cannot promise a reply for a
-        # node r4t does not own, so r4t stops acting as though it can.
+    def test_an_unmarked_outside_sender_is_human_class(self, ctx, r4t_home):
         handle_message(ctx, "beta", "acme", "ship it", drain_after=False)
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
-    def test_ingress_thread_is_never_nudged(self, ctx, fake_harness):
+    def test_nothing_nudges_an_unanswered_message(self, ctx, fake_harness):
+        # The termination backstop retired with the ledger: no sweep watches
+        # for a reply that never came, whoever sent the message.
         handle_message(ctx, "beta", "acme", "roster sync", drain_after=False)
-        task = tasks.list_tasks(NODE)[0]
-        task["updated_at"] = "2020-01-01T00:00:00Z"
-        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
-        assert run_idle(ctx)["quiet_nudged"] == []
+        assert "quiet_nudged" not in run_idle(ctx)
+        assert "QUIET thread=" not in read_log()
 
-    def test_the_roster_humans_doorbell_is_ingress_too(self, ctx, fake_harness):
-        # Mail through the human's `Address:` is a8s protocol, so whether to
-        # answer is the member's judgment. Watching it turns every passing
-        # remark from the owner into an unprompted status report half an hour
-        # later — observed in production, which is what settled this.
-        handle_message(ctx, "neil", "acme", "ship it", drain_after=False)
-        task = tasks.list_tasks(NODE)[0]
-        assert task["ingress"] is True
-        task["updated_at"] = "2020-01-01T00:00:00Z"
-        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
-        assert run_idle(ctx)["quiet_nudged"] == []
-
-    def test_the_seat_path_is_still_owed_an_answer(self, ctx, fake_harness):
-        # Reaching the roster from INSIDE — the seat, not the doorbell — is the
-        # path r4t owns both ends of, so it keeps its backstop.
-        dispatch._ingest(
-            ctx, f"{NODE}:neil", f"{NODE}:gerry", "where are we",
-            klass="human", internal=True,
-        )
-        task = tasks.list_tasks(NODE)[0]
-        assert task["ingress"] is False
-        task["updated_at"] = "2020-01-01T00:00:00Z"
-        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
-        assert run_idle(ctx)["quiet_nudged"] == [task["id"]]
-
-    def test_status_marks_the_ingress_thread(self, ctx, repo, rig_config, r4t_home, capsys):
-        # Why a thread is never nudged has to be visible to whoever is reading
-        # the surface at 2am.
-        handle_message(ctx, "beta", "acme", "roster sync", drain_after=False)
-        r4t_main([
-            "status", "--root", str(repo), "--node", NODE,
-            "--rig-config", str(rig_config), "--no-notify",
-        ])
-        out = capsys.readouterr().out
-        assert "creator=beta" in out and "ingress" in out
-
-    def test_a_hop_never_relabels_the_thread_it_rides(self, ctx, r4t_home):
-        # A delegation inherits the inbound thread and must not change what it
-        # is owed either way. The flag is stamped at birth or never.
+    def test_a_hop_inherits_the_thread_it_rides(self, ctx, r4t_home):
+        # A delegation inherits the inbound thread: lineage, not obligation.
         handle_message(ctx, "beta", "acme", "ship it", drain_after=False)
-        thread_id = tasks.list_tasks(NODE)[0]["id"]
+        thread_id = state.read_queue(NODE, "gerry")[0]["thread"]
         dispatch._ingest(
             ctx, f"{NODE}:gerry", f"{NODE}:phil", "your turn",
             klass="auto", internal=True, thread=thread_id, hop=1,
         )
-        assert tasks.load_task(NODE, thread_id)["ingress"] is True
-
-
-class TestQuietSweep:
-    def _quiet_thread(self, creator="acme:neil"):
-        task = tasks.new_task(new_ulid(), creator)
-        task["updated_at"] = "2020-01-01T00:00:00Z"
-        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
-        return task["id"]
-
-    def test_quiet_thread_nudges_the_leader(self, ctx, fake_harness):
-        thread_id = self._quiet_thread()
-        summary = run_idle(ctx)
-        assert summary["quiet_nudged"] == [thread_id]
-        prompts = [read_prompt(p) for p in harness_calls(fake_harness)]
-        assert any("You are Gerry" in p and "gone quiet" in p for p in prompts)
-        # nudged to report, not force-closed
-        assert tasks.load_task(NODE, thread_id)["status"] == tasks.STATUS_OPEN
-
-    def test_recent_thread_left_alone(self, ctx, fake_harness):
-        task = tasks.ensure_task(NODE, new_ulid(), "acme:neil")
-        summary = run_idle(ctx)
-        assert summary["quiet_nudged"] == []
-        assert tasks.load_task(NODE, task["id"])["status"] == tasks.STATUS_OPEN
-
-    def test_answered_thread_skipped(self, ctx, fake_harness):
-        thread_id = self._quiet_thread()
-        tasks.close_task(NODE, thread_id)  # originator already answered
-        summary = run_idle(ctx)
-        assert summary["quiet_nudged"] == []
-
-    def test_live_turn_defers_the_sweep(self, ctx, fake_harness):
-        self._quiet_thread()
-        live = state.AgentLock(NODE, "gerry")
-        assert live.acquire("leader")
-        try:
-            summary = run_idle(ctx)
-        finally:
-            live.release()
-        assert summary["quiet_nudged"] == []
+        assert state.read_queue(NODE, "phil")[0]["thread"] == thread_id
 
 
 class TestMissionReview:
     def _review(self, ctx):
+        # These exercise the STALL LADDER. The wall-clock floor below is a
+        # second, independent gate; clear its stamp so one is not measuring
+        # the other.
+        st = state.read_mission_review(NODE)
+        if st:
+            st.pop("last_review_at", None)
+            state.write_mission_review(NODE, st)
         return run_idle(ctx)["mission_review"]
+
+    def test_two_reviews_are_never_closer_than_the_floor(self, ctx, fake_harness):
+        # The ladder counts idle WAKES, so a shorter wake interval would
+        # multiply the review rate without anyone editing a policy. A review
+        # is a real paid leader turn, so wall time floors it too.
+        self._review(ctx)
+        assert self._review(ctx)["fired"] is True
+        calls = len(harness_calls(fake_harness))
+        state.write_mission_review(
+            NODE, {"stalls": 99, "silent_reviews": 0, "dormant": False,
+                   "mission_mtime": 0.0, "last_review_at": time.time()},
+        )
+        assert run_idle(ctx)["mission_review"]["fired"] is False
+        assert len(harness_calls(fake_harness)) == calls  # nothing was spent
 
     def test_no_fire_when_a_queue_is_nonempty(self, ctx, fake_harness):
         # A resting member holds its queue: work remains, so never stalled.
@@ -2130,11 +2145,6 @@ class TestMissionReview:
         assert self._review(ctx)["fired"] is False
         assert self._review(ctx)["fired"] is False
         assert not harness_calls(fake_harness)
-
-    def test_no_fire_with_an_open_thread(self, ctx, fake_harness):
-        tasks.ensure_task(NODE, new_ulid(), "acme:neil")  # open, but no queued work
-        self._review(ctx)
-        assert self._review(ctx)["fired"] is False
 
     def test_no_fire_when_leader_is_resting(self, ctx, fake_harness):
         empty_member_budget(ctx, "gerry")  # the top leader is broke
@@ -2343,51 +2353,38 @@ class TestRunHarness:
         config["junior-dev"]["invoke"] = ["/no/such/binary-r4t", "{prompt}"]
         rig_config.write_text(json.dumps(config), encoding="utf-8")
 
-    def test_spawn_failure_to_external_sender_tells(self, ctx, repo, tells, fake_harness, rig_config):
-        # An external sender enters at the top (gerry, the leader), whose rig is
-        # fine — so break the leader rig to force the 127 on the leader's turn.
-        config = json.loads(rig_config.read_text(encoding="utf-8"))
-        config["leader"]["invoke"] = ["/no/such/binary-r4t", "{prompt}"]
-        rig_config.write_text(json.dumps(config), encoding="utf-8")
-        sent, _ = tells
-        handle_message(ctx, "boss", "acme", "hi")
-        assert any("failed to start" in b for _, b in sent)
-
-    def test_spawn_failure_to_intra_roster_sender_feeds_error_in_band(
+    def test_spawn_failure_parks_the_member_and_tells_nobody(
         self, ctx, repo, tells, fake_harness, rig_config
     ):
-        # #160: an operational error to an INTRA-roster sender is not a headerless
-        # a8s tell that mints a fresh task — it is an in-band class=error message
-        # on the ORIGINATING thread. No tell leaves the garden; no new thread.
+        # #138: a harness that is not installed fails identically forever, so
+        # the sender heard about it forever. It parks instead — one line, then
+        # silence, with the queue held.
         self._break_junior_rig(rig_config)
         sent, _ = tells
         handle_message(ctx, "acme:gerry", f"{NODE}:phil", "hi", drain_after=False)
-        thread = tasks.list_tasks(NODE)[0]["id"]
         assert drain(ctx) == 1  # phil's one turn fails to spawn (127)
         assert sent == []  # nothing left via a8s tell
-        errs = state.read_queue(NODE, "gerry")
-        assert errs and errs[0]["class"] == "error"
-        assert errs[0]["thread"] == thread  # rides the original thread
-        assert "failed to start" in errs[0]["body"]
-        assert len(tasks.list_tasks(NODE)) == 1  # no fresh thread minted
+        assert state.read_queue(NODE, "gerry") == []  # and nothing in-band
+        assert state.read_parked(NODE, "phil")["probe"] == "/no/such/binary-r4t"
+        assert state.queue_depth(NODE, "phil") == 1  # the mail is held, not lost
 
 
 class TestMemberScoping:
     def test_flat_roster_lists_whole_roster(self, ctx):
         roster = load_roster(ctx.roster_path)
         lines = "\n".join(dispatch._member_lines(ctx, roster, roster.find("phil")))
-        assert "Gerry" in lines and "Neil" in lines
+        assert "Gerry" in lines
         assert "Broken" not in lines  # errored member is excluded
 
     def test_tree_roster_hides_non_adjacent(self, tree_ctx):
         roster = load_roster(tree_ctx.roster_path)
         lines = "\n".join(dispatch._member_lines(tree_ctx, roster, roster.find("ann")))
-        assert "Vic" in lines and "Bea" in lines and "Ned" in lines
+        assert "Vic" in lines and "Bea" in lines
         assert "Cal" not in lines  # the build cell is invisible to a design IC
 
 
 MISSION_TEXT = "# Mission\n\nBuild the thing. Done when a stranger loves it.\n"
-MISSION_HEADING = "## The mission (MISSION.md — outranks every other document)"
+MISSION_HEADING = "## The mission (outranks every other document)"
 
 
 class TestMissionInjection:
@@ -2451,14 +2448,6 @@ class TestTreeEnforcement:
         assert run_one(tree_ctx, "acme:cal", "acme:ann", "quick design question") == 1
         assert state.queue_depth(NODE, "cal") == 1  # reply delivered to Cal
         assert state.queue_depth(NODE, "vic") == 0
-        assert "REROUTED" not in read_log()
-
-    def test_seat_is_always_reachable(self, tree_ctx, monkeypatch):
-        monkeypatch.setenv("CHATTY_TO", "Ned")
-        monkeypatch.setenv("CHATTY_BODY", "status update for the seat")
-        assert run_one(tree_ctx, "acme:vic", "acme:ann", "report up") == 1
-        parked = seat_messages("ned")
-        assert parked and "status update" in parked[0]["content"]
         assert "REROUTED" not in read_log()
 
     def test_adjacent_tell_passes_through(self, tree_ctx, monkeypatch):
@@ -2653,20 +2642,6 @@ class TestPromptOverrides:
         assert dispatch._load_prompt_overrides(None) == {}
         assert dispatch._load_prompt_overrides(tmp_path / "nope.json") == {}
 
-    def test_quiet_nudge_override_reaches_the_leader(
-        self, r4t_home, repo, rig_config, tells, tmp_path
-    ):
-        ctx = self._ctx_with_prompts(
-            repo, rig_config, tells, tmp_path, {"quiet_nudge": "PING {creator} re {thread}"}
-        )
-        task = tasks.new_task(new_ulid(), "acme:neil")
-        task["updated_at"] = "2020-01-01T00:00:00Z"
-        state.atomic_write_json(tasks.task_path(NODE, task["id"]), task)
-        roster = load_roster(ctx.roster_path)
-        config = load_rig_config(ctx.config_path)
-        assert dispatch._quiet_task_sweep(ctx, config, roster) == [task["id"]]
-        assert f"PING acme:neil re {task['id']}" in state.read_queue(NODE, "gerry")[0]["body"]
-
 
 class TestHistoryRigKnobs:
     def _rig(self, tmp_path, **knobs):
@@ -2741,15 +2716,7 @@ class TestBatchIngress:
         queued = state.read_queue(NODE, "gerry")
         assert [e["class"] for e in queued] == ["auto", "human"]
         assert [e["from"] for e in queued] == ["peer-a", "peer-b"]
-        creators = {t["creator"] for t in tasks.list_tasks(NODE)}
-        assert creators == {"peer-a", "peer-b"}
-
-    def test_ingress_threads_still_marked(self, ctx, fake_harness):
-        raw = json.dumps([
-            {"from": "outside", "to": "acme", "content": "hi", "meta": {}},
-        ])
-        assert handle_batch(ctx, raw, drain_after=False) == 0
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
+        assert len({e["thread"] for e in queued}) == 2  # one thread each
 
     def test_malformed_array_exits_nonzero(self, ctx, fake_harness):
         assert handle_batch(ctx, "not-json") == 2
@@ -2842,7 +2809,6 @@ class TestCli:
         )
         assert rc == 0
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["auto"]
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
     def test_dispatch_without_meta_is_still_ingress(self, r4t_home, repo, rig_config, fake_harness):
         rc = self.run(
@@ -2852,18 +2818,6 @@ class TestCli:
         )
         assert rc == 0
         assert [e["class"] for e in state.read_queue(NODE, "gerry")] == ["human"]
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
-
-    def test_dispatch_from_the_roster_humans_doorbell_is_ingress(
-        self, r4t_home, repo, rig_config, fake_harness
-    ):
-        rc = self.run(
-            "dispatch", "--root", str(repo), "--from", "neil",
-            "--to", "acme", "--message", "ship it",
-            "--rig-config", str(rig_config), "--no-notify", "--no-drain",
-        )
-        assert rc == 0
-        assert tasks.list_tasks(NODE)[0]["ingress"] is True
 
     def test_dispatch_batches_queued_with_live(self, r4t_home, repo, rig_config, fake_harness):
         state.enqueue(
@@ -2896,7 +2850,6 @@ class TestCli:
         assert "cell=leadership" in out
         assert "budget=100/100" in out
         assert "✓ Phil" in out and "rig=junior-dev" in out
-        assert "Human  address=neil" in out
         assert "✗ Broken" in out and "disabled:" in out
         assert "(try: fix ROSTER.md)" in out
         assert "dead letters  0" in out
@@ -2908,15 +2861,14 @@ class TestCli:
         lines = out.splitlines()
         header = next(line for line in lines if line.startswith("RIG "))
         assert header.split() == [
-            "RIG", "PRESET", "MODEL", "CONC", "TIMEOUT", "SENDS", "BUDGET",
+            "RIG", "PRESET", "MODEL", "TIMEOUT", "SENDS", "BUDGET",
         ]
         rig_rows = [line for line in lines if line.startswith(("leader ", "junior-dev "))]
         assert len(rig_rows) == 2
         assert "{prompt}" not in out
         assert "gerry -> leader" in out
-        assert "throttle:" in out and "governance:" in out
+        assert "one turn at a time" in out and "governance:" in out
         assert "MEMBER" in out and "Phil" in out and "junior-dev" in out
-        assert "Neil" in out and "human" in out
         assert "(full invoke lines: r4t rig ls --wide)" in out
 
     def test_rigs_ls_matches_rig_list(self, r4t_home, repo, rig_config, capsys):
@@ -2982,29 +2934,16 @@ class TestCli:
         assert rc == 1
         assert "already exists" in capsys.readouterr().err
 
-    def test_task_list_and_show(self, r4t_home, capsys):
-        task = tasks.ensure_task(NODE, new_ulid(), "gerry")
-        assert self.run("task", "list", "--node", NODE) == 0
-        assert task["id"] in capsys.readouterr().out
-        assert self.run("task", "show", task["id"], "--node", NODE) == 0
-        assert '"creator": "gerry"' in capsys.readouterr().out
-
-    def test_clear_prunes_and_expires(self, r4t_home, repo, rig_config, capsys):
+    def test_clear_prunes_stale_locks(self, r4t_home, repo, rig_config, capsys):
         dead = state.agent_dir(NODE, "phil") / ".lock"
         dead.parent.mkdir(parents=True, exist_ok=True)
         dead.write_text(json.dumps({"pid": 99999999, "rig": "t"}), encoding="utf-8")
-        stale = tasks.new_task(new_ulid(), "gerry")
-        stale["updated_at"] = "2020-01-01T00:00:00Z"
-        tasks.atomic_write_json(tasks.task_path(NODE, stale["id"]), stale)
         rc = self.run(
             "clear", "--root", str(repo), "--node", NODE,
             "--rig-config", str(rig_config), "--no-notify",
         )
         assert rc == 0
-        out = capsys.readouterr().out
-        assert "pruned 1 stale lock(s)" in out
-        assert "expired 1 thread(s)" in out
-        assert tasks.load_task(NODE, stale["id"]) is None
+        assert "pruned 1 stale lock(s)" in capsys.readouterr().out
 
     def test_clear_applies_log_retention(self, r4t_home, repo, rig_config, capsys):
         log_dir = state.roster_dir(NODE) / "log"
@@ -3189,7 +3128,7 @@ class TestCli:
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(rig_config))
         out = capsys.readouterr().out
         assert rc == 1
-        assert "ProseReply must be on or off" in out
+        assert "ProseReply must be yes/no/true/false/y/n/1/0/on/off" in out
         assert "(try: ProseReply: off)" in out
 
     def test_roster_check_rejects_legacy_fallback_field(
@@ -3245,7 +3184,7 @@ class TestCli:
         )
         config = tmp_path / "shared-rigs.json"
         config.write_text(
-            json.dumps({"solo": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"]}}),
+            json.dumps({"solo": {"preset": "cursor", "invoke": ["agent", "-p", "{prompt}"]}}),
             encoding="utf-8",
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(config))
@@ -3374,32 +3313,33 @@ class TestDefault:
         assert rc == 0
         out = capsys.readouterr().out
         assert "(no rigs yet — try: r4t rig add" in out
-        assert "no ROSTER.md" in out
+        assert "no r4t.md or ROSTER.md" in out
 
 
 class TestInit:
     def run(self, *argv):
         return r4t_main(list(argv))
 
-    def test_init_writes_roster_and_config(self, r4t_home, tmp_path, capsys):
+    def test_init_writes_the_runbook_and_nothing_else(self, r4t_home, tmp_path, capsys):
         root = tmp_path / "fresh-repo"
         root.mkdir()
         rc = self.run("init", "--root", str(root))
         assert rc == 0
         out = capsys.readouterr().out
-        assert (root / "ROSTER.md").is_file()
-        assert (r4t_home / "rigs.json").is_file()
-        assert "a8s add fresh-repo-node" in out
-        assert "a8s namespace fresh-repo fresh-repo-node" in out
-        assert "a8s start fresh-repo-node" in out
-        assert "tell fresh-repo:dev" in out
+        # Two verbs, one each: init writes the file, add registers the node.
+        assert [p.name for p in root.iterdir()] == ["r4t.md"]
+        assert not (r4t_home / "rigs.json").exists()
+        assert f"next: r4t add {root}" in out
 
-    def test_generated_roster_passes_check(self, r4t_home, tmp_path, capsys):
+    def test_the_starter_runbook_extends_triforce_and_checks_out(
+        self, r4t_home, tmp_path, capsys
+    ):
         root = tmp_path / "fresh-repo"
         root.mkdir()
         self.run("init", "--root", str(root))
         capsys.readouterr()
-        rc = self.run("roster", "check", "--root", str(root))
+        assert 'extends: "triforce"' in (root / "r4t.md").read_text(encoding="utf-8")
+        rc = self.run("runbook", "check", "--root", str(root))
         assert rc == 0
         assert "OK" in capsys.readouterr().out
 
@@ -3407,26 +3347,20 @@ class TestInit:
         root = tmp_path / "fresh-repo"
         root.mkdir()
         self.run("init", "--root", str(root))
-        roster_before = (root / "ROSTER.md").read_text(encoding="utf-8")
-        config_before = (r4t_home / "rigs.json").read_text(encoding="utf-8")
+        before = (root / "r4t.md").read_text(encoding="utf-8")
         capsys.readouterr()
         rc = self.run("init", "--root", str(root))
         assert rc == 0
-        out = capsys.readouterr().out
-        assert "left unchanged" in out
-        assert (root / "ROSTER.md").read_text(encoding="utf-8") == roster_before
-        assert (r4t_home / "rigs.json").read_text(encoding="utf-8") == config_before
+        assert "left unchanged" in capsys.readouterr().out
+        assert (root / "r4t.md").read_text(encoding="utf-8") == before
 
 
-class TestExternalIngressEntersAtTheTop:
-    def test_external_member_address_routes_to_leader(self, ctx, fake_harness):
-        # An outside agent cannot reach a member by namespace: the topmost
-        # leader IS the garden from outside, so a sub-address is ignored.
+class TestExternalIngressIsGatedByTheMember:
+    def test_external_member_address_reaches_a_member_with_ingress(
+        self, ctx, fake_harness
+    ):
         handle_message(ctx, "boss", "acme:phil", "do this")
-        assert state.queue_depth(NODE, "phil") == 0
-        prompt = read_prompt(harness_calls(fake_harness)[0])
-        assert "You are Gerry" in prompt
-        assert tasks.list_tasks(NODE)[0]["creator"] == "boss"  # sender unchanged
+        assert "You are Phil" in read_prompt(harness_calls(fake_harness)[0])
 
     def test_external_bare_node_reaches_leader(self, ctx, fake_harness):
         handle_message(ctx, "boss", "acme", "status?")
@@ -3436,40 +3370,31 @@ class TestExternalIngressEntersAtTheTop:
         handle_message(ctx, "acme:gerry", "acme:phil", "do this")
         assert "You are Phil" in read_prompt(harness_calls(fake_harness)[0])
 
-    def test_doorbell_reply_lands_in_seat_path_and_routes_to_leader(self, ctx, fake_harness):
-        # "neil" is the roster human's Address: a reply from it is the human
-        # speaking, re-stamped to the seat and routed to the leader.
-        handle_message(ctx, "neil", "acme:phil", "please do X")
-        assert state.queue_depth(NODE, "phil") == 0
-        assert "You are Gerry" in read_prompt(harness_calls(fake_harness)[0])
-        assert tasks.list_tasks(NODE)[0]["creator"] == "acme:neil"
-
-    def test_doorbell_reply_thread_closes_on_answer(
-        self, chatty_ctx, chatty_harness, monkeypatch
+    def test_a_walled_member_refuses_rather_than_redirecting(
+        self, ctx, repo, tells, fake_harness
     ):
-        monkeypatch.setenv("CHATTY_TO", "neil")
-        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
-        assert run_one(chatty_ctx, "neil", "acme:gerry", "please ship") == 1
-        task = tasks.list_tasks(NODE)[0]
-        assert task["creator"] == "acme:neil"
-        assert task["status"] == tasks.STATUS_CLOSED
-
-    def test_reply_to_human_address_parks_in_seat_and_closes(
-        self, chatty_ctx, repo, chatty_harness, tells, monkeypatch
-    ):
-        # Gerry answers the doorbell reply by its a8s Address ("neil"), the
-        # human's other name: it parks in the seat, rings the doorbell, and
-        # closes the human's thread — no envelope leaves the garden.
+        # No silent redirect: the leader would answer for a member who never
+        # saw the message, and the sender would never learn it was ignored.
+        (repo / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n\n"
+            "### Phil\n- **Rig:** junior-dev\n- **Ingress:** off\n",
+            encoding="utf-8",
+        )
         sent, _ = tells
-        monkeypatch.setenv("CHATTY_TO", "neil")
-        monkeypatch.setenv("CHATTY_BODY", "done: shipped and verified")
-        assert run_one(chatty_ctx, "neil", "acme", "please ship") == 1
-        assert outbox_envelopes(repo) == []
-        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
-        assert ("neil", "done: shipped and verified") in sent
-        task = tasks.list_tasks(NODE)[0]
-        assert task["creator"] == "acme:neil"
-        assert task["status"] == tasks.STATUS_CLOSED
+        handle_message(ctx, "boss", "acme:phil", "please do X")
+        assert not harness_calls(fake_harness)
+        assert state.queue_depth(NODE, "phil") == 0
+        assert state.queue_depth(NODE, "gerry") == 0
+        assert "no-ingress" in dead_reasons()
+        assert any("does not accept ingress" in b for _, b in sent)
+
+    def test_the_leader_takes_ingress_by_default(self, ctx, repo, fake_harness):
+        (repo / "ROSTER.md").write_text(
+            "### Gerry\n- **Rig:** leader\n- **Leader:** yes\n",
+            encoding="utf-8",
+        )
+        handle_message(ctx, "boss", "acme:gerry", "status?")
+        assert "You are Gerry" in read_prompt(harness_calls(fake_harness)[0])
 
 
 class TestLiveLogTee:
@@ -3491,51 +3416,6 @@ class TestLiveLogTee:
         handle_message(ctx, "acme:gerry", "acme:phil", "hi")
         text = state.live_log_path(NODE, "phil").read_text(encoding="utf-8")
         assert "fake harness ran" in text
-
-
-class TestDoorbellGate:
-    def test_no_setting_rings_as_today(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        handle_message(ctx, "acme:gerry", "acme:neil", "hi")
-        assert ("neil", "hi") in sent
-        assert "GATE" not in read_log()
-
-    def test_gate_pass_rings(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        gated = replace(ctx, doorbell_check="exit 0")
-        handle_message(gated, "acme:gerry", "acme:neil", "hi")
-        assert ("neil", "hi") in sent
-        assert "GATE acme passed" in read_log()
-
-    def test_gate_fail_parks_without_ring(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        cmd = "echo 'check failed: 2 finding(s)'; echo 'doc.md:2: bad' 1>&2; exit 1"
-        gated = replace(ctx, doorbell_check=cmd)
-        handle_message(gated, "acme:gerry", "acme:neil", "hi")
-        assert ("neil", "hi") not in sent
-        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
-        assert any("seat unreachable: check failed: 2 finding(s)" in b for _, b in sent)
-        log = read_log()
-        assert "r4t: GATE acme doc.md:2: bad" in log
-        assert "doorbell BLOCKED" in log
-
-    def test_gate_timeout_fails_closed(self, ctx, tells, fake_harness, monkeypatch):
-        sent, _ = tells
-        monkeypatch.setattr(dispatch, "DOORBELL_CHECK_TIMEOUT", 0.3)
-        gated = replace(ctx, doorbell_check="sleep 5")
-        handle_message(gated, "acme:gerry", "acme:neil", "hi")
-        assert ("neil", "hi") not in sent
-        assert [m["from"] for m in seat_messages()] == ["acme:gerry"]
-        assert any("seat unreachable: check did not complete" in b for _, b in sent)
-        assert "timed out" in read_log()
-
-    def test_gate_skipped_when_seat_attached(self, ctx, tells, fake_harness):
-        sent, _ = tells
-        state.touch_seat_presence(NODE, "Neil")
-        gated = replace(ctx, doorbell_check="exit 1")
-        handle_message(gated, "acme:gerry", "acme:neil", "hi")
-        assert not sent
-        assert "GATE" not in read_log()
 
 
 WORKDIR_ROSTER = textwrap.dedent(

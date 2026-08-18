@@ -31,6 +31,7 @@ from pathlib import Path
 
 from core import (
     _preview,
+    harden_stdio,
     out_agent,
     outbox_bundle_dir,
     version_line as _version_line,
@@ -496,10 +497,22 @@ def _print_usage() -> None:
     print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
 
 
-def _optional_sender() -> tuple[str, dict] | None:
-    try:
-        from registry import sender_from_cwd
+def _optional_sender(outbox: Path | None = None) -> tuple[str, dict] | None:
+    """The registry entry this send is attributed to locally.
 
+    The outbox decides when it is some node's own: two nodes rooted at one repo
+    both match `sender_from_cwd`, which returns whichever the registry happens
+    to list first. The wire is unaffected either way — `_process_pending`
+    force-overwrites `from` from the node owning the ingested directory — but
+    the local log line and the envelope's initial stamp should name the node
+    that actually wrote it."""
+    try:
+        from registry import load_registry, sender_from_cwd
+
+        if outbox is not None:
+            owner = _registered_owner(outbox)
+            if owner is not None:
+                return owner.name, load_registry().get(owner.name, {})
         return sender_from_cwd()
     except OSError:
         return None
@@ -546,13 +559,17 @@ def _outbox_is_registered(outbox: Path) -> bool:
 def _hijack_note(outbox: Path) -> str | None:
     """The one shape a leaked `TELL_OUTBOX_DIR` makes and nothing else does.
 
-    An inherited variable from a live seat points a fresh shell's mail at that
-    seat's outbox, and every check passes — the directory exists, it is
-    writable, it is a real agent's. The mail simply leaves under the wrong
-    name. What gives it away is the pair: the outbox belongs to a registered
-    agent, and the CWD is nowhere near that agent. A staging outbox (r4t's
-    per-turn dir) is not registered, and a seat working in its own root
-    matches, so neither trips this.
+    Two registered identities competing is the only case where the env var's
+    outbox is misleading: the CWD sits inside (or is) a DIFFERENT registered
+    agent's root/outbox, so a reader there would expect mail to leave under
+    that other agent's name while it actually leaves under the outbox
+    owner's. A CWD that matches no registered agent at all has no competing
+    identity to lose to — the env var is explicit configuration (a seat that
+    deliberately exports its own TELL_OUTBOX_DIR and sends from an unrelated
+    worktree, or a staging outbox like r4t's per-turn dir), so it stays
+    silent even though the outbox is a registered agent's own. A CWD inside
+    the owner's own root is checked first and always silent: two nodes may
+    share one repo root, and the sibling must not read as a hijacker there.
     """
     if not os.environ.get(TELL_OUTBOX_DIR_ENV, "").strip():
         return None
@@ -561,17 +578,33 @@ def _hijack_note(outbox: Path) -> str | None:
         return None
     try:
         cwd = Path.cwd().resolve()
-        root = owner.root.resolve()
+        if _cwd_matches_outbox(cwd, owner.root.resolve(), outbox):
+            return None
     except (OSError, RuntimeError):
         return None
-    if _cwd_matches_outbox(cwd, root, outbox):
+    from registry import participants_from_registry
+
+    try:
+        others = participants_from_registry()
+    except OSError:
         return None
-    return (
-        f"{TELL_OUTBOX_DIR_ENV} points at {owner.name}'s outbox, but this "
-        f"directory is not {owner.name}'s ({cwd}). Mail sent from here leaves "
-        f"as {owner.name}. If that is not what you meant, the variable was "
-        f"inherited from another shell — unset {TELL_OUTBOX_DIR_ENV}."
-    )
+    for other in others:
+        if other.name == owner.name:
+            continue
+        try:
+            other_root = other.root.resolve()
+            other_outbox = other.outbox_path().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not _cwd_matches_outbox(cwd, other_root, other_outbox):
+            continue
+        return (
+            f"{TELL_OUTBOX_DIR_ENV} points at {owner.name}'s outbox, but this "
+            f"directory is {other.name}'s ({cwd}). Mail sent from here leaves "
+            f"as {owner.name}. If that is not what you meant, the variable was "
+            f"inherited from another shell — unset {TELL_OUTBOX_DIR_ENV}."
+        )
+    return None
 
 
 def _validate_recipient(target_query: str) -> tuple[int, str | None, str | None]:
@@ -671,6 +704,7 @@ def run_check(recipient: str | None) -> int:
 
 
 def tell_main(argv: list[str]) -> int:
+    harden_stdio()
     try:
         recipient, attachments, message_argv, check, split = parse_tell_argv(argv)
     except TellHelp:
@@ -713,7 +747,7 @@ def tell_main(argv: list[str]) -> int:
     if note is not None:
         print(f"tell: warning: {note}", file=sys.stderr)
 
-    sender = _optional_sender()
+    sender = _optional_sender(outbox)
     to = recipient
     kind: str | None = None
     if _outbox_is_registered(outbox):

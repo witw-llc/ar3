@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,84 +137,87 @@ class TestMessageBody:
 
 class TestBuildCommand:
     @pytest.fixture
-    def agent_root(self, tmp_path):
-        root = tmp_path / "agent"
-        root.mkdir()
+    def files_root(self, tmp_path):
+        """The node's already-resolved attachment root. `build_command` takes
+        it rather than deriving it: `files_dir` interpolates per-node vars, and
+        the registry is the one place that resolves a mailbox path."""
+        root = tmp_path / "agent" / ".files"
+        root.mkdir(parents=True)
         return root
 
-    def test_substitutes_sender_recipient_message(self, agent_root):
+    def test_substitutes_sender_recipient_message(self, files_root):
         defn = {"invoke": ["claude", "--continue", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "CLAUDE", "content": "fix this"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["claude", "--continue", "-p", "GERRY tells CLAUDE: fix this"]
 
-    def test_alias_routed_keeps_alias_in_recipient(self, agent_root):
+    def test_alias_routed_keeps_alias_in_recipient(self, files_root):
         # Strict opacity / mailing-list semantics: when the sender wrote
         # `to: devs`, the recipient's $RECIPIENT resolves to "devs".
         defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "devs", "content": "standup"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["claude", "-p", "GERRY tells devs: standup"]
 
-    def test_namespace_routed_keeps_full_address_in_recipient(self, agent_root):
+    def test_namespace_routed_keeps_full_address_in_recipient(self, files_root):
         # Issue #148: routing preserves the colon address in `to`, so the
         # bound node's $RECIPIENT carries it verbatim and the node can
         # self-route internally.
         defn = {"invoke": ["claude", "-p", "$SENDER tells $RECIPIENT: $MESSAGE"]}
         msg = {"from": "GERRY", "to": "acme:ops:phil", "content": "ping"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["claude", "-p", "GERRY tells acme:ops:phil: ping"]
 
-    def test_missing_invoke_raises(self, agent_root):
+    def test_missing_invoke_raises(self, files_root):
         with pytest.raises(ValueError, match="invoke"):
-            build_command({}, {"from": "G", "to": "C"}, agent_root)
+            build_command({}, {"from": "G", "to": "C"}, files_root)
 
-    def test_a8s_dir_substitution(self, agent_root):
+    def test_a8s_dir_substitution(self, files_root):
         from core import SCRIPT_DIR
         defn = {"invoke": ["$A8S_DIR/dummy-cli", "$MESSAGE"]}
         msg = {"from": "A", "to": "B", "content": "hi"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == [f"{SCRIPT_DIR}/dummy-cli", "hi"]
 
-    def test_definition_path_substitution(self, agent_root):
+    def test_definition_path_substitution(self, files_root):
         defn = {"invoke": ["r4t", "--definition", "$DEFINITION_PATH", "-p", "$MESSAGE"]}
         msg = {"from": "A", "to": "B", "content": "hi"}
-        argv = build_command(defn, msg, agent_root, "/path/to/defn.json")
+        argv = build_command(defn, msg, files_root, "/path/to/defn.json")
         assert argv == ["r4t", "--definition", "/path/to/defn.json", "-p", "hi"]
 
-    def test_definition_path_defaults_empty(self, agent_root):
+    def test_definition_path_defaults_empty(self, files_root):
         defn = {"invoke": ["r4t", "$DEFINITION_PATH", "$MESSAGE"]}
-        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, agent_root)
+        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, files_root)
         assert argv == ["r4t", "", "hi"]
 
-    def test_meta_expands_to_compact_json(self, agent_root):
+    def test_meta_expands_to_compact_json(self, files_root):
         # #167: protocol metadata between nodes. a8s carries the object and
         # hands it over verbatim — the vocabulary is the nodes' business.
         defn = {"invoke": ["r4t", "--meta", "$META", "-p", "$MESSAGE"]}
         msg = {"from": "A", "to": "B", "content": "hi", "meta": {"class": "auto"}}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["r4t", "--meta", '{"class":"auto"}', "-p", "hi"]
 
-    def test_meta_absent_expands_empty(self, agent_root):
+    def test_meta_absent_expands_empty(self, files_root):
         defn = {"invoke": ["r4t", "--meta", "$META"]}
-        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, agent_root)
+        argv = build_command(defn, {"from": "A", "to": "B", "content": "hi"}, files_root)
         assert argv == ["r4t", "--meta", ""]
 
-    def test_meta_non_object_expands_empty(self, agent_root):
+    def test_meta_non_object_expands_empty(self, files_root):
         # A remote cluster wrote the envelope; a scalar `meta` is that
         # boundary's problem, not a crash in the wake.
         defn = {"invoke": ["r4t", "--meta", "$META"]}
         msg = {"from": "A", "to": "B", "content": "hi", "meta": "auto"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["r4t", "--meta", ""]
 
-    def test_meta_value_is_not_reinterpolated(self, agent_root):
+    def test_meta_value_is_not_reinterpolated(self, files_root):
         defn = {"invoke": ["r4t", "--meta", "$META"]}
         msg = {"from": "A", "to": "B", "content": "hi", "meta": {"note": "$SENDER \\ x"}}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv[2] == '{"note":"$SENDER \\\\ x"}'
 
-    def test_bundled_r4t_node_receives_the_class_on_its_argv(self, agent_root):
+    def test_bundled_r4t_node_receives_the_class_on_its_argv(self, files_root):
         # The seam itself: the shipped r4t definition forwards `$META`, so a
         # peer cluster's class reaches `r4t dispatch` without a8s reading it.
         defn = json.loads(default_definition_path("r4t").read_text(encoding="utf-8"))
@@ -221,16 +225,16 @@ class TestBuildCommand:
             "from": "beta", "to": "acme", "content": "roster sync",
             "meta": {"class": "auto"},
         }
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv[argv.index("--meta") + 1] == '{"class":"auto"}'
 
-    def test_does_not_mutate_original_argv(self, agent_root):
+    def test_does_not_mutate_original_argv(self, files_root):
         defn = {"invoke": ["claude", "-p", "$MESSAGE"]}
         original = list(defn["invoke"])
-        build_command(defn, {"from": "A", "to": "B", "content": "hello"}, agent_root)
+        build_command(defn, {"from": "A", "to": "B", "content": "hello"}, files_root)
         assert defn["invoke"] == original
 
-    def test_message_body_includes_files(self, agent_root):
+    def test_message_body_includes_files(self, files_root):
         defn = {"invoke": ["x", "$MESSAGE"]}
         msg_id = "01JTESTATTACH000000000000"
         msg = {
@@ -240,16 +244,17 @@ class TestBuildCommand:
             "id": msg_id,
             "files": [{"filename": "x"}],
         }
-        argv = build_command(defn, msg, agent_root)
-        path = (agent_root / ".files" / msg_id / "x").resolve()
+        argv = build_command(defn, msg, files_root)
+        path = (files_root / msg_id / "x").resolve()
         assert argv == ["x", f"review\n\nATTACHED FILE: {path}"]
 
-    def test_message_body_uses_custom_files_dir(self, tmp_path):
-        agent_root = tmp_path / "agent"
-        agent_root.mkdir()
-        external = tmp_path / "attachments"
+    def test_files_dir_in_the_definition_does_not_override_the_given_root(self, tmp_path):
+        # `files_dir` is resolved once, by the registry, and handed here as a
+        # path. A definition that still names one must not be re-read: doing so
+        # would skip the per-node interpolation the caller already applied.
+        given = tmp_path / "resolved"
         msg_id = "01JTESTATTACH000000000000"
-        defn = {"invoke": ["x", "$MESSAGE"], "files_dir": str(external)}
+        defn = {"invoke": ["x", "$MESSAGE"], "files_dir": str(tmp_path / "ignored")}
         msg = {
             "from": "GERRY",
             "to": "CLAUDE",
@@ -257,11 +262,11 @@ class TestBuildCommand:
             "id": msg_id,
             "files": [{"filename": "x"}],
         }
-        argv = build_command(defn, msg, agent_root)
-        path = (external / msg_id / "x").resolve()
+        argv = build_command(defn, msg, given)
+        path = (given / msg_id / "x").resolve()
         assert argv == ["x", f"review\n\nATTACHED FILE: {path}"]
 
-    def test_timestamp_substitution_from_msg_date(self, agent_root):
+    def test_timestamp_substitution_from_msg_date(self, files_root):
         defn = {"invoke": ["x", "[$TIMESTAMP] $SENDER: $MESSAGE"]}
         msg = {
             "from": "GERRY",
@@ -269,10 +274,10 @@ class TestBuildCommand:
             "date": "2026-04-28T14:30:00.000000Z",
             "content": "hi",
         }
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["x", "[2026-04-28T14:30:00.000000Z] GERRY: hi"]
 
-    def test_age_substitution_relative_to_now(self, agent_root, monkeypatch):
+    def test_age_substitution_relative_to_now(self, files_root, monkeypatch):
         from datetime import timedelta
         import definitions as dmod
         frozen = datetime(2026, 4, 28, 14, 35, 0, tzinfo=timezone.utc)
@@ -286,13 +291,13 @@ class TestBuildCommand:
 
         defn = {"invoke": ["x", "($AGE) $MESSAGE"]}
         msg = {"from": "G", "to": "C", "date": msg_date, "content": "hi"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["x", "(5 minutes ago) hi"]
 
-    def test_missing_date_yields_empty_age_and_timestamp(self, agent_root):
+    def test_missing_date_yields_empty_age_and_timestamp(self, files_root):
         defn = {"invoke": ["x", "TS:$TIMESTAMP", "AGE:$AGE", "$MESSAGE"]}
         msg = {"from": "G", "to": "C", "content": "hi"}
-        argv = build_command(defn, msg, agent_root)
+        argv = build_command(defn, msg, files_root)
         assert argv == ["x", "TS:", "AGE:", "hi"]
 
 
@@ -368,6 +373,44 @@ class TestExpandArgv:
 
     def test_validate_var_name_canonicalizes(self):
         assert validate_var_name("model") == "MODEL"
+
+
+class TestNowPlaceholder:
+    """`$NOW` is the wake's own local reading. `$TIMESTAMP` stays the stored
+    UTC — definitions pick it deliberately because it is machine-readable and
+    stable, and rewriting it would rewrite every definition's meaning."""
+
+    @pytest.fixture
+    def zone(self, monkeypatch):
+        import time as _time
+
+        def use(name: str) -> None:
+            monkeypatch.setenv("TZ", name)
+            _time.tzset()
+
+        yield use
+        monkeypatch.undo()
+        _time.tzset()
+
+    def test_now_expands_to_local_time_with_its_zone(self, zone):
+        zone("America/Los_Angeles")
+        (got,) = _expand_argv(["$NOW"], "A", "B", "hi")
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} P[DS]T", got)
+
+    def test_now_follows_the_machines_zone(self, zone):
+        zone("Asia/Kolkata")
+        (got,) = _expand_argv(["$NOW"], "A", "B", "hi")
+        assert got.endswith(" IST")
+
+    def test_timestamp_stays_the_stored_utc(self, zone):
+        zone("America/Los_Angeles")
+        assert _expand_argv(
+            ["$TIMESTAMP"], "A", "B", "hi", "2026-06-18T14:00:00Z"
+        ) == ["2026-06-18T14:00:00Z"]
+
+    def test_now_is_reserved_from_a8s_vars(self):
+        with pytest.raises(ValueError, match="reserved"):
+            validate_var_name("now")
 
 # ---------- resolve_definition_arg ----------
 
@@ -558,6 +601,142 @@ class TestResolveInboxDir:
             resolve_inbox_dir(tmp_path, {"inbox_dir": "  "})
 
 
+# ---------- path-field interpolation ----------
+
+FIELD_RESOLVERS = [
+    ("outbox_dir", resolve_outbox_dir),
+    ("inbox_dir", resolve_inbox_dir),
+    ("files_dir", resolve_files_dir),
+]
+
+
+class TestPathFieldInterpolation:
+    """Per-node vars reach the three mailbox path fields, so two nodes rooted
+    at one repo can share a definition and still own separate mailboxes."""
+
+    @pytest.fixture
+    def root(self, tmp_path):
+        r = tmp_path / "repo"
+        r.mkdir()
+        return r
+
+    @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
+    def test_expands_node_var(self, root, field, resolve):
+        got = resolve(root, {field: f".box-$SEAT"}, "codex-ares", {"SEAT": "a"})
+        assert got == (root / ".box-a").resolve()
+
+    @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
+    def test_expands_dollar_node_with_no_vars(self, root, field, resolve):
+        got = resolve(root, {field: ".box-$NODE"}, "codex-ares", {})
+        assert got == (root / ".box-codex-ares").resolve()
+
+    @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
+    def test_absent_field_keeps_the_default(self, root, field, resolve):
+        default = {"outbox_dir": ".outbox", "inbox_dir": ".inbox", "files_dir": ".files"}
+        assert resolve(root, {}, "codex-ares", {"SEAT": "a"}) == (
+            root / default[field]
+        ).resolve()
+
+    @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
+    def test_unset_var_raises_and_names_it(self, root, field, resolve):
+        with pytest.raises(UndefinedVarsError) as e:
+            resolve(root, {field: ".box-$SEAT"}, "codex-ares", {})
+        assert "$SEAT" in str(e.value)
+
+    def test_node_builtin_is_not_shadowed_by_a_stored_var(self, root):
+        # `$NODE` is the one value guaranteed distinct between two
+        # registrations. A var that claims the name cannot take it over.
+        got = resolve_outbox_dir(
+            root, {"outbox_dir": ".outbox-$NODE"}, "codex-ares", {"NODE": "impostor"}
+        )
+        assert got == (root / ".outbox-codex-ares").resolve()
+
+    def test_no_partial_expansion(self, root):
+        # A path that half-resolves is a plausible directory that is silently
+        # the wrong one, and mail routed there is lost with no error anywhere.
+        with pytest.raises(UndefinedVarsError) as e:
+            resolve_outbox_dir(root, {"outbox_dir": ".out-$A-$B"}, "n", {"A": "x"})
+        assert "$B" in str(e.value)
+        assert not (root / ".out-x-").exists()
+
+    @pytest.mark.parametrize(
+        "builtin", ["SENDER", "RECIPIENT", "MESSAGE", "TIMESTAMP", "AGE", "META"]
+    )
+    def test_per_message_builtins_are_refused(self, root, builtin):
+        # A mailbox path is per-node and resolved long before any message
+        # exists. These names mean nothing here.
+        with pytest.raises(UndefinedVarsError):
+            resolve_outbox_dir(root, {"outbox_dir": f".outbox-${builtin}"}, "n", {})
+
+    def test_expansion_to_empty_is_refused(self, root):
+        with pytest.raises(ValueError, match="expanded to empty"):
+            resolve_outbox_dir(root, {"outbox_dir": "$SEAT"}, "n", {"SEAT": " "})
+
+    def test_absolute_expansion_still_wins_over_root(self, tmp_path):
+        root = tmp_path / "repo"
+        root.mkdir()
+        external = tmp_path / "mounts"
+        got = resolve_outbox_dir(
+            root, {"outbox_dir": f"{external}/$SEAT"}, "n", {"SEAT": "a"}
+        )
+        assert got == (external / "a").resolve()
+
+    def test_node_is_reserved_from_a8s_vars(self):
+        with pytest.raises(ValueError, match="reserved"):
+            validate_var_name("node")
+
+
+class TestPathFieldForAgent:
+    """The `_for_agent` wrappers supply the node name and its registry vars."""
+
+    def _register(self, tmp_path, name, spec, vars=None):
+        import registry
+
+        defn = tmp_path / f"{name}.json"
+        defn.write_text(json.dumps({"invoke": ["x"], "outbox_dir": spec}))
+        root = tmp_path / "repo"
+        root.mkdir(exist_ok=True)
+        entry = {"root": str(root), "definition": str(defn)}
+        if vars:
+            entry["vars"] = vars
+        reg = registry.load_registry()
+        reg[name] = entry
+        registry.save_registry(reg)
+        return root
+
+    def test_node_name_reaches_the_field(self, fake_home, tmp_path):
+        from definitions import resolve_outbox_dir_for_agent
+
+        root = self._register(tmp_path, "codex-ares", ".outbox-$NODE")
+        assert resolve_outbox_dir_for_agent("codex-ares", root) == (
+            root / ".outbox-codex-ares"
+        ).resolve()
+
+    def test_registry_vars_reach_the_field(self, fake_home, tmp_path):
+        from definitions import resolve_outbox_dir_for_agent
+
+        root = self._register(tmp_path, "n", ".outbox-$SEAT", {"SEAT": "b"})
+        assert resolve_outbox_dir_for_agent("n", root) == (root / ".outbox-b").resolve()
+
+    def test_unset_var_propagates(self, fake_home, tmp_path):
+        from definitions import resolve_outbox_dir_for_agent
+
+        root = self._register(tmp_path, "n", ".outbox-$SEAT")
+        with pytest.raises(UndefinedVarsError):
+            resolve_outbox_dir_for_agent("n", root)
+
+
+class TestVarsStayOutOfEnv:
+    """The argv/env boundary is untouched: a var reaches argv and a path field,
+    never the child's environment."""
+
+    def test_definition_env_is_literal(self):
+        assert definition_env({"env": {"SEAT": "$SEAT", "P": "$NODE"}}) == {
+            "SEAT": "$SEAT",
+            "P": "$NODE",
+        }
+
+
 # ---------- load_definition ----------
 
 class TestLoadDefinition:
@@ -662,7 +841,13 @@ class TestBundledEngineNode:
         # #157's chapter-1 field test: a bare $MESSAGE gives the node no way
         # to know who to answer, so the prompt states the sender too.
         assert argv[-1].endswith("check the deploy")
-        assert argv[-1].startswith("neil tells node1")
+        # `[$NOW]` leads: a model handed only relative age generalizes a zone
+        # it does not live in, and every *tomorrow* it writes lands a day off.
+        assert re.fullmatch(
+            r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+\] neil tells node1 \(\): "
+            r"check the deploy",
+            argv[-1],
+        )
 
     def test_a_batch_of_n_becomes_one_invocation(self):
         # #159's third bullet: three messages must not cost three cold context
@@ -827,7 +1012,7 @@ class TestBundledEngineDefinitions:
         # way to know who to answer. Every bundled definition's single-wake
         # prompt states the sender, same shape as codex.json / cursor.json.
         defn = self._definition(engine_id)
-        assert defn["invoke"][-1] == "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+        assert defn["invoke"][-1] == "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
     def test_batch_and_idle_invokes_carry_no_prompt(self, engine_id):
@@ -871,7 +1056,7 @@ class TestBundledEngineDefinitions:
         for argv in composed:
             assert argv[2:5] == ["engine", engine_id, "run"]
             assert argv[argv.index("--permissions") + 1] == "bypass"
-        assert defn["invoke"][-1] == "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+        assert defn["invoke"][-1] == "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
     def test_unrestricted_description_states_the_cost(self, engine_id):
@@ -964,6 +1149,26 @@ class TestBatchInvoke:
         assert "receiving messages as 'neil'" in prompt
         assert "A sent" in prompt and "hi" in prompt
         assert "B sent" in prompt and "yo" in prompt
+
+    def test_batch_prompt_opens_with_the_local_time(self, monkeypatch):
+        """The real fix for the UTC hallucination is the text the model reads.
+        The batch prompt is composed by a8s itself, so it says it outright."""
+        import time as _time
+        from definitions import build_batch_prompt
+
+        monkeypatch.setenv("TZ", "Asia/Kolkata")
+        _time.tzset()
+        try:
+            first = build_batch_prompt("neil", []).splitlines()[0]
+        finally:
+            monkeypatch.undo()
+            _time.tzset()
+        assert re.fullmatch(
+            r"Local time is \d{4}-\d{2}-\d{2} \d{2}:\d{2} IST\. Every date and "
+            r"time you read or write is this zone unless it carries an "
+            r"explicit offset\.",
+            first,
+        )
 
     def test_build_batch_command_empty_entries_still_has_header(self):
         from definitions import build_batch_command

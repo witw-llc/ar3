@@ -1,6 +1,6 @@
 {
   "_notes": [
-    "r4t rig config — copy to ~/.config/r4t/rigs.json and edit (or start from `r4t init`).",
+    "r4t rig config — copy to ~/.config/r4t/rigs.json and edit (or start from `r4t rig add`).",
     "This file is the security boundary: it lives OUTSIDE the repo, and only rigs",
     "defined here can run. A roster Harness naming a rig absent from this file fails",
     "closed. Keys starting with _ are ignored everywhere.",
@@ -12,12 +12,10 @@
   ],
 
   "throttle": {
-    "max_concurrent": 1,
-    "min_seconds_between_turn_starts": 15
+    "min_seconds_between_turn_starts": 0
   },
   "cell_budget_max": 16,
   "cell_budget_earn_per_hour": 8,
-  "quiet_task_seconds": 1800,
   "breaker_cap": 5,
   "breaker_cooldown_seconds": 600,
 

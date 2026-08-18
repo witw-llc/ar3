@@ -137,7 +137,7 @@ class TestParseKnowledge:
         path = tmp_path / "ROSTER.md"
         path.write_text(
             "# R\n\n"
-            "### Wren\n- **Rig:** claude\n- **Knowledge:** 4k\n\n"
+            "### Wren\n- **Rig:** claude\n- **Leader:** yes\n- **Knowledge:** 4k\n\n"
             "### Robin\n- **Rig:** claude\n- **Knowledge:** large agy\n\n"
             "### Bad\n- **Rig:** claude\n- **Knowledge:** small medium\n",
             encoding="utf-8",
@@ -200,7 +200,7 @@ class TestParseFraming:
         path = tmp_path / "ROSTER.md"
         path.write_text(
             "# R\n\n"
-            "### Wren\n- **Rig:** claude\n- **Framing:** off\n\n"
+            "### Wren\n- **Rig:** claude\n- **Leader:** yes\n- **Framing:** off\n\n"
             '### Robin\n- **Rig:** claude\n- **Framing:** "watch for stale notes"\n\n'
             "### Bad\n- **Rig:** claude\n- **Framing:** unquoted prose\n",
             encoding="utf-8",

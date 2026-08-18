@@ -1,5 +1,5 @@
 #!/bin/sh
-# The Ark one-line installer:
+# ar3 one-line installer:
 #
 #   curl --proto '=https' --tlsv1.2 -fsSL \
 #     https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
@@ -101,7 +101,7 @@ main() {
   if grep -qsF "$AR3_DIR/install.sh" "$RC"; then
     echo "Shell rc already sources install.sh ($RC)"
   else
-    printf '\n# The Ark (https://github.com/witw-llc/ar3)\n%s\n' "$SOURCE_LINE" >> "$RC"
+    printf '\n# ar3 (https://github.com/witw-llc/ar3)\n%s\n' "$SOURCE_LINE" >> "$RC"
     echo "Added to $RC: $SOURCE_LINE"
   fi
 
@@ -156,7 +156,7 @@ main() {
 
 _install_git() {
   if [ -d "$AR3_DIR/.git" ]; then
-    echo "Updating The Ark in $AR3_DIR"
+    echo "Updating ar3 in $AR3_DIR"
     before="$(git -C "$AR3_DIR" rev-parse HEAD)"
     if [ -n "$AR3_VERSION" ]; then
       git -C "$AR3_DIR" fetch --depth 1 origin tag "$AR3_VERSION"
@@ -184,7 +184,7 @@ _install_git() {
       }
       rm -rf "$AR3_DIR"
     fi
-    echo "Installing The Ark into $AR3_DIR"
+    echo "Installing ar3 into $AR3_DIR"
     if [ -n "$AR3_VERSION" ]; then
       git clone --depth 1 --branch "$AR3_VERSION" "$AR3_REPO" "$AR3_DIR"
     else
@@ -221,9 +221,9 @@ _install_tarball() {
   current=""
   [ -f "$AR3_DIR/.ar3-release" ] && current="$(cat "$AR3_DIR/.ar3-release")"
   if [ "$current" = "$tag" ]; then
-    echo "The Ark $tag is already installed in $AR3_DIR"
+    echo "ar3 $tag is already installed in $AR3_DIR"
   else
-    echo "Installing The Ark $tag into $AR3_DIR (tarball; git not found)"
+    echo "Installing ar3 $tag into $AR3_DIR (tarball; git not found)"
     tmp="$AR3_DIR.new.$$"
     rm -rf "$tmp"
     mkdir -p "$tmp"

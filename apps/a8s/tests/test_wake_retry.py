@@ -32,6 +32,24 @@ from registry import save_registry
 from ark.ulid import new as new_ulid
 
 
+def _main_thread_only(patched):
+    """Scope an Event.wait monkeypatch to the loop under test.
+
+    These tests replace `threading.Event.wait` process-wide to script the
+    attached loop's iteration clock, but the runner's watchdog thread waits
+    on the same event class — an unscoped patch runs the script from that
+    thread too, racing the loop it is scripting (double refills, early
+    stops). Any thread but the main one falls through to the real wait."""
+    real_wait = threading.Event.wait
+
+    def gated(self, timeout=None):
+        if threading.current_thread() is not threading.main_thread():
+            return real_wait(self, timeout)
+        return patched(self, timeout)
+
+    return gated
+
+
 def _read_log(name: str) -> str:
     p = agent_log_path(name)
     return p.read_text() if p.is_file() else ""
@@ -152,8 +170,9 @@ class TestSettleWake:
         import txlog
 
         events = txlog.read_events(env.stem)
-        assert [e["event"] for e in events] == ["DROPPED"]
-        assert "left in trash" in events[0]["detail"]
+        assert [e["event"] for e in events] == ["WAKE_RETURN", "DROPPED"]
+        assert events[0]["detail"] == "exit 3"
+        assert "left in trash" in events[1]["detail"]
 
     def test_a_different_delivery_restarts_the_count(self, agent):
         first = _in_trash("A", "one")
@@ -301,7 +320,7 @@ class TestFailureModesKeepMailDeliverable:
                     daemon_mod._STOP_EVENT.set()
             return True
 
-        monkeypatch.setattr(threading.Event, "wait", stop_once_requeued)
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(stop_once_requeued))
         attached_loop(["A"], 0.05, single_pass=False)
 
         log = _read_log("A")

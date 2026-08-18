@@ -11,7 +11,7 @@ table see [r4t-rigs.md](r4t-rigs.md#governance-knobs).
 
 | File | Where | What it defines |
 |------|-------|-----------------|
-| **`ROSTER.md`** | In the roster repo | *Who* is on the roster and which **symbolic rig** each AI member uses |
+| **`ROSTER.md`** | In the roster repo | *Who* is on the roster and which **symbolic rig** each member uses |
 | **`~/.config/r4t/rigs.json`** | Out of repo (`R4T_HOME`) | What each rig **actually runs** — CLI argv, timeouts, budgets |
 
 The roster never contains shell commands. A line like `Rig: opencode` is
@@ -42,8 +42,7 @@ r4t init
 
 `r4t init` writes (if missing):
 
-- **`ROSTER.md`** — a Human owner, an AI Lead on rig `leader`, an AI Dev on
-  rig `member`
+- **`ROSTER.md`** — a Lead on rig `leader` and a Dev on rig `member`
 - **`~/.config/r4t/rigs.json`** — matching `leader` and `member` rig
   definitions (default invoke: `opencode run --auto --dir {workdir}`)
 
@@ -79,7 +78,7 @@ Each preset documents its **headless** entry point (`-p`, `--print`, `run
 
 ### 4. Wire the roster to those rigs
 
-Edit `ROSTER.md`. Each AI member needs a `Rig:` line naming a rig that
+Edit `ROSTER.md`. Each member needs a `Rig:` line naming a rig that
 exists in `rigs.json`:
 
 ```markdown
@@ -88,9 +87,9 @@ exists in `rigs.json`:
 - **Role:** Code reviewer
 ```
 
-AI is the default and carries no marker. The human seat is marked
-`Human: yes` and must not carry a rig. Optional `Address:` is their a8s
-name for outbound tells.
+Every member takes turns, so every member carries a `Rig:`. You are not a
+member: you speak into the roster with `r4t tell --as <member>` and read it
+with `r4t logs`.
 
 ### 5. Lint before going live
 
@@ -105,7 +104,8 @@ work.
 ### 6. Operate
 
 ```bash
-r4t status --node myrepo    # budgets, queues, threads, dead letters
+r4t status --node myrepo    # health, budgets, queues, dead letters
+r4t logs --node myrepo -f   # the roster's own decisions and turns
 a8s logs myrepo-node -f     # traffic + r4t governance lines
 ```
 
@@ -203,7 +203,8 @@ ordinary `tell` and release after the turn. Full walk-through:
 | `r4t rig add <rig> <preset>` | Define a rig in the rig config |
 | `r4t rig list` (alias `ls`) | Show rigs and how roster members resolve (`--wide` for invoke lines) |
 | `r4t roster check` | Lint roster and rig mappings |
-| `r4t status --node <roster>` | Member budgets, queue depths, threads, dead letters |
+| `r4t status --node <roster>` | Health verdicts, member budgets, queue depths, dead letters |
+| `r4t tell --as <member>` | Speak into the roster as a member (`--to` picks the recipient) |
 | `r4t sandbox --fake` | End-to-end plumbing test without LLM calls |
 | `r4t sandbox --preset ollama-opencode --model M` | Live sandbox via local Ollama + OpenCode (stderr progress, report on stdout) |
 

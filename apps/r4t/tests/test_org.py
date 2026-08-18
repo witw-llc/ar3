@@ -15,11 +15,6 @@ NODE = "acme"
 CLEAN_ROSTER = """\
 # Roster
 
-### Neil
-- **Human:** yes
-- **Address:** neil
-- **Role:** Director
-
 ### Gerry
 - **Rig:** leader
 - **Role:** Lead
@@ -112,6 +107,43 @@ def test_check_reports_absent_workplace(tmp_path):
 def test_settings_parse_with_defaults(tmp_path):
     org = load_org(tmp_path)  # no config at all
     assert org.comms == "open" and org.leader_sees_lateral is False and org.egress is True
+    assert org.priority_senders == []
+
+
+def test_shipped_priority_senders_default_is_empty(tmp_path):
+    # The default used to be `["neil*"]` — the owner's own name, reaching the
+    # public mirror as shipped policy. No name ships by default; an org that
+    # wants a Tier-1 sender states one explicitly (see the AR3 org's own
+    # r4t.md frontmatter).
+    from schedule import DEFAULT_PRIORITY_SENDERS
+
+    assert DEFAULT_PRIORITY_SENDERS == ()
+    assert load_org(tmp_path).priority_senders == []
+
+
+def test_priority_senders_are_an_org_setting(tmp_path):
+    # Who the org answers to first is a property of the org, not of the
+    # machine or the rig, so it travels with ROSTER.md and MISSION.md.
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"priority_senders": ["ada*", " grace@* "]}), encoding="utf-8"
+    )
+    org = load_org(tmp_path)
+    assert org.priority_senders == ["ada*", "grace@*"]
+    assert check_org(tmp_path) == []
+
+
+def test_an_empty_priority_list_leaves_a_pure_score_rotation(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"priority_senders": []}), encoding="utf-8"
+    )
+    assert load_org(tmp_path).priority_senders == []
+
+
+def test_check_flags_a_malformed_priority_list(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(
+        json.dumps({"priority_senders": "neil*"}), encoding="utf-8"
+    )
+    assert any('"priority_senders" must be a list' in m for m in check_org(tmp_path))
 
 
 def test_check_flags_bad_setting_values(tmp_path):
@@ -124,29 +156,38 @@ def test_check_flags_bad_setting_values(tmp_path):
     # load_org still degrades to safe defaults rather than raising
     org = load_org(tmp_path)
     assert org.comms == "open" and org.leader_sees_lateral is False
+    # ...and no longer discards the same findings — a caller that dispatches
+    # on this org can still say so, instead of the operator finding out only
+    # by running `roster check`.
+    assert any('"comms" must be "open" or "closed"' in m for m in org.errors)
+    assert any('"leader_sees_lateral" must be true or false' in m for m in org.errors)
 
 
-def test_doorbell_check_string_accepted(tmp_path):
-    (tmp_path / ORG_CONFIG_NAME).write_text(
-        json.dumps({"doorbell_check": "r4t check acme"}), encoding="utf-8"
-    )
-    assert load_org(tmp_path).doorbell_check == "r4t check acme"
-    assert check_org(tmp_path) == []
+def test_a_clean_config_carries_no_errors(tmp_path):
+    (tmp_path / ORG_CONFIG_NAME).write_text(json.dumps({"comms": "closed"}), encoding="utf-8")
+    assert load_org(tmp_path).errors == []
 
 
-def test_doorbell_check_absent_by_default(tmp_path):
-    assert load_org(tmp_path).doorbell_check is None
+def test_dispatch_warns_on_a_malformed_org_setting_but_still_runs(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    # A malformed `comms:`/`egress:` used to vanish silently the moment
+    # `load_org` degraded to defaults — invisible until the operator happened
+    # to run `roster check`. Dispatch now says so, and still runs.
+    root = tmp_path / "solo"
+    root.mkdir()
+    (root / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    (root / ORG_CONFIG_NAME).write_text(json.dumps({"comms": "loud"}), encoding="utf-8")
+    cfg = _rig_config(tmp_path, fake_harness)
+    rc = r4t_main([
+        "dispatch", "--root", str(root),
+        "--from", "boss", "--to", f"{NODE}:gerry", "--message", "go",
+        "--rig-config", str(cfg), "--no-notify",
+    ])
+    err = capsys.readouterr().err
+    assert rc == 0  # loud, not fatal — the turn still runs on the default
+    assert 'warning: org config "comms" must be "open" or "closed"' in err
 
-
-def test_doorbell_check_non_string_degrades_with_error(tmp_path):
-    (tmp_path / ORG_CONFIG_NAME).write_text(
-        json.dumps({"doorbell_check": ["r4t", "check"]}), encoding="utf-8"
-    )
-    assert any('"doorbell_check" must be a string' in m for m in check_org(tmp_path))
-    assert load_org(tmp_path).doorbell_check is None
-
-
-# ---------- integration: turns resolve org dir vs workplace ----------
 
 def _portable_org(tmp_path, mission="Ship the thing and stop."):
     org_dir = tmp_path / "org"
@@ -368,33 +409,18 @@ def test_explicit_root_still_overrides_the_stamp(
     assert "Impostor" in out
 
 
-def test_seat_resolves_the_stamped_org_dir(
+def test_tell_resolves_the_stamped_org_dir(
     r4t_home, tmp_path, fake_harness, monkeypatch, capsys
 ):
     _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
     cfg = _rig_config(tmp_path, fake_harness)
     monkeypatch.chdir(workplace)
-    rc = r4t_main(["seat", "--node", NODE, "--rig-config", str(cfg), "--simulate-tell"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert f"seat: Neil on {NODE}" in out
-
-
-def test_chat_resolves_the_stamped_org_dir(
-    r4t_home, tmp_path, fake_harness, monkeypatch, capsys
-):
-    import io
-
-    _org_dir, workplace = _stamped_org(r4t_home, tmp_path)
-    cfg = _rig_config(tmp_path, fake_harness)
-    monkeypatch.chdir(workplace)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("/quit\n"))
     rc = r4t_main([
-        "chat", "--plain", "--node", NODE, "--rig-config", str(cfg), "--simulate-tell",
+        "tell", "--as", "gerry", "--to", "phil", "hi",
+        "--node", NODE, "--rig-config", str(cfg), "--simulate-tell",
     ])
-    out = capsys.readouterr().out
     assert rc == 0
-    assert f"seat: Neil on {NODE}" in out
+    assert _prompt_of(fake_harness)
 
 
 def test_logs_runs_against_an_org_dir_node(
@@ -409,19 +435,19 @@ def test_logs_runs_against_an_org_dir_node(
     assert "QUEUED boss -> gerry" in out
 
 
-def test_seat_adopts_the_root_when_no_stamp_exists(
+def test_tell_adopts_the_root_when_no_stamp_exists(
     r4t_home, tmp_path, fake_harness, monkeypatch, capsys
 ):
-    # The live quill sequence: a roster driven entirely through the seat never
+    # The live quill sequence: a roster driven entirely through `tell` never
     # passes cmd_dispatch, so no stamp exists and observer commands guess
-    # from cwd. One seat run with --root writes the stamp; from then on the
+    # from cwd. One tell with --root writes the stamp; from then on the
     # workplace cwd resolves the node and the org dir.
     org_dir, workplace = _portable_org(tmp_path)
     cfg = _rig_config(tmp_path, fake_harness)
     assert state.read_root(NODE) is None
 
     rc = r4t_main([
-        "seat", "--node", NODE, "--root", str(org_dir),
+        "tell", "--as", "gerry", "hi", "--node", NODE, "--root", str(org_dir),
         "--rig-config", str(cfg), "--simulate-tell",
     ])
     assert rc == 0
@@ -436,7 +462,7 @@ def test_seat_adopts_the_root_when_no_stamp_exists(
     assert f"roster: {NODE}" in out and "Gerry" in out
 
 
-def test_seat_never_overrides_an_existing_stamp(
+def test_tell_never_overrides_an_existing_stamp(
     r4t_home, tmp_path, fake_harness, capsys
 ):
     org_dir, workplace = _portable_org(tmp_path)
@@ -444,8 +470,8 @@ def test_seat_never_overrides_an_existing_stamp(
     (workplace / "ROSTER.md").write_text(SHADOW_ROSTER, encoding="utf-8")
     cfg = _rig_config(tmp_path, fake_harness)
     rc = r4t_main([
-        "seat", "--node", NODE, "--root", str(workplace),
+        "tell", "--as", "gerry", "hi", "--node", NODE, "--root", str(workplace),
         "--rig-config", str(cfg), "--simulate-tell",
     ])
-    assert rc == 2  # shadow roster has no human — the seat refuses
+    assert rc == 2  # the shadow roster has no Gerry — tell refuses
     assert state.read_root(NODE) == org_dir  # and the stamp is untouched

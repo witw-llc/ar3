@@ -38,11 +38,6 @@ TREE_TEXT = textwrap.dedent(
     - **Rig:** r
     - **Leader:** yes
     - **Cell:** lead
-    - **Lead:** Ned
-
-    ### Ned
-    - **Human:** yes
-    - **Address:** ned
 
     ### Ann
     - **Rig:** r
@@ -67,7 +62,6 @@ class TestParsing:
         roster = load_roster(repo / "ROSTER.md")
         gerry = roster.find("gerry")
         assert gerry is not None
-        assert gerry.is_human is False
         assert gerry.rig == "leader"
         assert gerry.role == "Technical Producer"
         assert gerry.leader
@@ -144,8 +138,26 @@ class TestParsing:
 
     def test_prose_reply_garbage_disables_member(self):
         member = parse("### A\n- **Rig:** r\n- **ProseReply:** maybe\n").find("a")
-        assert "ProseReply must be on or off" in member.error
+        assert "ProseReply must be yes/no/true/false/y/n/1/0/on/off" in member.error
         assert "(try: ProseReply: off)" in member.error
+
+    def test_leader_garbage_is_a_field_error_not_a_silent_no(self):
+        # A typo used to read as `no` with nothing to point at — the roster
+        # would just fail later with "marks no leader" and no clue why.
+        member = parse("### A\n- **Rig:** r\n- **Leader:** maybe\n").find("a")
+        assert member.leader is False
+        assert "Leader must be yes/no/true/false/y/n/1/0/on/off" in member.error
+        assert "'maybe'" in member.error
+
+    @pytest.mark.parametrize("value,expected", [("y", True), ("0", False), ("N", False)])
+    def test_leader_accepts_the_full_loose_vocabulary(self, value, expected):
+        member = parse(f"### A\n- **Rig:** r\n- **Leader:** {value}\n").find("a")
+        assert member.leader is expected
+        assert not member.errors
+
+    def test_ingress_garbage_is_a_field_error(self):
+        member = parse("### A\n- **Rig:** r\n- **Ingress:** maybe\n").find("a")
+        assert "Ingress must be yes/no/true/false/y/n/1/0/on/off" in member.error
 
     def test_legacy_fallback_field_disables_member(self):
         member = parse("### A\n- **Rig:** r\n- **Fallback:** off\n").find("a")
@@ -201,30 +213,14 @@ class TestParsing:
         roster = parse("### Solo\n- **Rig:** t\n")
         assert roster.leader() is None
 
-    def test_human_leader_not_dispatched_as_leader(self):
-        roster = parse(
-            "### Boss\n- **Human:** yes\n- **Leader:** yes\n"
-            "### Dev\n- **Rig:** t\n"
-        )
-        assert roster.leader() is None
+    def test_retired_human_field_disables_member(self):
+        member = parse("### A\n- **Rig:** t\n- **Human:** yes\n").find("a")
+        assert "Human: is gone" in member.error
+        assert "r4t tell --as" in member.error
 
-    def test_human(self, repo):
-        neil = load_roster(repo / "ROSTER.md").find("neil")
-        assert neil.is_human
-        assert neil.address == "neil"
-        assert not neil.errors
-
-    def test_human_needs_no_harness(self):
-        roster = parse("### Human\n- **Human:** yes\n")
-        assert not roster.find("human").errors
-
-    def test_unmarked_member_is_ai(self):
-        member = parse("### A\n- **Rig:** t\n").find("a")
-        assert member.is_human is False
-        assert not member.errors
-
-    def test_human_no_is_ai(self):
-        assert parse("### A\n- **Human:** no\n- **Rig:** t\n").find("a").is_human is False
+    def test_retired_address_field_disables_member(self):
+        member = parse("### A\n- **Rig:** t\n- **Address:** neil\n").find("a")
+        assert "Address: is gone" in member.error
 
     def test_backticked_rig(self):
         roster = parse("### A\n- **Rig:** `rig-1`\n")
@@ -259,6 +255,54 @@ class TestParsing:
         assert roster.find("b") is not None
 
 
+class TestLeaderValidation:
+    """Bare mail to the node lands on the leader, so a roster the router
+    would have to guess at is refused before it can take any."""
+
+    @staticmethod
+    def write(tmp_path, text: str) -> Path:
+        path = tmp_path / "ROSTER.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_load_refuses_a_roster_with_no_leader(self, tmp_path):
+        path = self.write(tmp_path, "### Solo\n- **Rig:** t\n")
+        with pytest.raises(RosterError) as e:
+            load_roster(path)
+        assert "marks no leader" in str(e.value)
+        assert "`- **Leader:** yes`" in str(e.value)
+
+    def test_load_refuses_two_leaders(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "### Ana\n- **Rig:** t\n- **Leader:** yes\n\n"
+            "### Bo\n- **Rig:** t\n- **Leader:** yes\n",
+        )
+        with pytest.raises(RosterError) as e:
+            load_roster(path)
+        assert "marks 2 leaders (Ana, Bo)" in str(e.value)
+
+    def test_load_names_the_roster_path(self, tmp_path):
+        path = self.write(tmp_path, "### Solo\n- **Rig:** t\n")
+        with pytest.raises(RosterError) as e:
+            load_roster(path)
+        assert str(path) in str(e.value)
+
+    def test_validate_false_loads_the_broken_roster(self, tmp_path):
+        path = self.write(tmp_path, "### Solo\n- **Rig:** t\n")
+        roster = load_roster(path, validate=False)
+        assert roster.find("solo") is not None
+        assert "marks no leader" in roster.leader_problem()
+
+    def test_one_leader_is_clean(self, tmp_path):
+        path = self.write(
+            tmp_path,
+            "### Bo\n- **Rig:** t\n\n### Ana\n- **Rig:** t\n- **Leader:** yes\n",
+        )
+        assert load_roster(path).leader().name == "Ana"
+        assert parse(path.read_text()).leader_problem() is None
+
+
 class TestMalformed:
     def test_bad_rig_disables_member(self, repo):
         roster = load_roster(repo / "ROSTER.md")
@@ -266,20 +310,11 @@ class TestMalformed:
         assert broken.errors
         assert "symbolic rig" in broken.error
 
-    def test_human_with_rig_disabled(self):
-        member = parse("### A\n- **Human:** yes\n- **Rig:** solo\n").find("a")
-        assert member.rig is None
-        assert "Human members carry no Rig" in member.error
-
     def test_legacy_status_line_disables_member(self):
         member = parse("### A\n- **Status:** Human\n").find("a")
         assert member.error == (
-            "Status: is gone — mark the human seat with **Human:** yes; "
-            "AI members carry no marker; missing Rig line"
+            "Status: is gone — members carry no marker; missing Rig line"
         )
-
-    def test_legacy_status_value_is_never_parsed(self):
-        assert parse("### A\n- **Status:** Human\n").find("a").is_human is False
 
     def test_command_harness_disables_member(self):
         roster = parse(
@@ -301,7 +336,7 @@ class TestMalformed:
         assert all("duplicate" in m.error for m in roster.members)
 
     def test_malformed_block_never_raises(self):
-        roster = parse("### \n### A\n- **Human:**\n- garbage ** stuff\n")
+        roster = parse("### \n### A\n- **Role:**\n- garbage ** stuff\n")
         assert isinstance(roster.members, list)
 
 
@@ -328,7 +363,7 @@ class TestTree:
     def test_lead_parsed(self):
         r = parse(TREE_TEXT)
         assert r.find("ann").lead == "Vic"
-        assert r.find("vic").lead == "Ned"
+        assert r.find("vic").lead == ""  # the apex reports to nobody
 
     def test_lead_empty_when_absent(self):
         assert parse("### A\n- **Rig:** r\n").find("a").lead == ""
@@ -346,17 +381,17 @@ class TestTree:
         assert {m.name for m in r.reports_to(r.find("vic"))} == {"Ann", "Cal"}
         assert {m.name for m in r.reports_to(r.find("ann"))} == {"Bea"}
 
-    def test_adjacent_is_lead_reports_cellmates_and_seat(self):
+    def test_adjacent_is_lead_reports_and_cellmates(self):
         r = parse(TREE_TEXT)
         adj = {m.name for m in r.adjacent(r.find("ann"))}
-        # lead (Vic), report+cell-mate (Bea), human seat (Ned) — never Cal
-        assert adj == {"Vic", "Bea", "Ned"}
+        # lead (Vic), report+cell-mate (Bea) — never Cal
+        assert adj == {"Vic", "Bea"}
         assert "Cal" not in adj
 
-    def test_adjacent_top_lead_sees_reports_and_seat(self):
+    def test_adjacent_top_lead_sees_reports(self):
         r = parse(TREE_TEXT)
         adj = {m.name for m in r.adjacent(r.find("vic"))}
-        assert {"Ann", "Cal", "Ned"} <= adj
+        assert {"Ann", "Cal"} <= adj
         assert "Bea" not in adj  # Bea is two levels down, not adjacent
 
     def test_tree_text_is_clean(self):
@@ -400,3 +435,25 @@ class TestTree:
             "### L3\n- **Rig:** r\n- **Lead:** L2\n"
         )
         assert any(s == "warn" and "depth" in msg for s, msg in r.tree_problems())
+
+
+class TestNoHumanVocabulary:
+    """A roster is members that take turns. The operator speaks into it with
+    `r4t tell --as` and has no row (#182)."""
+
+    def test_members_carry_no_human_attribute(self):
+        member = parse("### A\n- **Rig:** t\n").find("a")
+        assert not hasattr(member, "human")
+        assert not hasattr(member, "is_human")
+        assert not hasattr(member, "address")
+
+    def test_every_member_needs_a_rig(self):
+        # There is no longer a kind of member that is legal without one.
+        assert "missing Rig" in parse("### A\n- **Role:** Owner\n").find("a").error
+
+    def test_a_leader_needs_no_special_kind(self, tmp_path):
+        path = tmp_path / "ROSTER.md"
+        path.write_text(
+            "### Ana\n- **Rig:** t\n- **Leader:** yes\n", encoding="utf-8"
+        )
+        assert load_roster(path).leader().name == "Ana"

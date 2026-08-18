@@ -81,7 +81,7 @@ def test_page_without_a_state_is_stateless(wiki, write):
 
 def test_home_declares_neither_category_nor_state(wiki, write):
     write("_Sidebar", "**[Home](Home)**\n\n**[Reference](Reference)**\n")
-    write("Home", "# The Ark — wiki\n\n- [Reference](Reference)\n")
+    write("Home", "# ar3 — wiki\n\n- [Reference](Reference)\n")
     assert kinds(wiki) == []
 
 

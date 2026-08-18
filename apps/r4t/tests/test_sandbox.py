@@ -123,22 +123,23 @@ def test_fake_sandbox_silent_member_answers_on_stdout():
     assert "BREAKER" not in report
 
 
-def test_fake_sandbox_mute_member_is_not_nudged_on_an_ingress_thread():
+def test_fake_sandbox_mute_member_is_never_nudged():
     report, _ = _run_sandbox("--break", "lead:mute")
 
     mechanical = _mechanical(report)
     for check in (
         "Silent turn logged",
-        "Quiet sweep left the ingress thread alone",
+        "Heartbeat re-engaged the org, no watchdog nudge",
         "Breaker stayed closed",
-        "Leader stayed silent on an ingress thread",
+        "Leader answered the originator",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
-    # The cost of the ruling, stated plainly: the leader stages nothing, no
-    # watchdog chases an ingress thread, and the human's message goes
-    # unanswered with nothing objecting. Whether that is acceptable is a
-    # product decision, not a bug in this path.
+    # Fire-and-forget: nothing watched for the reply the muted turn never
+    # staged. The org still recovers, because a stalled org is the
+    # mission-review heartbeat's problem — one general mechanism instead of a
+    # watchdog per obligation.
     assert "SILENT lead" in report
+    assert "MISSION-REVIEW fired" in report
     assert "QUIET thread=" not in report
     assert "BREAKER" not in report

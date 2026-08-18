@@ -3,13 +3,13 @@
 How a roster grows structure: cells and leads, the mission file, org
 directories that live outside the repo, and the org-level settings that
 travel with them. Rationale and prior art: [r4t-governance.md](r4t-governance.md)
-§8–9.
+§7–8.
 
 ## The tree: cells, leads, and information hiding
 
-A roster is a tree of small **cells**, not a flat pool of peers. Give each AI
+A roster is a tree of small **cells**, not a flat pool of peers. Give each
 member a `Cell:` line (its cell) and a `Lead:` line (the member it reports
-to); the top lead reports to the human:
+to). The top lead is the member marked `Leader:` and carries no `Lead:` line:
 
 ```markdown
 ### Cass
@@ -21,19 +21,18 @@ to); the top lead reports to the human:
 Once any `Lead:` line is present the tree becomes structural, not advisory:
 
 - **Information hiding.** A member's turn prompt lists only its tree-adjacent
-  names — its lead, its direct reports, its cell-mates — plus the human seat.
-  It never sees the whole roster, so lateral contact is not advertised.
+  names — its lead, its direct reports, its cell-mates. It never sees the
+  whole roster, so lateral contact is not advertised.
 - **Delivery follows the `comms` setting** (org-level, default `open`). In
   `open` a tell to any valid roster member delivers — a learned address works
   even though the prompt did not list it (info hiding stays at the prompt
   level, softening the tree tax). In `closed` a tell outside a member's
   adjacency is rerouted to its lead (`[r4t rerouted: Ann -> Cal] …`, logged
   `REROUTED`) — the military model. In both, replies to whoever messaged you
-  this turn and anything to the human seat always get through. Set it in
-  `r4t-org.json` (below).
+  this turn always get through. Set it in `r4t-org.json` (below).
 
 `r4t roster check` lints the shape: every `Lead:` must name a real member,
-exactly one member is the leader, a cell warns past 6 AI members and errors
+exactly one member is the leader, a cell warns past 6 members and errors
 past 10, and a tree deeper than 2 levels below the top lead warns (the
 span-of-control bounds from the org research). A roster with **no** `Lead:`
 lines is a flat roster — one cell under the leader — and none of this applies.
@@ -74,13 +73,14 @@ intent that no longer fits a page has usually gone stale into planning.
 
 ## The mission-review idle pass
 
-This is the **heartbeat** on an [idle pass](r4t-idle.md). When an org goes
-fully quiet — every queue empty, no open thread — but the mission may not be
-met, the idle pass hands the topmost leader a budget-gated **mission-review**
-turn to reweigh the mission and delegate the next step (cadence is the a8s
-`idle.timeout` with a widening backoff; three silent reviews go dormant until
-a real message or a `MISSION.md` change re-arms it). The nudge never asks the
-leader to report to the human. Prompt text — the turn framing, doctrine
+This is the **heartbeat** on an [idle pass](r4t-idle.md), and it is the one
+mechanism that re-engages a stalled org. When an org goes fully quiet — the
+drain ran nothing, every queue empty, no live turn, and no member has finished
+a turn since the last tick — but the mission may not be met, the idle pass
+hands the topmost leader a budget-gated **mission-review** turn to reweigh the
+mission and delegate the next step (cadence is the a8s `idle.timeout` with a
+widening backoff; three silent reviews go dormant until a real message or a
+`MISSION.md` change re-arms it). Prompt text — the turn framing, doctrine
 bullets, and both nudges — is overridable per key under a `prompts` object in
 the a8s node definition (defaults live in `dispatch.py`); the definition
 reaches r4t via `--definition $DEFINITION_PATH`.
@@ -117,8 +117,8 @@ config without a `repo` key is an in-repo org that just wants settings.
 |---|---|---|
 | `comms` | `open` | `open` delivers a tell to any valid member (learned addresses); `closed` reroutes non-adjacent tells through the sender's lead |
 | `leader_sees_lateral` | `false` | when `true`, a lateral (peer) delivery lands a read-only copy in the lead's history — no turn burned |
+| `priority_senders` | `[]` | tier 1 of the rotation: a member holding mail from a matching sender goes next, always (never preempting a running turn). `fnmatch` globs, case-insensitive, against the envelope's `from`. Empty by default — no priority sender ships; an org that wants one states it — see [the rotation](r4t-operations.md#the-rotation) |
 | `egress` | `true` | only the topmost leader may message outside the garden; a non-top member's external tell redirects up to it. `false` keeps the org silent outward. Bind the org's namespace `--opaque` and what leaves is stamped with the bare prefix — one name outside the walls; the default binding keeps member attribution (see [r4t-message-flow.md](r4t-message-flow.md)) |
-| `doorbell_check` | *absent* | a shell command that gates every ring of an absent human's doorbell (see [r4t-verification.md](r4t-verification.md)); absent or empty means no gate |
 | `run_as` | *absent* | OS-level isolation: wrap every member turn in `sudo -u <username>`. One user serves the whole roster (see [r4t-isolation.md](r4t-isolation.md)) |
 | `container` | *absent* | OS-level isolation: run every member turn under `docker run --rm <image>`; mutually exclusive with `run_as` (see [r4t-isolation.md](r4t-isolation.md)) |
 | `container_args` | *absent* | extra `docker run` args appended verbatim (credential mounts, `--network`); needs `container` |

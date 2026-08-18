@@ -1,7 +1,7 @@
-# The Ark doctrine
+# ar3 doctrine
 
-Every app built on The Ark follows one doctrine. A user who has never opened a
-new Ark app can navigate it because it feels like the ones already learned. The
+Every app in ar3 follows one doctrine. A user who has never opened a
+new ar3 app can navigate it because it feels like the ones already learned. The
 doctrine governs **how** apps do things, never **how much** they need: r4t taking
 a TUI dependency and k7e taking none are both compliant.
 
@@ -52,7 +52,7 @@ mechanism, which fetches on demand.
   the foundation before it is used, never invented locally.
 - **`--version` is answered by `arkver` everywhere.**
 
-The test to apply to any proposed CLI change: a user who learns one Ark app has
+The test to apply to any proposed CLI change: a user who learns one ar3 app has
 learned the grammar of all of them, including the ones that do not exist yet.
 
 ## 4. Processes

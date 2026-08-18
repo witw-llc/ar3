@@ -1,7 +1,6 @@
 {
   "_notes": "Sandbox rig config (live mode). Rig invoke is live-agent.py; the underlying LLM argv comes from `r4t sandbox --preset` (R4T_SANDBOX_INVOKE). `r4t sandbox --fake` swaps every invoke for fake-agent.py and drops the cadence gate.",
   "throttle": {
-    "max_concurrent": 1,
     "min_seconds_between_turn_starts": 5
   },
   "leader": {

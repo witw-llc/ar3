@@ -180,14 +180,18 @@ class TestContinueFlag:
         # -s/--sandbox outright (verified against codex-cli 0.147.0), so the
         # pair comes out rather than composing an argv the CLI refuses.
         argv = argv_for("codex", continue_conversation=True)
-        assert argv[:4] == ["codex", "exec", "resume", "--last"]
+        assert argv[:5] == [
+            "codex", "exec", "resume", "--last", "--include-non-interactive",
+        ]
         assert "--sandbox" not in argv
         assert "workspace-write" not in argv
         assert "--skip-git-repo-check" in argv
 
     def test_codex_bypass_survives_continuation(self):
         argv = argv_for("codex", continue_conversation=True, permissions="bypass")
-        assert argv[:4] == ["codex", "exec", "resume", "--last"]
+        assert argv[:5] == [
+            "codex", "exec", "resume", "--last", "--include-non-interactive",
+        ]
         assert "--dangerously-bypass-approvals-and-sandbox" in argv
 
     def test_opencode_keeps_its_workdir_and_gains_continue(self):

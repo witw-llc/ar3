@@ -114,6 +114,28 @@ class TestRecord:
         assert rows[-1]["content"] == "m4"
 
 
+@pytest.fixture
+def zone(monkeypatch):
+    """Force the process's local zone so a rendered heading is the same string
+    on every machine that runs this suite."""
+    import time as _time
+
+    def use(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        _time.tzset()
+
+    yield use
+    monkeypatch.undo()
+    _time.tzset()
+
+
+@pytest.fixture(autouse=True)
+def _utc_zone(zone):
+    """`a8s convo` shows local time, so every heading assertion below would
+    otherwise read differently in Kenmore and in Berlin."""
+    zone("UTC")
+
+
 class TestFormatConversation:
     def test_outbound_uses_heading_out(self, fake_home):
         record(
@@ -127,7 +149,7 @@ class TestFormatConversation:
             recipients=["Alice"],
         )
         text = format_conversation("Bob", limit=10)
-        assert "## from Bob to Alice at 2026-06-18T14:00:00.000000Z" in text
+        assert "## from Bob to Alice at 2026-06-18 14:00:00 UTC" in text
         assert "ping" in text
         assert "###" not in text
 
@@ -143,7 +165,7 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=10)
-        assert "### from Alice to Bob at 2026-06-18T15:00:00.000000Z" in text
+        assert "### from Alice to Bob at 2026-06-18 15:00:00 UTC" in text
         assert "pong" in text
 
     def test_alias_inbound_for_member(self, fake_home):
@@ -158,7 +180,7 @@ class TestFormatConversation:
             recipients=["Bob", "Carol"],
         )
         text = format_conversation("Bob", limit=10)
-        assert "### from Alice to devs at 2026-06-18T16:00:00.000000Z" in text
+        assert "### from Alice to devs at 2026-06-18 16:00:00 UTC" in text
         assert "standup" in text
 
     def test_limit_returns_last_n_chronologically(self, fake_home):
@@ -195,7 +217,7 @@ class TestFormatConversation:
             heading_out="OUT {from}->{to} @ {timestamp}",
             heading_in="IN",
         )
-        assert "OUT Bob->Alice @ 2026-06-18T17:00:00.000000Z" in text
+        assert "OUT Bob->Alice @ 2026-06-18 17:00:00 UTC" in text
 
     def test_attachment_shows_full_path_when_on_disk(self, fake_home, tmp_path):
         from registry import save_registry
@@ -392,8 +414,45 @@ class TestHeadingTemplates:
             limit=1,
             heading_in="from {from}\n_{timestamp}_",
         )
-        assert "from Alice\n_2026-06-18T14:00:00.000000Z_" in text
+        assert "from Alice\n_2026-06-18 14:00:00 UTC_" in text
         assert "body" in text
+
+    def test_timestamp_reads_in_the_machines_zone(self, fake_home, zone):
+        """What the operator reads is their own wall clock — the archive keeps
+        the UTC it was handed."""
+        zone("America/Los_Angeles")
+        record(
+            {
+                "id": "01JTZ000000000000000000",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "body",
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert "### from Alice to Bob at 2026-06-18 07:00:00 PDT" in text
+        assert "2026-06-18T14:00:00.000000Z" not in text
+
+    def test_utc_placeholder_exposes_the_stored_value(self, fake_home, zone):
+        """One heading can carry both: the local reading a human wants and the
+        stored instant a script wants."""
+        zone("America/Los_Angeles")
+        record(
+            {
+                "id": "01JUTC000000000000000000",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "body",
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation(
+            "Bob", limit=1, heading_in="{timestamp} == {utc}"
+        )
+        assert "2026-06-18 07:00:00 PDT == 2026-06-18T14:00:00.000000Z" in text
 
 
 class TestCmdConvo:

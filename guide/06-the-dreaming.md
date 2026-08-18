@@ -5,7 +5,7 @@
 
 ## 1. Capability
 
-At the end of this chapter Wren has a memory of his own. One roster line gives
+At the end of this chapter Wren has a memory of his own. One runbook line gives
 him a private knowledge store, and two things happen around it without you
 doing anything again: every turn he wakes with a `## Knowledge` section built
 from that store, and every idle pass distills his finished turns back into it.
@@ -24,22 +24,18 @@ About 20 minutes, most of it waiting on turns.
 ## 3. Starting state
 
 - No live `silo` roster because chapter 5's escape hatch skipped 02–04 (k7e
-  alone needs no roster)? Don't rebuild by hand: `r4t init` gets you the repo
-  and prints the `a8s add`/`namespace`/`start` lines chapter 2 runs, then
+  alone needs no roster)? Don't rebuild by hand: `r4t init` writes the runbook
+  and prints the `r4t add` line chapter 2 runs, then
   [templates/06-roster-memory/](templates/06-roster-memory/) is the one-shot
-  rest — its `ROSTER.md` already carries `Knowledge: on`, `rig-setup.sh` adds
-  both rigs, and `seed-store.sh` seeds Wren's store and points it at chapter
-  5's bridge (build that first from
-  [templates/05-k7e-bridge/](templates/05-k7e-bridge/) if it isn't there
-  either). No `STATUS.md` needed — the first turn below just refounds instead
-  of continuing.
+  rest — its `r4t.md` already carries `Knowledge: on`, `rig-setup.sh` adds
+  both rigs, and `seed-store.sh` seeds Wren's store. No `STATUS.md` needed —
+  the first turn below just refounds instead of continuing.
 - Chapter 4 complete: roster `silo` with Wren (leader, `Continue: 15m`) and
-  Moss (helper, echo), both answering at the seat.
-- Chapter 5 complete: `~/ark/bin/ask`, the stdin→stdout bridge, executable and
-  working. This chapter needs it a second time, for a second store.
-- Wren has a `STATUS.md` from chapter 3. If his conversation has gone idle
-  since you last worked, the first turn below refounds from it — chapter 3's
-  machinery, unchanged.
+  Moss (helper, echo), both answering.
+- Chapter 5 is useful background and not a prerequisite: this chapter drives
+  k7e through r4t rather than by hand, so the `~/ark/bin/ask` bridge you built
+  there is not needed here. A member's store distills through the member's own
+  rig.
 
 The `Knowledge:` field is experimental and off by default; the budget sizes
 here are lab settings, not settled numbers. Nothing changes for a roster that
@@ -54,23 +50,38 @@ know and a roster could not derive:
 **Run**
 
 ```bash
-cd ~/ark/silo
-r4t seat send --node silo "I want to ship the new ROSTER.md this Friday. Any reason not to?"
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "I want to ship the new r4t.md this Friday. Any reason not to?"
+tells --timeout 300
+```
+
+Wren's answer may land in your inbox, and on the free path it often will not —
+that is chapter 4's last mile again, and echo has been off Wren since then.
+It makes no difference here, because this chapter reads everything off disk
+anyway. Every turn is captured whole under the roster's state directory,
+prompt and output together, and the newest file is the turn you just caused:
+
+**Run**
+
+```bash
+export TURNS=~/.config/r4t/rosters/silo/agents/wren/turns
+sed -n '/^## Output/,$p' "$(ls -d $TURNS/* | tail -1)"
 ```
 
 You should see:
 
 ```
-── from silo:wren (2026-07-31T18:10:49.949015Z)
-There's only one reason: I don't see the work. `ROSTER.md` hasn't been changed and `agents/` is empty — no diff, no new file to ship.
+## Output
 
-Send me what you're planning to ship (or where it lives), and I'll get it committed.
+[0m
+> build · qwen3.6:latest
+[0m
+No reason from my end — Friday works. Want to review the diff before it ships?
 ```
 
-A good answer to a different question. He read the repo, found nothing to
-ship, and asked for the work — he has no way to know that Friday is the
-problem, because that fact lives in your head and nowhere on this machine.
+(The `[0m` lines are the harness's own terminal colour codes, captured raw.)
+Wren has no objection, because he has no way to know that Friday is the
+problem: that fact lives in your head and nowhere on this machine.
 
 Put it somewhere. A knowledge-carrying member's store lives host-side under
 the roster's state directory, one store per member, and `K7E_HOME` is how you
@@ -80,8 +91,8 @@ reach it with the CLI from chapter 5:
 
 ```bash
 export WREN_STORE=~/.config/r4t/rosters/silo/agents/wren/k7e
-K7E_HOME=$WREN_STORE k7e store "Ship window for the silo roster" --tags ops,deploy --content "Ship on Tuesday mornings. Friday ships are forbidden — nobody reads the logs over the weekend, and a bad ROSTER.md takes the whole node down until someone notices on Monday."
-K7E_HOME=$WREN_STORE k7e store "Who signs off a roster change" --tags ops,roster --content "The owner signs off every ROSTER.md edit before it ships. Moss drafts, Wren commits, the owner approves."
+K7E_HOME=$WREN_STORE k7e store "Ship window for the silo roster" --tags ops,deploy --content "Ship on Tuesday mornings. Friday ships are forbidden — nobody reads the logs over the weekend, and a bad r4t.md takes the whole node down until someone notices on Monday."
+K7E_HOME=$WREN_STORE k7e store "Who signs off a roster change" --tags ops,roster --content "The owner signs off every r4t.md edit before it ships. Moss drafts, Wren commits, the owner approves."
 K7E_HOME=$WREN_STORE k7e list
 ```
 
@@ -103,7 +114,7 @@ the repo both of them read.
 
 Now the line that turns it on:
 
-**Replace** `~/ark/silo/ROSTER.md` — in Wren's block, add one field under
+**Replace** `~/ark/silo/r4t.md` — in Wren's block, add one field under
 `Continue:`
 
 ```markdown
@@ -116,19 +127,23 @@ Now the line that turns it on:
 **Run**
 
 ```bash
-r4t roster check
+cd ~/ark/silo
+r4t runbook check
 ```
 
 You should see:
 
 ```
-You: note — Human without an Address (roster cannot tell them)
-/home/you/ark/silo/ROSTER.md: OK (3 member(s), leader Wren)
+runbook: triforce -> r4t.md
+warning: Wren: Knowledge is on with rig 'silo' — a small-model class that smooths specifics out of distilled notes; consider a distill-rig override, and note budgets are bytes, not tokens (see docs/r4t-knowledge.md)
+/home/you/ark/silo/r4t.md: OK (2 member(s), leader Wren, 1 warning(s))
 ```
 
-Nothing new to report — the field is one member's private business, and if
-you had turned it on for a member with no store at all, the section would
-simply not be built. Knowledge never costs the turn.
+The warning is r4t telling you the truth about the free path before you find
+it out yourself: a small local model reading its own transcripts writes
+vague notes. Injection is unaffected — what you *write* by hand lands whole,
+which is the half this section proves. Section 10 is where the warning earns
+itself.
 
 ## 5. Run it
 
@@ -137,8 +152,10 @@ Ask the same question again:
 **Run**
 
 ```bash
-r4t seat send --node silo "Same question again: Friday for the ROSTER.md ship. Yes or no, and why?"
-r4t seat inbox --node silo
+cd ~/ark/me
+tell silo "Same question again: Friday for the r4t.md ship. Yes or no, and why?"
+tells --timeout 300
+sed -n '/^## Output/,$p' "$(ls -d $TURNS/* | tail -1)"
 ```
 
 ## 6. Expected receipt
@@ -146,44 +163,47 @@ r4t seat inbox --node silo
 You should see:
 
 ```
-── from silo:wren (2026-07-31T18:11:22.312901Z)
-No. Ship window is Tuesday mornings — Friday ships are forbidden. A bad ROSTER.md over the weekend takes the whole node down until Monday. If it's urgent, we can do a mid-week emergency edit; otherwise push to Tuesday.
+## Output
+
+[0m
+> build · qwen3.6:latest
+[0m
+No. Friday ship is forbidden — nobody reads logs over the weekend, and a broken r4t.md takes the whole node down until someone notices Monday. Tuesday morning is the window.
 ```
 
 Nothing in that message told him, nothing in the repo says it, and his own
-last words on the subject were that he saw nothing to ship — so his history
-did not hold it either. He read it off his own store on the way in. Every turn
-is captured whole under `agents/<member>/turns/`, prompt included, so the
-words he actually saw are on disk. Take the newest capture:
+last words on the subject were that Friday was fine — so his history did not
+hold it either. He read it off his own store on the way in, and the prompt he
+read is in the same capture. Take the newest one:
 
 **Run**
 
 ```bash
-ls ~/.config/r4t/rosters/silo/agents/wren/turns | tail -1
-awk '/^## Knowledge/{f=1} /^## Output/{f=0} f' ~/.config/r4t/rosters/silo/agents/wren/turns/<THAT_FILE>
+ls $TURNS | tail -1
+awk '/^## Knowledge/{f=1} /^## Output/{f=0} f' "$(ls -d $TURNS/* | tail -1)"
 ```
 
 You should see (the capture's filename, then the injected section):
 
 ```
-20260731T181122311011Z-01ABC....md
+20260817T070907821013Z-01ABC....md
 ```
 
 ```
 ## Knowledge (recalled from your private store)
 Notes your past turns distilled — background that may be stale or wrong. When they disagree with the messages above or your own files, the messages and files win.
 
-### Who signs off a roster change (K7E-000-00002, 2026-07-31)
+### Who signs off a roster change (K7E-000-00002, today)
 
 ## Verified Protocol
 
-The owner signs off every ROSTER.md edit before it ships. Moss drafts, Wren commits, the owner approves.
+The owner signs off every r4t.md edit before it ships. Moss drafts, Wren commits, the owner approves.
 
-### Ship window for the silo roster (K7E-000-00001, 2026-07-31)
+### Ship window for the silo roster (K7E-000-00001, today)
 
 ## Verified Protocol
 
-Ship on Tuesday mornings. Friday ships are forbidden — nobody reads the logs over the weekend, and a bad ROSTER.md takes the whole node down until someone notices on Monday.
+Ship on Tuesday mornings. Friday ships are forbidden — nobody reads the logs over the weekend, and a bad r4t.md takes the whole node down until someone notices on Monday.
 ```
 
 Read the framing line, because it is the whole posture: *background that may
@@ -204,98 +224,113 @@ None of this is free, and r4t prices it per wake. Every capture carries a
 **Run**
 
 ```bash
-r4t logs --node silo --agent wren --full | grep "^- prompt:" | tail -5
+cd ~/ark/silo
+r4t logs --agent wren --full | grep "^- prompt:" | tail -5
 ```
 
 You should see:
 
 ```
-- prompt: refound 2573 bytes — preamble 45, intro 739, persona 304, history 118, messages 130, doctrine 1232
-- prompt: continue 2623 bytes — intro 739, persona 304, history 198, messages 146, doctrine 1232
-- prompt: continue 2613 bytes — intro 739, persona 304, history 198, messages 136, doctrine 1232
-- prompt: refound 2588 bytes — preamble 45, intro 739, persona 304, history 118, messages 145, doctrine 1232
-- prompt: continue 3318 bytes — intro 739, persona 324, history 198, messages 152, doctrine 1232, knowledge 668
+- prompt: continue 4175 bytes — intro 747, mission 113, charter 1402, persona 304, history 198, messages 211, doctrine 1194
+- prompt: continue 4211 bytes — intro 747, mission 113, charter 1402, persona 304, history 198, messages 247, doctrine 1194
+- prompt: continue 4246 bytes — intro 747, mission 113, charter 1402, persona 304, history 198, messages 282, doctrine 1194
+- prompt: continue 4105 bytes — intro 747, mission 113, charter 1402, persona 304, history 198, messages 141, doctrine 1194
+- prompt: continue 4785 bytes — intro 747, mission 113, charter 1402, persona 324, history 198, messages 148, doctrine 1194, knowledge 652
 ```
+
+Four wakes costing about 4.2 KB each, and then the last one — the wake that
+knew the answer — carrying one new field, `knowledge 652`, for 4785 bytes
+total.
 
 Your own numbers will differ — history length tracks how much of chapters
 2–4 you actually ran before reaching this one, so the field to look for is
-`knowledge`, not the totals around it. Wakes that cost about 2.6 KB, and
-then the last one — the wake that knew the answer — carrying one new field,
-`knowledge 668`, for 3318 bytes total. That is the entire price of the
-capability, per turn, in bytes. The same breakdown
-goes to the day log live (`r4t: PROMPT wren continue 3.3k — … knowledge
-0.7k`), so a store that quietly bloats into every prompt shows up as a number
-instead of an archaeology dig.
+`knowledge`, not the totals around it. The wake that knew the answer carries
+one field the others do not, and that is the entire price of the capability,
+per turn, in bytes. The same breakdown goes to the ticker live
+(`r4t: PROMPT wren continue 3.3k — … knowledge 0.7k`), so a store that quietly
+bloats into every prompt shows up as a number instead of an archaeology dig.
 
 ## 7. Break it
 
-Injection is half the loop. The other half is supposed to run on its own: when
-the node goes idle, each knowledge-carrying member's finished turn captures
-are fed to `k7e distill` and whatever they yield lands in that member's store.
-Ask for an idle pass and watch it not happen:
+Injection is half the loop. The other half runs on its own: when the node goes
+idle, each knowledge-carrying member's finished turn captures are fed to
+`k7e distill`, and whatever they yield lands in that member's store. There is
+nothing to configure for it. Chapter 5's store needed a bridge because you
+were driving k7e by hand; a *member's* store borrows the member's own rig,
+which r4t already knows how to run — that is what the lint warning in section
+4 was about.
+
+Which means the way to break it is to point the dreaming somewhere else.
+`Knowledge:` takes a rig name after the size — the knob you reach for when the
+turn rig is too small to write good notes, exactly as that warning suggests.
+Name a rig you never created:
+
+**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
+
+```markdown
+- **Knowledge:** medium scribe
+```
 
 **Run**
 
 ```bash
-r4t idle --node silo
-r4t logs --node silo -n 6 | grep DREAM
+r4t runbook check
+r4t idle
+r4t logs -n 10 | grep DREAM
 ```
 
 You should see:
 
 ```
-drained 0 queued turn(s); nudged the leader on 0 quiet thread(s)
-pruned 0 stale lock(s); expired 0 thread(s); drained 0 more queued turn(s)
-r4t: DREAM-SKIP wren distill exit 1 (k7e distill requires an LLM command. Set llm_command (or a purpose-specific override) — stdin in, stdout out — then retry (see `k7e status`).); 5 capture(s) wait
+runbook: triforce -> r4t.md
+Wren: Knowledge distill rig 'scribe' not found in /home/you/.config/r4t/rigs.json
+1 problem(s)
+```
+
+```
+drained 0 queued turn(s)
+pruned 0 stale lock(s); drained 0 more queued turn(s)
+r4t: DREAM-SKIP wren Knowledge distill rig 'scribe' not found in /home/you/.config/r4t/rigs.json; 1 capture(s) wait
 ```
 
 ## 8. Diagnose
 
-The idle command itself reported nothing wrong, because nothing *is* wrong
-with the roster — the failure is one layer down, in a store that has no way to
-think:
+The lint caught it before the idle pass did, which is the order you want: a
+name that resolves to nothing is a member error, not a soft skip, and
+`r4t runbook check` refuses the runbook rather than letting a member dream
+into the void. The idle pass then says the same thing in the ticker. Two
+details there are the design working:
 
-**Run**
-
-```bash
-K7E_HOME=$WREN_STORE k7e status | grep -E "distill|Home"
-ls $WREN_STORE
-```
-
-You should see:
-
-```
-  Home: /home/you/.config/r4t/rosters/silo/agents/wren/k7e
-  LLM distill: unavailable
-    • Set llm_command (stdin→stdout CLI) for distill/recall/compile
-assets
-mocs
-nodes
-```
-
-Chapter 5's bridge was configured in *your* store, at `~/.config/k7e`
-(`K7E_HOME`). This is a different store, with no bridge configured — no
-`config.json` on disk yet — never told about a model. Two details in that
-log line are the design working:
-
-- **`5 capture(s) wait`** — the captures are not consumed, not marked, not
+- **`1 capture(s) wait`** — the captures are not consumed, not marked, not
   lost. A watermark file (`.dreamed`) advances only after a successful pass,
-  so a store that cannot dream today dreams the backlog the day it can.
+  so a store that cannot dream today dreams the backlog the day it can. (Your
+  count will be higher if you have run more turns than this walkthrough; a
+  pass distills at most five captures at a time.)
 - **`DREAM-SKIP`, not an error** — no turn failed, no message was delayed,
   nobody was told anything. Dreaming is an idle-time luxury and it is built to
   be skippable. (Failed turns are never distilled either: facts pulled out of
   a turn that crashed would be premature.)
 
+Note also what the idle pass printed on its own two lines: `drained 0 queued
+turn(s)`. Nothing about the roster is unwell. The failure is one layer down,
+in a member's private machinery, and it stayed there.
+
 ## 9. Fix
 
-Give this store the same bridge:
+Take the override off and let the dreaming fall back to Wren's own rig:
+
+**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
+
+```markdown
+- **Knowledge:** on
+```
 
 **Run**
 
 ```bash
-K7E_HOME=$WREN_STORE k7e config llm_command "$HOME/ark/bin/ask"
-r4t idle --node silo
-r4t logs --node silo -n 40 | grep DREAM
+r4t runbook check
+r4t idle
+r4t logs -n 40 | grep DREAM
 ```
 
 (The wider `-n` is deliberate: a successful pass can wake the leader on its
@@ -304,20 +339,20 @@ way out, so the dream line is a few events back by the time you look.)
 You should see:
 
 ```
-llm_command = /home/you/ark/bin/ask
-drained 0 queued turn(s); nudged the leader on 0 quiet thread(s)
-pruned 0 stale lock(s); expired 0 thread(s); drained 0 more queued turn(s)
-r4t: DREAM-SKIP wren distill exit 1 (k7e distill requires an LLM command. Set llm_command (or a purpose-specific override) — stdin in, stdout out — then retry (see `k7e status`).); 5 capture(s) wait
-r4t: DREAM wren distilled 5 capture(s) into the knowledge store
+r4t: DREAM wren distilled 1 capture(s) into the knowledge store
+r4t: DREAM-EMBED wren embedded 4 entries in 0.2s (54ms each)
 ```
 
-The skip you caused and the pass that replaced it, one after the other.
+The skip you caused and the pass that replaced it, and behind the second line
+a job you never asked for: `DREAM-EMBED` keeps the store's semantic index over
+whatever it now holds, which is why recall gets better as the store grows
+without you reindexing anything.
 
-That pass took over a minute on the free path — five captures, chunked, each
-chunk a model call — and it ran entirely outside anyone's turn. That placement
-is the point: extraction never happens while a member is answering you, it is
-bounded per member per pass (five captures), and it costs the roster nothing
-but idle time.
+That pass took a while on the free path — every capture is chunked, and each
+chunk is a model call — and it ran entirely outside anyone's turn. That
+placement is the point: extraction never happens while a member is answering
+you, it is bounded per member per pass, and it costs the roster nothing but
+idle time.
 
 ## 10. Check
 
@@ -327,30 +362,31 @@ Look at what he dreamed:
 
 ```bash
 K7E_HOME=$WREN_STORE k7e list
-K7E_HOME=$WREN_STORE k7e get <A_NEW_ID> | sed -n '12,14p'
 ```
 
-You should see:
+You should see something like:
 
 ```
-  K7E-000-00001  Ship window for the silo roster  [active]  conf:0.5
   K7E-000-00002  Who signs off a roster change  [active]  conf:0.5
-  K7E-000-00003  Solo agent role composition  [active]  conf:0.5
-  K7E-000-00004  Repo work completion definition  [active]  conf:0.4
-## Verified Protocol
-
-Repository work is considered incomplete until the changes are committed.
+  K7E-000-00004  Silo charter branch rule  [active]  conf:0.7
+  K7E-000-00005  Owner's question to Wren  [active]  conf:0.5
+  K7E-000-00007  Empty workdir observation  [active]  conf:0.5
+  K7E-000-00008  Thread queue status at review time  [active]  conf:0.5
+  K7E-000-00009  Next-step delegation directive  [active]  conf:0.5
+  K7E-000-00011  turn exit and timing  [active]  conf:0.5
+  K7E-000-00012  Wren roster config  [active]  conf:0.5
 ```
 
-(Distill count varies per pass — check the `k7e list` output above for your
-real IDs, and pick one of the new ones for `<A_NEW_ID>`; titles will differ
-too.) The first two entries are the ones you wrote by hand; the rest Wren
-distilled out of his own working turns. Judge them plainly: they are thin,
-and they are *about* him rather than about the work — a small local model
-reading transcripts of itself produces exactly this. That is the knob to
-reach for first when dreams disappoint (`k7e config distill_command` on his
-store, pointed at a stronger model), and it is why the inject framing calls
-these fallible in the first place.
+(Titles and ids will differ — a distill pass writes whatever it found.) The
+two you wrote by hand are in there; the rest Wren distilled
+out of his own working turns. Judge them plainly: they are thin, and they are
+*about* him rather than about the work — a small local model reading
+transcripts of itself produces exactly this, and it is what section 4's lint
+warning was predicting. The knob to reach for first is the one you broke on
+purpose in section 7: add a rig name to the `Knowledge:` line
+(`- **Knowledge:** medium scribe`, with a real `scribe` rig on a stronger
+model) and the dreaming runs there while the turns stay cheap. It is also why
+the inject framing calls these notes fallible in the first place.
 
 The front door reads a member's store like any other, given the path:
 
@@ -358,31 +394,36 @@ The front door reads a member's store like any other, given the path:
 
 ```bash
 K7E_HOME=$WREN_STORE ar3
-r4t status --node silo
+r4t status
 ```
 
-You should see (`k7e` section, then health and roster):
+You should see (the `k7e` panel, then the roster):
 
 ```
 k7e — knowledge engine  (/home/you/.config/r4t/rosters/silo/agents/wren/k7e)
   ✓ cli    k7e -> /home/you/.ar3/k7e
-  ✓ store  4 entr(ies) under /home/you/.config/r4t/rosters/silo/agents/wren/k7e/nodes
-  ✓ index  56 KiB at /home/you/.config/r4t/rosters/silo/agents/wren/k7e/.index.db
+  ✓ store  20 entr(ies) under /home/you/.config/r4t/rosters/silo/agents/wren/k7e/nodes
+  ✓ index  156 KiB at /home/you/.config/r4t/rosters/silo/agents/wren/k7e/.index.db
 ```
+
 ```
+Rotation  (one turn at a time)
+  Now   —  idle 23s   (last: wren, exit 0)
+  Next  —  nothing ready to run
+  Idle     2 member(s) with nothing queued
+
 Health
-  ✓ nothing waiting on you
-  ✓ no runaway signs (7 turn(s) last 10m)
+  ✓ no runaway signs (2 turn(s) last 10m)
   ✓ all 2 member(s) healthy
 
-Roster  (repo settings: /home/you/ark/silo/ROSTER.md)
-    You   Human  address=(none)   (try: add an **Address:** line so the roster can reach them)
-  ✓ Wren  rig=silo  budget=1.5/8  [leader]
+Roster  (repo settings: /home/you/ark/silo/r4t.md)
+  ✓ Wren  rig=silo  budget=6.6/8  [leader]
   ✓ Moss  rig=helper  budget=8/8
 ```
 
-A healthy roster with a memory in it, and Wren's spend budget down to 1.5 of 8
-after an afternoon of this — the guard rail from chapter 2 doing its quiet
+The same front door that has been reading your own store since chapter 5 reads
+a member's, given the path — nothing about Wren's memory is a special format.
+A healthy roster with a memory in it, and Wren's spend budget doing its quiet
 arithmetic while you learned something else.
 
 ## 11. Customize
@@ -390,7 +431,7 @@ arithmetic while you learned something else.
 The budget is a real dial, and the cheapest way to feel it is to make it too
 small:
 
-**Replace** `~/ark/silo/ROSTER.md` — Wren's `Knowledge:` line
+**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
 
 ```markdown
 - **Knowledge:** 512
@@ -399,30 +440,36 @@ small:
 **Run**
 
 ```bash
-r4t seat send --node silo "One line: what is the ship rule?"
-r4t seat inbox --node silo
-r4t logs --node silo --agent wren --full | grep "^- prompt:" | tail -1
+cd ~/ark/me
+tell silo "One line: what is the ship rule?"
+tells --timeout 300
+cd ~/ark/silo
+r4t logs --agent wren --full | grep "^- prompt:" | tail -1
 ```
 
-You should see (or, as often, `(no unread messages)` — a one-line ask is the
-sub-80-character shape terminal chrome cleans, the same fumble chapter 4
-walks through; nothing failed either way, and the `knowledge N` field on the
-prompt line below is the actual check for this section):
+You should see the answer, and then the bill for it:
 
 ```
-── from silo:wren (2026-07-31T18:13:43.793861Z)
-Ship ROSTER.md edits Tuesday mornings only; Friday ships are forbidden regardless of urgency.
+## Output
 
-- prompt: continue 3208 bytes — intro 739, persona 325, history 198, messages 113, doctrine 1232, knowledge 596
+[0m
+> build · qwen3.6:latest
+[0m
+Ship windows are Tuesday morning only — never Friday, because nobody reads logs over the weekend and a broken r4t.md takes the node down until Monday.
 ```
 
-The budget bounds the entry blocks and the header and framing line ride on
-top, which is why the log reads 596 for a 512-byte dial. Two entries fit, in
-ranked order; the next one would have overflowed and was left out — truncation
-is deterministic, never a random half-entry. Set the dial where the trade sits
-for your rig: a wide context window and a store worth reading want more, a
-small local model already drowning wants less. Put it back to `on` when you
-are done.
+```
+- prompt: continue 4587 bytes — intro 747, mission 113, charter 1402, persona 325, history 198, messages 127, doctrine 1194, knowledge 474
+```
+
+`knowledge 474` against a 512-byte dial: the budget bounds whole entry blocks,
+so what fits is the highest-ranked entries that still come in under it, and
+the leftover is simply not spent. Truncation is deterministic and never a
+random half-entry — the next entry would have overflowed, so it was left out
+whole. Wren still answered correctly, because the one note that mattered was
+the one that ranked first. Set the dial where the trade sits for your rig: a
+wide context window and a store worth reading want more, a small local model
+already drowning wants less. Put it back to `on` when you are done.
 
 Two related knobs while you are here. Echo members never get the section at
 all, so Moss stays exactly as chapter 4 left him until you lift echo. And
@@ -431,13 +478,13 @@ from ever having the last word in the prompt.
 
 ## 12. Commit point
 
-The roster line is repo state. The store is not:
+The runbook line is repo state. The store is not:
 
 **Run**
 
 ```bash
 cd ~/ark/silo
-git add ROSTER.md
+git add r4t.md
 git commit -q -m "silo roster: Wren remembers — Knowledge on"
 ```
 
@@ -469,11 +516,11 @@ be retired and refounded from disk, a second member to delegate to, and now a
 memory per member that fills itself from work already done and rides into
 every wake at a price you can read in the log.
 
-Every piece of it is a file you can open. The roster is markdown, the rigs are
-JSON outside the repo, the mailboxes are directories, the knowledge is
+Every piece of it is a file you can open. The roster is one markdown file, the
+rigs are JSON outside the repo, the mailboxes are directories, the knowledge is
 markdown with a disposable index over it. Nothing here needs a subscription,
 and nothing here phones anyone.
 
 What is not built yet is *shape*: one leader and one helper is a roster, not an
-organization. Cells, leads that hide detail from each other, a `MISSION.md`
-the roster reviews itself against — that is where the guide goes next.
+organization. Cells, leads that hide detail from each other, and the rituals
+you left empty in chapter 2 — that is where the guide goes next.

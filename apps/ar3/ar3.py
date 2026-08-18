@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ar3 — the front door to The Ark (a8s, r4t, k7e).
+"""ar3 — the front door to the ar3 suite (a8s, r4t, k7e).
 
 ar3 never mutates product state; it owns and maintains the suite's own
 substrate instead. It reads a8s/r4t/k7e state passively and probes
@@ -39,7 +39,7 @@ except ImportError:
     def version_line(app: str) -> str:
         import platform
 
-        return f"{app} unknown (The Ark, python {platform.python_version()})"
+        return f"{app} unknown (ar3, python {platform.python_version()})"
 
     def update_note(timeout_s: float = 0) -> str:
         return "unknown (no VERSION file beside this copy)"
@@ -54,7 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WORDMARK = ("A R K", "8 4 7", "S T E")
 
 TAGLINE = (
-    "The Ark — a8s routes the messages, r4t governs the roster,",
+    "ar3 — a8s routes the messages, r4t governs the roster,",
     "k7e keeps what they learn. ar3 reads; each product owns its own verbs.",
 )
 
@@ -195,7 +195,7 @@ def r4t_rows() -> list[Row]:
     rows = [_cli_row("r4t")]
     rigs = home / "rigs.json"
     if not rigs.is_file():
-        rows.append((False, "rigs", f"no rig config at {rigs}", "r4t init"))
+        rows.append((False, "rigs", f"no rig config at {rigs}", "r4t rig add <rig> <preset>"))
     else:
         data = _read_json(rigs)
         if data is None:
@@ -220,7 +220,7 @@ def r4t_rows() -> list[Row]:
         bool(rosters),
         "rosters",
         f"{len(rosters)} roster(s): {', '.join(rosters)}" if rosters else f"none under {rosters_dir}",
-        None if rosters else "r4t init",
+        None if rosters else "r4t add <dir> [<runbook>]",
     ))
     return rows
 
@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ar3",
         description=(
-            "Front door to The Ark. Bare `ar3` reports where a8s, r4t and "
+            "Front door to the ar3 suite. Bare `ar3` reports where a8s, r4t and "
             "k7e stand; `ar3 doctor` probes the tools they need. ar3 never runs "
             "another product's commands for you."
         ),

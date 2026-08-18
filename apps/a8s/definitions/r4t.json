@@ -33,7 +33,7 @@
     ]
   },
   "idle": {
-    "timeout": 300,
+    "timeout": 60,
     "invoke": [
       "python3",
       "$A8S_DIR/../r4t/r4t.py",

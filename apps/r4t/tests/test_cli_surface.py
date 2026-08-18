@@ -8,7 +8,9 @@ import pytest
 import r4t
 from r4t import main as r4t_main
 
-VISIBLE = ["init", "roster", "rig", "status", "logs", "chat", "seat", "flush", "task", "check"]
+VISIBLE = [
+    "init", "roster", "rig", "status", "logs", "tell", "flush", "resume", "check",
+]
 
 
 def _top_level_help() -> str:
@@ -71,7 +73,7 @@ def test_panel_is_sectioned(capsys):
     assert "Getting started" in out
     assert "Every day" in out
     assert "Verification" in out
-    for name in ("logs", "chat", "seat", "flush", "status", "task list", "check"):
+    for name in ("logs", "tell", "flush", "status", "check"):
         assert name in out
 
 
@@ -155,15 +157,10 @@ class TestStrayPositionalAdoption:
         ns = self._fabricated(action="quota", prompt=None)
         assert r4t._adopt_stray_positionals(ns, ["Test"]) == ["Test"]
 
-    def test_seat_send_message_keeps_taking_words(self):
-        ns = self._fabricated(action="send", message=[])
+    def test_tell_message_keeps_taking_words(self):
+        ns = self._fabricated(message=[])
         assert r4t._adopt_stray_positionals(ns, ["hello", "there"]) == []
         assert ns.message == ["hello", "there"]
-
-    def test_task_id_after_flags_is_adopted(self):
-        ns = self._fabricated(action="show", id=None)
-        assert r4t._adopt_stray_positionals(ns, ["01ABC"]) == []
-        assert ns.id == "01ABC"
 
     def test_rig_get_key_after_flags_is_adopted(self):
         ns = self._fabricated(rig="cheap", key=None)
@@ -173,9 +170,7 @@ class TestStrayPositionalAdoption:
     @pytest.mark.parametrize(
         "argv,dest,expected",
         [
-            (["seat", "send", "--to", "bob", "hi", "there"], "message", ["hi", "there"]),
-            (["task", "show", "--node", "n1", "01ABC"], "id", "01ABC"),
-            (["task", "trace", "--json", "01ABC"], "id", "01ABC"),
+            (["tell", "--as", "bob", "hi", "there"], "message", ["hi", "there"]),
             (["rig", "get", "cheap", "--rig-config", "x", "timeout"], "key", "timeout"),
             (["flush", "--node", "n1", "amos", "bo"], "members", ["amos", "bo"]),
         ],

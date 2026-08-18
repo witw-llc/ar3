@@ -4,6 +4,6 @@
     "opencode",
     "run",
     "--auto",
-    "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

@@ -2,7 +2,7 @@
 
 Schema:
   {
-    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."], "vars": {"KEY": "..."}}},
+    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."], "vars": {"KEY": "..."}, "retired_mailboxes": ["..."]}},
     "aliases":    {"<ALIAS>": ["<NAME-or-ALIAS>", ...]},
     "namespaces": {"<PREFIX>": "<AGENT>"}
   }
@@ -10,6 +10,10 @@ Schema:
   attachments may originate at routing time, in addition to `root`.
   `vars` — optional per-node a8s variables (`a8s vars`); expanded as `$KEY` in
   definition argv. Not OS environment variables.
+  `retired_mailboxes` — optional list of absolute paths this tool itself
+  un-pointed a mailbox field from (`a8s vars set`/`unset`), most recent last,
+  deduped, capped at 20. `a8s health`'s orphan scan walks this list directly
+  and prunes entries that are empty or owned again.
   `namespaces` — prefix routing: a recipient `<PREFIX>:<sub-address>`
   routes to the single bound agent with the full address preserved in `to`.
 Aliases are disjoint from both agents and namespaces. A namespace prefix may
@@ -270,6 +274,10 @@ def participants_from_registry() -> list[Participant]:
             root = Path(root_str).expanduser().resolve()
         except (OSError, RuntimeError):
             continue
+        mailboxes, _reason = _resolve_mailboxes(name, root)
+        if mailboxes is None:
+            continue
+        outbox, files, inbox = mailboxes
         safe_dirs: list[Path] = []
         raw_dirs = info.get("safe_dirs") or []
         if isinstance(raw_dirs, list):
@@ -285,30 +293,64 @@ def participants_from_registry() -> list[Participant]:
                 name=name,
                 root=root,
                 safe_dirs=tuple(safe_dirs),
-                outbox=_participant_outbox(name, root),
-                files=_participant_files(name, root),
-                inbox=_participant_inbox(name, root),
+                outbox=outbox,
+                files=files,
+                inbox=inbox,
             )
         )
     return parts
 
 
-def _participant_inbox(name: str, root: Path) -> Path:
-    from definitions import resolve_inbox_dir_for_agent
+def _resolve_mailboxes(
+    name: str, root: Path
+) -> tuple[tuple[Path, Path, Path] | None, str]:
+    """The node's outbox / files / inbox paths, or `(None, reason)`.
 
-    return resolve_inbox_dir_for_agent(name, root)
+    A path field referencing an a8s var that is not set makes the node
+    unresolvable, and unresolvable means not participating. Falling back to the
+    `.outbox` default instead would put two nodes on one root back in one
+    directory — silently, which is the failure this interpolation removes. A
+    node that sends and receives nothing is visible in seconds.
+    """
+    from definitions import (
+        UndefinedVarsError,
+        resolve_files_dir_for_agent,
+        resolve_inbox_dir_for_agent,
+        resolve_outbox_dir_for_agent,
+    )
+
+    paths: list[Path] = []
+    for field, resolve in (
+        ("outbox_dir", resolve_outbox_dir_for_agent),
+        ("files_dir", resolve_files_dir_for_agent),
+        ("inbox_dir", resolve_inbox_dir_for_agent),
+    ):
+        try:
+            paths.append(resolve(name, root))
+        except UndefinedVarsError as e:
+            return None, f"unresolved {field} — {e}"
+    return (paths[0], paths[1], paths[2]), ""
 
 
-def _participant_files(name: str, root: Path) -> Path:
-    from definitions import resolve_files_dir_for_agent
+def unresolved_mailboxes() -> dict[str, str]:
+    """Every registered node whose mailbox paths do not resolve, name → reason.
 
-    return resolve_files_dir_for_agent(name, root)
-
-
-def _participant_outbox(name: str, root: Path) -> Path:
-    from definitions import resolve_outbox_dir_for_agent
-
-    return resolve_outbox_dir_for_agent(name, root)
+    These nodes are absent from `participants_from_registry`, so they route
+    nothing. `a8s ls`, `a8s start` and `a8s health` name them rather than
+    leaving an operator to notice the silence."""
+    out: dict[str, str] = {}
+    for name, info in load_registry().items():
+        root_str = info.get("root", "")
+        if not root_str:
+            continue
+        try:
+            root = Path(root_str).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        _paths, reason = _resolve_mailboxes(name, root)
+        if reason:
+            out[name] = reason
+    return out
 
 
 # ---------- discovery (suggestions only) ----------

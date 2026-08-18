@@ -1,4 +1,4 @@
-"""Tests for the shared spawn/terminate-group primitive — The Ark's
+"""Tests for the shared spawn/terminate-group primitive — ar3's
 foundation layer."""
 from __future__ import annotations
 

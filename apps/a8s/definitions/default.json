@@ -1,4 +1,4 @@
 {
   "description": "Fallback default — no real CLI is configured. Routes to apps/a8s/dummy-cli, which prints a 'not configured' notice and the received prompt. Configure a real CLI with `a8s define <name> <definition>` (path or bare bundled name like `claude`).",
-  "invoke": ["$A8S_DIR/dummy-cli", "$SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
+  "invoke": ["$A8S_DIR/dummy-cli", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"]
 }

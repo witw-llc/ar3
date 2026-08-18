@@ -6,15 +6,20 @@ the LLM. Prompt etiquette ("don't send ack-only messages") is kept as a
 courtesy, but no mechanism depends on an agent obeying it.
 
 Everything here runs autonomously. There are knobs (config) and lenses
-(`r4t status`, the dead-letter dir, a8s logs); the only gate is on
-escalation to an absent human (the doorbell — see
-[r4t-verification.md](r4t-verification.md)). Member work never waits, and a
-deliverable message is never dropped.
+(`r4t status`, the dead-letter dir, a8s logs), and nothing gates a turn on a
+person being present. Member work never waits, and a deliverable message is
+never dropped.
 The economics are *budgets, not cuts* — an agent that is out of budget does
 not run (its mail queues), rather than having its mail thrown away. The point
 is not only that no roster overspends the plan, but that the plan you already
 pay for keeps earning: held queues mean refill is the retry, so capacity is
 spent on work rather than left idle.
+
+Traffic is **fire-and-forget**, inside the walls as well as across them: a
+message carries no task and demands no answer. Nothing records whether one was
+answered, and no mechanism chases a member for a reply. What r4t watches
+instead is whether the org is moving at all — when it stops, the mission-review
+heartbeat on an [idle pass](r4t-idle.md) re-engages the top leader.
 
 ## The failure modes
 
@@ -37,8 +42,8 @@ of them within days:
 3. **Runaway fan-out.** One turn messages N members; each of those
    messages N more. Unbounded width, multiplied by depth.
 4. **Stalled fan-in.** A leader delegates, a subordinate's process dies,
-   and the leader never answers the human because nothing re-engages
-   either side.
+   and the org goes silent because nothing re-engages either side. The
+   mission-review heartbeat on an [idle pass](r4t-idle.md) is what wakes it.
 5. **Quota burn without work.** All of the above cost real tokens/credits
    while producing nothing.
 
@@ -104,12 +109,16 @@ gRPC retry throttling (gRFC A6 — a token bucket that disables spend below a
 floor); IRC flood control's burst-credit model (RFC 1459 §8.10). The design
 lesson is graduated degradation: slow first, queue second, never drop.
 
-### 5. Cadence throttle and concurrency cap
+### 5. One turn at a time, and the cadence throttle
 
-Roster-wide floor on burn rate: a minimum interval between turn starts and a
-cap on concurrent turns. Content- and topology-blind, so nothing evades it;
-a perfectly evasive storm degrades into a slow, visible drip. A member that
-can't start yet keeps its queue and runs on a later pass.
+A node runs exactly one member turn at a time — a contract held by the
+admission lock, with no number to raise. Parallelism is a second node, which
+also makes the operator accept the loss of the single watchable stream at the
+moment they choose it. On top of that sits an optional floor on burn rate: a
+minimum interval between turn starts, off by default. Content- and
+topology-blind, so nothing evades it; a perfectly evasive storm degrades into a
+slow, visible drip. A member that can't start yet keeps its queue and runs on a
+later pass.
 
 Prior art: IRC flood control — RFC 1459 §8.10 (burst credit, per-message
 penalty; excess queues rather than drops), UnrealIRCd fake lag.
@@ -123,54 +132,33 @@ turns the member's turns pause; its queue simply holds (nothing is dropped).
 One probe turn is let through per `breaker_cooldown_seconds`; the first
 clean turn closes the breaker.
 
+A failure that will recur *identically* — an exec that never started, because
+the harness binary is not on `PATH` — skips the ladder entirely and **parks**
+the member on its first occurrence: one line, then silence, with the queue
+held. Retrying forever at the cap is the opposite lesson, and it is where the
+prior art divides.
+
 Prior art: systemd start rate limiting (`StartLimitBurst`/
-`StartLimitIntervalSec`) and the circuit-breaker pattern's
-closed/open/half-open probe cycle.
+`StartLimitIntervalSec`) for the transient ladder and systemd's `failed` state
+plus `systemctl reset-failed` for the park (`r4t resume`); the circuit-breaker
+pattern's closed/open/half-open probe cycle. Kubernetes CrashLoopBackOff is the
+anti-precedent — retry forever at the cap, so an operator watching restart 40
+still cannot tell whether anything is being learned.
 
-### 7. Quiet-thread sweep (the termination backstop)
-
-This is the **watchdog** on an [idle pass](r4t-idle.md). A thread
-(conversation label) can go quiet with its originator never having heard
-back — a turn succeeds while staging no reply, or a chain stalls. When an
-open thread whose originator is unanswered sees no activity for
-`quiet_task_seconds`, the leader is woken with a nudge to report current
-state — NOT to force-finish the work. The human, or the leader, decides what
-"done" means; r4t only makes sure the originator is not left in silence.
-
-**The sweep watches the inside only.** A thread that arrived from outside the
-roster is owed nothing and is never nudged, whoever sent it and whatever the
-envelope claims. Beyond the wall a8s posts messages to nodes and stops there:
-it has no notion of a reply being expected, and giving it one would put a
-decision point on every node of a network r4t does not own. So a message
-arriving from outside is an offer, not a debt — the leader answers it or does
-not, and that judgment is the leader's. A leader that goes quiet on outside
-mail is no different from any lone agent that reads a message and moves on.
-
-Inside the wall the obligation is real, because r4t holds both ends: a member
-that never answered its originator is a dropped ball, and that is what the
-nudge is for. The roster's own human counts as inside — their mail arrives
-through the doorbell like any outside sender, but they are a member, so their
-thread keeps its backstop.
-
-Nudges are the only thing the sweep does, and they are deliberately dull: it
-asks for current state, never for the work to be finished.
-
-Prior art: Erlang/OTP supervision — a bounded, rate-limited recovery action
-rather than an unbounded retry loop.
-
-### 8. The tree (information hiding + hard rerouting)
+### 7. The tree (information hiding + hard rerouting)
 
 A roster is not a flat pool of peers; it is a tree of small **cells**, each
-with one lead, composing up to a single top lead. The roster declares it: an
-AI member's `Cell:` line names its cell and its `Lead:` line names the member
-it reports to (the top lead's `Lead:` is the human). Two mechanisms make the
-tree structural rather than merely advisory, and both switch on only when the
-roster declares `Lead:` lines — a flat roster (no `Lead:` lines anywhere) is
-treated as one cell under the leader and behaves exactly as before.
+with one lead, composing up to a single top lead. The roster declares it: a
+member's `Cell:` line names its cell and its `Lead:` line names the member
+it reports to (the top lead, marked `Leader:`, carries no `Lead:` line). Two
+mechanisms make the tree structural rather than merely advisory, and both
+switch on only when the roster declares `Lead:` lines — a flat roster (no
+`Lead:` lines anywhere) is treated as one cell under the leader and behaves
+exactly as before.
 
 - **Information hiding.** A member's turn prompt lists only its
-  tree-adjacent names — its lead, its direct reports, its cell-mates — plus
-  the human seat, which is always reachable. It never sees the whole roster.
+  tree-adjacent names — its lead, its direct reports, its cell-mates. It never
+  sees the whole roster.
   Lateral contact becomes informationally *unthinkable*, not just structurally
   blocked: an IC in the design cell has no idea the build cell's members exist
   by name. Cross-cell contact is created by introduction — a lead mentioning
@@ -179,9 +167,8 @@ treated as one cell under the leader and behaves exactly as before.
 - **Hard rerouting.** If a member does address someone outside its adjacency
   (a stale name from history, say), the release path reroutes that tell to the
   member's lead with a mechanical prefix (`[r4t rerouted: Ann -> Cal] …`) and
-  logs a `REROUTED` event. Replies to whoever messaged the member this turn,
-  and any message to the human seat, are never rerouted — answering must
-  always get through.
+  logs a `REROUTED` event. Replies to whoever messaged the member this turn
+  are never rerouted — answering must always get through.
 
 Why this shape: span-of-control research converges on cells of ~4–6 (soft
 warning past 6, hard cap 10) and trees no deeper than ~2–3 levels; `roster
@@ -195,7 +182,7 @@ Prior art: Roster Topologies (Skelton/Pais) — explicit, bounded interaction
 modes rather than ad-hoc cross-roster chatter; the parametric bounds trace to
 Hackman's roster-size work and the US Army's fire-roster/squad structure.
 
-### 9. The mission file (nested intent)
+### 8. The mission file (nested intent)
 
 A `MISSION.md` at the repo root is the roster's highest-ranking document — a
 short, human-owned page of *why* the repo exists and what "done" looks like

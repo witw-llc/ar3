@@ -185,6 +185,15 @@ Read [a8s.md](a8s.md) first for concept and usage.
   loops. `txlog.log` never raises; `a8s trace <ULID>` and `a8s transactions`
   are the only readers, and `a8s update` retains `txlog_max_rows`. Both
   stores share the WAL/busy-retry discipline in `sqlite_store.py`.
+- **A wake's stdout is read by a dedicated reader thread, never the main
+  loop.** The main loop only ever drains that thread's queue with a bounded
+  deadline (`wake_drain_grace_seconds`) — never an unbounded `for line in
+  proc.stdout:` EOF wait. An inherited write end (a grandchild that keeps the
+  pipe open after the wake itself exits) must not wedge the runner.
+- **The watchdog's kill boundary is the wake's own process group, nothing
+  else.** Recovery closes the runner's end of the current wake's stdout and,
+  if that process is still alive, terminates its process group — never a
+  detached process (its own session) or anything outside the in-flight wake.
 
 ## Per-tool quirks
 

@@ -32,16 +32,16 @@ not enough.
 ## Adoption trigger
 
 A candidate graduates from this list to a preset PR when a **concrete
-seat** wants it — a roster member that needs that CLI. Each adoption
-runs the live verification matrix: plant/resume codeword, cold
-behavior, cross-directory scope probe.
+roster member** wants it — someone on a live roster who needs that CLI.
+Each adoption runs the live verification matrix: plant/resume codeword,
+cold behavior, cross-directory scope probe.
 
 ## Presets r4t supports today
 
 | Preset | Headless shape | Continue | MCP idiom | Notes |
 |---|---|---|---|---|
-| `claude` | `claude … -p {prompt}` with `--permission-mode dontAsk` | `--continue` | `claude-flag` | |
-| `codex` | `codex exec --sandbox workspace-write … {prompt}` | `resume --last` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
+| `claude` | `claude … -p {prompt}` with `--permission-mode dontAsk` | `--continue`, but graded **poor** — a roster may not use it | `claude-flag` | |
+| `codex` | `codex exec --sandbox workspace-write … {prompt}` | `resume --last --include-non-interactive` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
 | `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
@@ -103,13 +103,16 @@ notes for agy and the `ollama launch` wrappers:
 
 Cross-cutting view for roster `- **Continue:**` decisions. “Pin path”
 means how r4t would keep two members on the same CLI from sharing one
-conversation.
+conversation. Where the engine research measured a preset against a
+process-boundary resume — the only shape a roster turn has — the grade is in
+the last column; see
+[r4t-rigs.md](r4t-rigs.md#the-continuation-grade).
 
 | CLI | Continue mechanism | Scope | Pin path | Roster continue? |
 |---|---|---|---|---|
-| claude (preset) | `--continue` | per-directory (CLI convention) | distinct `Workdir:` / CLI | yes |
-| codex (preset) | `exec resume --last` | last **interactive** session in this cwd — cwd-filtered, and excludes `codex exec` sessions unless `--include-non-interactive` is passed | `resume <SESSION_ID>` (bin#256) | yes (`--last`) |
-| cursor (preset) | `--continue` | per-directory | distinct workdirs | yes |
+| claude (preset) | `--continue` | per-directory (CLI convention) | distinct `Workdir:` / CLI | **no** — graded **poor**: a process-boundary resume re-wrote the conversation 40.6% of the time against a 2.5% same-process baseline, and every roster turn is a new process |
+| codex (preset) | `exec resume --last --include-non-interactive` | cwd-filtered; `--include-non-interactive` is what lets `--last` see the `codex exec` sessions a roster creates, and the preset passes it | `resume <SESSION_ID>` (bin#256) | yes (`--last`), graded **moderate** |
+| cursor (preset) | `--continue` | per-directory (MD5 of the absolute cwd) | distinct workdirs | yes, graded **good** |
 | opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
 | copilot (preset) | `--continue` exists | **machine-global** | `--session-id <id>` at creation, `-r, --resume=<id>` under `-p` (#17) | **no** until the pin path replaces `--continue` in the preset |
