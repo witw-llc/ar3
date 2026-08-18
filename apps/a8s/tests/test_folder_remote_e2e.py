@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from conftest import set_home
 
 
 def _machine(home: Path, shared: Path) -> None:
@@ -63,8 +64,6 @@ def test_folder_round_trip(tmp_path, monkeypatch):
     import core
 
     core.PRINT_LOCK = None
-    monkeypatch.delenv("A8S_HOME", raising=False)
-    monkeypatch.delenv("USERPROFILE", raising=False)
 
     from core import Participant, inbox_dir
     from daemon import attached_loop
@@ -72,14 +71,14 @@ def test_folder_round_trip(tmp_path, monkeypatch):
     from network import load_remotes, load_services, start_remotes, stop_remotes
     from registry import save_registry
 
-    monkeypatch.setenv("HOME", str(home_b))
+    set_home(monkeypatch, home_b)
     target_root = home_b / "target"
     target_root.mkdir()
     save_registry({"TARGET": {"root": str(target_root)}})
     target_p = Participant("TARGET", target_root)
     ensure_mailboxes(target_p)
 
-    monkeypatch.setenv("HOME", str(home_a))
+    set_home(monkeypatch, home_a)
     core.PRINT_LOCK = None
     sender_root = home_a / "sender"
     sender_root.mkdir()
@@ -94,7 +93,7 @@ def test_folder_round_trip(tmp_path, monkeypatch):
     assert envelope.is_file(), "publish left no envelope in the shared folder"
     assert json.loads(envelope.read_text())["content"] == "ping from A"
 
-    monkeypatch.setenv("HOME", str(home_b))
+    set_home(monkeypatch, home_b)
     core.PRINT_LOCK = None
     rx = start_remotes(load_remotes(), lambda: [target_p], services=load_services())
     try:
@@ -114,7 +113,7 @@ def test_folder_round_trip(tmp_path, monkeypatch):
         stop_remotes(rx)
 
     # The receipt rides the same folder back.
-    monkeypatch.setenv("HOME", str(home_a))
+    set_home(monkeypatch, home_a)
     core.PRINT_LOCK = None
     receipt_rx = start_remotes(load_remotes(), lambda: [sender_p])
     try:
@@ -151,8 +150,6 @@ def test_folder_round_trip_with_attachment(tmp_path, monkeypatch):
     import core
 
     core.PRINT_LOCK = None
-    monkeypatch.delenv("A8S_HOME", raising=False)
-    monkeypatch.delenv("USERPROFILE", raising=False)
 
     from core import Participant, files_dir
     from daemon import attached_loop
@@ -160,14 +157,14 @@ def test_folder_round_trip_with_attachment(tmp_path, monkeypatch):
     from network import load_remotes, load_services, start_remotes, stop_remotes
     from registry import save_registry
 
-    monkeypatch.setenv("HOME", str(home_b))
+    set_home(monkeypatch, home_b)
     target_root = home_b / "target"
     target_root.mkdir()
     save_registry({"TARGET": {"root": str(target_root)}})
     target_p = Participant("TARGET", target_root)
     ensure_mailboxes(target_p)
 
-    monkeypatch.setenv("HOME", str(home_a))
+    set_home(monkeypatch, home_a)
     core.PRINT_LOCK = None
     sender_root = home_a / "sender"
     sender_root.mkdir()
@@ -186,7 +183,7 @@ def test_folder_round_trip_with_attachment(tmp_path, monkeypatch):
     assert (shared / f"{msg_id}.json").is_file()
     assert (shared / msg_id / "report.txt").read_text() == "hello from machine A\n"
 
-    monkeypatch.setenv("HOME", str(home_b))
+    set_home(monkeypatch, home_b)
     core.PRINT_LOCK = None
     rx = start_remotes(load_remotes(), lambda: [target_p], services=load_services())
     try:

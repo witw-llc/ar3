@@ -12,6 +12,8 @@ import json
 
 import pytest
 
+from conftest import set_home
+
 from services import StorageError
 from services.sync_folder import (
     MANIFEST_NAME,
@@ -65,7 +67,7 @@ class TestConfigUrl:
             SyncFolderService("x", url="OneDrive/A8S")
 
     def test_tilde_expands(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        set_home(monkeypatch, tmp_path)
         svc = SyncFolderService("x", url="~/Sync")
         assert svc.store(_payload(tmp_path), msg_id=MSG)
         assert (tmp_path / "Sync" / MSG / "hello.txt").is_file()

@@ -10,6 +10,30 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.72
+
+### Fixed
+- **The a8s test suite can no longer touch live state, on any platform.**
+  A native-Windows verification run caught the suite overwriting the
+  developer's real registry and publishing fixture envelopes to the real
+  brokers: four e2e sites redirected `HOME` alone, and `ntpath.expanduser`
+  never consults `HOME` — resolution fell through `USERPROFILE` to the real
+  home. Every home redirect now goes through one conftest helper
+  (`set_home`) that pins all four resolution variables, and a session-wide
+  `A8S_HOME` floor under pytest's tmp root turns any future bypass into a
+  write to a throwaway directory instead of a live one.
+- **The rotation fix got the test its arithmetic deserved.** 0.1.71's
+  strict-alternation test never exercises a skip — its inboxes stay full,
+  so the old and new counter arithmetic agree at every step it takes. A new
+  deterministic transient-skip test makes the preferred agent unready
+  exactly once and asserts the counter lands one past the *woken* position
+  (the skipped agent gets the very next turn); it fails on the pre-fix
+  arithmetic, which is the property a regression test is for.
+
+### Changed
+- `CLAUDE.md`'s per-suite test counts caught up with reality (a8s ~1440,
+  r4t ~1450, ar3 ~175, k7e ~190).
+
 ## 0.1.71
 
 ### Fixed

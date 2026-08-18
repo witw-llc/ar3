@@ -25,6 +25,7 @@ from core import (
     seen_ids_path,
     touch_last_active,
 )
+from conftest import set_home
 
 
 class TestPidAlive:
@@ -165,9 +166,7 @@ class TestA8sHomeOverride:
     def test_new_install_defaults_to_config_a8s(self, tmp_path, monkeypatch):
         from core import resolve_a8s_home
 
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.delenv("A8S_HOME", raising=False)
-        monkeypatch.delenv("USERPROFILE", raising=False)
+        set_home(monkeypatch, tmp_path)
         assert resolve_a8s_home() == tmp_path / ".config" / "a8s"
         assert _a8s_dir() == tmp_path / ".config" / "a8s"
         assert (tmp_path / ".config" / "a8s").is_dir()

@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import set_home
+
 from mqtt_cluster import write_network_json
 
 pytest.importorskip("paho.mqtt.client")
@@ -46,8 +48,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     # client_id), publish from A while B's subscriber is offline, then
     # bring B's subscriber back up and let the broker replay.
 
-    monkeypatch.setenv("HOME", str(cluster_b_home))
-    monkeypatch.delenv("USERPROFILE", raising=False)
+    set_home(monkeypatch, cluster_b_home)
     target_root = cluster_b_home / "target"
     target_root.mkdir()
     from registry import save_registry
@@ -63,7 +64,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     stop_remotes(warmup)
 
     # Step 2: cluster A publishes via attached_loop.
-    monkeypatch.setenv("HOME", str(cluster_a_home))
+    set_home(monkeypatch, cluster_a_home)
     core.PRINT_LOCK = None
     sender_root = cluster_a_home / "sender"
     sender_root.mkdir()
@@ -78,7 +79,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     assert rc == 0
 
     # Step 3: cluster B reconnects with the same client_id; broker replays.
-    monkeypatch.setenv("HOME", str(cluster_b_home))
+    set_home(monkeypatch, cluster_b_home)
     core.PRINT_LOCK = None
     rx_remotes = start_remotes(load_remotes(), lambda: [target_p])
     try:
@@ -99,7 +100,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
 
     # Step 4: cluster A reconnects its persistent subscriber and consumes
     # the internal receipt emitted by cluster B after the inbox write.
-    monkeypatch.setenv("HOME", str(cluster_a_home))
+    set_home(monkeypatch, cluster_a_home)
     core.PRINT_LOCK = None
     receipt_remotes = start_remotes(load_remotes(), lambda: [sender_p])
     try:
@@ -163,8 +164,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
 
         # Pre-register cluster B's persistent session (matches the no-files
         # test's pattern) and create TARGET's mailbox.
-        monkeypatch.setenv("HOME", str(cluster_b_home))
-        monkeypatch.delenv("USERPROFILE", raising=False)
+        set_home(monkeypatch, cluster_b_home)
         target_root = cluster_b_home / "target"
         target_root.mkdir()
         from core import Participant, files_dir, inbox_dir
@@ -182,7 +182,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         stop_remotes(warmup)
 
         # Cluster A: write a FILE: outbox, run attached_loop to publish.
-        monkeypatch.setenv("HOME", str(cluster_a_home))
+        set_home(monkeypatch, cluster_a_home)
         core.PRINT_LOCK = None
         sender_root = cluster_a_home / "sender"
         sender_root.mkdir()
@@ -203,7 +203,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         assert len(storage_server.files) == 1, "sender did not upload to storage"
 
         # Cluster B reconnects with the same client_id; broker replays.
-        monkeypatch.setenv("HOME", str(cluster_b_home))
+        set_home(monkeypatch, cluster_b_home)
         core.PRINT_LOCK = None
         b_services = load_services()
         rx_remotes = start_remotes(load_remotes(), lambda: [target_p], services=b_services)

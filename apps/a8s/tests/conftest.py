@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -56,21 +57,39 @@ def _settle_deferred_attachment_retries():
     network.drain_attachment_retries(timeout_s=10)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _a8s_home_floor(tmp_path_factory):
+    """Session-wide A8S_HOME floor under pytest's tmp root.
+
+    A test that redirects nothing must still be unable to resolve the
+    developer's live state. `fake_home` and `set_home` delete the variable
+    per-test, so properly isolated tests are unaffected — the floor exists
+    for the future bypass, turning a live-state write (a clobbered registry,
+    fixture envelopes published to real remotes — both field-observed) into
+    a write to a throwaway directory."""
+    os.environ["A8S_HOME"] = str(tmp_path_factory.mktemp("a8s-home-floor"))
+
+
+def set_home(monkeypatch, home) -> None:
+    """Point every home-resolution path at `home`, on every platform.
+
+    `ntpath.expanduser` never consults HOME — it reads USERPROFILE, then
+    HOMEDRIVE+HOMEPATH — so a site that sets HOME alone is isolated on POSIX
+    and un-isolated on Windows: resolution falls through to the real home,
+    and the suite writes the developer's live ~/.a8s (field-verified). Every
+    test that redirects home goes through here or `fake_home`."""
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+    monkeypatch.delenv("A8S_HOME", raising=False)
+
+
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
     """Redirect `Path.home()` to `tmp_path` so registry / agent / log files
     land in an isolated location. Resets module-level mutable state in core."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    # ntpath.expanduser never consults HOME: it reads USERPROFILE, then
-    # HOMEDRIVE+HOMEPATH. Deleting USERPROFILE therefore un-isolates Windows —
-    # resolution falls through to the real home and the suite clobbers the
-    # developer's live ~/.a8s (field-verified). Point USERPROFILE at the same
-    # tmp dir and clear the fallback pair.
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    monkeypatch.delenv("HOMEDRIVE", raising=False)
-    monkeypatch.delenv("HOMEPATH", raising=False)
-    # Don't let a globally-set A8S_HOME leak into tests.
-    monkeypatch.delenv("A8S_HOME", raising=False)
+    set_home(monkeypatch, tmp_path)
     # Prefer legacy ~/.a8s when present so existing path assertions stay stable.
     (tmp_path / ".a8s").mkdir(parents=True, exist_ok=True)
     import json

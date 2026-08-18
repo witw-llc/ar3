@@ -1686,3 +1686,60 @@ class TestSharedHandlerWakeFairness:
 
         assert len(woke) >= 4
         assert woke[:4] == ["A", "B", "A", "B"]
+
+    def test_a_skip_advances_past_the_woken_agent_not_the_skipped_one(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        """The transient-skip double turn. B is unready exactly once, at its
+        own rotation slot, so A takes it. The counter must land one past the
+        WOKEN position — recovered B goes next — not one past the skipped
+        slot, which parks it on A and hands A a third consecutive turn while
+        B sits ready with mail. The strict-alternation test above never
+        exercises this: its inboxes stay full, the start agent always wakes,
+        and both arithmetics agree at woke_index zero."""
+        import daemon as daemon_mod
+        from mailbox import peek_inbox_messages
+
+        agents = self._register(tmp_path, fixtures_dir, ("A", "B"))
+        queue = self._queue
+        queue("A", "a0")
+        queue("B", "b0")
+
+        woke: list[str] = []
+
+        def instant_wake(p, msg_path, *, async_wake=False):
+            woke.append(p.name)
+            msg_path.rename(unique_path(trash_dir(p.name) / msg_path.name))
+            return True
+
+        monkeypatch.setattr(daemon_mod, "wake_once", instant_wake)
+
+        real_ready = daemon_mod._wake_retry_ready
+        armed = True
+
+        def skip_b_once(name, **kw):
+            nonlocal armed
+            if armed and name == "B" and len(woke) == 1:
+                armed = False
+                return False
+            return real_ready(name, **kw)
+
+        monkeypatch.setattr(daemon_mod, "_wake_retry_ready", skip_b_once)
+
+        wait_calls = 0
+
+        def refill_and_stop(self, timeout=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            for name, p in agents.items():
+                if not peek_inbox_messages(p, 1):
+                    queue(name, f"more-{name}-{wait_calls}")
+            if len(woke) >= 4 or wait_calls >= 200:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(refill_and_stop))
+        attached_loop(["A", "B"], 0.01, single_pass=False)
+
+        assert len(woke) >= 4
+        assert woke[:4] == ["A", "A", "B", "A"]

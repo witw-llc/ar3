@@ -233,10 +233,10 @@ own harness come from `source <repo>/install.sh --skills`.
 # Every suite runs through its own `tests/run`, which builds and reuses a venv
 # at apps/<app>/tests/.venv from that suite's requirements.txt. Never install
 # pytest into the system or Homebrew python — extra args pass through to pytest.
-apps/a8s/tests/run          # ~875
-apps/r4t/tests/run          # ~1070 (run separately from a8s — ulid modules shadow)
-apps/ar3/tests/run          # ~37
-cd apps/k7e && tests/run    # ~170; add -m "not llm" to skip model-backed tests
+apps/a8s/tests/run          # ~1440
+apps/r4t/tests/run          # ~1450 (run separately from a8s — ulid modules shadow)
+apps/ar3/tests/run          # ~175
+cd apps/k7e && tests/run    # ~190; add -m "not llm" to skip model-backed tests
 
 # Rebuild a suite's venv after its requirements change
 rm -rf apps/a8s/tests/.venv
