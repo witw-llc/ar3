@@ -1114,7 +1114,9 @@ class Rig:
             )
         return argv
 
-    def distill_command(self, workdir: str | Path) -> str | None:
+    def distill_command(
+        self, workdir: str | Path, *, run_as: str | None = None
+    ) -> str | None:
         """A stdin->stdout shell command line for k7e's `K7E_DISTILL_COMMAND`,
         built from this rig's own invoke. k7e pipes the prompt to the
         command's stdin with no shell of its own, and not every harness reads
@@ -1122,7 +1124,19 @@ class Rig:
         `"$(cat)"` inside an `sh -c` wrapper — the prompt lands in the exact
         argument position the invoke defines, whatever the harness. None when
         the rig has nothing to run, or an agy-class model can't be resolved
-        right now."""
+        right now.
+
+        `run_as` is the org's isolation user, and dreaming has to honour it for
+        the same reason a turn does: under `run_as` the harness is installed in
+        that user's home and authenticated as that user, so the router user
+        cannot run it at all. The wrapper is a LOGIN shell because the invoke
+        names the harness bare (`agy`) and only a login PATH finds
+        `~/.local/bin`. k7e launches the bridge with cwd inside its own
+        router-owned store, which the caged user cannot even stat, so the
+        `cd` to the member's workdir happens first, in a startup-free `sh` —
+        a login shell sources profiles before its `-c` string ever runs, and
+        those profiles would still be running with the unreadable store as
+        cwd."""
         pool = self.pool()
         if not pool:
             return None
@@ -1139,6 +1153,9 @@ class Rig:
             )
             for a in argv
         )
+        if run_as:
+            caged = f"cd {shlex.quote(str(workdir))} && exec bash --login -c {shlex.quote(inner)}"
+            return f"sudo -u {shlex.quote(run_as)} sh -c {shlex.quote(caged)}"
         return f"sh -c {shlex.quote(inner)}"
 
 

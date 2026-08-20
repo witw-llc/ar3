@@ -2434,7 +2434,7 @@ def _remote_usage() -> int:
         "already watches; give a second machine the same folder and the messages\n"
         "cross by themselves. Quote the path — a sync root with a space in it\n"
         "splits into two words and reads as a broker and a topic. It takes\n"
-        "--poll-seconds (15), --prefix (none) and --retain-days (off), and the\n"
+        "--poll-seconds (15), --prefix (none) and --retain-days (3), and the\n"
         "same command registers the folder for attachments so a message's files\n"
         "travel with it. Registration also stamps `joined`, the ULID this\n"
         "machine joined the folder at; envelopes named below it are the backlog\n"
@@ -2874,7 +2874,7 @@ configured path when that path is already dedicated to a8s.
                                                  --prefix (a8s) --timeout_s (60)
   rclone        rclone://<remote>/<path>         --prefix (a8s) --timeout_s (300)
                                                  --rclone_path (rclone)
-  sync_folder   <a local folder path>            --prefix (none) --retain-days (off)
+  sync_folder   <a local folder path>            --prefix (none) --retain-days (3)
 
 URLs must be https. A peer picks the URL your node downloads from, and these
 links carry their own authorization in the query string. A download follows at
@@ -2895,9 +2895,11 @@ bytes cross by themselves. Nothing is published — no host, no credential, and
 no URL that resolves for anyone outside the folder. The marker that rides in
 the envelope names neither the service nor the path, so configure two folders
 and whichever syncs first delivers the file. Attachments are keyed by message
-ULID, so one message's files stay together. Set --retain-days to sweep old
-bundles; it is off by default because deleting from one machine deletes from
-all of them. Use rclone instead on headless and VM machines, which have no
+ULID, so one message's files stay together. --retain-days sweeps bundles
+older than the window by their ULID mint time, 3 days by default; set
+--retain-days 0 to keep bundles forever. The folder is transport, not the
+archive — delivered attachments are already in the recipient's own
+.files/. Use rclone instead on headless and VM machines, which have no
 sync client to ride along with.
 
 file_sync copies into a folder some other tool already syncs and hands out the

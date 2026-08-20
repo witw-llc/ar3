@@ -9,11 +9,13 @@ Files On-Demand leaves a folder in indefinitely.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from conftest import set_home
 
+import services.sync_folder as sync_folder_mod
 from services import StorageError
 from services.sync_folder import (
     MANIFEST_NAME,
@@ -21,9 +23,23 @@ from services.sync_folder import (
     marker_for,
     parse_marker,
 )
+from ark.ulid import ALPHABET, new as new_ulid
 
-MSG = "01KZAAAAAAAAAAAAAAAAAAAAAA"
-OTHER_MSG = "01KZBBBBBBBBBBBBBBBBBBBBBB"
+# Real message IDs, minted now rather than a fixed literal: a bundle's own
+# name is what ages it under the default retention sweep, so a constant
+# frozen at some past date would eventually be stale enough to sweep itself.
+MSG = new_ulid()
+
+
+def _ulid_at_ms(ms: int) -> str:
+    """A valid ULID carrying an exact millisecond, for aging a bundle past
+    (or short of) a retention window without waiting on a real clock."""
+    chars = []
+    n = int(ms)
+    for _ in range(10):
+        chars.append(ALPHABET[n & 0x1F])
+        n >>= 5
+    return "".join(reversed(chars)) + "0" * 16
 
 
 @pytest.fixture
@@ -227,40 +243,114 @@ class TestDelete:
 
 
 class TestRetention:
-    def test_off_by_default(self, folder, tmp_path):
-        # A sync folder is shared, so a delete here is a delete on every
-        # machine. Nobody should get that by accident.
-        svc = _svc(folder)
-        stale = folder / OTHER_MSG
-        stale.mkdir()
-        (stale / "old.txt").write_text("x")
-        import os
-        old = 1
-        os.utime(stale, (old, old))
-        svc.store(_payload(tmp_path), msg_id=MSG)
-        assert stale.exists()
+    @pytest.fixture(autouse=True)
+    def _reset_sweep_throttle(self):
+        sync_folder_mod._LAST_SWEEP.clear()
+        yield
+        sync_folder_mod._LAST_SWEEP.clear()
+
+    def test_default_retain_days_is_three(self, folder):
+        assert _svc(folder)._retain_days == 3
 
     def test_a_sweep_drops_bundles_past_the_window(self, folder, tmp_path):
         import os
 
         svc = _svc(folder, retain_days=30)
-        stale = folder / OTHER_MSG
+        stale_id = _ulid_at_ms((time.time() - 40 * 86400) * 1000)
+        stale = folder / stale_id
         stale.mkdir()
         (stale / "old.txt").write_text("x")
-        os.utime(stale, (1, 1))
+        old = time.time() - 40 * 86400
+        os.utime(stale, (old, old))
         svc.store(_payload(tmp_path), msg_id=MSG)
         assert not stale.exists()
         assert (folder / MSG).is_dir()  # the one just written survives
 
-    def test_the_sweep_leaves_things_it_did_not_write(self, folder, tmp_path):
+    def test_an_old_ulid_with_a_fresh_mtime_is_kept(self, folder, tmp_path):
         import os
 
         svc = _svc(folder, retain_days=30)
+        stale_id = _ulid_at_ms((time.time() - 40 * 86400) * 1000)
+        stale = folder / stale_id
+        stale.mkdir()
+        (stale / "old.txt").write_text("x")
+        now = time.time()
+        os.utime(stale, (now, now))  # a resync just rewrote the mtime
+        svc.store(_payload(tmp_path), msg_id=MSG)
+        assert stale.exists()
+
+    def test_a_fresh_ulid_with_an_old_mtime_is_kept(self, folder, tmp_path):
+        import os
+
+        svc = _svc(folder, retain_days=30)
+        fresh_id = new_ulid()
+        fresh = folder / fresh_id
+        fresh.mkdir()
+        (fresh / "keep.txt").write_text("x")
+        old = time.time() - 40 * 86400
+        os.utime(fresh, (old, old))
+        svc.store(_payload(tmp_path), msg_id=MSG)
+        assert fresh.exists()
+
+    def test_retain_days_zero_sweeps_nothing(self, folder, tmp_path):
+        import os
+
+        svc = _svc(folder, retain_days=0)
+        stale_id = _ulid_at_ms((time.time() - 40 * 86400) * 1000)
+        stale = folder / stale_id
+        stale.mkdir()
+        (stale / "old.txt").write_text("x")
+        old = time.time() - 40 * 86400
+        os.utime(stale, (old, old))
+        svc.store(_payload(tmp_path), msg_id=MSG)
+        assert stale.exists()
+
+    def test_a_delayed_store_survives_its_own_sweep(self, folder, tmp_path):
+        svc = _svc(folder)
+        delayed_id = _ulid_at_ms((time.time() - 4 * 86400) * 1000)
+        marker = svc.store(_payload(tmp_path), msg_id=delayed_id)
+        assert marker
+        assert (folder / delayed_id).is_dir()
+        assert svc.retrieve(marker, tmp_path / "out")
+
+    def test_disabled_retention_does_not_stamp_the_shared_throttle(
+        self, folder, tmp_path
+    ):
+        import os
+
+        off = _svc(folder, retain_days=0)
+        off.store(_payload(tmp_path), msg_id=new_ulid())
+        assert sync_folder_mod._LAST_SWEEP == {}
+
+        on = _svc(folder)
+        stale_id = _ulid_at_ms((time.time() - 40 * 86400) * 1000)
+        stale = folder / stale_id
+        stale.mkdir()
+        (stale / "old.txt").write_text("x")
+        old = time.time() - 40 * 86400
+        os.utime(stale, (old, old))
+        on.store(_payload(tmp_path), msg_id=MSG)
+        assert not stale.exists()
+
+    def test_the_sweep_leaves_things_it_did_not_write(self, folder, tmp_path):
+        svc = _svc(folder, retain_days=30)
         theirs = folder / "someone-elses-folder"
         theirs.mkdir()
-        os.utime(theirs, (1, 1))
         svc.store(_payload(tmp_path), msg_id=MSG)
         assert theirs.exists()
+
+    def test_retrieve_triggers_the_sweep(self, folder, tmp_path):
+        import os
+
+        svc = _svc(folder, retain_days=30)
+        stale_id = _ulid_at_ms((time.time() - 40 * 86400) * 1000)
+        stale = folder / stale_id
+        stale.mkdir()
+        (stale / "old.txt").write_text("x")
+        old = time.time() - 40 * 86400
+        os.utime(stale, (old, old))
+        svc.retrieve(marker_for(MSG, "nope.txt"), tmp_path / "out")
+        assert not stale.exists()
 
 
 class TestUnreachableFolder:

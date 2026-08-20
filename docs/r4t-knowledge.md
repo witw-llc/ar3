@@ -252,6 +252,23 @@ to `k7e distill` and advancing a `.dreamed` watermark only on success. Failed
 turns are never distilled — their batch returns to the queue, and facts
 extracted from them would be premature.
 
+Captures are distilled **one per call**, with the watermark advancing after
+each. The batch bound (`DREAM_BATCH`) counts captures, but the cost is in
+bytes — a 58KB capture measured ~102s against a small VM's model — so a batch
+can run past `DISTILL_TIMEOUT_SECONDS`. A whole-batch call that times out
+commits everything k7e stored on the way and advances nothing, which leaves
+the next pass redrawing the same batch and timing out again. Per capture, a
+slow one costs only its own place and the rest keep their progress.
+
+The watermark is the reason `k7e distill` distinguishes a bridge that had
+nothing to say from one that never ran. Both extract nothing; only the second
+is an outage. k7e exits non-zero when every LLM call in a pass failed, which
+holds the watermark and leaves the captures for the next pass. Without that
+the mark advances past captures no model ever read, and because captures are
+pruned to the most recent 50 they are then gone. The day-log line reports what
+k7e stored rather than how many captures it was handed — a pass that changed
+nothing reads `no new knowledge`.
+
 ### Distill rig — a different writer for the same member
 
 Dreaming defaults to the member's own turn rig — the least surprising choice,
@@ -263,9 +280,15 @@ member's own rig, pins included) and bridges it to k7e as
 `K7E_DISTILL_COMMAND` for that one distill pass — the rig's own invoke under
 an `sh -c` wrapper that substitutes `"$(cat)"` where the prompt argument
 goes, because k7e pipes the prompt to stdin and not every harness reads
-stdin as its prompt. A store whose
-resolved rig has nothing to run, or whose distill-rig name matches no
-configured rig, just waits (`DREAM-SKIP` in the day log); `r4t roster check`
+stdin as its prompt. Under `run_as` the wrapper is
+`sudo -u <user> bash --login -c` instead: the harness is installed in the
+agent user's home and authenticated as that user, so the bridge has to enter
+the same cage a turn does, and only a login PATH finds a bare `agy`. A
+container the bridge cannot cross gets no rig-derived command at all: the
+store's own `distill_command` answers there, because an operator who set one
+has said how to cross. A store
+whose resolved rig has nothing to run, whose distill-rig name matches no
+configured rig just waits (`DREAM-SKIP` in the day log); `r4t roster check`
 catches an unresolvable override before it ever reaches a dream pass.
 
 An agy-class advanced rig matched a much slower model's fidelity at a tenth

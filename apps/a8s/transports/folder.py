@@ -20,13 +20,17 @@ carry both the envelopes and the attachment bundles they refer to:
   <base>/<ULID>.json     one envelope
   <base>/<ULID>/         that message's attachment bundle (sync_folder)
 
-Nobody deletes an envelope on receive. Every machine sharing the folder wants
-to read it, and the machine that read it first has no way to know how many
-others are still offline. So each machine keeps its own ledger of consumed
-ULIDs under its config home, and the folder is left alone; `--retain-days`
-is the only thing that ever removes an envelope, and only on the machine
-that asked for it — and only when that machine publishes, since the sweep
-rides on a publish.
+Every machine sharing the folder wants to read each envelope, and the machine
+that read it first has no way to know how many others are still offline. So
+each machine keeps its own ledger of consumed ULIDs under its config home,
+and the folder itself is what gets swept: `--retain-days` (default 3, `0`
+keeps forever) drops an envelope only when both the ULID mint time and the
+file's mtime clear the window — a rewritten mtime only postpones the reap,
+and a delayed send's fresh write is never swept by the publish that made it.
+The sweep rides both a publish and the poll, at most once an hour, so a
+machine that only receives still reaps. The folder is a wire, not an
+archive; delivered mail is already archived per-machine in
+`conversations.sqlite3`.
 
 A machine that joins a folder which has carried mail for a month is not owed
 that month, and the folder cannot be trusted to hold still while it registers
@@ -89,6 +93,15 @@ DEFAULT_POLL_SECONDS = 15.0
 # nothing and costs a directory listing per interval on somebody's laptop.
 MIN_POLL_SECONDS = 1.0
 
+# The folder must outlast the broker's ~24h retention and cover a 3-day
+# weekend outage. Delivered mail is already archived per-machine in
+# conversations.sqlite3, so the folder itself is a wire, not an archive.
+DEFAULT_RETAIN_DAYS = 3
+
+# The sweep is a directory pass; riding every publish and every poll would
+# make it as frequent as either, so it self-throttles to once an hour instead.
+SWEEP_INTERVAL_SECONDS = 3600
+
 # How far below `joined` an envelope may be stamped and still count as new
 # mail. A ULID is ordered by the clock of the machine that minted it, so
 # without an allowance a peer whose clock runs behind this one publishes
@@ -147,11 +160,12 @@ class FolderTransport(Transport):
         **opts: per-remote options forwarded from `network.json`. Recognized:
             poll_seconds (default 15, floored at 1), prefix (default none —
             the typed path is the base, matching `a8s storage`), retain_days
-            (default 0, off — a publish-time sweep of envelopes older than N
-            days), probe (a reachability check instead of a poll thread; see
-            `start`), joined (the ULID `a8s remote` stamped at registration —
-            envelopes older than it are somebody else's backlog; absent means
-            consume whatever is there).
+            (default 3, `0` keeps forever — a sweep of envelopes older than N
+            days by both ULID mint time and mtime, riding publish and the
+            poll, at most once an hour), probe (a reachability check instead
+            of a poll thread; see `start`), joined (the ULID `a8s remote`
+            stamped at registration — envelopes older than it are somebody
+            else's backlog; absent means consume whatever is there).
     """
 
     def __init__(self, remote_id: str, *, path: str, **opts: Any) -> None:
@@ -197,6 +211,7 @@ class FolderTransport(Transport):
         self._thread: threading.Thread | None = None
         self._started = False
         self._reachable = False
+        self._last_sweep = 0.0
 
     @staticmethod
     def _resolve_poll_seconds(remote_id: str, opts: dict) -> float:
@@ -213,7 +228,7 @@ class FolderTransport(Transport):
     def _resolve_retain_days(remote_id: str, opts: dict) -> int:
         raw = opts.get("retain_days")
         if raw is None or str(raw).strip() == "":
-            return 0
+            return DEFAULT_RETAIN_DAYS
         try:
             days = int(str(raw).strip())
         except ValueError:
@@ -433,18 +448,37 @@ class FolderTransport(Transport):
         return kept
 
     def _sweep(self) -> None:
-        """Drop envelopes past `retain_days`.
+        """Drop envelopes past `retain_days`, once both clocks agree they
+        are old.
 
-        Off unless the operator asks for it: the folder is shared, and
-        deleting here deletes on every machine sharing it.
+        Self-throttled to once an hour: this rides both `publish` and every
+        poll, and a directory pass on every one of those would cost a listing
+        per publish and per poll interval for a check that only ever matters
+        once an hour. A candidate is reaped only when both its ULID mint time
+        and its file's mtime clear the window — either clock alone fails in a
+        different direction. mtime alone can be rewritten forward by a
+        resync, which only postpones the reap; mint time alone would
+        classify a delayed send as already expired, so a sender resuming
+        after an outage longer than the window would delete its own
+        just-written file and report success. Requiring both means a fresh
+        write always survives — its mtime is now — while an untouched old
+        file still ages out.
         """
+        now = time.time()
+        if now - self._last_sweep < SWEEP_INTERVAL_SECONDS:
+            return
         if not self._retain_days:
             return
-        cutoff = time.time() - self._retain_days * 86400
+        self._last_sweep = now
+        cutoff_ms = (now - self._retain_days * 86400) * 1000
+        cutoff = now - self._retain_days * 86400
         for path in self._all_envelopes():
             try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink(missing_ok=True)
+                if parse_ulid(path.stem)[0] >= cutoff_ms:
+                    continue
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                path.unlink(missing_ok=True)
             except OSError:
                 continue
 
@@ -550,6 +584,7 @@ class FolderTransport(Transport):
 
     def _poll_once(self) -> None:
         self._reachable = self._root.is_dir()
+        self._sweep()
         for path in self._listing():
             stem = path.stem
             if stem in self._consumed:

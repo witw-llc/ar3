@@ -3,6 +3,7 @@ wake, dream (batch distill) on idle. Default off must be byte-invisible."""
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import sqlite3
 import subprocess
@@ -10,6 +11,7 @@ import subprocess
 import pytest
 
 import dispatch
+import isolate
 import knowledge
 import state
 from rig import Rig, load_rig_config
@@ -617,8 +619,7 @@ class TestDreamSweep:
         roster = self.dreaming_roster(ctx)
         config = self._config(ctx)
         assert knowledge.dream_sweep(ctx, roster, config) == ["Phil"]
-        (call,) = calls
-        assert call[0] == "distill" and len(call) == 3
+        assert [c[0] for c in calls] == ["distill", "distill"]
         mark = knowledge.store_home(NODE, "phil") / ".dreamed"
         assert mark.read_text(encoding="utf-8").strip().startswith(
             "20260730T000000000002Z"
@@ -650,6 +651,74 @@ class TestDreamSweep:
         assert "DREAM-SKIPPED phil /caps/bad.md: UnicodeDecodeError" in log
         assert "A real note" not in log
 
+    def test_the_log_line_reports_what_was_stored_not_what_was_read(
+        self, ctx, monkeypatch
+    ):
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(
+                stdout="  [stored] K7E-000-00001 One\n"
+                       "  [stored] K7E-000-00002 Two\n"
+                       "  [appended] K7E-000-00003 Three\n"
+            ),
+        )
+        state.write_turn_capture(NODE, "phil", "20260730T000000000010Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        assert "DREAM phil distilled 1 capture(s) — 1 appended, 2 stored" in read_log()
+
+    def test_a_dream_that_stored_nothing_says_so(self, ctx, monkeypatch):
+        """The line used to claim captures went "into the knowledge store" on
+        the strength of a zero exit alone. A live roster printed that on every
+        pass for nineteen days while storing nothing."""
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(stdout="No new knowledge extracted.\n"),
+        )
+        state.write_turn_capture(NODE, "phil", "20260730T000000000011Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        assert "DREAM phil distilled 1 capture(s) — no new knowledge" in read_log()
+
+    def test_run_as_reaches_the_bridge_through_the_members_cage(
+        self, ctx, monkeypatch
+    ):
+        """The rig's invoke is the CAGED command. Handing it to k7e unwrapped
+        runs it as the router user, who on a `run_as` box has neither the
+        harness on PATH nor its credentials."""
+        seen = {}
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: seen.update(k.get("extra_env") or {}) or completed(),
+        )
+        ctx.isolation = isolate.Isolation(run_as="bob")
+        state.write_turn_capture(NODE, "phil", "20260730T000000000012Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        cmd = seen["K7E_DISTILL_COMMAND"]
+        # sudo to the member's user, cd to their workdir in a startup-free
+        # `sh`, then exec the login shell that actually runs the harness —
+        # see Rig.distill_command's docstring for why the order matters.
+        assert cmd.startswith("sudo -u bob sh -c ")
+        assert "cd " in cmd and " && exec bash --login -c " in cmd
+
+    def test_container_isolation_defers_to_the_stores_own_command(
+        self, ctx, monkeypatch
+    ):
+        """The bridge can enter a `run_as` cage but not a container. Injecting
+        the rig-derived command there would run the harness outside the
+        boundary, so the store's own `distill_command` is left to answer."""
+        seen = {}
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: seen.update(env=k.get("extra_env")) or completed(),
+        )
+        ctx.isolation = isolate.Isolation(container="img")
+        state.write_turn_capture(NODE, "phil", "20260730T000000000013Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        assert "K7E_DISTILL_COMMAND" not in (seen["env"] or {})
+
     def test_failure_leaves_the_watermark(self, ctx, monkeypatch):
         monkeypatch.setattr(
             knowledge, "_run_k7e",
@@ -660,6 +729,172 @@ class TestDreamSweep:
         assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == []
         assert not (knowledge.store_home(NODE, "phil") / ".dreamed").exists()
         assert "DREAM-SKIP phil" in read_log()
+
+    def test_a_slow_capture_costs_only_its_own_place_in_the_batch(
+        self, ctx, monkeypatch
+    ):
+        """The whole-batch call committed everything k7e stored on the way and
+        advanced nothing, so the next pass redrew the same batch and timed out
+        again — dreaming wedged on those captures while re-paying for work
+        already in the store. Per capture, the ones that finished keep their
+        progress."""
+        def fake(home, *a, **k):
+            if a[1].endswith("0002Z-t.md"):
+                raise subprocess.TimeoutExpired("k7e", 600)
+            return completed(stdout="  [stored] K7E-000-00001 A note\n")
+
+        monkeypatch.setattr(knowledge, "_run_k7e", fake)
+        for i in (1, 2, 3):
+            state.write_turn_capture(NODE, "phil", f"20260730T00000000000{i}Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        mark = knowledge.store_home(NODE, "phil") / ".dreamed"
+        assert mark.read_text(encoding="utf-8").strip().startswith(
+            "20260730T000000000001Z"
+        )
+        log = read_log()
+        assert "DREAM phil distilled 1 capture(s) — 1 stored" in log
+        assert "DREAM-FAIL phil distill died on 20260730T000000000002Z" in log
+        assert "2 capture(s) wait" in log
+
+    def test_the_harness_gets_the_members_workdir_not_the_store(
+        self, ctx, monkeypatch
+    ):
+        """`{workdir}` is where the harness runs, so it has to be somewhere the
+        harness can reach. Under `run_as` the documented store posture is a
+        0700 router-owned dir — an opencode-class rig pointed at it would be
+        sent exactly where the cage excludes."""
+        seen = {}
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: seen.update(k.get("extra_env") or {}) or completed(),
+        )
+        ctx.config_path.write_text(
+            json.dumps({"code": {"invoke": ["opencode", "--dir", "{workdir}", "{prompt}"]}}),
+            encoding="utf-8",
+        )
+        config = load_rig_config(ctx.config_path)
+        roster = self.dreaming_roster(ctx)
+        phil = roster.find("phil")
+        phil.rig = "code"
+        phil.workdir = "/srv/phil"
+        ctx.isolation = isolate.Isolation(run_as="bob")
+        state.write_turn_capture(NODE, "phil", "20260730T000000000020Z", "t", "x")
+        knowledge.dream_sweep(ctx, roster, config)
+        cmd = seen["K7E_DISTILL_COMMAND"]
+        assert "/srv/phil" in cmd
+        assert str(knowledge.store_home(NODE, "phil")) not in cmd
+
+    def test_the_sweep_stops_at_its_budget_rather_than_the_wake_ceiling(
+        self, ctx, monkeypatch
+    ):
+        """Per-capture timeouts multiply. Left unbounded a pass can outlive the
+        definition's max_wake_seconds, and then the daemon kills it from
+        outside — sole wake slot gone, rest of the idle pass skipped."""
+        timeouts = []
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: timeouts.append(k.get("timeout")) or completed(),
+        )
+        clock = iter([0.0] + [float(i) for i in range(1, 40)])
+        monkeypatch.setattr(knowledge.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(knowledge, "DREAM_BUDGET_SECONDS", 300.0)
+        for i in range(3):
+            state.write_turn_capture(NODE, "phil", f"20260730T00000000003{i}Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        assert timeouts and all(x <= 300.0 for x in timeouts)
+
+    def test_a_spent_budget_leaves_the_rest_for_the_next_pass(
+        self, ctx, monkeypatch
+    ):
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(),
+        )
+        clock = iter([0.0, 0.0, 500.0, 500.0, 500.0])
+        monkeypatch.setattr(knowledge.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(knowledge, "DREAM_BUDGET_SECONDS", 400.0)
+        for i in range(3):
+            state.write_turn_capture(NODE, "phil", f"20260730T00000000004{i}Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        log = read_log()
+        assert "DREAM-SKIP phil out of sweep budget" in log
+        assert "capture(s) wait" in log
+
+    def test_every_unreadable_capture_gets_its_line_not_just_the_last(
+        self, ctx, monkeypatch
+    ):
+        """Skips are collected across the per-capture calls; reporting only the
+        final result watermarks an earlier bad capture in silence."""
+        def fake(home, *a, **k):
+            tag = "one" if a[1].endswith("0050Z-t.md") else "two"
+            return completed(
+                stdout=f"  [skipped] /caps/{tag}.md: UnicodeDecodeError: bad byte\n"
+            )
+
+        monkeypatch.setattr(knowledge, "_run_k7e", fake)
+        for i in (0, 1):
+            state.write_turn_capture(NODE, "phil", f"20260730T00000000005{i}Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        log = read_log()
+        assert "DREAM-SKIPPED phil /caps/one.md" in log
+        assert "DREAM-SKIPPED phil /caps/two.md" in log
+
+    def test_the_budget_covers_embedding_too(self, ctx, monkeypatch):
+        """Bounding distill alone leaves the other half of the sweep loose:
+        one EMBED_TIMEOUT per knowledge member, started after the distill
+        budget is spent, walks a roster straight past the wake ceiling."""
+        seen = []
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: seen.append((a[0], k.get("timeout"))) or completed(
+                stdout='{"embedded": 0, "pending": 0, "seconds": 0.0}'
+            ),
+        )
+        seed_store("phil", "Deploy key limits", "The deploy key cannot push workflow files.")
+        clock = iter([0.0] + [1150.0] * 20)
+        monkeypatch.setattr(knowledge.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(knowledge, "DREAM_BUDGET_SECONDS", 1200.0)
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        embeds = [t for verb, t in seen if verb == "embed-pending"]
+        assert all(x <= 50.0 for x in embeds), embeds
+
+    def test_a_member_the_budget_cannot_reach_keeps_its_queue(
+        self, ctx, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: calls.append(a[0]) or completed(),
+        )
+        clock = iter([0.0] + [2000.0] * 20)
+        monkeypatch.setattr(knowledge.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(knowledge, "DREAM_BUDGET_SECONDS", 1200.0)
+        state.write_turn_capture(NODE, "phil", "20260730T000000000060Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == []
+        assert calls == []
+        assert "DREAM-SKIP phil sweep budget spent before this member" in read_log()
+
+    def test_dropped_candidates_get_a_line_of_their_own(self, ctx, monkeypatch):
+        """k7e keeps the sound candidates and reports the malformed one on
+        stderr. That is not a failed call, but it IS extracted knowledge that
+        never reached the store."""
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(
+                stdout="  [stored] K7E-000-00001 A real note\n",
+                stderr="  [distill] skipping candidate 'Bad one': content is list\n",
+            ),
+        )
+        state.write_turn_capture(NODE, "phil", "20260730T000000000070Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        assert "DREAM-DROPPED phil skipping candidate 'Bad one'" in read_log()
 
     def test_batch_is_bounded_per_pass(self, ctx, monkeypatch):
         calls = []
@@ -672,12 +907,12 @@ class TestDreamSweep:
         roster = self.dreaming_roster(ctx)
         config = self._config(ctx)
         knowledge.dream_sweep(ctx, roster, config)
-        (call,) = calls
-        assert len(call) - 1 == knowledge.DREAM_BATCH  # "distill" + bounded paths
+        # One call per capture — the pass is still bounded at DREAM_BATCH.
+        assert len(calls) == knowledge.DREAM_BATCH
+        assert all(c[0] == "distill" and len(c) == 2 for c in calls)
         calls.clear()
         knowledge.dream_sweep(ctx, roster, config)  # the remainder rides the next pass
-        (call,) = calls
-        assert len(call) - 1 == 3
+        assert len(calls) == 3
 
     def test_backlog_survives_an_absent_ollama(self, ctx):
         """A real store and a dead endpoint: the queue keeps its entries, the

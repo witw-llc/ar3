@@ -292,6 +292,7 @@ def main(argv=None):
         if not config.llm_configured("distill"):
             print(_LLM_REQUIRED.format(cmd="distill"), file=sys.stderr)
             return 1
+        engine.reset_llm_failures()
         results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
             action = r["action"]
@@ -301,6 +302,25 @@ def main(argv=None):
             title = r["title"]
             entry_id = r.get("id", "")
             print(f"  [{action}] {entry_id} {title}")
+        # Scoped to distill: the ledger is global, and `diff_against_store`
+        # searches, which may rerank. A dead reranker is not a dead distill
+        # bridge, and reading it as one retries a capture that was distilled
+        # perfectly well.
+        failures = engine.llm_failures("distill")
+        if failures:
+            # ANY failed call fails the run, not only an all-failed one. A
+            # capture is chunked, and the caller's watermark is per capture:
+            # exit 0 after losing one chunk of twenty tells r4t the whole
+            # capture was read, and that chunk is never offered again. Better
+            # to re-offer a capture whose stored results will mostly dedup
+            # than to drop input silently — the failure this whole change
+            # exists to stop.
+            print(
+                f"distill: {len(failures)} LLM call(s) failed ({failures[0]}) — "
+                "the input they covered was not read",
+                file=sys.stderr,
+            )
+            return 1
         if not results:
             print("No new knowledge extracted.")
 

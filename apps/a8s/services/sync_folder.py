@@ -45,7 +45,7 @@ from typing import Any
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
 from ark.fsio import replace_with_retry
-from ark.ulid import new as new_ulid
+from ark.ulid import new as new_ulid, parse as parse_ulid
 
 _KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
 
@@ -53,6 +53,20 @@ MARKER_SCHEME = "a8s+sync"
 MANIFEST_NAME = "manifest.json"
 
 _ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+
+# The folder must outlast the broker's ~24h retention and cover a 3-day
+# weekend outage. Delivered mail is already archived per-machine in
+# conversations.sqlite3, so the folder itself is a wire, not an archive.
+DEFAULT_RETAIN_DAYS = 3
+
+# Service instances can be short-lived — rebuilt on every `load_services()`
+# call whose config stamp changed, or fresh per CLI invocation — so the
+# throttle lives on the base directory (and each service's own retain_days,
+# so two services with different windows on one base do not throttle each
+# other) rather than on `self`. The throttle is process-local: a fresh CLI
+# process pays one directory pass on first use, which is the accepted cost.
+SWEEP_INTERVAL_SECONDS = 3600
+_LAST_SWEEP: dict[tuple[str, int], float] = {}
 
 
 def _looks_like_a_local_path(url: str) -> bool:
@@ -114,7 +128,7 @@ class SyncFolderService(StorageService):
     def _resolve_retain_days(name: str, opts: dict) -> int:
         raw = opts.get("retain_days")
         if raw is None or str(raw).strip() == "":
-            return 0
+            return DEFAULT_RETAIN_DAYS
         try:
             days = int(str(raw).strip())
         except ValueError:
@@ -213,6 +227,7 @@ class SyncFolderService(StorageService):
         parsed = parse_marker(url)
         if parsed is None:
             return False
+        self._sweep()
         src = self._complete_source(*parsed)
         if src is None:
             return False
@@ -258,16 +273,32 @@ class SyncFolderService(StorageService):
             pass
 
     def _sweep(self) -> None:
-        """Drop bundles past `retain_days`.
+        """Drop bundles past `retain_days`, once both clocks agree they
+        are old.
 
-        Off unless the operator asks for it. A sync folder is shared, and
-        deleting from one machine deletes from every machine — that is not a
-        default anybody should get by accident.
+        Self-throttled to once an hour, keyed on the base directory rather
+        than on `self`: a service instance can be as short-lived as one
+        `store` or `retrieve` call, so an instance attribute would never
+        actually throttle anything. A bundle is reaped only when both its
+        ULID mint time and its directory's mtime clear the window — either
+        clock alone fails in a different direction. mtime alone can be
+        rewritten forward by a resync, which only postpones the reap; mint
+        time alone would classify a delayed send as already expired, so a
+        sender resuming after an outage longer than the window would delete
+        its own just-written bundle and report success. Requiring both means
+        a fresh write always survives — its mtime is now — while an
+        untouched old bundle still ages out.
         """
         if not self._retain_days:
             return
         base = self._root / self._prefix if self._prefix else self._root
-        cutoff = time.time() - self._retain_days * 86400
+        key = (str(base), self._retain_days)
+        now = time.time()
+        if now - _LAST_SWEEP.get(key, 0.0) < SWEEP_INTERVAL_SECONDS:
+            return
+        _LAST_SWEEP[key] = now
+        cutoff_ms = (now - self._retain_days * 86400) * 1000
+        cutoff = now - self._retain_days * 86400
         try:
             bundles = list(base.iterdir())
         except OSError:
@@ -276,6 +307,8 @@ class SyncFolderService(StorageService):
             if not _ULID_RE.match(bundle.name) or not bundle.is_dir():
                 continue
             try:
+                if parse_ulid(bundle.name)[0] >= cutoff_ms:
+                    continue
                 if bundle.stat().st_mtime >= cutoff:
                     continue
                 for child in bundle.iterdir():

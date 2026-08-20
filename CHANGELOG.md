@@ -10,6 +10,158 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.73
+
+### Changed
+- **Folder remotes and sync-folder storage reap by default.** A shared
+  folder nobody swept only grew: `--retain-days` on both the `folder`
+  remote and the `sync_folder` storage service now defaults to 3 (72h) —
+  enough to outlast the broker's ~24h retention and cover a 3-day weekend
+  outage — instead of off. `--retain-days 0` keeps everything forever, same
+  as before. The folder is a wire, not an archive: delivered mail and
+  attachments are already archived per-machine (`conversations.sqlite3`,
+  `.files/`), so what stays behind in the shared folder is only ever a
+  spare copy. A file is reaped only when both its ULID mint time and its
+  mtime clear the window: mtime alone can be pushed forward by a resync,
+  which only delays the reap, and mint time alone would let a sender
+  resuming from a long outage delete its own just-published message while
+  reporting success. The sweep now rides the receive side too — both
+  transports previously swept only on publish, so a machine that only
+  receives never reaped — throttled to once an hour so it costs one
+  directory pass per hour rather than one per publish or poll.
+
+### Fixed
+- **Dreaming no longer reports a store that never happened.** A live roster
+  ran nineteen days taking nothing into its knowledge store while logging a
+  successful dream on every idle pass. Three faults in a row, each of which
+  would have caught it alone:
+  - r4t built the distill bridge from the member's turn rig and handed it to
+    k7e with no isolation wrapper. Under `run_as` the harness is installed in
+    the agent user's home and authenticated as that user, so the router user
+    cannot invoke it — `agy` was not even on its PATH. `Rig.distill_command`
+    now takes the org's `run_as` and wraps the bridge in the member's own
+    cage, using a login shell because an invoke names its harness bare.
+    Container isolation, which the bridge cannot cross, no longer gets a
+    rig-derived command at all — the store's own `distill_command` answers
+    there, because an operator who configured one has said how to cross.
+  - k7e's `distill` exits 0 whether the LLM produced nothing or never ran.
+    It now separates the two: a pass whose every LLM call failed exits 1 and
+    says why, and a pass that lost only some calls warns. A bridge that ran
+    and found nothing novel still exits 0. This is what stops the data loss —
+    r4t already declines to advance its watermark on a non-zero exit.
+  - r4t's own log line claimed captures went "into the knowledge store" on
+    the strength of that zero exit. It now counts what k7e reported and says
+    `no new knowledge` when that is the answer.
+
+  Turn captures keep only the most recent 50, so on the affected deployment
+  everything before the last three days was consumed and discarded. The
+  watermark advancing past captures nothing ever read is the shape to watch
+  for elsewhere.
+- **A slow capture no longer wedges dreaming.** With the bridge repaired, the
+  same roster hit the next failure along: the batch is counted in captures but
+  the cost is in bytes, and five captures ran past the 600s call timeout. The
+  whole-batch call committed the 48 entries k7e had stored on the way and
+  advanced the watermark by nothing, so the following pass redrew the same
+  batch and timed out again — dreaming wedged on those captures permanently
+  while re-paying for work already in the store, and each attempt held the
+  node's only wake slot for ten minutes. Captures are now distilled one per
+  call with the watermark advancing after each, so a slow one costs its own
+  progress and no more. The timeout is now named (`DISTILL_TIMEOUT_SECONDS`)
+  and applies per capture, under a `DREAM_BUDGET_SECONDS` wall-clock budget for
+  the whole sweep — per-capture limits multiply, and an idle pass that outlives
+  the definition's `max_wake_seconds` is killed from outside, costing the sole
+  wake slot and the rest of the pass.
+- **A distill that lost part of its input no longer reports success.** Three
+  ways a broken bridge still read as a quiet one: a capture is chunked, so one
+  failed call among many exited 0 and let the caller watermark the whole
+  capture, dropping that chunk for good; a bridge that printed an auth error to
+  stdout and exited 0 looked like an answer, because at that layer any
+  non-empty stdout is one — the required JSON array's absence is now the tell;
+  and the failure ledger was global, so a dead reranker (reached through
+  `diff_against_store`'s own search) failed a distillation that had worked,
+  retrying that capture forever. Failures are now recorded per purpose and any
+  distill-purpose failure fails the run.
+- **The distill bridge stops pointing the harness at the store.** `{workdir}`
+  is the harness's working directory, and under `run_as` the documented store
+  posture is a 0700 router-owned dir — an opencode-class rig was being sent
+  exactly where the cage excludes. It now receives the member's own workdir;
+  store I/O stays router-side, where only the model call crosses the boundary.
+  The `{workdir}` placeholder only reaches two built-in rig classes, though —
+  every bridge also inherits its *process* cwd from k7e, which launches it
+  inside that same store — so the `run_as` wrapper now `cd`s to the member's
+  workdir before the harness starts, covering every rig class the same way —
+  and the `cd` runs in a startup-free `sh` that then `exec`s the login shell,
+  because a login shell sources profiles before its `-c` string, still inside
+  the unreadable store.
+- **Every unreadable capture gets its `DREAM-SKIPPED` line**, not just whichever
+  one happened to be last in the batch. Candidates k7e parsed but could not use
+  get a `DREAM-DROPPED` line rather than dying in stderr.
+- **Only a payload the parser can use counts as an answer.** A bracket-shaped
+  string is not one: `Error: token [expired]` and `Error code [401]` both passed
+  a shape check, and neither was ever read. The parse decides now — no array, an
+  unparseable one, a non-array payload, or an array with nothing usable in it
+  all record a failed call. A valid `[]` stays a real answer. The boundary is
+  whether the model *attempted* the schema, judged separately from whether
+  anything validated: an array carrying even one candidate-shaped item — a dict
+  with title and content keys, whatever their types — proves the chunk was
+  read, so every discarded item (wrong types, missing keys, bare non-objects)
+  prints its own drop line and the run stays exit 0; only a payload with no
+  candidate-shaped answer at all (`[401]`) fails. Failing an attempted payload
+  would re-offer input against a model that shapes it identically every time.
+- **A media bridge cannot store its own error as knowledge.** A response with no
+  JSON object anywhere fell through to a raw-text fallback that made
+  `Error: authentication expired; sign in again` a knowledge entry — worse than
+  losing the file, since the store then recalls it as a fact. Unparseable
+  brace-bearing prose and well-formed objects with no `content` field both
+  record a failure and store nothing; the raw-text fallback survives only for a
+  parsed object whose `content` is a truthy list or dict — the model that
+  plainly tried, which is the case it was built for. Key presence alone was
+  still too weak: a structured error object carrying `"content": null` (or
+  empty) is a failed call, not an attempt — and so is an explicit error
+  envelope, whatever its `content` carries. A truthy `error`, an explicit
+  `success: false` or `ok: false`, a numeric `status`/`code` outside 2xx, or
+  a serialized form of the same, is rejected before content handling. The
+  `success`/`ok` flags follow the same positive-recognition rule as
+  `status`/`code`: serialized false forms (`"false"`, `0`) and any
+  unrecognized flag value now reject too, closing the gap where a literal-
+  `False` check let `success: "false"` and `ok: "false"` ride straight
+  through. A serialized `status`/`code` string is tokenized and judged by
+  positive recognition, not a failure-word blocklist: it passes only when
+  every token is benign — a stable success word (`ok`, `success`, `succeeded`,
+  `complete`, `completed`, `done`), a 2xx 3-digit token, or `http`/`https`
+  filler — and at least one token is positively successful, so `"200 OK"`,
+  `"HTTP 204"`, `"SUCCESS"`, and `"COMPLETED"` pass while any non-2xx 3-digit
+  token or unrecognized word (`"401 Unauthorized"`,
+  `"AUTHENTICATION_ERROR"`) rejects the value. The rule is now complete by
+  type, not just by value: a boolean `status`/`code` means what it says
+  (`false` rejects, `true` passes) instead of being skipped as if only a
+  numeric value could reach the 2xx test, and a container value (`dict`,
+  `list`) is unrecognized envelope state and rejects rather than falling
+  through an isinstance chain that had nothing left to check it against. The
+  failure-word blocklist
+  (`error`, `err`, `failed`, `unauthorized`, `denied`, `invalid`, …) is gone:
+  it let `RATE_LIMITED`, `THROTTLED`, and `RESOURCE_EXHAUSTED` — none of
+  which matched any listed
+  component — ride straight through as content, because failure vocabulary is
+  open-ended (there is always a next provider's next code) while success
+  vocabulary is small and stable. The bar is still deliberately narrow in the
+  other direction (`"error": null` and `"status": 200`, numeric or string,
+  beside real content still pass; an empty tokenizable value carries no
+  signal and passes), because a missed envelope and an over-broad match are
+  both permanent, not one cheap and one costly: the former poisons the store,
+  the latter wedges the capture in retry forever, since r4t re-offers the
+  same capture on every idle pass. The fallback itself no longer admits
+  arbitrary truthy containers — only the
+  recognized fragments shape, a non-empty list of strings, which is the one
+  the #70 case pinned. Whitespace-only content is the unnormalized spelling
+  of empty on both paths: a scalar `content` string is failed (and otherwise
+  stripped before use) when nothing survives `.strip()`, and an all-whitespace
+  fragments list is a failed call while one real fragment still opens the raw
+  fallback.
+- **The sweep budget covers embedding.** Bounding distill alone left one
+  `EMBED_TIMEOUT` per knowledge member running after the budget was spent, which
+  on six stores reaches past the wake ceiling on its own.
+
 ## 0.1.72
 
 ### Fixed

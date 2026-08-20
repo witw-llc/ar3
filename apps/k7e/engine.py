@@ -573,6 +573,42 @@ def _strip_ansi(text):
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+# Why a caller ever needs to know: `_call_llm` returns None both when the
+# bridge ran and had nothing to say and when the bridge never ran at all. To a
+# caller those are the same value and opposite facts — "no new knowledge" is a
+# result, "the command is not on PATH" is an outage. Distillation is where the
+# difference bites: a broken bridge that reads as an empty one lets r4t record
+# a successful dream and advance its watermark past captures nothing ever read.
+_llm_failures: list[tuple[str, str]] = []
+
+
+def llm_failures(purpose: str | None = None) -> list[str]:
+    """Reasons LLM invocations failed since the last reset, oldest first.
+    Filtered by purpose, because the ledger is global and one command's work
+    can invoke another's model: `diff_against_store` searches, a search may
+    rerank, and a dead reranker must not be read as a dead distill bridge."""
+    return [
+        f"{p}: {detail}"
+        for p, detail in _llm_failures
+        if purpose is None or p == purpose
+    ]
+
+
+def reset_llm_failures() -> None:
+    _llm_failures.clear()
+
+
+def note_llm_failure(purpose: str, detail: str) -> None:
+    """Record a bridge that produced nothing usable. Callers that can judge
+    the OUTPUT — a parser that found no payload where one was required — use
+    this too: exit 0 with a page of prose is a failure `_call_llm` cannot see,
+    because at that layer any non-empty stdout looks like an answer."""
+    _llm_failures.append((purpose, detail))
+
+
+_note_llm_failure = note_llm_failure
+
+
 def _call_llm(prompt, purpose="summarize", timeout=120):
     """Invoke the configured stdin→stdout CLI for an LLM purpose."""
     import config
@@ -592,12 +628,23 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
         if result.returncode == 0 and result.stdout.strip():
             return _strip_ansi(result.stdout).strip()
         if result.returncode != 0:
+            first = (result.stderr.strip().splitlines() or [""])[0]
+            _note_llm_failure(
+                purpose, f"exit {result.returncode}{f' ({first})' if first else ''}"
+            )
             print(f"  [llm:{purpose}] exit {result.returncode}", file=sys.stderr)
             if result.stderr.strip():
                 print(f"  [llm:{purpose}] {result.stderr.strip()}", file=sys.stderr)
+        else:
+            # Exit 0 with nothing on stdout. A harness that dies after printing
+            # its own error to stdout still exits 0 on some CLIs, so this is a
+            # failure to produce, not a considered empty answer.
+            _note_llm_failure(purpose, "exited 0 with no output")
     except subprocess.TimeoutExpired:
+        _note_llm_failure(purpose, f"timed out ({timeout}s)")
         print(f"  [llm:{purpose}] timed out ({timeout}s)", file=sys.stderr)
     except OSError as e:
+        _note_llm_failure(purpose, f"launch failed: {e}")
         print(f"  [llm:{purpose}] launch failed: {e}", file=sys.stderr)
     return None
 

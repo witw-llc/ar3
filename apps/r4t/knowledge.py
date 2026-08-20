@@ -63,6 +63,26 @@ MIN_SNIPPET = 120
 # the bytes over chasing a boundary that costs too much of the budget.
 BOUNDARY_KEEP = 0.6
 DREAM_BATCH = 5  # captures distilled per member per idle pass
+# Per CAPTURE, not per batch — captures are distilled one at a time so a slow
+# one costs only its own progress. Generous because the cost is a model's, not
+# ours: a 58KB capture measured ~102s against a small VM's local-ish model.
+DISTILL_TIMEOUT_SECONDS = 600
+# The whole sweep's wall-clock budget, across every member. Per-capture
+# timeouts multiply — DREAM_BATCH of them per member, and a sweep walks the
+# roster — so a per-call limit alone lets one idle pass run past the wake
+# ceiling the definition sets (`max_wake_seconds`, 2700 in the shipped r4t
+# definition). Past that the daemon kills the pass from outside: the sole wake
+# slot is gone for the whole time, the watermark keeps whatever it had, and
+# the rest of the idle pass — mission review, the flush sweep — never runs.
+# Well under the ceiling because dreaming is the least urgent thing an idle
+# pass does; what it does not finish, the next pass picks up.
+DREAM_BUDGET_SECONDS = 1200
+# Below this there is no point starting another capture — it would be killed
+# mid-model for nothing.
+DREAM_MIN_CAPTURE_SECONDS = 60
+# The same floor for the embedding pass, which is cheaper per unit of work and
+# resumes cleanly: whatever it does not drain stays queued.
+DREAM_MIN_EMBED_SECONDS = 15
 SEED_BODY_MAX = 400
 # The wake budget. k7e's own query-embed timeout is a couple of seconds, so a
 # search that runs past this is a sick store, not a slow one — and a member's
@@ -122,6 +142,42 @@ def _embed_note(stderr: str) -> str:
     if match.group(2):
         return f"embed {match.group(1)}ms unanswered, fts-only"
     return f"embed {match.group(1)}ms"
+
+
+def _distill_counts(stdout: str) -> dict[str, int]:
+    """What one distill call put in the store, by action, from k7e's own
+    output lines."""
+    counts: dict[str, int] = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("[") or "]" not in line:
+            continue
+        action = line[1:line.index("]")]
+        if action in ("skipped", "warning"):
+            continue
+        counts[action] = counts.get(action, 0) + 1
+    return counts
+
+
+def _format_outcome(counts: dict[str, int]) -> str:
+    """A dream that changed nothing says so, rather than implying a store."""
+    if not counts:
+        return "no new knowledge"
+    return ", ".join(f"{n} {action}" for action, n in sorted(counts.items()))
+
+
+_DROP_PREFIX = "[distill] skipping candidate"
+
+
+def _distill_drops(stderr: str) -> list[str]:
+    """Candidates k7e parsed but could not use. Not a failed call — the chunk
+    was read and the model answered — but extracted knowledge that never
+    reached the store, which is worth a line rather than a death in stderr."""
+    return [
+        line.strip()[len("[distill] "):]
+        for line in stderr.splitlines()
+        if line.strip().startswith(_DROP_PREFIX)
+    ]
 
 
 def _distill_skips(stdout: str) -> list[str]:
@@ -371,16 +427,28 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
     return parts
 
 
-def _embed_backlog(ctx, member_name: str, home: Path) -> None:
+def _embed_backlog(
+    ctx, member_name: str, home: Path, *, deadline: float | None = None
+) -> None:
     """Give the store's queued entries their vectors. Storing an entry only
     queues it, so this pass is where the semantic track pays for itself —
     dreaming has all the time in the world and a waking member has none.
     An unreachable ollama leaves the queue intact for the next pass."""
     if not (home / "nodes").is_dir():
         return
+    timeout = EMBED_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout < DREAM_MIN_EMBED_SECONDS:
+            state.append_log(
+                ctx.node,
+                f"r4t: DREAM-EMBED-SKIP {member_name.lower()} out of sweep "
+                "budget; the queue waits for the next pass",
+            )
+            return
     started = time.perf_counter()
     try:
-        res = _run_k7e(home, "embed-pending", "--json", timeout=EMBED_TIMEOUT)
+        res = _run_k7e(home, "embed-pending", "--json", timeout=timeout)
         if res.returncode != 0:
             raise RuntimeError(
                 (res.stderr or res.stdout).strip() or f"exit {res.returncode}"
@@ -442,17 +510,32 @@ def dream_sweep(ctx, roster, config: RigConfig) -> list[str]:
     embedding backlog, so the semantic track never rides a wake. Returns
     members that dreamed."""
     dreamed: list[str] = []
+    deadline = time.monotonic() + DREAM_BUDGET_SECONDS
     for m in roster.members:
         if not m.knowledge_on:
             continue
+        # The budget covers the whole sweep, embedding included. Bounding only
+        # distill leaves the other half unbounded: one EMBED_TIMEOUT per
+        # knowledge member, started after the distill budget is already spent,
+        # walks a roster of six straight past the wake ceiling. A member the
+        # budget cannot reach keeps its queue — the next pass starts fresh.
+        if time.monotonic() >= deadline:
+            state.append_log(
+                ctx.node,
+                f"r4t: DREAM-SKIP {m.name.lower()} sweep budget spent before "
+                "this member; its captures and embed queue wait",
+            )
+            continue
         home = store_home(ctx.node, m.name)
-        if _distill_fresh(ctx, m, home, config):
+        if _distill_fresh(ctx, m, home, config, deadline=deadline):
             dreamed.append(m.name)
-        _embed_backlog(ctx, m.name, home)
+        _embed_backlog(ctx, m.name, home, deadline=deadline)
     return dreamed
 
 
-def _distill_fresh(ctx, m, home: Path, config: RigConfig) -> bool:
+def _distill_fresh(
+    ctx, m, home: Path, config: RigConfig, *, deadline: float | None = None
+) -> bool:
     captures = state.list_turn_captures(ctx.node, m.name)
     mark = home / ".dreamed"
     try:
@@ -471,39 +554,92 @@ def _distill_fresh(ctx, m, home: Path, config: RigConfig) -> bool:
         )
         return False
     extra_env = {}
-    cmd = distill_rig.distill_command(home)
-    if cmd:
-        extra_env["K7E_DISTILL_COMMAND"] = cmd
-    try:
-        res = _run_k7e(
-            home, "distill", *[str(c) for c in fresh], timeout=600, extra_env=extra_env
+    # The bridge can enter a `run_as` cage but not a container. Rather than
+    # hand k7e a command that would run outside the boundary, leave the
+    # variable unset there and let the store's own `distill_command` answer —
+    # an operator who configured one has said how to cross. If they have not,
+    # k7e exits non-zero saying it needs an LLM command, and that is the
+    # DREAM-SKIP the day log should carry.
+    if not ctx.isolation.container:
+        # `{workdir}` is the harness's working directory, so it has to be a
+        # path the harness can reach. The store is not one: under `run_as` the
+        # documented posture is a 0700 router-owned store dir, and handing an
+        # opencode-class rig `--dir <store>` sends the caged user somewhere the
+        # cage deliberately excludes. The member's own workdir is what a turn
+        # gives it; store I/O stays router-side in k7e, which never enters the
+        # cage — only the model call does.
+        from dispatch import resolve_workdir
+
+        cmd = distill_rig.distill_command(
+            resolve_workdir(ctx, m), run_as=ctx.isolation.run_as
         )
-    except Exception as e:
-        state.append_log(
-            ctx.node,
-            f"r4t: DREAM-FAIL {m.name.lower()} distill died: {e}; "
-            f"{len(fresh)} capture(s) wait for the next idle pass",
-        )
+        if cmd:
+            extra_env["K7E_DISTILL_COMMAND"] = cmd
+    # One capture per call, with the watermark advancing after each. The batch
+    # is counted in captures but the cost is in bytes: a 58KB capture measured
+    # ~102s against a small VM's model, and five of them together ran past the
+    # timeout below. A whole-batch call that times out commits everything k7e
+    # stored on the way and advances nothing, so the next pass redraws the same
+    # batch and times out again — dreaming wedges on those captures forever
+    # while re-paying for work already in the store. Per capture, a timeout
+    # costs one capture's progress and the rest of the batch keeps its place.
+    done: list[str] = []
+    counts: dict[str, int] = {}
+    skips: list[str] = []
+    drops: list[str] = []
+    for capture in fresh:
+        timeout = DISTILL_TIMEOUT_SECONDS
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout < DREAM_MIN_CAPTURE_SECONDS:
+                state.append_log(
+                    ctx.node,
+                    f"r4t: DREAM-SKIP {m.name.lower()} out of sweep budget; "
+                    f"{len(fresh) - len(done)} capture(s) wait",
+                )
+                break
+        try:
+            res = _run_k7e(
+                home, "distill", str(capture),
+                timeout=timeout, extra_env=extra_env,
+            )
+        except Exception as e:
+            state.append_log(
+                ctx.node,
+                f"r4t: DREAM-FAIL {m.name.lower()} distill died on "
+                f"{capture.name}: {e}; {len(fresh) - len(done)} capture(s) wait "
+                "for the next idle pass",
+            )
+            break
+        if res.returncode != 0:
+            reason = (res.stderr or res.stdout).strip().splitlines()
+            state.append_log(
+                ctx.node,
+                f"r4t: DREAM-SKIP {m.name.lower()} distill exit "
+                f"{res.returncode} ({reason[0] if reason else 'no output'}); "
+                f"{len(fresh) - len(done)} capture(s) wait",
+            )
+            break
+        home.mkdir(parents=True, exist_ok=True)
+        mark.write_text(capture.name + "\n", encoding="utf-8")
+        done.append(capture.name)
+        for action, n in _distill_counts(res.stdout or "").items():
+            counts[action] = counts.get(action, 0) + n
+        skips.extend(_distill_skips(res.stdout or ""))
+        drops.extend(_distill_drops(res.stderr or ""))
+    if not done:
         return False
-    if res.returncode != 0:
-        reason = (res.stderr or res.stdout).strip().splitlines()
-        state.append_log(
-            ctx.node,
-            f"r4t: DREAM-SKIP {m.name.lower()} distill exit "
-            f"{res.returncode} ({reason[0] if reason else 'no output'}); "
-            f"{len(fresh)} capture(s) wait",
-        )
-        return False
-    home.mkdir(parents=True, exist_ok=True)
-    mark.write_text(fresh[-1].name + "\n", encoding="utf-8")
+    # Say what k7e reported, not what it was asked to do. "distilled N captures
+    # into the knowledge store" was printed on every pass of a nineteen-day
+    # stretch that stored nothing at all, because a zero exit was read as a
+    # store having happened.
     state.append_log(
         ctx.node,
-        f"r4t: DREAM {m.name.lower()} distilled {len(fresh)} capture(s) "
-        "into the knowledge store",
+        f"r4t: DREAM {m.name.lower()} distilled {len(done)} capture(s) — "
+        f"{_format_outcome(counts)}",
     )
-    # A capture k7e could not read is dropped from the sweep and never comes
-    # back — the mark advances past it. A successful dream is exactly when that
-    # would go unnoticed, so the skips get their own line.
-    for line in _distill_skips(res.stdout or ""):
+    for line in skips:
         state.append_log(ctx.node, f"r4t: DREAM-SKIPPED {m.name.lower()} {line}")
+    for line in drops:
+        state.append_log(ctx.node, f"r4t: DREAM-DROPPED {m.name.lower()} {line}")
     return True

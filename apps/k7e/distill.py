@@ -193,12 +193,178 @@ def _multimodal_extract(path):
     return []
 
 
+_SUCCESS_TOKENS = {"ok", "success", "succeeded", "complete", "completed", "done"}
+_NEUTRAL_TOKENS = {"http", "https"}
+_FLAG_SUCCESS_STRINGS = {"true", "1", "yes", "ok", "success", "succeeded"}
+
+
+def _tokenize(value):
+    """Split a status/code string into lowercase alphanumeric tokens."""
+    return [t.lower() for t in re.split(r"[^0-9a-zA-Z]+", value) if t]
+
+
+def _flag_signals_failure(value):
+    """True when a `success`/`ok` flag value positively signals failure.
+
+    Same allowlist philosophy as the status/code branch: these fields are
+    never requested by the extraction prompt, so a nonempty value must
+    positively prove success or it is judged a failure signal. `None` (the
+    key absent) carries no signal.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, (int, float)):
+        return value != 1
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if not token:
+            return False
+        return token not in _FLAG_SUCCESS_STRINGS
+    return True
+
+
+def _is_error_envelope(item):
+    """True when the top-level object is an explicit error/failing-status envelope.
+
+    Missing an envelope and matching one that isn't there are both permanent
+    mistakes, not one cheap and one costly. A missed envelope lets an error
+    ride into the store as if it were content — the store recalls it later
+    as a fact, not a failure. A false match is just as permanent in its own
+    way: r4t re-offers the same capture on every idle pass, so a
+    deterministic false positive wedges that capture in retry forever rather
+    than wasting one attempt. So the bar matches only signals that cannot
+    plausibly appear beside real content: the extraction prompt never asks
+    the model for status/code/success/error fields at all, so status/code
+    are fields it never volunteers — a nonempty value there must positively
+    prove itself success, or it is judged an envelope.
+
+    The string branch used to reject on a failure-component blocklist
+    (`error`, `unauthorized`, `denied`, ...) and pass everything else. That
+    let real failures through undetected: `RATE_LIMITED`, `THROTTLED`, and
+    `RESOURCE_EXHAUSTED` none matched the blocklist and rode straight into
+    the store as content. Failure vocabulary is open-ended — there is always
+    a next provider's next code — so enumerating it is a losing game. Success
+    vocabulary is small and stable (a handful of words, the 2xx range), so
+    the branch is now a success allowlist instead: a string passes only when
+    every token in it is benign (a success word, a 2xx code, or `http`/
+    `https` filler) AND at least one token is positively successful. An empty
+    token list (nothing alphanumeric survived tokenizing) carries no signal
+    and passes. Anything else — an unrecognized word, a non-2xx numeric code,
+    a success word sharing space with an unknown one — is an envelope.
+
+    The `success`/`ok` flags follow the same positive-recognition rule as
+    status/code: serialized false forms (`"false"`, `0`) were the
+    ninth-pass bypass, sailing past a literal-`False` check straight into
+    the store.
+
+    The status/code type matrix is now complete rather than a chain that
+    silently passes what it doesn't recognize: booleans mean what they say
+    (`False` rejects, `True` passes) rather than being skipped as if only
+    numeric values could carry a bool, and any container value (`dict`,
+    `list`, ...) is unrecognized envelope state and rejects — `status:false`
+    riding a bool-skip meant only to guard the numeric test was the
+    tenth-pass bypass.
+    """
+    if item.get("error"):
+        return True
+    for key in ("success", "ok"):
+        if key in item and _flag_signals_failure(item.get(key)):
+            return True
+    for key in ("status", "code"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            if value is False:
+                return True
+            continue
+        if isinstance(value, (int, float)):
+            if not (200 <= value <= 299):
+                return True
+            continue
+        if isinstance(value, str):
+            tokens = _tokenize(value)
+            if not tokens:
+                continue
+            has_success = False
+            for token in tokens:
+                if token.isdigit() and len(token) == 3:
+                    if 200 <= int(token) <= 299:
+                        has_success = True
+                    else:
+                        return True
+                elif token in _SUCCESS_TOKENS:
+                    has_success = True
+                elif token in _NEUTRAL_TOKENS:
+                    continue
+                else:
+                    return True
+            if not has_success:
+                return True
+            continue
+        return True
+    return False
+
+
 def _parse_multimodal_response(text, path):
     """Parse LLM response for a single media file. Returns one candidate dict or None."""
     # Try to extract a JSON object
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        # Fallback: use entire response as content, filename as title
+        # No object anywhere means the model never answered the instruction.
+        # Taking the whole response as content is how `Error: authentication
+        # expired; sign in again` became a knowledge entry — worse than losing
+        # the file, because the store then recalls it as a fact. The raw-text
+        # fallback below still covers a response that DID carry an object and
+        # got its fields wrong (#70): there the model plainly tried.
+        _note_unusable(text, "with no JSON object for a media file")
+        return None
+    try:
+        item = json.loads(match.group())
+    except json.JSONDecodeError as e:
+        # Braces that don't parse are the same "never answered" case as no
+        # braces at all — `{status:401}` sitting inside prose is not an
+        # attempt, and falling back to the raw text is how the auth error
+        # itself got stored as a knowledge entry.
+        _note_unusable(text, f"with unparseable JSON ({type(e).__name__})")
+        return None
+    if not isinstance(item, dict):
+        _note_unusable(text, "with a JSON object that has no content field")
+        return None
+    if _is_error_envelope(item):
+        _note_unusable(text, "with an error envelope instead of content")
+        return None
+    if "content" not in item:
+        _note_unusable(text, "with a JSON object that has no content field")
+        return None
+
+    title = item.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = Path(path).stem.replace("-", " ").replace("_", " ")
+    content = item["content"]
+    # A structured error object can carry a `content` key with a null (or
+    # empty) value — {"status":401,...,"content":null} parses as a dict and
+    # HAS "content", so gating on key presence alone let an auth error
+    # through as if it were an attempt. The #70 fallback below is narrower
+    # than "any truthy container": an arbitrary truthy container is exactly
+    # how an error dict (or a list holding one) rode this fallback into the
+    # store, so only the recognized fragments shape — a non-empty list whose
+    # elements are all strings, at least one of them carrying real text —
+    # proves the model answered with content in the wrong shape. Every other
+    # container, and every other falsy or whitespace-only value (whitespace
+    # is just the unnormalized spelling of empty), means no content was
+    # produced at all, so it is a failed call.
+    if isinstance(content, list) and content and all(isinstance(x, str) for x in content):
+        if not any(x.strip() for x in content):
+            _note_unusable(text, "with content of type list, all fragments whitespace-only")
+            return None
+        print(
+            f"  [distill] {path}: content is a list of string fragments, "
+            "expected a single string — falling back to the raw response",
+            file=sys.stderr,
+        )
         if len(text.strip()) > 20:
             return {
                 "title": Path(path).stem.replace("-", " ").replace("_", " "),
@@ -206,45 +372,25 @@ def _parse_multimodal_response(text, path):
                 "tags": [_media_type(path)],
             }
         return None
-    try:
-        item = json.loads(match.group())
-        if isinstance(item, dict) and "content" in item:
-            # A model that answers with a content *list* (a common multimodal
-            # response shape) used to reach `.strip()` downstream and take the
-            # whole batch down with an AttributeError. `_parse_llm_response`
-            # already guards the same class; this is the media path.
-            title = item.get("title")
-            if not isinstance(title, str) or not title.strip():
-                title = Path(path).stem.replace("-", " ").replace("_", " ")
-            content = item["content"]
-            if not isinstance(content, str):
-                print(
-                    f"  [distill] {path}: content is {type(content).__name__}, "
-                    "expected string — falling back to the raw response",
-                    file=sys.stderr,
-                )
-                raise TypeError("non-string content")
-            tags = item.get("tags", [_media_type(path)])
-            if tags is None:
-                tags = [_media_type(path)]
-            elif isinstance(tags, str):
-                tags = [tags]
-            elif not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-                print(
-                    f"  [distill] {path}: tags must be a list of strings — using the media type",
-                    file=sys.stderr,
-                )
-                tags = [_media_type(path)]
-            return {"title": title, "content": content, "tags": tags}
-    except (json.JSONDecodeError, TypeError):
-        # Fallback: use raw text
-        if len(text.strip()) > 20:
-            return {
-                "title": Path(path).stem.replace("-", " ").replace("_", " "),
-                "content": text.strip(),
-                "tags": [_media_type(path)],
-            }
-    return None
+    if isinstance(content, (list, dict)):
+        _note_unusable(text, f"with content of type {type(content).__name__}, not the recognized fragments shape")
+        return None
+    if not isinstance(content, str) or not content.strip():
+        _note_unusable(text, f"with content of type {type(content).__name__}, not usable")
+        return None
+    content = content.strip()
+    tags = item.get("tags", [_media_type(path)])
+    if tags is None:
+        tags = [_media_type(path)]
+    elif isinstance(tags, str):
+        tags = [tags]
+    elif not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        print(
+            f"  [distill] {path}: tags must be a list of strings — using the media type",
+            file=sys.stderr,
+        )
+        tags = [_media_type(path)]
+    return {"title": title, "content": content, "tags": tags}
 
 
 _TITLE_STOPWORDS = {"the", "a", "an", "via", "with", "using", "from", "to", "for", "and", "or", "of", "in", "on", "by"}
@@ -501,25 +647,71 @@ def _llm_extract(text):
 
 
 def _run_llm_prompt(prompt):
-    """Run a single LLM prompt and return parsed candidates."""
+    """Run a single LLM prompt and return parsed candidates.
+
+    A bridge that exits 0 having printed its own error — an auth failure, a
+    usage banner, a truncated payload — looks identical to a good answer one
+    layer down, where any non-empty stdout is a response. The required shape
+    is a JSON array, so its absence is the signal: no array means the chunk
+    was never read, not that it held nothing. `[]` is a real answer and stays
+    one."""
     response = engine._call_llm(prompt, purpose="distill", timeout=180)
-    if response:
-        return _parse_llm_response(response)
-    return []
+    if not response:
+        return []
+    return _parse_llm_response(response)
+
+
+def _note_unusable(text, detail):
+    engine.note_llm_failure(
+        "distill", f"exit 0 {detail} ({str(text).strip()[:80]!r})"
+    )
 
 
 def _parse_llm_response(text):
+    """Candidates from one LLM response.
+
+    Only a valid array is quiet. Bracket-shaped prose is not an answer —
+    `Error: token [expired]` and `Error code [401]` both match a shape check
+    and neither was ever read — so the PARSE decides, and anything it cannot
+    turn into candidates is recorded as a failed call. `[]` stays a real
+    answer: the model read the chunk and found nothing novel."""
     # Extract JSON array from LLM response (may have surrounding text)
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if not match:
+        _note_unusable(text, "with no JSON array in output")
         return []
     try:
         items = json.loads(match.group())
         if not isinstance(items, list):
+            _note_unusable(text, "with a JSON payload that is not an array")
+            return []
+        if not items:
+            return []
+        # A candidate-shaped item — a dict carrying both keys, whatever their
+        # value types — proves the chunk was read: the model attempted the
+        # schema. Failing on that would re-offer input a model shapes the
+        # same way every time, a deterministic retry loop. A payload with no
+        # candidate-shaped item at all (`[401]`) was never an answer.
+        attempted = any(
+            isinstance(item, dict) and "title" in item and "content" in item
+            for item in items
+        )
+        if not attempted:
+            _note_unusable(text, "with no candidate-shaped answer in the array")
             return []
         valid = []
         for item in items:
-            if not isinstance(item, dict) or "title" not in item or "content" not in item:
+            if not isinstance(item, dict):
+                print(
+                    f"  [distill] skipping candidate: not an object (got {type(item).__name__})",
+                    file=sys.stderr,
+                )
+                continue
+            if "title" not in item or "content" not in item:
+                print(
+                    "  [distill] skipping candidate: missing title/content keys",
+                    file=sys.stderr,
+                )
                 continue
             title = item["title"]
             content = item["content"]
@@ -553,5 +745,6 @@ def _parse_llm_response(text):
                 "tags": tags,
             })
         return valid
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        _note_unusable(text, f"with unparseable JSON ({type(e).__name__})")
         return []

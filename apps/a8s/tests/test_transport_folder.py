@@ -255,7 +255,7 @@ class TestJoined:
         history = _ulid_at("01A")
         (folder / f"{history}.json").write_bytes(_envelope(history, "backlog"))
         seen: list[bytes] = []
-        t = _transport(folder, joined=_ulid_at("01M"))
+        t = _transport(folder, joined=_ulid_at("01M"), retain_days="0")
         t._on_message = seen.append
         t._poll_once()
         assert seen == []
@@ -270,7 +270,7 @@ class TestJoined:
         """Carlos's repro: the folder is absent when the remote is registered."""
         absent = tmp_path / "not-mounted-yet"
         t = FolderTransport(
-            remote_id="box", path=str(absent), joined=_ulid_at("01M")
+            remote_id="box", path=str(absent), joined=_ulid_at("01M"), retain_days="0"
         )
         t.touch_ledger()
         seen: list[bytes] = []
@@ -288,7 +288,7 @@ class TestJoined:
         # And a fresh process reading the same spec agrees.
         restarted: list[bytes] = []
         t2 = FolderTransport(
-            remote_id="box", path=str(absent), joined=_ulid_at("01M")
+            remote_id="box", path=str(absent), joined=_ulid_at("01M"), retain_days="0"
         )
         t2._on_message = restarted.append
         t2._poll_once()
@@ -320,7 +320,7 @@ class TestJoined:
         history = _ulid_at("01A")
         (folder / f"{history}.json").write_bytes(_envelope(history, "backlog"))
         seen: list[bytes] = []
-        t = _transport(folder)
+        t = _transport(folder, retain_days="0")
         t._on_message = seen.append
         t._poll_once()
         assert len(seen) == 1
@@ -334,7 +334,7 @@ class TestJoined:
         for prefix in ("01A", "01B"):
             history = _ulid_at(prefix)
             (folder / f"{history}.json").write_bytes(_envelope(history, "backlog"))
-        t = _transport(folder, joined=_ulid_at("01M"))
+        t = _transport(folder, joined=_ulid_at("01M"), retain_days="0")
         t._on_message = lambda _b: None
         t._poll_once()
         t._poll_once()
@@ -367,7 +367,7 @@ class TestJoined:
         import os
         import time
 
-        history = _ulid_at("01A")
+        history = _ulid_at_ms(int((time.time() - 40 * 86400) * 1000))
         stale = folder / f"{history}.json"
         stale.write_bytes(_envelope(history))
         old = time.time() - 40 * 86400
@@ -653,8 +653,9 @@ class TestOptions:
         assert _transport(folder, poll_seconds="0.01")._poll_seconds == 1.0
 
     def test_retain_days_validated(self, fake_home, folder):
-        assert _transport(folder)._retain_days == 0
+        assert _transport(folder)._retain_days == 3
         assert _transport(folder, retain_days="30")._retain_days == 30
+        assert _transport(folder, retain_days="0")._retain_days == 0
         with pytest.raises(ValueError, match="whole number"):
             _transport(folder, retain_days="soon")
         with pytest.raises(ValueError, match="negative"):
@@ -672,7 +673,7 @@ class TestOptions:
         import os
         import time
 
-        stale = new_ulid()
+        stale = _ulid_at_ms(int((time.time() - 40 * 86400) * 1000))
         stale_path = folder / f"{stale}.json"
         stale_path.write_bytes(_envelope(stale))
         old = time.time() - 40 * 86400
@@ -682,3 +683,84 @@ class TestOptions:
         t.publish(_envelope(fresh))
         assert not stale_path.exists()
         assert (folder / f"{fresh}.json").is_file()
+
+    def test_an_old_ulid_with_a_fresh_mtime_is_kept(self, fake_home, folder):
+        import os
+        import time
+
+        stale = _ulid_at_ms(int((time.time() - 40 * 86400) * 1000))
+        stale_path = folder / f"{stale}.json"
+        stale_path.write_bytes(_envelope(stale))
+        now = time.time()
+        os.utime(stale_path, (now, now))
+        t = _transport(folder, retain_days="30")
+        t.publish(_envelope(new_ulid()))
+        assert stale_path.exists()
+
+    def test_a_fresh_ulid_with_an_old_mtime_is_kept(self, fake_home, folder):
+        import os
+        import time
+
+        fresh_id = new_ulid()
+        fresh_path = folder / f"{fresh_id}.json"
+        fresh_path.write_bytes(_envelope(fresh_id))
+        old = time.time() - 40 * 86400
+        os.utime(fresh_path, (old, old))
+        t = _transport(folder, retain_days="30")
+        t.publish(_envelope(new_ulid()))
+        assert fresh_path.exists()
+
+    def test_retain_days_zero_sweeps_nothing(self, fake_home, folder):
+        import os
+        import time
+
+        stale = _ulid_at_ms(int((time.time() - 40 * 86400) * 1000))
+        stale_path = folder / f"{stale}.json"
+        stale_path.write_bytes(_envelope(stale))
+        old = time.time() - 40 * 86400
+        os.utime(stale_path, (old, old))
+        t = _transport(folder, retain_days="0")
+        t.publish(_envelope(new_ulid()))
+        assert stale_path.exists()
+
+    def test_a_delayed_publish_survives_its_own_sweep(self, fake_home, folder):
+        import time
+
+        t = _transport(folder)
+        delayed = _ulid_at_ms(int((time.time() - 4 * 86400) * 1000))
+        t.publish(_envelope(delayed))
+        assert (folder / f"{delayed}.json").exists()
+
+    def test_the_poll_path_sweeps_too(self, fake_home, folder):
+        import os
+        import time
+
+        stale = _ulid_at("01A")
+        stale_path = folder / f"{stale}.json"
+        stale_path.write_bytes(_envelope(stale))
+        old = time.time() - 40 * 86400
+        os.utime(stale_path, (old, old))
+        t = _transport(folder)
+        t._on_message = lambda _b: None
+        t._poll_once()
+        assert not stale_path.exists()
+
+    def test_the_sweep_throttle_holds_off_a_second_poll_pass(self, fake_home, folder):
+        import os
+        import time
+
+        first = _ulid_at("01A")
+        first_path = folder / f"{first}.json"
+        first_path.write_bytes(_envelope(first))
+        old = time.time() - 40 * 86400
+        os.utime(first_path, (old, old))
+        t = _transport(folder)
+        t._on_message = lambda _b: None
+        t._poll_once()
+        assert not first_path.exists()
+
+        second = _ulid_at("01B")
+        second_path = folder / f"{second}.json"
+        second_path.write_bytes(_envelope(second))
+        t._poll_once()
+        assert second_path.exists()

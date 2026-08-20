@@ -2174,6 +2174,60 @@ class TestDistillCommand:
     def test_empty_rig_returns_none(self):
         assert Rig(name="empty").distill_command(Path(".")) is None
 
+    def test_run_as_wraps_the_bridge_in_the_members_own_cage(self, tmp_path):
+        """Under `run_as` the harness lives in the agent user's home and is
+        authenticated as that user, so a bridge run as the router user cannot
+        work — on the deployment that found this, `agy` was simply not on the
+        router's PATH and every dream silently distilled nothing."""
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["agy", "--print", "{prompt}"]},
+        }))
+        cmd = config.rigs["local"].distill_command(tmp_path, run_as="bob")
+        parts = shlex.split(cmd)
+        assert parts[:5] == ["sudo", "-u", "bob", "sh", "-c"]
+        assert len(parts) == 6
+        payload = parts[5]
+        assert payload.startswith(
+            f"cd {shlex.quote(str(tmp_path))} && exec bash --login -c "
+        )
+        inner = shlex.split(payload)[-1]
+        assert inner == 'agy --print "$(cat)"'
+
+    def test_run_as_cds_into_the_workdir_before_the_bridge_starts(self, tmp_path):
+        """k7e launches the bridge with cwd inside its own router-owned
+        store, which the caged user cannot even stat — the wrapper must move
+        to the member's own workdir before the harness starts, whether or
+        not the rig's invoke ever names `{workdir}` itself."""
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["agy", "--print", "{prompt}"]},
+        }))
+        workdir = tmp_path / "member-home"
+        cmd = config.rigs["local"].distill_command(workdir, run_as="bob")
+        inner = shlex.split(cmd)[-1]
+        assert inner.startswith(f"cd {shlex.quote(str(workdir))} && ")
+
+    def test_run_as_cd_prefix_and_workdir_placeholder_both_apply(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "code": {
+                "invoke": ["opencode", "run", "--auto", "--dir", "{workdir}", "{prompt}"],
+                "preset": "opencode",
+            },
+        }))
+        workdir = tmp_path / "member-home"
+        cmd = config.rigs["code"].distill_command(workdir, run_as="bob")
+        payload = shlex.split(cmd)[-1]
+        assert payload == (
+            f"cd {shlex.quote(str(workdir))} && exec bash --login -c "
+            + shlex.quote(f'opencode run --auto --dir {workdir} "$(cat)"')
+        )
+
+    def test_no_run_as_keeps_the_plain_shell_wrapper(self, tmp_path):
+        config = load_rig_config(write_config(tmp_path, {
+            "local": {"invoke": ["agy", "--print", "{prompt}"]},
+        }))
+        cmd = config.rigs["local"].distill_command(tmp_path, run_as=None)
+        assert self.inner(cmd) == 'agy --print "$(cat)"'
+
     def test_agy_resolves_the_live_model_before_bridging(self, tmp_path, monkeypatch):
         config = load_rig_config(write_config(tmp_path, {
             "brain": {
