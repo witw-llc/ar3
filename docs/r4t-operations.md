@@ -207,14 +207,21 @@ that zone, not UTC.* That sentence is the point of the arrangement: a member
 handed nothing but UTC concludes it lives in UTC, and then every *tomorrow* it
 writes lands a day off.
 
-What is written stays UTC. The day log's filename, the retention window, the
-`## <timestamp> dispatch` headers in the archive — all UTC, because those are
-sort keys, not reading. `prune_day_logs` compares those names as strings, and a
-portable org whose log directory is shared between a Mac, a Windows seat and a
-Linux VM needs every machine to name the same wall moment the same file. So
-`r4t logs` prints a day header saying both — `— log day 2026-08-16 UTC (this
-machine reads PDT)` — rather than letting one stand for the other near
-midnight.
+Headings a model reads carry the same local reading: a history entry's
+`## 2026-08-16 13:22:04 PDT (UTC-07:00) from acme:gerry`, the day log's
+`## <local> dispatch N message(s) -> member` line, the turn-capture meta
+block, and the sandbox report header all stamp with the machine's zone. The
+parenthetical offset is the reversible instant — an abbreviation alone cannot
+be turned back into UTC on a machine in another zone, and the sandbox's
+conversation table sorts by that instant. What sorts,
+names a file, or otherwise round-trips through machinery stays UTC instead:
+the day log's filename, the retention window, and a turn capture's `stamp`
+identifier are all UTC sort keys. `prune_day_logs` compares day-log filenames
+as strings, and a portable org whose log directory is shared between a Mac, a
+Windows seat and a Linux VM needs every machine to name the same wall moment
+the same file. So `r4t logs` prints a day header saying both — `— log day
+2026-08-16 UTC (this machine reads PDT)` — rather than letting one stand for
+the other near midnight.
 
 The zone is the machine's, which means `TZ` is the only knob. A caged member is
 the case that needs it: `isolate.py` runs the turn in a container, and a

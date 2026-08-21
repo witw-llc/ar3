@@ -54,7 +54,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
@@ -74,9 +74,40 @@ except ImportError:
         off = dt.strftime("%z") or "+0000"
         return f"UTC{off[:3]}:{off[3:5]}"
 
-    def local_stamp() -> str:
-        dt = datetime.now().astimezone()
-        return f"{dt.strftime('%Y-%m-%d %H:%M')} {local_zone(dt)}"
+    def _local_dt(ts: str | datetime) -> datetime | None:
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            text = str(ts).strip()
+            if not text:
+                return None
+            if text.endswith(("Z", "z")):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone()
+
+    def local_stamp(ts: str | datetime | None = None, *, seconds: bool = False) -> str:
+        dt = datetime.now().astimezone() if ts is None else _local_dt(ts)
+        if dt is None:
+            return str(ts)
+        fmt = "%Y-%m-%d %H:%M:%S" if seconds else "%Y-%m-%d %H:%M"
+        return f"{dt.strftime(fmt)} {local_zone(dt)}"
+
+def zoned_stamp() -> str:
+    """History and day-log heading stamp: local display plus the UTC offset,
+    because a zone abbreviation alone is not a reversible instant when the
+    reader's machine or zone differs from the writer's."""
+    dt = datetime.now().astimezone()
+    base = local_stamp(dt, seconds=True)
+    off = dt.strftime("%z") or "+0000"
+    tag = f"UTC{off[:3]}:{off[3:5]}"
+    return base if base.endswith(tag) else f"{base} ({tag})"
+
 
 import isolate
 import knowledge
@@ -1191,7 +1222,7 @@ def _copy_lateral_to_lead(
     state.append_history(
         ctx.node,
         lead.name,
-        f"## {state.utc_now()} lateral {member.name} -> "
+        f"## {zoned_stamp()} lateral {member.name} -> "
         f"{_display_name(ctx.node, to)} (thread {thread_id})\n\n{clip}",
         max_bytes=rig.history_max_bytes,
     )
@@ -1375,7 +1406,7 @@ def release_staging(
         state.append_history(
             ctx.node,
             member.name,
-            f"## {state.utc_now()} to {_display_name(ctx.node, to)}\n\n"
+            f"## {zoned_stamp()} to {_display_name(ctx.node, to)}\n\n"
             + (body if len(body) <= rig.history_body_max else body[:rig.history_body_max] + " [...]"),
             max_bytes=rig.history_max_bytes,
         )
@@ -1509,6 +1540,7 @@ def _capture_turn(
     meta = "\n".join(
         [
             f"- stamp: {stamp}",
+            f"- local: {local_stamp(seconds=True)}",
             f"- threads: {', '.join(threads) or '(none)'}",
             f"- exit: {exit_code}",
             f"- duration_seconds: {duration:.2f}",
@@ -1785,7 +1817,7 @@ def _run_turn(
     env.update(ctx.isolation.to_env())
     state.append_log(
         ctx.node,
-        f"## {state.utc_now()} dispatch {len(batch)} message(s) -> {member.name} "
+        f"## {zoned_stamp()} dispatch {len(batch)} message(s) -> {member.name} "
         f"(threads {', '.join(sorted({str(b.get('thread', '')) for b in batch}))}, "
         f"rig {rig.name}"
         + (f" variant {variant}" if rig.pool_size > 1 else "")
@@ -1880,7 +1912,7 @@ def _run_turn(
             state.append_history(
                 ctx.node,
                 member.name,
-                f"## {state.utc_now()} from "
+                f"## {zoned_stamp()} from "
                 f"{_display_name(ctx.node, str(env_msg.get('from', '?')))}\n\n{entry_body}",
                 max_bytes=rig.history_max_bytes,
             )

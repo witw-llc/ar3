@@ -7,11 +7,11 @@ are done correctly:
     A timestamp that is ever sorted, compared, merged, or pruned is UTC.
     A timestamp a human or a model reads is local, and always carries its zone.
 
-Filenames and log-line prefixes are sort keys, so they stay UTC — a roster's
-day-log directory is a shared artifact whose lexicographic order must be
-chronological order on every machine that writes into it, and `r4t`'s retention
-pass string-compares those names. Display is display: it is read once, by
-someone standing in one place, and UTC is wrong for them.
+Filenames are sort keys, so they stay UTC — a roster's day-log directory is a
+shared artifact whose lexicographic order must be chronological order on every
+machine that writes into it, and `r4t`'s retention pass string-compares those
+names. Display is display: it is read once, by someone standing in one place,
+and UTC is wrong for them.
 
 The model is the reader this matters most for. An agent handed nothing but UTC
 stamps concludes it lives in UTC, and then every relative word it writes —

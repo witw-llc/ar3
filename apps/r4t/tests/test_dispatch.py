@@ -581,6 +581,23 @@ class TestFailureBreaker:
         assert run_one(ctx, "acme:gerry", "acme:phil", "three", run_fn=ok_run) == 1
         assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
 
+    def test_a_failed_turn_requeues_the_same_envelope_and_thread(self, ctx):
+        handle_message(ctx, "acme:gerry", "acme:phil", "keep this thread", drain_after=False)
+        queued = state.read_queue(NODE, "phil")
+        assert len(queued) == 1
+        thread, msg_id = queued[0]["thread"], queued[0]["id"]
+
+        assert drain(ctx, run_fn=fail_run) == 1
+        requeued = state.read_queue(NODE, "phil")
+        assert [(m["id"], m["thread"]) for m in requeued] == [(msg_id, thread)]
+        assert state.list_inflight(NODE, "phil") == []
+        assert state.read_turn(NODE, "phil") is None
+        assert state.read_meta(NODE, "phil")["last_turn"]["threads"] == [thread]
+
+        assert drain(ctx, run_fn=ok_run) == 1
+        assert state.read_queue(NODE, "phil") == []
+        assert state.read_meta(NODE, "phil")["last_turn"]["threads"] == [thread]
+
     def test_trips_at_cap_then_holds_queue(self, ctx):
         trip_breaker(ctx)
         handle_message(ctx, "acme:gerry", "acme:phil", "blocked", drain_after=False)
@@ -1025,6 +1042,22 @@ class TestPromptStatesTheLocalTime:
         roster = load_roster(ctx.roster_path)
         prompt = dispatch.build_prompt(ctx, roster, roster.find("phil"), [], Rig(name="t"))
         assert "You are Phil on acme." in prompt
+
+    UTC_ISO_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z")
+    LOCAL_HISTORY_HEADING = re.compile(
+        r"(?m)^## \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} IST \(UTC\+05:30\) (from|to) "
+    )
+
+    def test_history_heading_and_prompt_carry_no_utc_iso_stamp(
+        self, ctx, zone, fake_harness
+    ):
+        zone("Asia/Kolkata")
+        handle_message(ctx, "acme:gerry", "acme:phil", "first job")
+        roster = load_roster(ctx.roster_path)
+        prompt = dispatch.build_prompt(ctx, roster, roster.find("phil"), [], Rig(name="t"))
+        assert not self.UTC_ISO_STAMP.search(prompt)
+        history = state.read_history(NODE, "phil")
+        assert self.LOCAL_HISTORY_HEADING.search(history)
 
 
 class TestPromptStats:

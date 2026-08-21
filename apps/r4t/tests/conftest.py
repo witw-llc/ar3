@@ -5,9 +5,14 @@ import json
 import os
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
+
+needs_tzset = pytest.mark.skipif(
+    not hasattr(time, "tzset"), reason="TZ only takes effect via tzset (not on Windows)"
+)
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
@@ -38,6 +43,19 @@ def _no_var_cache_leak():
     runbook.clear_vars_cache()
     yield
     runbook.clear_vars_cache()
+
+
+@pytest.fixture
+def zone(monkeypatch):
+    """Force the process's local zone, and put it back afterwards."""
+
+    def use(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield use
+    monkeypatch.undo()
+    time.tzset()
 
 
 @pytest.fixture(autouse=True)

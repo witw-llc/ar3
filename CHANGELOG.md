@@ -10,6 +10,19 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## Unreleased
+
+### Changed
+- **History and day-log headings speak delegator-local time.** A history
+  entry's `## <stamp> from|to <party>`, a day log's `## <stamp> dispatch ...`
+  line, the sandbox report header, and the turn-capture meta block now stamp
+  with the machine's local zone (`2026-08-20 16:41:55 PDT (UTC-07:00)`)
+  instead of UTC — a model reads these every turn, and UTC-only stamps read
+  as living in the wrong day. The parenthetical offset keeps the instant
+  reversible on any machine. Filenames, the retention window, and JSON
+  payload stamps stay UTC; the sandbox conversation table sorts entries by
+  resolved UTC instant, not by the display string.
+
 ## 0.1.73
 
 ### Changed

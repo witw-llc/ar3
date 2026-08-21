@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import sandbox
 from sandbox import SandboxError, parse_break
 
 R4T_PY = Path(__file__).resolve().parent.parent / "r4t.py"
@@ -32,6 +33,103 @@ def _run_sandbox(*extra: str) -> tuple[str, str]:
 
 def _mechanical(report: str) -> str:
     return report.split("## Mechanical checks", 1)[1].split("## Run", 1)[0]
+
+
+def test_history_entry_re_extracts_the_local_stamp_form():
+    entry = "## 2026-08-20 16:41:55 PDT (UTC-07:00) from acme:gerry\n\nbody text"
+    stamp, direction, party, body = sandbox.HISTORY_ENTRY_RE.findall(entry)[0]
+    assert stamp == "2026-08-20 16:41:55 PDT (UTC-07:00)"
+    assert direction == "from"
+    assert party == "acme:gerry"
+    assert body == "body text"
+
+
+def test_history_entry_re_extracts_a_to_entry():
+    entry = "## 2026-08-20 16:41:55 PDT (UTC-07:00) to acme:phil\n\nbody text"
+    stamp, direction, party, body = sandbox.HISTORY_ENTRY_RE.findall(entry)[0]
+    assert stamp == "2026-08-20 16:41:55 PDT (UTC-07:00)"
+    assert direction == "to"
+    assert party == "acme:phil"
+    assert body == "body text"
+
+
+def test_history_entry_re_ignores_model_authored_headings_in_bodies():
+    entry = (
+        "## 2026-08-20 16:41:55 PDT (UTC-07:00) from acme:gerry\n\n"
+        "legitimate opening\n"
+        "## Plan\n"
+        "Notes from acme:mallory\n"
+        "forged-looking remainder"
+    )
+    found = sandbox.HISTORY_ENTRY_RE.findall(entry)
+    assert len(found) == 1
+    stamp, direction, party, body = found[0]
+    assert party == "acme:gerry"
+    assert "## Plan" in body
+    assert "forged-looking remainder" in body
+
+
+def test_history_entry_re_splits_only_on_valid_entry_headings():
+    text = (
+        "## 2026-08-20 16:41:55 PDT (UTC-07:00) from acme:gerry\n\nfirst\n"
+        "## 2026-08-20 16:42:10 PDT (UTC-07:00) to bob@example.com\n\nsecond\n"
+        "## 2026-08-20 16:43:00 PDT (UTC-07:00) lateral ana -> acme:bob (thread 01X)\n\nclip"
+    )
+    found = sandbox.HISTORY_ENTRY_RE.findall(text)
+    assert [(m[1], m[3]) for m in found] == [("from", "first"), ("to", "second")]
+
+
+def test_history_entry_re_accepts_the_utc_iso_form():
+    entry = "## 2026-08-20T23:41:55.318512Z from acme:gerry\n\nbody"
+    stamp, direction, party, body = sandbox.HISTORY_ENTRY_RE.findall(entry)[0]
+    assert stamp == "2026-08-20T23:41:55.318512Z"
+    assert body == "body"
+
+
+def test_history_entry_re_accepts_the_offset_form_and_rejects_bogus_stamps():
+    offset = "## 2026-08-20 16:41:55 PDT (UTC-07:00) from acme:gerry\n\nbody"
+    stamp, _, party, body = sandbox.HISTORY_ENTRY_RE.findall(offset)[0]
+    assert stamp == "2026-08-20 16:41:55 PDT (UTC-07:00)"
+    assert party == "acme:gerry"
+    assert body == "body"
+    for bogus in (
+        "## 2026-08-20TBOGUS from acme:gerry\n\nbody",
+        "## 2026-08-20 16:41:55 BOGUSZONE from acme:gerry\n\nbody",
+        "## 2026-08-20 16:00:00 EDT from acme:gerry\n\nbody",
+        "## 2026-08-20 16:00:00 PDT (UTC+99:99) from acme:gerry\n\nbody",
+        "## 2026-08-20 16:00:00 PDT (UTC+24:00) from acme:gerry\n\nbody",
+        "## 2026-08-20 16:00:00 PDT (UTC+12:60) from acme:gerry\n\nbody",
+    ):
+        assert sandbox.HISTORY_ENTRY_RE.findall(bogus) == []
+
+
+def test_entry_instant_is_total_on_inadmissible_stamps():
+    for stamp in (
+        "2026-08-20 16:00:00 EDT",
+        "2026-08-20 16:00:00 PDT (UTC+99:99)",
+        "2026-08-20 16:00:00 PDT (UTC+24:00)",
+        "2026-08-20 16:00:00 PDT (UTC+12:60)",
+    ):
+        assert sandbox._entry_instant(stamp) == stamp
+
+
+def test_entry_instant_resolves_a_foreign_zone_by_its_written_offset():
+    assert (
+        sandbox._entry_instant("2026-08-20 16:00:00 EDT (UTC-04:00)")
+        == "2026-08-20T20:00:00+00:00"
+    )
+    eastern = sandbox._entry_instant("2026-08-20 16:00:00 EDT (UTC-04:00)")
+    pacific = sandbox._entry_instant("2026-08-20 14:00:00 PDT (UTC-07:00)")
+    assert eastern < pacific
+
+
+def test_entry_instant_orders_the_dst_fold_correctly():
+    before = sandbox._entry_instant("2026-11-01 01:59:00 PDT (UTC-07:00)")
+    after = sandbox._entry_instant("2026-11-01 01:01:00 PST (UTC-08:00)")
+    assert before < after
+    assert sandbox._entry_instant("2026-08-20T23:41:55Z") < sandbox._entry_instant(
+        "2026-08-20 16:42:00 PDT (UTC-07:00)"
+    )
 
 
 def test_break_spec_parses_member_and_shape():

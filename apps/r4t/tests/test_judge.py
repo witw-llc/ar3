@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 import textwrap
 
@@ -11,6 +12,8 @@ import pytest
 
 import judge
 import state
+from conftest import needs_tzset
+from dispatch import zoned_stamp
 
 NODE = "acme"
 
@@ -150,6 +153,20 @@ def test_missing_config_errors_action_first(r4t_home, tmp_path):
     assert code == 2
     assert "no rig config" in err
     assert "(try: r4t rig add grader" in err
+
+
+@needs_tzset
+def test_run_context_speaks_local_not_utc_iso(r4t_home, zone):
+    zone("Asia/Kolkata")
+    state.append_log(
+        NODE,
+        f"## {zoned_stamp()} dispatch 1 message(s) -> phil "
+        "(threads 01X, rig grader)\n\n### Prompt\n\nbuild it",
+    )
+    unit = judge.run_context(NODE)
+    assert unit is not None
+    assert "IST" in unit.text
+    assert not re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z", unit.text)
 
 
 def test_prompt_carries_taxonomy_captures_and_context(

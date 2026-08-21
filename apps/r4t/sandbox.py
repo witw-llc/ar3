@@ -37,9 +37,51 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import state
+
+# The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
+# container with no repo root, so `ark` is not always reachable there — and a
+# caged turn is exactly the case that needs the zone stated, because a
+# container boots UTC until `rig.env` sets `TZ`. So the fallback reimplements
+# the display contract rather than degrading to a stub: local time, always
+# carrying its zone, with `ark.clock`'s abbreviation rule.
+try:
+    from ark.clock import stamp as local_stamp
+except ImportError:
+    def _local_zone(when: datetime | None = None) -> str:
+        dt = when or datetime.now().astimezone()
+        abbr = dt.strftime("%Z")
+        if abbr.isalpha() and len(abbr) <= 5:
+            return abbr
+        off = dt.strftime("%z") or "+0000"
+        return f"UTC{off[:3]}:{off[3:5]}"
+
+    def _local_dt(ts: str | datetime) -> datetime | None:
+        if isinstance(ts, datetime):
+            dt = ts
+        else:
+            text = str(ts).strip()
+            if not text:
+                return None
+            if text.endswith(("Z", "z")):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+            except ValueError:
+                return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone()
+
+    def local_stamp(ts: str | datetime | None = None, *, seconds: bool = False) -> str:
+        dt = datetime.now().astimezone() if ts is None else _local_dt(ts)
+        if dt is None:
+            return str(ts)
+        fmt = "%Y-%m-%d %H:%M:%S" if seconds else "%Y-%m-%d %H:%M"
+        return f"{dt.strftime(fmt)} {_local_zone(dt)}"
 
 from rig import RigError, build_preset_invoke, format_preset_invoke, preset_names
 
@@ -390,9 +432,53 @@ def _governance_lines() -> list[str]:
     return lines
 
 
-HISTORY_ENTRY_RE = re.compile(
-    r"(?m)^## (\S+) (from|to) (\S+)\n\n(.*?)(?=\n## |\Z)", re.DOTALL
+# The stamp grammar is pinned to what the writers emit so a `## ` heading
+# inside a clipped member body can never open or close an entry: the zoned
+# local form `2026-08-20 16:41:55 PDT (UTC-07:00)` — the offset is required,
+# because every accepted local form must be a reversible instant — and the
+# UTC ISO form older state carries. Offset digits are range-checked so an
+# accepted stamp can always construct a timezone.
+_OFFSET = r"UTC[+-](?:[01]\d|2[0-3]):[0-5]\d"
+HISTORY_STAMP = (
+    r"\d{4}-\d{2}-\d{2}"
+    rf"(?: \d{{2}}:\d{{2}}:\d{{2}} (?:[A-Za-z]{{1,5}} \({_OFFSET}\)|{_OFFSET})"
+    r"|T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)"
 )
+HISTORY_ENTRY_RE = re.compile(
+    rf"(?m)^## ({HISTORY_STAMP}) (from|to) (\S+)\n\n"
+    rf"(.*?)(?=\n## {HISTORY_STAMP} (?:from|to|lateral) |\Z)",
+    re.DOTALL,
+)
+
+_STAMP_OFFSET_RE = re.compile(r"UTC([+-])([01]\d|2[0-3]):([0-5]\d)")
+
+
+def _entry_instant(stamp: str) -> str:
+    """UTC sort key for a heading stamp. The written UTC offset is the
+    instant. Total by construction: a stamp the grammar should never have
+    admitted sorts as its own text rather than aborting the report."""
+    try:
+        naive = datetime.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        text = stamp[:-1] + "+00:00" if stamp.endswith(("Z", "z")) else stamp
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return stamp
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    offset = _STAMP_OFFSET_RE.search(stamp, 19)
+    if not offset:
+        return stamp
+    sign = -1 if offset.group(1) == "-" else 1
+    try:
+        zone = timezone(
+            sign * timedelta(hours=int(offset.group(2)), minutes=int(offset.group(3)))
+        )
+    except ValueError:
+        return stamp
+    return naive.replace(tzinfo=zone).astimezone(timezone.utc).isoformat()
 
 
 def _conversation() -> list[tuple[str, str, str, str]]:
@@ -412,7 +498,7 @@ def _conversation() -> list[tuple[str, str, str, str]]:
                 events.append((ts, other, agent, body.strip()))
             elif not other.lower().startswith(ROSTER):
                 events.append((ts, agent, other, body.strip()))
-    events.sort(key=lambda e: e[0])
+    events.sort(key=lambda e: _entry_instant(e[0]))
     return events
 
 
@@ -610,7 +696,7 @@ def _build_report(
     lines = [
         f"# r4t sandbox report — {mode} run",
         "",
-        f"Generated {state.utc_now()} by `r4t sandbox`. Self-contained: the",
+        f"Generated {local_stamp(seconds=True)} by `r4t sandbox`. Self-contained: the",
         "mechanical section is computed by the runner; everything else is the",
         "raw record of the run.",
         "",
