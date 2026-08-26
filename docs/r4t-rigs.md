@@ -492,16 +492,43 @@ the heredoc teaching.
 It is **on by default** on `claude`, `codex`, `copilot` and `opencode` (and
 their `ollama launch` variants): their idioms are a flag, a `-c` override or a
 config file under the member's own state dir, so nothing lands in the roster repo.
-`cursor` is **opt-in** — its only idiom writes `.cursor/mcp.json` into the
-working tree, and writing a file into your repo is a different consent level
-than passing a flag. `r4t rig set <rig> mcp off` is the escape hatch on any rig,
-and `r4t rig get <rig> mcp` says whether the value is `explicit` or came `from
-preset <name>`. Two presets have no per-turn path at all — `agy` reads MCP
-config only from `~/.gemini`, bare `ollama` has no tool use — so they resolve
-off silently and `rig set <rig> mcp on` errors there with a
+`cursor` and `agy` are **opt-in** — their idioms write a file into a directory
+r4t does not own (`.cursor/mcp.json` in the working tree; `~/.gemini` in the
+member's home), which is a different consent level than passing a flag.
+`r4t rig set <rig> mcp off` is the escape hatch on any rig, and
+`r4t rig get <rig> mcp` says whether the value is `explicit` or came `from
+preset <name>`. Bare `ollama` has no tool use at all, so it resolves off
+silently and `rig set <rig> mcp on` errors there with a
 `(try: r4t rig swap <rig> ...)` hint rather than running turns whose tool never
-appears. Under an org boundary (`run_as` / `container`) r4t carries each
-harness's idiom across and fails the turn closed when it cannot — see
+appears.
+
+`agy` has no per-invocation flag in any released version: it reads
+`$HOME/.gemini/config/mcp_config.json` and nothing else. That is a per-member
+file exactly when the member has a home of its own, so the knob is allowed on an
+org with `run_as` isolation and refused everywhere else — bare (the home is the
+router's), in a container, or with a second agy member on the same Unix user
+(one config names one staging outbox, so their sends would cross). Those three
+name the rig and the fix at `roster check` and again at the turn.
+
+A roster is not the whole story, though: that file is global to the Unix user
+across every org and every node, so two rosters can each scan clean and still
+write the same `~/.gemini`. The file therefore carries its own ownership record
+— the staging outbox in the entry r4t writes is unique per node and member — and
+a turn that finds an a8s entry naming a **different** outbox refuses by that
+path rather than overwriting it. Otherwise r4t merges the a8s server into
+whatever that file already holds and leaves every other server and every field
+it does not recognise alone.
+
+`mcp off` on an agy rig takes the entry back out again, because agy reads that
+file whether r4t wrote it this turn or not: a member left holding `a8s_tell`
+while its prompt teaches the shell command sends into whichever outbox the stale
+entry names. Only r4t's own entry for that member is removed — an entry naming
+another outbox is another member's, and it is left alone, though it is logged:
+that member loads the tool anyway, and no turn of its own will ever clear it. A
+removal that cannot happen is logged too, rather than made the turn's verdict.
+
+Under an org boundary (`run_as` / `container`) r4t carries each harness's idiom
+across and fails the turn closed when it cannot — see
 [isolation](r4t-isolation.md#the-a8s_tell-tool-behind-the-boundary).
 
 ## Harness env knobs (`env`)
@@ -577,7 +604,7 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
 | `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
-| `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo) and for agy / bare ollama (no per-turn idiom) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on agy and bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
+| `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo), for agy (its idiom writes `~/.gemini` in the member's home, and needs `run_as`) and for bare ollama (no idiom at all) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
 | `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance the machine caps: a runbook may name one, and the trust ceiling (`auto` unless `r4t add --trust`) is what a repo cannot raise |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |

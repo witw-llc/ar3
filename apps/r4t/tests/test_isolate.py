@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import dispatch
 import isolate
 import state
 from dispatch import (
@@ -34,10 +35,13 @@ from isolate import Isolation
 from org import ORG_CONFIG_NAME, check_org, load_org
 from rig import (
     A8S_PY,
+    ENV_MCP_HOME_PEERS,
     Rig,
+    RigError,
     add_preset_rig,
     apply_mcp,
     load_rig_config,
+    revoke_mcp,
     set_rig_value,
 )
 from roster import Member
@@ -430,10 +434,10 @@ class TestContainerTimeoutKill:
 # ---------- the `mcp` knob has to cross the boundary too (#314) ----------
 
 
-def _mcp_rig(tmp_path, preset: str) -> Rig:
-    path = tmp_path / f"mcp-rigs-{preset}.json"
+def _mcp_rig(tmp_path, preset: str, knob: str = "on") -> Rig:
+    path = tmp_path / f"mcp-rigs-{preset}-{knob}.json"
     add_preset_rig(path, "worker", preset, force=True)
-    set_rig_value(path, "worker", "mcp", "on")
+    set_rig_value(path, "worker", "mcp", knob)
     return load_rig_config(path).rigs["worker"]
 
 
@@ -453,15 +457,30 @@ def _mcp_turn_env(tmp_path, isolation: Isolation) -> tuple[dict, Path, Path]:
     return env, workplace, staging
 
 
-def _recording_sudo(fakebin, record: Path, *, unreadable: str = "") -> None:
+def _recording_sudo(
+    fakebin, record: Path, *, unreadable: str = "", home: str = ""
+) -> None:
     """A `sudo` stub that answers the prereq probes, optionally fails the
-    read-access probe, and records the wrapped invoke instead of running it."""
+    read-access probe, runs the member-home file scripts under a real bash with
+    `home` as HOME, and records the wrapped invoke instead of running it."""
     _fake_bin(
         fakebin, "sudo",
         f"""
+        import os
+        import subprocess
         import sys
         a = sys.argv[1:]
         script = a[a.index("-c") + 1] if "-c" in a else ""
+        if script.startswith('p="$HOME/'):
+            # The whole point of the idiom: $HOME is expanded by the AGENT
+            # user's login shell, so the file lands in that user's own home.
+            if not {home!r}:
+                sys.exit("stub sudo: this test set no agent home")
+            done = subprocess.run(
+                ["bash", "-c", script] + a[a.index("-c") + 2:],
+                env={{"HOME": {home!r}, "PATH": os.environ.get("PATH", "")}},
+            )
+            sys.exit(done.returncode)
         if script.startswith("for p;"):
             if {unreadable!r}:
                 print({unreadable!r})
@@ -701,12 +720,292 @@ class TestMcpWithoutIsolation:
         assert plan.env_pass == {} and plan.mount_dirs == []
 
     def test_a_preset_without_an_idiom_asks_nothing_of_the_boundary(self, tmp_path):
-        rig = Rig(name="agy-rig", invoke=["agy", "{prompt}"], preset="agy", mcp=True)
+        rig = Rig(
+            name="ollama-rig", invoke=["ollama", "{prompt}"], preset="ollama", mcp=True
+        )
         env, workplace, _staging = _mcp_turn_env(tmp_path, Isolation(run_as="agent-x"))
         plan = apply_mcp(rig, rig.argv("P"), env, workplace, Isolation(run_as="agent-x"))
 
         assert plan.argv == rig.argv("P")
         assert not plan.env_pass and not plan.mount_dirs and not plan.read_paths
+
+
+AGY_RELPATH = Path(".gemini") / "config" / "mcp_config.json"
+
+
+def _agy_config(home: Path) -> dict:
+    return json.loads((home / AGY_RELPATH).read_text(encoding="utf-8"))
+
+
+def _seed_agy_config(home: Path, payload: dict) -> None:
+    (home / AGY_RELPATH).parent.mkdir(parents=True, exist_ok=True)
+    (home / AGY_RELPATH).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _a8s_entry(outbox: str) -> dict:
+    """An a8s entry as a turn left it. The staging outbox in `env` is what r4t
+    reads back to tell its own entry from another member's."""
+    return {
+        "command": "python3",
+        "args": ["a8s.py", "mcp", "serve"],
+        "env": {"TELL_OUTBOX_DIR": outbox},
+    }
+
+
+class TestAgyHomeIdiom:
+    """agy has no per-invocation MCP flag in any released version — it reads
+    `$HOME/.gemini/config/mcp_config.json` and nothing else. Under `run_as` that
+    home is the member's own, which is the whole reason the knob is allowed
+    there and refused everywhere else."""
+
+    def _turn(self, tmp_path, fakebin, isolation, *, home: Path | None = None):
+        _recording_sudo(
+            fakebin, tmp_path / "sudo.txt", home=str(home) if home else ""
+        )
+        rig = _mcp_rig(tmp_path, "agy")
+        env, workplace, staging = _mcp_turn_env(tmp_path, isolation)
+        return rig, env, workplace, staging
+
+    def test_the_server_lands_in_the_members_own_gemini_config(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        plan = apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        # No flag to splice and nothing for the wrapper to carry: agy finds the
+        # file itself, in the home the wrapper's login shell already gives it.
+        assert plan.argv == rig.argv("P")
+        assert not plan.env_pass and not plan.mount_dirs
+        assert A8S_PY in plan.read_paths
+        server = _agy_config(home)["mcpServers"]["a8s"]
+        assert server["command"] == sys.executable
+        assert server["args"][-2:] == ["mcp", "serve"]
+        # Literal values only — the file expands no variables — and behind the
+        # boundary the outbox is the one path worth naming.
+        assert server["env"]["TELL_OUTBOX_DIR"] == str(staging)
+        assert "HOME" not in server["env"]
+
+    def test_other_servers_and_unknown_fields_survive_the_merge(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        (home / AGY_RELPATH).parent.mkdir(parents=True)
+        (home / AGY_RELPATH).write_text(
+            json.dumps({
+                "mcpServers": {"theirs": {"command": "x"}},
+                "somethingAgyKnows": [1, 2],
+            }),
+            encoding="utf-8",
+        )
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        payload = _agy_config(home)
+        assert set(payload["mcpServers"]) == {"theirs", "a8s"}
+        assert payload["mcpServers"]["theirs"] == {"command": "x"}
+        assert payload["somethingAgyKnows"] == [1, 2]
+
+    def test_an_unparseable_config_fails_closed_without_touching_it(
+        self, tmp_path, fakebin
+    ):
+        home = tmp_path / "agent-home"
+        (home / AGY_RELPATH).parent.mkdir(parents=True)
+        (home / AGY_RELPATH).write_text("{ not json", encoding="utf-8")
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        with pytest.raises(RigError) as excinfo:
+            apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        assert "~agent-x/.gemini/config/mcp_config.json" in str(excinfo.value)
+        assert (home / AGY_RELPATH).read_text(encoding="utf-8") == "{ not json"
+
+    def test_a_json_file_that_is_not_a_server_map_also_fails_closed(
+        self, tmp_path, fakebin
+    ):
+        home = tmp_path / "agent-home"
+        (home / AGY_RELPATH).parent.mkdir(parents=True)
+        (home / AGY_RELPATH).write_text('{"mcpServers": []}', encoding="utf-8")
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        with pytest.raises(RigError, match="mcpServers"):
+            apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+    def test_an_unchanged_config_is_not_rewritten(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+        stamp = (home / AGY_RELPATH).stat().st_mtime_ns
+        apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        # The staging path is stable across turns, so a steady member writes
+        # once and never again.
+        assert (home / AGY_RELPATH).stat().st_mtime_ns == stamp
+
+    def test_no_isolation_refuses_because_the_home_is_the_routers(
+        self, tmp_path, fakebin
+    ):
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, Isolation())
+
+        with pytest.raises(RigError) as excinfo:
+            apply_mcp(rig, rig.argv("P"), env, workplace, Isolation())
+
+        message = str(excinfo.value)
+        assert "never per invocation" in message
+        assert "(try: r4t rig set worker mcp off" in message
+
+    def test_a_container_refuses_with_its_own_reason(self, tmp_path, fakebin):
+        iso = Isolation(container="img")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso)
+
+        with pytest.raises(RigError, match="nothing inside a container image"):
+            apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+    def test_a_shared_run_as_user_refuses_by_name(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+        env[ENV_MCP_HOME_PEERS] = "Bob,Cass"
+
+        with pytest.raises(RigError) as excinfo:
+            apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        message = str(excinfo.value)
+        assert "Bob, Cass" in message and "'agent-x'" in message
+        assert not (home / AGY_RELPATH).exists()
+
+    def test_a_config_another_outbox_owns_refuses_and_names_it(
+        self, tmp_path, fakebin
+    ):
+        # The roster scan sees one roster; this file is global to the Unix user
+        # across every org and node, so the collision that matters here is one
+        # `mcp_home_peers` cannot see at all.
+        home = tmp_path / "agent-home"
+        theirs = "/state/other-node/bob/staging"
+        _seed_agy_config(home, {"mcpServers": {"a8s": _a8s_entry(theirs)}})
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, iso, home=home)
+
+        with pytest.raises(RigError) as excinfo:
+            apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        message = str(excinfo.value)
+        assert theirs in message
+        assert "(try: r4t rig set worker mcp off" in message
+        assert _agy_config(home)["mcpServers"]["a8s"]["env"]["TELL_OUTBOX_DIR"] == theirs
+
+    def test_the_members_own_entry_is_rewritten_not_refused(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        iso = Isolation(run_as="agent-x")
+        rig, env, workplace, staging = self._turn(tmp_path, fakebin, iso, home=home)
+        stale = _a8s_entry(str(staging))
+        stale["command"] = "an-older-interpreter"
+        _seed_agy_config(home, {"mcpServers": {"a8s": stale}})
+
+        apply_mcp(rig, rig.argv("P"), env, workplace, iso)
+
+        assert _agy_config(home)["mcpServers"]["a8s"]["command"] == sys.executable
+
+    def test_a_refused_turn_fails_closed_instead_of_running(
+        self, tmp_path, fakebin, monkeypatch
+    ):
+        # The live `agy models` resolver runs before any injection and is not
+        # what is under test here.
+        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q: "Gemini 3 Pro")
+        rig, env, workplace, _staging = self._turn(tmp_path, fakebin, Isolation())
+
+        code, out, _dur, timed = run_harness(rig, "P", workplace, env=env)
+
+        assert (code, timed) == (126, False)
+        assert "rig 'worker' has mcp on" in out
+        assert not (tmp_path / "sudo.txt").exists()
+
+
+class TestAgyHomeKnobOff:
+    """Off has to un-write what on wrote. agy reads that file whether r4t
+    injected anything this turn or not, so an entry left behind keeps handing
+    the member `a8s_tell` while the prompt teaches the shell command — and
+    after a rename or a rig change it names another member's outbox."""
+
+    def _turn(self, tmp_path, fakebin, *, home: Path | None = None):
+        _recording_sudo(
+            fakebin, tmp_path / "sudo.txt", home=str(home) if home else ""
+        )
+        rig = _mcp_rig(tmp_path, "agy", "off")
+        iso = Isolation(run_as="agent-x")
+        env, workplace, staging = _mcp_turn_env(tmp_path, iso)
+        return rig, env, workplace, staging, iso
+
+    def test_our_own_entry_comes_out_and_nothing_else_moves(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        rig, env, _work, staging, iso = self._turn(tmp_path, fakebin, home=home)
+        _seed_agy_config(home, {
+            "mcpServers": {
+                "a8s": _a8s_entry(str(staging)),
+                "theirs": {"command": "x"},
+            },
+            "somethingAgyKnows": [1, 2],
+        })
+
+        assert revoke_mcp(rig, env, iso) is None
+
+        payload = _agy_config(home)
+        assert set(payload["mcpServers"]) == {"theirs"}
+        assert payload["mcpServers"]["theirs"] == {"command": "x"}
+        assert payload["somethingAgyKnows"] == [1, 2]
+
+    def test_an_entry_another_outbox_owns_is_left_alone_but_reported(
+        self, tmp_path, fakebin
+    ):
+        home = tmp_path / "agent-home"
+        rig, env, _work, _staging, iso = self._turn(tmp_path, fakebin, home=home)
+        theirs = _a8s_entry("/state/other-node/bob/staging")
+        _seed_agy_config(home, {"mcpServers": {"a8s": theirs}})
+
+        stale = revoke_mcp(rig, env, iso)
+
+        # Deleting a server r4t did not write is the worse mistake: the config
+        # is the member's, and r4t only ever takes its own entry back.
+        assert _agy_config(home)["mcpServers"]["a8s"] == theirs
+        # But never silently. This member loads `a8s_tell` anyway, pointed at
+        # that outbox, and no turn of its own will ever clear it — the `mcp on`
+        # side of the same collision refuses; off can only say so.
+        assert stale is not None
+        assert "/state/other-node/bob/staging" in stale
+
+    def test_no_config_at_all_writes_nothing(self, tmp_path, fakebin):
+        home = tmp_path / "agent-home"
+        rig, env, _work, _staging, iso = self._turn(tmp_path, fakebin, home=home)
+
+        assert revoke_mcp(rig, env, iso) is None
+
+        # The overwhelmingly common case: one read finds nothing, no write.
+        assert not (home / AGY_RELPATH).exists()
+
+    def test_another_idiom_never_reaches_for_a_home(self, tmp_path, fakebin):
+        # The stub refuses every home-file script when no home is set, so a
+        # regression here would come back as a message instead of None.
+        _recording_sudo(fakebin, tmp_path / "sudo.txt")
+        rig = _mcp_rig(tmp_path, "claude", "off")
+        iso = Isolation(run_as="agent-x")
+        env, _workplace, _staging = _mcp_turn_env(tmp_path, iso)
+
+        assert revoke_mcp(rig, env, iso) is None
+
+    def test_the_turn_removes_it_and_still_runs(self, tmp_path, fakebin, monkeypatch):
+        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q: "Gemini 3 Pro")
+        home = tmp_path / "agent-home"
+        rig, env, workplace, staging, _iso = self._turn(tmp_path, fakebin, home=home)
+        _seed_agy_config(home, {"mcpServers": {"a8s": _a8s_entry(str(staging))}})
+
+        code, _out, _dur, timed = run_harness(rig, "P", workplace, env=env)
+
+        assert (code, timed) == (0, False)
+        assert _agy_config(home)["mcpServers"] == {}
 
 
 # ---------- the rig's `env` map has to cross the boundary too (#284) ----------

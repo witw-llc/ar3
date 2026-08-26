@@ -115,13 +115,17 @@ import schedule
 import state
 import transcript
 from rig import (
+    AGY_HOME_IDIOM,
+    ENV_MCP_HOME_PEERS,
     McpPlan,
     RigConfig,
     RigError,
     Rig,
     apply_mcp,
     load_rig_config,
+    mcp_home_peers,
     resolve_agy_model,
+    revoke_mcp,
 )
 from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
@@ -768,9 +772,26 @@ def run_harness(
     # cross when the wrapper is told to carry them — so the injection states its
     # needs and the wrapper below honours them.
     mcp = McpPlan(argv=argv)
-    if rig.mcp_on and env is not None:
-        mcp = apply_mcp(rig, argv, env, cwd, isolation)
-        argv = mcp.argv
+    if env is not None:
+        if rig.mcp_on:
+            try:
+                mcp = apply_mcp(rig, argv, env, cwd, isolation)
+            except (RigError, isolate.IsolationError) as e:
+                # Same verdict as the read probe below: a prompt that teaches
+                # `a8s_tell` against a server that cannot start leaves the member
+                # with no way to send at all, so the turn fails instead.
+                return 126, str(e), 0.0, False
+            argv = mcp.argv
+        else:
+            # Off has to UN-write what on wrote, in the same place and the same
+            # breath — one idiom's channel is a file the harness reads whether
+            # r4t injected anything this turn or not. A member holding a tool
+            # its prompt no longer teaches is degraded, not broken, so a removal
+            # that cannot happen is logged and the turn runs anyway.
+            stale = revoke_mcp(rig, env, isolation)
+            node = env.get("R4T_NODE", "")
+            if stale and node:
+                state.append_log(node, f"r4t: MCP-STALE {stale}")
 
     # An `env_reset`/container keeps only what the wrapper is told to carry, so
     # the rig map has to be named to it the same way the mcp idiom's env is.
@@ -1815,6 +1836,12 @@ def _run_turn(
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
     env.update(ctx.isolation.to_env())
+    # agy takes MCP config only from the member's own `~/.gemini`, and the
+    # roster is the only place a second agy member sharing that home shows up.
+    if rig.mcp_idiom == AGY_HOME_IDIOM:
+        peers = mcp_home_peers(roster, config, member)
+        if peers:
+            env[ENV_MCP_HOME_PEERS] = ",".join(peers)
     state.append_log(
         ctx.node,
         f"## {zoned_stamp()} dispatch {len(batch)} message(s) -> {member.name} "

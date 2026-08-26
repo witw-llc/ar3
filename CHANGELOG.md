@@ -12,6 +12,50 @@ version when the batch is ready to merge.
 
 ## Unreleased
 
+### Added
+- **The `mcp` knob now serves agy.** An agy rig can take the `a8s_tell` tool
+  instead of the shell `tell` heredoc: `r4t rig set <rig> mcp on`. agy has no
+  per-invocation MCP flag in any released version — it reads
+  `$HOME/.gemini/config/mcp_config.json` and nothing else — but under an org
+  with `run_as` isolation that home is the member's own, because sudoers
+  `env_reset` drops the router's environment and the turn's login shell
+  expands `$HOME` to the agent user's. r4t writes the file through that same
+  sudo grant at turn start, merging the a8s server into whatever is already
+  there and leaving every other server and every field it does not recognise
+  intact. The knob stays **opt-in** (like cursor's): r4t is writing into a
+  directory it does not own. It is refused, by name and with the fix, on a rig
+  with no isolation (the home is the router's), on a container org, and where
+  a second agy member shares the Unix user — one config names one staging
+  outbox, so their sends would cross. `roster check` reaches the same verdict
+  before a wake pays for it. That file is global to the Unix user across every
+  org and node, which no roster scan can see, so it carries its own ownership
+  record too: a turn that finds an a8s entry naming a different staging outbox
+  refuses by that path instead of overwriting it. `mcp off` on an agy rig takes
+  r4t's own entry back out — agy reads that file whether the knob is on or not,
+  so a member left holding `a8s_tell` while its prompt teaches the shell command
+  would send into whichever outbox the stale entry names. An entry owned by
+  another outbox is never removed — but it is reported, because that member
+  loads the tool anyway and no turn of its own will ever clear it. A removal
+  that cannot happen is logged rather than made the turn's verdict.
+
+### Fixed
+- **`r4t engine codex quota` works on current codex.** The probe sent
+  `-a untrusted`, an approval policy the CLI dropped somewhere before 0.149;
+  a codex that new refuses the argv and exits before the handshake, which read
+  as a 15-second login timeout because the child's stderr was discarded. It
+  now sends `-a never` — accepted by every codex in the field, and stricter
+  than what it replaces — and quotes the CLI's own complaint whether the probe
+  comes back empty or the CLI exits fast enough to break the pipe under the
+  first write.
+- **`r4t engine cursor quota` works off macOS.** The Cursor state database was
+  looked for at a hardcoded macOS path, so the engine could never find a token
+  on Linux or Windows and blamed the login for it. The path now resolves per
+  platform, the failure names every path it searched, and it says that the
+  token comes from the Cursor IDE — which installing the `cursor-agent` CLI
+  alone never produces. `R4T_CURSOR_STATE_DB` points at the database outright
+  for the case no rule can guess, such as a WSL shell whose Cursor is
+  installed Windows-side.
+
 ### Changed
 - **History and day-log headings speak delegator-local time.** A history
   entry's `## <stamp> from|to <party>`, a day log's `## <stamp> dispatch ...`

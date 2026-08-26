@@ -49,7 +49,7 @@ cold behavior, cross-directory scope probe.
 | `ollama-codex` | `ollama launch codex --model … -y -- exec --sandbox workspace-write` | no | `codex-config` | Requires `--model` |
 | `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; `--session-id <id>` at creation and `-r, --resume=<id>` under `-p` are the pin path (#17) |
 | `ollama-copilot` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
-| `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | none | MCP only from `~/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
+| `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | `agy-home` (opt-in, needs `run_as`) | MCP only from `$HOME/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
 | `ollama` | `ollama run {model} {prompt}` | no | none | No tools; stdout-fallback replies |
 
 `r4t rig presets` marks which of these declare `continue_argv`. Deep
@@ -142,7 +142,7 @@ should expose `a8s` tell the way current MCP presets do.
 | copilot / ollama-copilot | CLI flag (`copilot-flag`) | yes | Default-on |
 | opencode / ollama-opencode | env / config (`opencode-env`) | yes | Default-on |
 | cursor | `.cursor/mcp.json` in worktree (`cursor-file`) | yes | Opt-in (writes into the repo) |
-| agy | `~/.gemini` settings only | **no** | Preset refuses MCP knob |
+| agy | `$HOME/.gemini/config/mcp_config.json` (`agy-home`) | **no** — `$HOME` is the only lever | Opt-in; allowed only under `run_as`, where that home is the member's own |
 | ollama (bare) | none | no | No tools |
 | Gemini CLI | `mcpServers` in user/project `settings.json`; `gemini mcp add` | file-scoped | Same family as agy’s constraint |
 | Cline | `cline_mcp_settings.json` / `cline mcp` | global (isolatable via `--data-dir` / `CLINE_DIR`) | Confirm path for installed major |

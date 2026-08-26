@@ -14,7 +14,8 @@ every turn.
 
 Both wrappers are pure argv builders so the exact shape is unit-testable
 against fake `sudo`/`docker` binaries; nothing here shells out except the
-prereq probes and the container kill, which run the real tool by name.
+prereq probes, the member-home file read/write, and the container kill, which
+run the real tool by name.
 """
 from __future__ import annotations
 
@@ -148,9 +149,15 @@ def wrap_run_as(
     ]
 
 
-def _run_probe(argv: list[str]) -> subprocess.CompletedProcess:
+def _run_probe(
+    argv: list[str], *, stdin_text: str | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS
+        argv,
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        timeout=PROBE_TIMEOUT_SECONDS,
     )
 
 
@@ -223,6 +230,62 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
             f"the rig's mcp knob off — see docs/r4t-isolation.md)"
         )
     return None
+
+
+# A file in the agent user's OWN home, reached through the grant `run_as`
+# already requires. `$HOME` is expanded by the member's login shell rather than
+# the router's — sudoers `env_reset` drops the router's environment, which is
+# what makes an otherwise-global harness config per-member. The path rides as
+# $1 and the content on stdin, so nothing is quoted into a command string.
+_HOME_FILE_READ = 'p="$HOME/$1"; [ -e "$p" ] || exit 0; cat "$p"'
+_HOME_FILE_WRITE = 'p="$HOME/$1"; mkdir -p "$(dirname "$p")" && cat > "$p"'
+
+
+def _home_file_argv(user: str, script: str, relpath: str) -> list[str]:
+    return [
+        "sudo", "-n", "-u", user, "bash", "--login", "-c", script, "_", relpath,
+    ]
+
+
+def read_home_file_as(user: str, relpath: str) -> str:
+    """The text of `relpath` under `user`'s own home, or "" when it is not there
+    yet. Anything else raises: a file r4t is about to merge into and write back
+    must be read, never guessed at."""
+    _require_posix_isolation()
+    try:
+        got = _run_probe(_home_file_argv(user, _HOME_FILE_READ, relpath))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise IsolationError(f"cannot read ~{user}/{relpath}: {e}") from e
+    if got.returncode != 0:
+        detail = (got.stderr or got.stdout or "").strip()
+        raise IsolationError(
+            f"cannot read ~{user}/{relpath}"
+            + (f": {detail}" if detail else "")
+            + " (try: grant the router NOPASSWD sudo to that user — see "
+            "docs/r4t-isolation.md)"
+        )
+    return got.stdout
+
+
+def write_home_file_as(user: str, relpath: str, content: str) -> None:
+    """Write `content` to `relpath` under `user`'s own home, creating the parent
+    dirs. The router has no business writing into another user's home directly,
+    so the write goes through the same sudo grant the isolation already needs."""
+    _require_posix_isolation()
+    try:
+        wrote = _run_probe(
+            _home_file_argv(user, _HOME_FILE_WRITE, relpath), stdin_text=content
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise IsolationError(f"cannot write ~{user}/{relpath}: {e}") from e
+    if wrote.returncode != 0:
+        detail = (wrote.stderr or wrote.stdout or "").strip()
+        raise IsolationError(
+            f"cannot write ~{user}/{relpath}"
+            + (f": {detail}" if detail else "")
+            + " (try: grant the router NOPASSWD sudo to that user — see "
+            "docs/r4t-isolation.md)"
+        )
 
 
 def agent_gid(user: str) -> int | None:

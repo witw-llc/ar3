@@ -202,13 +202,27 @@ presets — injects the a8s MCP server into every turn, and each harness takes i
 a different way:
 claude, codex and copilot read a flag, so it rides argv through both wrappers
 untouched; opencode reads a file named by `OPENCODE_CONFIG`; cursor reads
-`.cursor/mcp.json` in the workdir. A boundary keeps only what it is told to keep,
-so r4t carries each idiom across:
+`.cursor/mcp.json` in the workdir; agy reads `$HOME/.gemini/config/mcp_config.json`
+and nothing else. A boundary keeps only what it is told to keep, so r4t carries
+each idiom across:
 
 - **`run_as`** re-exports `OPENCODE_CONFIG` through the wrapper's counted
   positionals and writes the config into `agents/<member>/mcp/`, beside the
   staging outbox and readable by the agent user. cursor's file lands in the
   workplace, which the agent user already has.
+- **agy's home config is the boundary**, not a passenger across it. `sudo`
+  drops the router's environment, so `$HOME` inside the turn is the agent user's
+  own — which is what turns agy's one global config into a per-member file. r4t
+  writes it through that same sudo grant, with the path expanded by the member's
+  login shell and the content on stdin, merging the a8s server into whatever is
+  already there. That makes `run_as` the only isolation the knob works under:
+  bare, the home is the router's; in a container, r4t writes nothing inside the
+  image; and a second agy member on the same user would read one config naming
+  the other's outbox. All three refuse by name (`roster check`, then the turn),
+  and because that home is global to the Unix user across every org and node —
+  where no roster scan can see the other writer — a turn that finds an a8s entry
+  naming a different staging outbox refuses at the write as well. Turning the
+  knob off removes r4t's own entry for that member again.
 - **`container`** mounts that one config dir read-only, passes the matching
   `-e`, and names the image's own `python3` for the server — the router's
   interpreter path is not in the image, while the a8s client dir is mounted at

@@ -220,6 +220,120 @@ class TestCursorParse:
             cursor.parse_period_usage({"planUsage": {}}, None)
 
 
+class TestCursorStateDb:
+    """The token lives in the IDE's state database, and the IDE puts it in a
+    different place on every platform — a macOS-only path made the engine
+    unusable anywhere else."""
+
+    def test_each_platform_looks_under_its_own_app_data_root(self, monkeypatch):
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        seen = {}
+        for platform in ("darwin", "win32", "linux"):
+            monkeypatch.setattr(cursor.sys, "platform", platform)
+            seen[platform] = cursor.state_db_candidates()[0]
+        assert "Application Support" in str(seen["darwin"])
+        assert "Roaming" in str(seen["win32"])
+        assert ".config" in str(seen["linux"])
+        assert len({str(p) for p in seen.values()}) == 3
+
+    def test_every_platform_ends_at_the_same_database(self, monkeypatch):
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        for platform in ("darwin", "win32", "linux"):
+            monkeypatch.setattr(cursor.sys, "platform", platform)
+            assert cursor.state_db_candidates()[0].name == "state.vscdb"
+
+    def test_env_override_wins_and_is_the_only_candidate(self, monkeypatch, tmp_path):
+        named = tmp_path / "windows-side.vscdb"
+        monkeypatch.setenv(cursor.STATE_DB_ENV, str(named))
+        monkeypatch.setattr(cursor.sys, "platform", "linux")
+        assert cursor.state_db_candidates() == [named]
+
+    def test_state_db_is_none_when_nothing_is_on_disk(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(cursor.STATE_DB_ENV, str(tmp_path / "absent.vscdb"))
+        assert cursor.state_db() is None
+
+    def test_missing_database_names_where_it_looked_and_the_override(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv(cursor.STATE_DB_ENV, str(tmp_path / "absent.vscdb"))
+        with pytest.raises(QuotaError) as caught:
+            cursor._access_token()
+        message = str(caught.value)
+        assert "absent.vscdb" in message
+        assert cursor.STATE_DB_ENV in message
+        assert "cursor-agent" in message
+
+
+class _DeadCodex:
+    """A codex that complains on stderr and never answers. `broken` closes the
+    pipe under the first write, which is what a CLI that rejects its own argv
+    does; otherwise the writes land and stdout just ends."""
+
+    def __init__(self, *, broken: bool):
+        self.stdin = self
+        self.stdout = iter(())
+        self._broken = broken
+
+    def write(self, text: str) -> None:
+        if self._broken:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+def _fake_codex(monkeypatch, complaint: str, *, broken: bool) -> None:
+    def popen(_argv, **kwargs):
+        kwargs["stderr"].write(complaint)
+        kwargs["stderr"].flush()
+        return _DeadCodex(broken=broken)
+
+    monkeypatch.setattr(codex.subprocess, "Popen", popen)
+
+
+class TestCodexProbeArgv:
+    """`untrusted` was a valid approval policy until it was not, and the CLI
+    rejects an unknown one outright — with stderr discarded that read as a
+    login timeout."""
+
+    def test_approval_policy_is_one_every_codex_accepts(self):
+        assert codex.APPROVAL_POLICY in ("on-request", "never")
+
+    def test_last_line_is_the_complaint_not_the_warnings(self):
+        assert codex._last_line("WARN: no bubblewrap\nerror: invalid value") == (
+            "error: invalid value"
+        )
+        assert codex._last_line("  \n\n") == ""
+
+    def test_a_broken_pipe_carries_the_complaint_too(self, monkeypatch):
+        # A CLI that refuses its own argv can be gone before the first write
+        # lands. That path used to raise before the stderr file was read, so it
+        # discarded exactly the text this fix exists to surface.
+        _fake_codex(
+            monkeypatch, "WARN: no bubblewrap\nerror: unexpected argument\n", broken=True
+        )
+
+        with pytest.raises(QuotaError) as caught:
+            codex._rpc_rate_limits()
+
+        message = str(caught.value)
+        assert "pipe broke" in message
+        assert "error: unexpected argument" in message
+
+    def test_the_no_answer_path_still_carries_it(self, monkeypatch):
+        _fake_codex(monkeypatch, "error: invalid value 'untrusted'\n", broken=False)
+
+        with pytest.raises(QuotaError) as caught:
+            codex._rpc_rate_limits()
+
+        message = str(caught.value)
+        assert "error: invalid value 'untrusted'" in message
+        assert "codex login status" in message
+
+
 class TestAgyParse:
     def test_models_group_into_pools(self):
         result = agy.parse_user_status(

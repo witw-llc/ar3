@@ -10,7 +10,9 @@ contract.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -23,15 +25,31 @@ USAGE_URL = (
 )
 TIMEOUT_S = 15
 
-STATE_DB = (
-    Path.home()
-    / "Library"
-    / "Application Support"
-    / "Cursor"
-    / "User"
-    / "globalStorage"
-    / "state.vscdb"
-)
+# Where the IDE keeps its state database, per platform. The suffix is the same
+# everywhere; only the application-data root moves. `R4T_CURSOR_STATE_DB` names
+# the file outright, which is the only way in on a machine where the IDE is not
+# the one holding the token — a WSL shell whose Cursor lives on the Windows
+# side, say, reachable under /mnt/c but not at any path this list can guess.
+STATE_DB_ENV = "R4T_CURSOR_STATE_DB"
+_STATE_DB_SUFFIX = ("Cursor", "User", "globalStorage", "state.vscdb")
+_APP_DATA_ROOTS = {
+    "darwin": [Path.home() / "Library" / "Application Support"],
+    "win32": [Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")],
+}
+_LINUX_ROOTS = [Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")]
+
+
+def state_db_candidates() -> list[Path]:
+    """Every place the token might be, most explicit first."""
+    named = os.environ.get(STATE_DB_ENV, "").strip()
+    if named:
+        return [Path(named).expanduser()]
+    roots = _APP_DATA_ROOTS.get(sys.platform, _LINUX_ROOTS)
+    return [root.joinpath(*_STATE_DB_SUFFIX) for root in roots]
+
+
+def state_db() -> Path | None:
+    return next((p for p in state_db_candidates() if p.is_file()), None)
 
 
 def quota() -> dict:
@@ -107,10 +125,11 @@ def _cycle_end(payload: dict) -> str | None:
 
 
 def _state_value(key: str) -> str | None:
-    if not STATE_DB.is_file():
+    db = state_db()
+    if db is None:
         return None
     try:
-        with sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True) as conn:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
             row = conn.execute(
                 "SELECT value FROM ItemTable WHERE key = ?", (key,)
             ).fetchone()
@@ -127,9 +146,17 @@ def _state_value(key: str) -> str | None:
 def _access_token() -> str:
     token = _state_value("cursorAuth/accessToken")
     if not token:
+        looked = ", ".join(str(p) for p in state_db_candidates())
+        found = state_db()
         raise QuotaError(
-            "no Cursor access token in the IDE state database — is Cursor "
-            "installed and logged in on this machine?"
+            (
+                f"Cursor state database has no access token: {found}"
+                if found
+                else f"no Cursor state database (looked in: {looked})"
+            )
+            + " — the token comes from the Cursor IDE, which the `cursor-agent` "
+            f"CLI alone does not install (try: log in to the IDE on this "
+            f"machine, or set {STATE_DB_ENV} to its state.vscdb)"
         )
     return token
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import rig as rig_module
+from isolate import Isolation
 from rig import (
     Rig,
     CONFIGURABLE_RIG_KEYS,
@@ -33,6 +34,8 @@ from rig import (
     is_below_knowledge_floor,
     knowledge_tier_bytes,
     load_rig_config,
+    mcp_home_peers,
+    mcp_home_refusals,
     mcp_presets,
     permission_ceiling_note,
     preset_names,
@@ -583,6 +586,83 @@ class TestContinueCollisions:
             "### Bob\n- **Rig:** solo\n- **Workdir:** .\n"
         ))
         assert len(warnings) == 1 and "Bob" in warnings[0]
+
+
+MCP_HOME_CONFIG = {
+    "flier": {"preset": "agy", "invoke": ["agy", "{prompt}"], "mcp": True},
+    "flier-two": {"preset": "agy", "invoke": ["agy", "--print", "{prompt}"], "mcp": True},
+    "grounded": {"preset": "agy", "invoke": ["agy", "{prompt}"]},
+    "other": {"preset": "claude", "invoke": ["claude", "-p", "{prompt}"], "mcp": True},
+}
+
+
+class TestMcpHomeRefusals:
+    """`roster check` reaches the same verdict run_harness would, before a wake
+    spends a turn on it: the agy knob is safe only where `$HOME/.gemini` belongs
+    to exactly one member."""
+
+    def refusals(self, tmp_path, roster_text, isolation):
+        config = load_rig_config(write_config(tmp_path, MCP_HOME_CONFIG))
+        roster = parse_roster(roster_text, Path("ROSTER.md"))
+        return mcp_home_refusals(roster, config, isolation)
+
+    def test_a_lone_agy_member_under_run_as_is_allowed(self, tmp_path):
+        assert self.refusals(
+            tmp_path,
+            "### Ana\n- **Rig:** flier\n\n### Bob\n- **Rig:** other\n",
+            Isolation(run_as="agent-x"),
+        ) == []
+
+    def test_no_isolation_refuses_by_name(self, tmp_path):
+        refusals = self.refusals(
+            tmp_path, "### Ana\n- **Rig:** flier\n", Isolation()
+        )
+        assert len(refusals) == 1
+        assert refusals[0].startswith("Ana: rig 'flier' has mcp on")
+        assert "never per invocation" in refusals[0]
+        assert "(try: r4t rig set flier mcp off" in refusals[0]
+
+    def test_a_container_refuses_with_its_own_reason(self, tmp_path):
+        refusals = self.refusals(
+            tmp_path, "### Ana\n- **Rig:** flier\n", Isolation(container="img")
+        )
+        assert len(refusals) == 1
+        assert "writes nothing inside a container image" in refusals[0]
+
+    def test_two_agy_members_sharing_the_user_refuse_by_name(self, tmp_path):
+        refusals = self.refusals(
+            tmp_path,
+            "### Ana\n- **Rig:** flier\n\n### Bob\n- **Rig:** flier-two\n",
+            Isolation(run_as="agent-x"),
+        )
+        assert len(refusals) == 2
+        assert "Bob" in refusals[0] and "'agent-x'" in refusals[0]
+        assert "Ana" in refusals[1]
+
+    def test_a_second_agy_member_collides_even_with_its_own_knob_off(self, tmp_path):
+        # The file is global to the Unix user: Grace is handed the a8s server
+        # whether her prompt teaches the tool or not, pointed at Ana's outbox.
+        refusals = self.refusals(
+            tmp_path,
+            "### Ana\n- **Rig:** flier\n\n### Grace\n- **Rig:** grounded\n",
+            Isolation(run_as="agent-x"),
+        )
+        assert len(refusals) == 1 and "Grace" in refusals[0]
+
+    def test_a_member_on_another_harness_shares_no_gemini_config(self, tmp_path):
+        roster = parse_roster(
+            "### Ana\n- **Rig:** flier\n\n### Bob\n- **Rig:** other\n",
+            Path("ROSTER.md"),
+        )
+        config = load_rig_config(write_config(tmp_path, MCP_HOME_CONFIG))
+        assert mcp_home_peers(roster, config, roster.find("ana")) == []
+
+    def test_the_knob_off_is_never_refused(self, tmp_path):
+        assert self.refusals(
+            tmp_path,
+            "### Ana\n- **Rig:** grounded\n\n### Bob\n- **Rig:** grounded\n",
+            Isolation(),
+        ) == []
 
 
 class TestHarnessPresets:
@@ -1569,20 +1649,22 @@ class TestMcpSetting:
             True, False, f"from preset {preset}", "true"
         )
 
-    def test_unset_defaults_off_for_cursor_which_would_write_into_the_repo(
-        self, tmp_path
+    @pytest.mark.parametrize("preset", ["cursor", "agy"])
+    def test_unset_defaults_off_where_the_idiom_writes_a_file_r4t_does_not_own(
+        self, tmp_path, preset
     ):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "worker", "cursor")
+        add_preset_rig(path, "worker", preset)
         rig = load_rig_config(path).rigs["worker"]
         assert (rig.mcp, rig.mcp_on) == (None, False)
         s = rig_setting(path, "worker", "mcp")
-        assert (s.value, s.explicit, s.source) == (False, False, "from preset cursor")
+        assert (s.value, s.explicit, s.source) == (
+            False, False, f"from preset {preset}"
+        )
 
-    @pytest.mark.parametrize("preset,model", [("agy", None), ("ollama", "tiny")])
-    def test_unset_resolves_off_silently_without_an_idiom(self, tmp_path, preset, model):
+    def test_unset_resolves_off_silently_without_an_idiom(self, tmp_path):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "worker", preset, model=model)
+        add_preset_rig(path, "worker", "ollama", model="tiny")
         rig = load_rig_config(path).rigs["worker"]
         assert (rig.mcp, rig.mcp_on, rig.error) == (None, False, None)
 
@@ -1638,23 +1720,19 @@ class TestMcpSetting:
         with pytest.raises(RigError, match="must be true or false"):
             set_rig_value(path, "worker", "mcp", "maybe")
 
-    def test_mcp_presets_exclude_agy_and_bare_ollama(self):
+    def test_mcp_presets_exclude_bare_ollama(self):
         names = mcp_presets()
-        assert "agy" not in names and "ollama" not in names
-        assert {"claude", "codex", "copilot", "cursor", "opencode"} <= set(names)
+        assert "ollama" not in names
+        assert {"agy", "claude", "codex", "copilot", "cursor", "opencode"} <= set(names)
         for name in names:
             assert HARNESS_PRESETS[name].get("mcp")
 
-    def test_agy_refuses_the_knob_with_a_try_hint(self, tmp_path):
+    def test_agy_takes_the_knob_as_an_explicit_opt_in(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "worker", "agy")
-        with pytest.raises(RigError) as excinfo:
-            set_rig_value(path, "worker", "mcp", "on")
-        message = str(excinfo.value)
-        assert message.startswith("leave mcp off for rig 'worker'")
-        assert "~/.gemini" in message
-        assert "(try: r4t rig swap worker" in message
-        assert "mcp" not in json.loads(path.read_text(encoding="utf-8"))["worker"]
+        set_rig_value(path, "worker", "mcp", "on")
+        rig = load_rig_config(path).rigs["worker"]
+        assert (rig.mcp_on, rig.mcp_idiom, rig.error) == (True, "agy-home", None)
 
     def test_bare_ollama_refuses_the_knob(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1673,15 +1751,29 @@ class TestMcpSetting:
         set_rig_value(path, "worker", "mcp", "off")
         assert load_rig_config(path).rigs["worker"].mcp is False
 
-    def test_hand_edited_true_on_agy_fails_the_rig_closed(self, tmp_path):
+    def test_hand_edited_true_without_an_idiom_fails_the_rig_closed(self, tmp_path):
+        path = write_config(
+            tmp_path,
+            {
+                "worker": {
+                    "preset": "ollama",
+                    "invoke": ["ollama", "run", "tiny", "{prompt}"],
+                    "mcp": True,
+                }
+            },
+        )
+        rig = load_rig_config(path).rigs["worker"]
+        assert rig.error and "no tool use at all" in rig.error
+        assert (rig.mcp, rig.mcp_on) == (None, False)
+        assert load_rig_config(path).rig_for(member(rig="worker"))[0] is None
+
+    def test_hand_edited_true_on_agy_loads_clean(self, tmp_path):
         path = write_config(
             tmp_path,
             {"worker": {"preset": "agy", "invoke": ["agy", "{prompt}"], "mcp": True}},
         )
         rig = load_rig_config(path).rigs["worker"]
-        assert rig.error and "~/.gemini" in rig.error
-        assert (rig.mcp, rig.mcp_on) == (None, False)
-        assert load_rig_config(path).rig_for(member(rig="worker"))[0] is None
+        assert (rig.error, rig.mcp_on, rig.mcp_idiom) == (None, True, "agy-home")
 
     def test_parse_rejects_non_boolean_json(self, tmp_path):
         path = write_config(
@@ -1697,9 +1789,11 @@ class TestMcpSetting:
         ) == 0
         assert "set worker mcp = true" in capsys.readouterr().out
 
-    def test_agy_via_cli_returns_1_action_first(self, tmp_path, capsys):
+    def test_a_preset_without_an_idiom_via_cli_returns_1_action_first(
+        self, tmp_path, capsys
+    ):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "worker", "agy")
+        add_preset_rig(path, "worker", "ollama", model="tiny")
         assert r4t_main(
             ["rig", "set", "worker", "mcp", "on", "--rig-config", str(path)]
         ) == 1

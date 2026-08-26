@@ -32,15 +32,20 @@ ceiling binds every roster on the machine that shares the rig; a turn also costs
 plan always declares a refill rate.
 
 `mcp` — inject the a8s MCP server (`a8s mcp serve`) into every turn on this
-rig, using the harness's own per-invocation idiom, and teach the member the
-`a8s_tell` tool instead of the shell command. Tri-state: unset takes the
-preset's default (on wherever the idiom is invisible to the roster repo — see
-`MCP_DEFAULT_ON_IDIOMS`, off for cursor and for presets with no idiom at all),
-and an explicit true/false in rigs.json always wins. Presets whose CLI takes
-MCP config only globally (agy) or has no tools at all (bare ollama) refuse an
-explicit on. Each idiom rides a different channel, so `apply_mcp` states what an
-org's isolation boundary has to carry across (`McpPlan`) and the wrapper in
-isolate.py honours it.
+rig, using the harness's own idiom, and teach the member the `a8s_tell` tool
+instead of the shell command. Tri-state: unset takes the preset's default (on
+wherever the idiom is invisible to the roster repo — see
+`MCP_DEFAULT_ON_IDIOMS`, off for cursor, for agy, and for presets with no idiom
+at all), and an explicit true/false in rigs.json always wins. A preset with no
+tools at all (bare ollama) refuses an explicit on. agy takes MCP config only
+from `$HOME/.gemini`, never per invocation, so its idiom is safe exactly where
+that home belongs to one member: an org with `run_as` isolation, whose turns
+run under a login shell whose `$HOME` is the agent user's own. Without that —
+bare, in a container, or with a second agy member sharing the user — the knob
+fails the turn closed rather than writing one config two members read. Each
+idiom rides a different channel, so `apply_mcp` states what an org's isolation
+boundary has to carry across (`McpPlan`) and the wrapper in isolate.py honours
+it.
 
 `permissions` — the rig's permission stance in ar3's own three words:
 `ask` (the CLI's own default, no auto-approval), `auto` (approve tool use
@@ -107,7 +112,7 @@ try:
 except ImportError:
     _ROUTING_OWNED = ("TELL_OUTBOX_DIR", "TELL_FILE_MAX")
 
-from isolate import Isolation
+from isolate import Isolation, IsolationError, read_home_file_as, write_home_file_as
 from roster import (
     KNOWLEDGE_DEFAULT_BUDGET,
     KNOWLEDGE_SIZES,
@@ -398,6 +403,7 @@ HARNESS_PRESETS: dict[str, dict] = {
         ),
         "a8s_definition": "agy.json",
         "headless": "--print",
+        "mcp": "agy-home",
         "invoke": [
             "agy",
             "--dangerously-skip-permissions",
@@ -1010,9 +1016,9 @@ class Rig:
 
     @property
     def mcp_idiom(self) -> str | None:
-        """How this rig's preset takes an MCP server for ONE invocation. None
-        means there is no per-turn path (agy configures MCP only in ~/.gemini;
-        bare ollama has no tool use), and the knob refuses to turn on."""
+        """How this rig's preset takes an MCP server — a flag, a config
+        override, or a file r4t writes. None means there is no path at all
+        (bare ollama has no tool use), and the knob refuses to turn on."""
         return HARNESS_PRESETS.get(self.preset or "", {}).get("mcp")
 
     @property
@@ -1261,7 +1267,7 @@ def continue_presets() -> list[str]:
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("continue_argv")]
 
 
-# --- the `mcp` knob: one stdio server, five harness idioms -------------------
+# --- the `mcp` knob: one stdio server, six harness idioms --------------------
 #
 # The server definition is MEMBER-AGNOSTIC. A harness spawns its stdio servers
 # as children of the turn process, which already carries the per-turn
@@ -1287,6 +1293,18 @@ OPENCODE_CONFIG_BASENAME = "mcp-opencode.json"
 # config is never mistaken for a staged envelope.
 MCP_CONFIG_DIRNAME = "mcp"
 
+AGY_HOME_IDIOM = "agy-home"
+# agy's only lever: it reads this path under `$HOME` unconditionally, with no
+# flag, no workspace scope, and no other variable that moves it (verified
+# against 1.1.20). Relative because the router never resolves it — the member's
+# own login shell does, which is what makes a "global" config per-member.
+AGY_MCP_CONFIG_RELPATH = ".gemini/config/mcp_config.json"
+# Set by dispatch when another member's turns write the SAME agy-home file:
+# one config pins ONE staging outbox, so the second member's tool would post
+# into the first member's mailbox. The overlap is visible only in the roster,
+# and the turn env is how a roster fact reaches run_harness (like R4T_NODE).
+ENV_MCP_HOME_PEERS = "R4T_MCP_HOME_PEERS"
+
 
 @dataclass
 class McpPlan:
@@ -1303,7 +1321,7 @@ class McpPlan:
 
 
 def mcp_presets() -> list[str]:
-    """Presets that can take the MCP server for a single invocation."""
+    """Presets that can take the MCP server at all."""
     return [n for n in preset_names() if HARNESS_PRESETS[n].get("mcp")]
 
 
@@ -1311,9 +1329,10 @@ def mcp_presets() -> list[str]:
 # under the member's own state dir. Those default the knob ON — the tell-arms
 # experiment measured the tool eliminating the no-send failure class outright
 # (20/20 against 9/20), so an untouched rig has to be the one that sends.
-# `cursor-file` writes `.cursor/mcp.json` into the working tree: writing a file
-# into the user's repo is a different consent level than passing a flag, so
-# cursor stays opt-in.
+# `cursor-file` writes `.cursor/mcp.json` into the working tree and `agy-home`
+# writes into the agent user's own `~/.gemini`: writing a file into a directory
+# r4t does not own is a different consent level than passing a flag, so both
+# stay opt-in.
 MCP_DEFAULT_ON_IDIOMS = frozenset({
     "claude-flag",
     "codex-config",
@@ -1336,8 +1355,6 @@ def mcp_enabled(mcp: bool | None, preset: str | None) -> bool:
 
 
 def mcp_unsupported_reason(preset: str | None) -> str:
-    if preset == "agy":
-        return "agy reads MCP config only from ~/.gemini, never per invocation"
     if preset == "ollama":
         return "bare `ollama run` has no tool use at all"
     if preset:
@@ -1466,6 +1483,115 @@ def _write_cursor_mcp(
     return path
 
 
+def agy_home_refusal(
+    rig: Rig, isolation: Isolation | None, peers: list[str]
+) -> str | None:
+    """Why the `agy-home` idiom cannot serve this member, or None when it can.
+    agy has no per-invocation flag in any released version, so the knob buys the
+    named tool only where `$HOME/.gemini` belongs to exactly one member —
+    which a `run_as` login shell makes true and nothing else does."""
+    if isolation and isolation.container:
+        return (
+            f"rig {rig.name!r} has mcp on, but agy takes MCP config only from "
+            f"$HOME/.gemini and r4t writes nothing inside a container image "
+            f"(try: r4t rig set {rig.name} mcp off, or move the org to run_as)"
+        )
+    if not (isolation and isolation.run_as):
+        return (
+            f"rig {rig.name!r} has mcp on, but agy reads MCP config only from "
+            f"~/.gemini, never per invocation — with no isolation that home is "
+            f"the router's, not the member's "
+            f"(try: r4t rig set {rig.name} mcp off, or give the org a run_as user)"
+        )
+    if peers:
+        return (
+            f"rig {rig.name!r} has mcp on, but {', '.join(peers)} also run agy "
+            f"as user {isolation.run_as!r} — one ~/.gemini config names ONE "
+            f"staging outbox, so their sends would land in each other's threads "
+            f"(try: keep mcp on for one agy member and off for the rest)"
+        )
+    return None
+
+
+def _agy_home_owner(existing: str) -> str:
+    """The staging outbox the a8s entry in this config already names, or "" when
+    there is no such entry.
+
+    The entry r4t writes is its own ownership record: `TELL_OUTBOX_DIR` is
+    `state.staging_dir(node, member)`, unique per node AND member and stable
+    across turns, so the file already says whose it is. Nothing new is invented
+    to say it again — an unrecognized key is a gamble against agy's parser, and
+    a second field could disagree with the one that actually routes the sends.
+    Anything unparseable reads as unowned; the merge below is what fails on it."""
+    try:
+        loaded = json.loads(existing) if existing.strip() else {}
+    except ValueError:
+        return ""
+    servers = loaded.get("mcpServers") if isinstance(loaded, dict) else None
+    entry = servers.get(MCP_SERVER_NAME) if isinstance(servers, dict) else None
+    env = entry.get("env") if isinstance(entry, dict) else None
+    return str(env.get("TELL_OUTBOX_DIR", "")) if isinstance(env, dict) else ""
+
+
+def _agy_home_config(existing: str, entry: dict) -> str:
+    """The member's own `mcp_config.json` with the a8s server spliced in. Every
+    other server and every field agy knows and r4t does not survives — agy
+    1.1.16+ preserves what it does not recognize, and silently dropping a
+    member's own servers is a worse failure than refusing to write."""
+    loaded = json.loads(existing) if existing.strip() else {}
+    servers = loaded.get("mcpServers", {}) if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict) or not isinstance(servers, dict):
+        raise ValueError("it is not an `mcpServers` object")
+    loaded["mcpServers"] = {**servers, MCP_SERVER_NAME: entry}
+    return json.dumps(loaded, indent=2)
+
+
+def _agy_home_without_ours(existing: str) -> str:
+    """The same config with r4t's own a8s entry taken back out. Called only
+    after `_agy_home_owner` matched, so the shape is already known good."""
+    loaded = json.loads(existing)
+    loaded["mcpServers"] = {
+        k: v for k, v in loaded["mcpServers"].items() if k != MCP_SERVER_NAME
+    }
+    return json.dumps(loaded, indent=2)
+
+
+def _write_agy_home_config(rig: Rig, user: str, entry: dict) -> None:
+    """Merge the a8s server into the member's own agy config. Read-then-write
+    through the member's login shell, and skipped entirely when the file already
+    says this — the staging outbox path is stable across turns, so a steady
+    member writes once and never again."""
+    relpath = AGY_MCP_CONFIG_RELPATH
+    existing = read_home_file_as(user, relpath)
+    ours = entry["env"].get("TELL_OUTBOX_DIR", "")
+    theirs = _agy_home_owner(existing)
+    # The file is global to the UNIX USER, not to a roster: two orgs on two
+    # nodes can each hold a clean `mcp_home_peers` scan and still name the same
+    # `~/.gemini`, and a per-node admission lock serializes neither. The two
+    # gates are complementary — the roster scan fires at `roster check`, before
+    # a wake is paid for, and sees overlaps this file cannot; this one sees
+    # every writer the roster cannot, and is the last word before the write.
+    if theirs and theirs != ours:
+        raise RigError(
+            f"rig {rig.name!r} has mcp on, but ~{user}/{relpath} already names "
+            f"staging outbox {theirs} — that config belongs to another member, "
+            f"and one config serves ONE outbox, so this member's sends would "
+            f"land in that member's threads "
+            f"(try: r4t rig set {rig.name} mcp off, or give this org a run_as "
+            f"user no other agy member writes)"
+        )
+    try:
+        merged = _agy_home_config(existing, entry)
+    except ValueError as e:
+        raise RigError(
+            f"rig {rig.name!r} has mcp on, but ~{user}/{relpath} cannot be "
+            f"merged into: {e} (try: fix or remove that file, or "
+            f"r4t rig set {rig.name} mcp off)"
+        ) from e
+    if merged != existing:
+        write_home_file_as(user, relpath, merged)
+
+
 def _mcp_config_dir(env: dict, cwd: Path) -> Path:
     """Where a config file the harness reads from disk goes: an `mcp` dir beside
     the member's per-turn staging outbox, so the knob writes nothing into the
@@ -1531,7 +1657,64 @@ def apply_mcp(
         # The file lands in the effective cwd — the workplace, which both
         # wrappers already give the harness — so only its mode has to hold.
         plan.read_paths.append(_write_cursor_mcp(cwd, env, command, isolated=isolated))
+    elif idiom == AGY_HOME_IDIOM:
+        peers = [p for p in (env.get(ENV_MCP_HOME_PEERS) or "").split(",") if p]
+        refusal = agy_home_refusal(rig, isolation, peers)
+        if refusal:
+            raise RigError(refusal)
+        # No argv to splice and nothing for the wrapper to carry: agy finds the
+        # file on its own, in the home the wrapper's login shell already gives
+        # it. Values are written literally — the file expands no variables.
+        _write_agy_home_config(
+            rig, isolation.run_as, _mcp_server_entry(env, command, isolated=isolated)
+        )
     return plan
+
+
+def revoke_mcp(rig: Rig, env: dict, isolation: Isolation | None = None) -> str | None:
+    """Take back what `apply_mcp` wrote, for a turn whose knob is now off.
+    Returns what stopped it, or None when it is done — including the common
+    case of nothing to do.
+
+    Only `agy-home` needs undoing. Every other idiom rides argv, an environment
+    variable, or a file r4t names per turn, so an off knob is off the moment the
+    turn starts. agy reads its home config unconditionally, so an entry left
+    behind hands the member `a8s_tell` while the prompt teaches the shell
+    command instead — and after a rename, a rig change, or a second agy member
+    on that user, the outbox that tool writes into is somebody else's."""
+    if rig.mcp_idiom != AGY_HOME_IDIOM or not (isolation and isolation.run_as):
+        # `agy_home_refusal` rejects both a bare org and a container, so a
+        # member's own home under `run_as` is the only place r4t ever wrote.
+        return None
+    ours = env.get("TELL_OUTBOX_DIR", "")
+    if not ours:
+        return None
+    user, relpath = isolation.run_as, AGY_MCP_CONFIG_RELPATH
+    try:
+        existing = read_home_file_as(user, relpath)
+        # Only r4t's own entry for THIS member comes out. Any other outbox is
+        # another member's claim on the file, and deleting a server r4t did not
+        # write is the worse mistake — the config is the member's, not r4t's.
+        theirs = _agy_home_owner(existing)
+        if theirs and theirs != ours:
+            # Left in place, but never silently: this member's harness still
+            # loads `a8s_tell` pointed at that outbox while its own prompt
+            # teaches the shell command, and no turn of this member will ever
+            # clear it. The `mcp on` side of the same collision refuses the
+            # turn; off can only say so.
+            return (
+                f"rig {rig.name!r} has mcp off, but ~{user}/{relpath} still "
+                f"names staging outbox {theirs} — this member loads `a8s_tell` "
+                f"anyway, and it would send into that outbox's threads "
+                f"(try: remove the a8s server from that file, or give this org "
+                f"a run_as user no other agy member writes)"
+            )
+        if not theirs:
+            return None
+        write_home_file_as(user, relpath, _agy_home_without_ours(existing))
+    except IsolationError as e:
+        return f"rig {rig.name!r} has mcp off, but {e}"
+    return None
 
 
 def _effective_cwd(member: Member, workplace: Path) -> Path:
@@ -1577,6 +1760,47 @@ def continue_collisions(roster: Roster, config: RigConfig, workplace: Path) -> l
                 f"directory, so their turns will land in {member.name}'s "
                 f"(try: another CLI, or a distinct Workdir:)"
             )
+    return out
+
+
+def mcp_home_peers(roster: Roster, config: RigConfig, member: Member) -> list[str]:
+    """Other members whose turns share the `agy-home` config file this member's
+    would write. Their own `mcp` knob does not enter into it: the file is global
+    to the Unix user, so a second agy member is handed the a8s server whether
+    its prompt teaches the tool or not — and the outbox that server writes into
+    is not that member's.
+
+    This sees only THIS roster. The file is global to the Unix user across every
+    org and node, so `_write_agy_home_config` checks the file's own ownership
+    record as well; the two gates catch different collisions."""
+    out: list[str] = []
+    for other in roster.members:
+        if other.name == member.name or other.errors:
+            continue
+        rig, _err, _pinned = config.rig_for(other)
+        if rig is not None and rig.mcp_idiom == AGY_HOME_IDIOM:
+            out.append(other.name)
+    return out
+
+
+def mcp_home_refusals(
+    roster: Roster, config: RigConfig, isolation: Isolation
+) -> list[str]:
+    """Every member whose `agy-home` knob would fail its turns closed — the
+    verdict the turn itself reaches, reached at `roster check` instead of at the
+    cost of a wake."""
+    out: list[str] = []
+    for member in roster.members:
+        if member.errors:
+            continue
+        rig, _err, _pinned = config.rig_for(member)
+        if rig is None or rig.mcp_idiom != AGY_HOME_IDIOM or not rig.mcp_on:
+            continue
+        refusal = agy_home_refusal(
+            rig, isolation, mcp_home_peers(roster, config, member)
+        )
+        if refusal:
+            out.append(f"{member.name}: {refusal}")
     return out
 
 

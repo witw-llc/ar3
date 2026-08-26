@@ -272,17 +272,20 @@ KNOWLEDGE_ROSTER = """\
 """
 
 
-def _rig_config_with_preset(tmp_path, fake_harness, preset):
+def _rig_config_with_preset(tmp_path, fake_harness, preset, *, mcp: bool | None = None):
     script, _out = fake_harness
     invoke = [sys.executable, str(script), "{prompt}"]
+    junior = {
+        "invoke": invoke, "timeout_seconds": 30, "budget_max": 100, "preset": preset,
+    }
+    if mcp is not None:
+        junior["mcp"] = mcp
     config = {
         "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
         "cell_budget_max": 200,
         "cell_budget_earn_per_hour": 100,
         "leader": {"invoke": invoke, "timeout_seconds": 30, "budget_max": 100},
-        "junior-dev": {
-            "invoke": invoke, "timeout_seconds": 30, "budget_max": 100, "preset": preset,
-        },
+        "junior-dev": junior,
         "pins": {"gerry": "leader"},
     }
     path = tmp_path / "rigs.json"
@@ -320,6 +323,36 @@ def test_roster_check_flags_an_unresolvable_distill_rig(r4t_home, tmp_path, fake
     out = capsys.readouterr().out
     assert rc == 1
     assert "Phil: Knowledge distill rig 'ghost' not found" in out
+
+
+def test_roster_check_refuses_the_agy_mcp_knob_without_run_as(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    # agy takes MCP config only from `$HOME/.gemini`. With no boundary that
+    # home is the router's, so the knob is refused before a wake pays for it.
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "agy", mcp=True)
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Phil: rig 'junior-dev' has mcp on" in out
+    assert "never per invocation" in out
+
+
+def test_roster_check_allows_the_agy_mcp_knob_under_run_as(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    org_dir, workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    (org_dir / ORG_CONFIG_NAME).write_text(
+        json.dumps({"repo": str(workplace), "run_as": "agent-x"}), encoding="utf-8"
+    )
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "agy", mcp=True)
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mcp on" not in out
 
 
 def test_two_orgs_one_repo_do_not_collide(r4t_home, tmp_path, fake_harness):

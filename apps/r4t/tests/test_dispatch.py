@@ -3609,6 +3609,11 @@ class TestMcpKnob:
         assert HEREDOC_TEACHING not in prompt
         assert "Members:" in prompt
 
+    def test_agy_opted_in_gets_the_tool_doctrine_too(self, ctx):
+        prompt = self._prompt(ctx, Rig(name="t", preset="agy", mcp=True))
+        assert "`a8s_tell` tool" in prompt
+        assert HEREDOC_TEACHING not in prompt
+
     def _echo_env_rig(self, tmp_path, **kwargs):
         script = tmp_path / "show_env.py"
         script.write_text(
@@ -3671,3 +3676,80 @@ class TestMcpKnob:
             env=dict(os.environ),
         )
         assert len(calls) == 1
+
+
+AGY_PEER_ROSTER = textwrap.dedent(
+    """\
+    ### Gerry
+    - **Rig:** {leader_rig}
+    - **Leader:** yes
+
+    ### Bob
+    - **Rig:** flier
+    """
+)
+
+
+class TestAgyHomePeers:
+    """agy reads MCP config only from the member's own `~/.gemini`, and a second
+    agy member on the node shares that home. Only the roster shows the overlap,
+    so dispatch names it to the turn the way it names node and isolation."""
+
+    def _turn_env(self, tmp_path, fake_harness, tells, leader_rig: str) -> dict:
+        from dispatch import DispatchContext
+
+        script, _out = fake_harness
+        root = tmp_path / "agy-repo"
+        root.mkdir()
+        (root / "ROSTER.md").write_text(
+            AGY_PEER_ROSTER.format(leader_rig=leader_rig), encoding="utf-8"
+        )
+        config_path = tmp_path / "agy-rigs.json"
+        config_path.write_text(
+            json.dumps({
+                "throttle": {"min_seconds_between_turn_starts": 0},
+                "cell_budget_max": 200,
+                "cell_budget_earn_per_hour": 100,
+                "flier": {
+                    "preset": "agy",
+                    "invoke": [sys.executable, str(script), "{prompt}"],
+                    "timeout_seconds": 30,
+                    "mcp": True,
+                },
+                "desk": {
+                    "preset": "claude",
+                    "invoke": [sys.executable, str(script), "{prompt}"],
+                    "timeout_seconds": 30,
+                    "mcp": False,
+                },
+            }),
+            encoding="utf-8",
+        )
+        _sent, capture = tells
+        ctx = DispatchContext(
+            root=root,
+            node=NODE,
+            roster_path=root / "ROSTER.md",
+            config_path=config_path,
+            tell_fn=capture,
+        )
+        envs: list[dict] = []
+
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            envs.append(dict(env or {}))
+            return 0, "ok", 0.0, False
+
+        assert run_one(ctx, "acme:gerry", "acme:bob", "hi", run_fn=run) == 1
+        return envs[0]
+
+    def test_a_second_agy_member_is_named_to_the_turn(
+        self, r4t_home, tmp_path, fake_harness, tells
+    ):
+        env = self._turn_env(tmp_path, fake_harness, tells, "flier")
+        assert env["R4T_MCP_HOME_PEERS"] == "Gerry"
+
+    def test_a_leader_on_another_harness_is_no_peer(
+        self, r4t_home, tmp_path, fake_harness, tells
+    ):
+        env = self._turn_env(tmp_path, fake_harness, tells, "desk")
+        assert "R4T_MCP_HOME_PEERS" not in env

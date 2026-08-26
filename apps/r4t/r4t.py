@@ -68,6 +68,7 @@ from rig import (
     is_below_knowledge_floor,
     load_rig_config,
     machine_ceiling,
+    mcp_home_refusals,
     permission_ceiling_note,
     preset_names,
     raise_machine_ceiling,
@@ -2304,6 +2305,10 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         for message in continue_collisions(roster, config, org.workplace):
             print(f"warning: {message}")
             warnings += 1
+        # A problem, not a warning: these are the turns run_harness refuses.
+        for message in mcp_home_refusals(roster, config, org.isolation):
+            print(message)
+            problems += 1
     for message in _name_shadow_warnings(roster):
         print(f"warning: {message}")
         warnings += 1

@@ -72,6 +72,27 @@ Two things make it work:
    requires dispatch to inject the per-turn staging path into the argv, since
    the path is per-node/per-member. Not currently wired.
 
+## MCP: `$HOME` is the only lever (agy 1.1.20)
+
+agy has no per-invocation MCP flag in any released version. It reads
+`$HOME/.gemini/config/mcp_config.json` unconditionally, and:
+
+- `XDG_CONFIG_HOME` is not honoured, and no `GEMINI_DIR` / `GEMINI_HOME` /
+  `AGY_HOME` / `ANTIGRAVITY_HOME` variable exists in the binary.
+- There is no workspace scope: `agy mcp add` has no `--scope`, and the binary's
+  bundled docs list only the global path and per-plugin `mcp_config.json`.
+- Hand-writing the file works — the schema is the same `mcpServers` object the
+  other presets take — and since 1.1.16 the CLI preserves fields it does not
+  recognise. No shell expansion happens in the file, so every value is literal.
+
+That makes the file per-member exactly when `$HOME` is: under an org with
+`run_as` isolation, sudoers `env_reset` drops the router's environment and the
+turn's login shell resolves `$HOME` to the agent user's own. So the `mcp` knob
+([rigs](r4t-rigs.md#the-a8s_tell-tool-mcp)) is opt-in on agy, allowed under
+`run_as`, and refused bare, in a container, or where a second agy member shares
+the Unix user. If upstream ever ships the per-invocation flag (an open feature
+request), the idiom should be replaced by it — a flag needs no write at all.
+
 ## Update: headless command permissions (2026-07-16, agy 1.1.3)
 
 agy 1.1.3 introduced a new permission model, `toolPermission=request-review`.
