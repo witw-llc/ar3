@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 import engines
@@ -252,6 +254,66 @@ class TestCursorStateDb:
         monkeypatch.setenv(cursor.STATE_DB_ENV, str(tmp_path / "absent.vscdb"))
         assert cursor.state_db() is None
 
+    def test_wsl_windows_profiles_are_candidates_on_linux(self, monkeypatch, tmp_path):
+        # Measured working from a WSL seat: the CLI runs on Linux while the IDE
+        # that holds the token is installed Windows-side.
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        monkeypatch.setattr(cursor.sys, "platform", "linux")
+        users = tmp_path / "Users"
+        (users / "ana").mkdir(parents=True)
+        (users / "bo").mkdir(parents=True)
+        monkeypatch.setattr(cursor, "_WSL_USERS_DIR", users)
+        found = [str(p) for p in cursor.state_db_candidates()]
+        assert any("ana/AppData/Roaming/Cursor" in p for p in found)
+        assert any("bo/AppData/Roaming/Cursor" in p for p in found)
+        # The Linux path stays first — a locally installed IDE outranks a guess.
+        assert ".config" in found[0]
+
+    def test_wsl_candidates_absent_off_linux_and_without_mnt_c(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        monkeypatch.setattr(cursor, "_WSL_USERS_DIR", tmp_path / "nope")
+        monkeypatch.setattr(cursor.sys, "platform", "linux")
+        assert cursor._wsl_candidates() == []
+        monkeypatch.setattr(cursor.sys, "platform", "darwin")
+        assert cursor._wsl_candidates() == []
+
+    def test_a_database_with_a_token_outranks_one_without(self, monkeypatch, tmp_path):
+        # Several Windows profiles can each hold a Cursor install; only one was
+        # ever signed in, and merely existing is not what makes a database useful.
+        empty, real = tmp_path / "empty.vscdb", tmp_path / "real.vscdb"
+        for path, token in ((empty, None), (real, "tok-123")):
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+            if token:
+                conn.execute(
+                    "INSERT INTO ItemTable VALUES (?, ?)",
+                    (cursor.ACCESS_TOKEN_KEY, f'"{token}"'),
+                )
+            conn.commit()
+            conn.close()
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        monkeypatch.setattr(cursor, "state_db_candidates", lambda: [empty, real])
+        assert cursor.state_db() == real
+        assert cursor._state_value(cursor.ACCESS_TOKEN_KEY) == "tok-123"
+
+    def test_a_tokenless_database_is_still_named_when_it_is_all_there_is(
+        self, monkeypatch, tmp_path
+    ):
+        empty = tmp_path / "empty.vscdb"
+        conn = sqlite3.connect(empty)
+        conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(cursor, "state_db_candidates", lambda: [empty])
+        # Falls back so the error can say "this one has no token" rather than
+        # "there is no database", which are different problems.
+        assert cursor.state_db() == empty
+        with pytest.raises(QuotaError) as caught:
+            cursor._access_token()
+        assert "no access token" in str(caught.value)
+
     def test_missing_database_names_where_it_looked_and_the_override(
         self, monkeypatch, tmp_path
     ):
@@ -307,6 +369,41 @@ class TestCodexProbeArgv:
             "error: invalid value"
         )
         assert codex._last_line("  \n\n") == ""
+
+
+class TestCodexAuthHint:
+    """A CLI signed in with an API key is signed in — it just has no
+    subscription, and so no rate limit to report. The server calls that
+    "authentication required", which reads as a broken login."""
+
+    def _answer(self, message):
+        return {"id": 2, "error": {"message": message}}
+
+    def test_authentication_error_says_which_sign_in_carries_quota(self, monkeypatch):
+        monkeypatch.setattr(
+            codex,
+            "_rpc_rate_limits",
+            lambda: (_ for _ in ()).throw(
+                QuotaError(
+                    "account/rateLimits/read: chatgpt authentication required "
+                    "to read rate limits (an API-key sign-in has no subscription "
+                    "quota to report; `codex login status` names the current one, "
+                    "and a ChatGPT account login is what carries rate limits)"
+                )
+            ),
+        )
+        monkeypatch.setattr(codex.shutil, "which", lambda _n: "/usr/bin/codex")
+        with pytest.raises(QuotaError) as caught:
+            codex.quota()
+        message = str(caught.value)
+        assert "API-key" in message
+        assert "codex login status" in message
+
+    def test_an_unrelated_error_gets_no_hint(self):
+        # The hint is for the one failure it explains, not decoration on every
+        # error the server can return.
+        assert "API-key" not in codex._error_hint("rate limit window missing")
+        assert "API-key" in codex._error_hint("chatgpt Authentication required")
 
     def test_a_broken_pipe_carries_the_complaint_too(self, monkeypatch):
         # A CLI that refuses its own argv can be gone before the first write

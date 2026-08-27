@@ -106,10 +106,23 @@ def _rpc_rate_limits() -> dict:
             + " (is this CLI logged in? try: codex login status)"
         )
     if "error" in answer:
-        raise QuotaError(
-            f"account/rateLimits/read: {answer['error'].get('message')}"
-        )
+        message = str(answer["error"].get("message") or "")
+        raise QuotaError(f"account/rateLimits/read: {message}{_error_hint(message)}")
     return answer.get("result") or {}
+
+
+def _error_hint(message: str) -> str:
+    """What the server's own wording leaves out. A rate limit belongs to a
+    subscription and an API key has none, so a CLI that is signed in perfectly
+    well is told "authentication required" — which reads as a broken login and
+    sends the reader to fix something that is not wrong."""
+    if "authentication" not in message.lower():
+        return ""
+    return (
+        " (an API-key sign-in has no subscription quota to report; "
+        "`codex login status` names the current one, and a ChatGPT account "
+        "login is what carries rate limits)"
+    )
 
 
 def _last_line(text: str) -> str:

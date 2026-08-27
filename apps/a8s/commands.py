@@ -99,7 +99,7 @@ from registry import (
     save_namespace_options,
     unresolved_mailboxes,
 )
-from txlog import read_events
+from txlog import last_heard, read_events
 from ark import clock
 from ark.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
@@ -866,18 +866,29 @@ def cmd_ls(args: list[str] | None = None) -> int:
 
     A node whose mailbox path field references an unset a8s var reads
     `unresolved: $KEY` instead of either — it is registered but absent from
-    routing, and that is the fact an operator needs before the pid."""
+    routing, and that is the fact an operator needs before the pid.
+
+    Names only ever heard over the broker are listed after the local ones,
+    with DEFINITION `remote` and the local time each last reached us. Without
+    them the command answers "what runs here" while reading as "what can I
+    reach", and an agent told to message a name it cannot find in `ls` goes
+    looking for a fault instead of sending."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
-    if not reg:
+    names = sorted(reg, key=str.lower)
+    local = {name.lower() for name in names}
+    remotes = sorted(
+        ((name, ts) for name, ts in last_heard().items() if name.lower() not in local),
+        key=lambda pair: pair[0].lower(),
+    )
+    if not reg and not remotes:
         if not quiet:
             print("(no nodes registered — use `a8s add <name> <dir>`)")
         return 0
 
-    names = sorted(reg, key=str.lower)
     if quiet:
-        for name in names:
+        for name in names + [name for name, _ in remotes]:
             print(name)
         return 0
 
@@ -899,6 +910,10 @@ def cmd_ls(args: list[str] | None = None) -> int:
         root = info.get("root", "?")
         ns = " ".join(sorted(bindings.get(name.lower(), [])))
         rows.append((name, status, definition, root, ns))
+
+    for name, ts in remotes:
+        ns = " ".join(sorted(bindings.get(name.lower(), [])))
+        rows.append((name, f"last heard {clock.stamp(ts)}", "remote", "", ns))
 
     if any(row[4] for row in rows):
         _print_table(["NAME", "STATUS", "DEFINITION", "ROOT", "NAMESPACES"], rows)

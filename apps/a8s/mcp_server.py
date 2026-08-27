@@ -11,6 +11,11 @@ reuses `a8s tell <recipient> -` with the body on stdin — the same safe path a
 shell caller has — and the envelope lands in `TELL_OUTBOX_DIR`, which the
 server reads from its own environment (r4t pins it per turn).
 
+Files ride along the same way, through `--attach`. A member on an MCP rig would
+otherwise have no way to send one at all, which is a capability the shell form
+has always had — and the gap is a reason to keep a member on the shell rather
+than a cost worth paying.
+
 `sys.stdin.readline()` is load-bearing: `for line in sys.stdin` read-aheads and
 deadlocks the handshake.
 
@@ -39,8 +44,9 @@ TELL_TIMEOUT_SECONDS = 60
 TOOL = {
     "name": TOOL_NAME,
     "description": (
-        "Send a message to a roster member or the human on the a8s network. "
-        "The body is delivered byte-exact; no shell is involved."
+        "Send a message, optionally with files attached, to a roster member or "
+        "the human on the a8s network. The body is delivered byte-exact; no "
+        "shell is involved."
     ),
     "inputSchema": {
         "type": "object",
@@ -52,6 +58,17 @@ TOOL = {
             "body": {
                 "type": "string",
                 "description": "The message text. Sent verbatim.",
+            },
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Absolute paths of files to send with the message. The "
+                    "recipient receives the files themselves, not the paths, so "
+                    "a path outside your own machine is meaningless to them. "
+                    "Put short content in the body; attach a file when it is "
+                    "long, binary, or something they will open rather than read."
+                ),
             },
         },
         "required": ["recipient", "body"],
@@ -70,9 +87,20 @@ def log_call(event: dict) -> None:
         pass
 
 
-def send(recipient: str, body: str) -> tuple[bool, str]:
-    """Deliver through `a8s tell <recipient> -`, body on stdin."""
-    argv = [sys.executable, str(A8S_PY), "tell", recipient, "-"]
+def send(recipient: str, body: str, attachments: list[str] | None = None) -> tuple[bool, str]:
+    """Deliver through `a8s tell <recipient> -`, body on stdin.
+
+    Attachments use the `--attach=<path>` form on purpose: the separate-argument
+    form consumes following arguments while they name existing files, so a
+    recipient that happens to match a filename in the working directory would be
+    swallowed as an attachment. The `=` form takes exactly one path and cannot.
+
+    Path validation is left to `tell` — existence, the size cap and the resolved
+    path in the error message all live there, and a second copy here would drift.
+    """
+    argv = [sys.executable, str(A8S_PY), "tell"]
+    argv += [f"--attach={path}" for path in (attachments or [])]
+    argv += [recipient, "-"]
     try:
         proc = subprocess.run(
             argv,
@@ -105,8 +133,19 @@ def _call_tool(params: dict) -> dict:
         return _text_result("recipient is required", is_error=True)
     if not isinstance(body, str) or not body:
         return _text_result("body is required", is_error=True)
-    log_call({"tool": name, "recipient": recipient, "body": body})
-    ok, detail = send(recipient, body)
+    raw = args.get("attachments")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        return _text_result("attachments must be a list of paths", is_error=True)
+    attachments = [str(p).strip() for p in raw if str(p).strip()]
+    record = {"tool": name, "recipient": recipient, "body": body}
+    if attachments:
+        # Only when there are some: the record is read back by experiments that
+        # compare calls, and an empty key on every line is noise.
+        record["attachments"] = attachments
+    log_call(record)
+    ok, detail = send(recipient, body, attachments)
     return _text_result(detail, is_error=not ok)
 
 

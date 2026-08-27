@@ -198,7 +198,8 @@ PROMPT_DEFAULTS: dict[str, str] = {
     "work_tell_mcp": (
         "- Send messages by calling the `a8s_tell` tool (call the tool — "
         "printing text sends nothing). Pass `recipient` (the name) and `body` "
-        "(your message). The body is delivered byte-exact; there is no shell. "
+        "(your message), and `attachments` (a list of absolute paths) to send "
+        "files with it. The body is delivered byte-exact; there is no shell. "
         "`recipient` is whoever asked, or a member. Members:"
     ),
     "work_direct": (

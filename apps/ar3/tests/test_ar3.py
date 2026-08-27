@@ -375,3 +375,189 @@ def test_no_note_when_every_harness_resolves(monkeypatch, capsys):
     monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
     ar3.cmd_doctor(None)
     assert "not visible from this shell" not in capsys.readouterr().out
+
+
+# ---------- update ----------
+
+def _checkout(tmp_path, monkeypatch, **answers):
+    """A tree that looks like a git checkout, with git's answers modeled. This
+    suite spawns no processes, so `_git_out` is the seam: what is under test is
+    which combination of answers stops an update, not git's own behaviour.
+
+    Keys are the git subcommand; None means git exited non-zero, which is how
+    a detached HEAD reports itself.
+    """
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    table = {
+        "rev-parse": "true",
+        "status": "",
+        "HEAD": "main",
+        "origin": None,
+        "describe": None,
+    }
+    table.update(answers)
+
+    def git(_root, *args):
+        if args[0] in ("rev-parse", "status", "describe"):
+            return table[args[0]]
+        return table["origin" if args[-1].startswith("refs/") else "HEAD"]
+
+    monkeypatch.setattr(ar3, "_git_out", git)
+    return root
+
+
+def test_update_allows_a_tree_that_is_not_a_checkout(tmp_path):
+    assert ar3.update_refusal(tmp_path) is None
+
+
+def test_update_refuses_a_git_dir_git_will_not_vouch_for(tmp_path, monkeypatch):
+    # A disowned .git and one git cannot read — missing binary, timeout,
+    # dubious ownership — are the same answer here, and one of them is a
+    # working checkout. get.sh force-resets the tree, so the ambiguous case
+    # has to stop rather than proceed.
+    root = _checkout(tmp_path, monkeypatch, **{"rev-parse": None})
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "work tree" in refusal
+
+
+def test_update_refuses_when_git_will_not_report_status(tmp_path, monkeypatch):
+    # Clean reports as "", so None here means git failed to answer at all.
+    # Reading that as clean is how work in progress gets overwritten.
+    root = _checkout(tmp_path, monkeypatch, status=None)
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "status" in refusal
+
+
+def test_update_refuses_a_dirty_tree(tmp_path, monkeypatch):
+    root = _checkout(tmp_path, monkeypatch, status=" M VERSION")
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "uncommitted changes" in refusal
+
+
+def test_update_refuses_a_working_branch(tmp_path, monkeypatch):
+    root = _checkout(tmp_path, monkeypatch, HEAD="0.1.99")
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    # It must name the branch, or the operator cannot tell which tree it means.
+    assert "0.1.99" in refusal
+
+
+def test_update_allows_the_default_branch(tmp_path, monkeypatch):
+    assert ar3.update_refusal(_checkout(tmp_path, monkeypatch)) is None
+
+
+def test_update_honours_a_remote_default_that_is_not_main(tmp_path, monkeypatch):
+    root = _checkout(tmp_path, monkeypatch, HEAD="trunk", origin="origin/trunk")
+    assert ar3.update_refusal(root) is None
+
+
+def test_update_allows_a_detached_head_on_a_release_tag(tmp_path, monkeypatch):
+    # What an AR3_VERSION pin leaves behind; get.sh rejoins the branch itself.
+    root = _checkout(tmp_path, monkeypatch, HEAD=None, describe="v0.1.75")
+    assert ar3.update_refusal(root) is None
+
+
+def test_update_refuses_a_detached_head_on_an_arbitrary_tag(tmp_path, monkeypatch):
+    # `describe --exact-match` answers for any tag, but get.sh only accepts
+    # AR3_VERSION as `v[0-9]*`, so only that grammar can be a pin it created.
+    # A bookmark named "wip" is a working state wearing a tag.
+    root = _checkout(tmp_path, monkeypatch, HEAD=None, describe="wip")
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "wip" in refusal
+
+
+def test_update_refuses_a_detached_head_that_is_not_a_tag(tmp_path, monkeypatch):
+    # A developer parked on an unpushed commit reports no branch, exactly as a
+    # version pin does. Only the pin lands on a tag, and get.sh would force
+    # this tree back onto the default branch.
+    root = _checkout(tmp_path, monkeypatch, HEAD=None, describe=None)
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "AR3_VERSION pin" in refusal
+
+
+def _installed(tmp_path, version="0.1.0"):
+    root = tmp_path / "install"
+    root.mkdir()
+    (root / "get.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    return root
+
+
+class _Done:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+def test_update_runs_the_local_installer_against_this_copy(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    seen = {}
+
+    def fake_run(argv, env=None, **kw):
+        seen["argv"] = argv
+        seen["dir"] = (env or {}).get("AR3_DIR")
+        return _Done(0)
+
+    monkeypatch.setattr(ar3.subprocess, "run", fake_run)
+    assert ar3.cmd_update(None) == 0
+    assert seen["argv"] == ["sh", str(root / "get.sh")]
+    # Without this, get.sh updates whatever lives at ~/.ar3 instead of the
+    # copy the operator actually invoked.
+    assert seen["dir"] == str(root)
+
+
+def test_update_reports_the_version_it_moved_to(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path, "0.1.0")
+
+    def fake_run(argv, env=None, **kw):
+        (root / "VERSION").write_text("0.1.9\n", encoding="utf-8")
+        return _Done(0)
+
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    monkeypatch.setattr(ar3.subprocess, "run", fake_run)
+    assert ar3.cmd_update(None) == 0
+    assert "0.1.0 -> 0.1.9" in capsys.readouterr().out
+
+
+def test_update_says_so_when_nothing_moved(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path, "0.1.0")
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    monkeypatch.setattr(ar3.subprocess, "run", lambda *a, **k: _Done(0))
+    assert ar3.cmd_update(None) == 0
+    assert "already at 0.1.0" in capsys.readouterr().out
+
+
+def test_update_propagates_installer_failure(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    monkeypatch.setattr(ar3.subprocess, "run", lambda *a, **k: _Done(3))
+    assert ar3.cmd_update(None) == 3
+    # No invented success line on top of the installer's own complaint.
+    assert "->" not in capsys.readouterr().out
+
+
+def test_update_without_an_installer_says_where_to_get_one(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "install"
+    root.mkdir()
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    assert ar3.cmd_update(None) == 1
+    assert "get.sh" in capsys.readouterr().err
+
+
+def test_update_refusal_stops_before_the_installer_runs(tmp_path, monkeypatch, capsys):
+    repo = _checkout(tmp_path, monkeypatch, HEAD="0.1.99")
+    (repo / "get.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(ar3, "REPO_ROOT", repo)
+
+    def explode(*a, **k):
+        raise AssertionError("installer ran against a working checkout")
+
+    monkeypatch.setattr(ar3.subprocess, "run", explode)
+    assert ar3.cmd_update(None) == 1
+    assert "0.1.99" in capsys.readouterr().err

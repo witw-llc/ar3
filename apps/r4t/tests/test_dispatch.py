@@ -3614,6 +3614,16 @@ class TestMcpKnob:
         assert "`a8s_tell` tool" in prompt
         assert HEREDOC_TEACHING not in prompt
 
+    def test_the_tool_prompt_names_every_argument_it_has(self, ctx):
+        """A tool argument the prompt does not name goes unused, the same way
+        a tool described generically does. `attachments` is the one that made
+        the difference between an MCP rig being usable and a member staying on
+        the shell to keep sending files."""
+        prompt = self._prompt(ctx, Rig(name="t", preset="opencode", mcp=True))
+        assert "`recipient`" in prompt
+        assert "`body`" in prompt
+        assert "`attachments`" in prompt
+
     def _echo_env_rig(self, tmp_path, **kwargs):
         script = tmp_path / "show_env.py"
         script.write_text(

@@ -75,6 +75,14 @@ class TestToolListing:
     def test_model_facing_name_is_a8s_tell(self):
         assert mcp_server.QUALIFIED_TOOL_NAME == "a8s_tell"
 
+    def test_schema_offers_attachments_and_does_not_require_them(self):
+        (listing,) = _drive(LIST)
+        schema = listing["result"]["tools"][0]["inputSchema"]
+        assert schema["properties"]["attachments"]["type"] == "array"
+        assert schema["properties"]["attachments"]["items"]["type"] == "string"
+        # A message with no files stays a two-argument call.
+        assert "attachments" not in schema["required"]
+
 
 HAZARDS = (
     "The refund is $1.25 and 100% of `whoami` stays literal; "
@@ -83,16 +91,16 @@ HAZARDS = (
 
 
 class TestDelivery:
-    def _call(self, recipient: str, body: str) -> dict:
+    def _call(self, recipient: str, body: str, attachments=None) -> dict:
+        arguments: dict = {"recipient": recipient, "body": body}
+        if attachments is not None:
+            arguments["attachments"] = attachments
         (response,) = _drive(
             {
                 "jsonrpc": "2.0",
                 "id": 7,
                 "method": "tools/call",
-                "params": {
-                    "name": "tell",
-                    "arguments": {"recipient": recipient, "body": body},
-                },
+                "params": {"name": "tell", "arguments": arguments},
             }
         )
         return response["result"]
@@ -124,6 +132,88 @@ class TestDelivery:
 
         (record,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         assert record == {"tool": "tell", "recipient": "BOB", "body": HAZARDS}
+
+    def test_call_stages_the_attached_file(self, fake_home, tmp_path, monkeypatch):
+        """Without this a member on an MCP rig cannot send a file at all —
+        the gap that kept a live seat on the shell form."""
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        payload = tmp_path / "report.md"
+        payload.write_text("the report body", encoding="utf-8")
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.chdir(tmp_path)
+
+        result = self._call("BOB", "report attached", [str(payload)])
+        assert result["isError"] is False
+
+        (staged,) = sorted(outbox.glob("*.json"))
+        envelope = json.loads(staged.read_text(encoding="utf-8"))
+        assert [e["filename"] for e in envelope["files"]] == ["report.md"]
+
+    def test_a_recipient_that_names_a_real_file_is_not_eaten(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        """`--attach a b` consumes `b` too when `b` names an existing file, so
+        the recipient must not be reachable by that rule. The `=` form is why."""
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        payload = tmp_path / "report.md"
+        payload.write_text("body", encoding="utf-8")
+        (tmp_path / "BOB").write_text("a file that shares the recipient's name", encoding="utf-8")
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.chdir(tmp_path)
+
+        result = self._call("BOB", "hello", [str(payload)])
+        assert result["isError"] is False
+        (staged,) = sorted(outbox.glob("*.json"))
+        envelope = json.loads(staged.read_text(encoding="utf-8"))
+        assert envelope["to"] == "BOB"
+        assert [e["filename"] for e in envelope["files"]] == ["report.md"]
+
+    def test_missing_attachment_is_an_error_not_a_silent_send(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.chdir(tmp_path)
+
+        result = self._call("BOB", "hello", [str(tmp_path / "nope.md")])
+        assert result["isError"] is True
+        # Nothing half-sent.
+        assert sorted(outbox.glob("*.json")) == []
+
+    def test_attachments_must_be_a_list(self, fake_home, tmp_path, monkeypatch):
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        result = self._call("BOB", "hello", "/not/a/list")
+        assert result["isError"] is True
+        assert "list" in result["content"][0]["text"]
+
+    def test_empty_attachments_still_sends(self, fake_home, tmp_path, monkeypatch):
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.chdir(tmp_path)
+        assert self._call("BOB", "hello", [])["isError"] is False
+        assert len(sorted(outbox.glob("*.json"))) == 1
+
+    def test_attachments_are_logged_only_when_present(self, fake_home, tmp_path, monkeypatch):
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        payload = tmp_path / "report.md"
+        payload.write_text("x", encoding="utf-8")
+        log = tmp_path / "mcp-calls.jsonl"
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.setenv("A8S_MCP_LOG", str(log))
+        monkeypatch.chdir(tmp_path)
+
+        self._call("BOB", "no files")
+        self._call("BOB", "with a file", [str(payload)])
+
+        plain, withfile = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+        assert "attachments" not in plain
+        assert withfile["attachments"] == [str(payload)]
 
     def test_failed_delivery_reports_is_error(self, fake_home, tmp_path, monkeypatch):
         monkeypatch.delenv("TELL_OUTBOX_DIR", raising=False)

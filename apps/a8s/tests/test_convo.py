@@ -264,6 +264,112 @@ class TestFormatConversation:
         assert "attachment: missing.pdf" in text
         assert "missing.pdf" == text.split("attachment: ")[-1].strip()
 
+    def test_lost_attachment_says_so_and_says_why(self, fake_home, tmp_path):
+        """A file the transfer could not deliver must not render in the
+        vocabulary of one that arrived. The owner read `- attachment: x.md`
+        for a file that did not exist and went looking for it."""
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root.resolve())}})
+        record(
+            {
+                "id": "01JLOST00000000000000000",
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "see attached",
+                "files": [
+                    {
+                        "filename": "notes.md",
+                        "error": "ATTACHMENT_UNAVAILABLE",
+                        "detail": "could not download after 900s",
+                    }
+                ],
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert "ATTACHMENT UNAVAILABLE: notes.md" in text
+        assert "could not download after 900s" in text
+        # The success vocabulary must not appear for it.
+        assert "- attachment: notes.md" not in text
+
+    def test_lost_and_delivered_in_one_message_read_differently(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root.resolve())}})
+        msg_id = "01JMIXED00000000000000000"
+        arrived = root / ".files" / msg_id / "arrived.md"
+        arrived.parent.mkdir(parents=True)
+        arrived.write_text("payload", encoding="utf-8")
+        record(
+            {
+                "id": msg_id,
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "two files",
+                "files": [
+                    {"filename": "arrived.md"},
+                    {"filename": "lost.md", "error": "ATTACHMENT_UNAVAILABLE",
+                     "detail": "upload produced no url"},
+                ],
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert f"attachment: {arrived.resolve()}" in text
+        assert "ATTACHMENT UNAVAILABLE: lost.md" in text
+
+    def test_error_without_detail_still_reports_the_loss(self, fake_home, tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root.resolve())}})
+        record(
+            {
+                "id": "01JBARE000000000000000000",
+                "date": "2026-06-18T18:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "gone",
+                "files": [{"filename": "x.md", "error": "ATTACHMENT_UNAVAILABLE"}],
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1)
+        assert "ATTACHMENT UNAVAILABLE: x.md" in text
+
+    def test_clean_envelope_gains_no_unavailable_key(self):
+        from convo import entry_from_message
+
+        entry = entry_from_message(
+            {"id": "X", "from": "a", "to": "b", "content": "hi",
+             "files": [{"filename": "report.md", "storage": "https://example.com/x"}]}
+        )
+        assert entry["files"] == ["report.md"]
+        # The archive shape only grows when there is something to record.
+        assert "files_unavailable" not in entry
+
+    def test_a_lost_file_keeps_its_name_in_files(self):
+        from convo import entry_from_message
+
+        entry = entry_from_message(
+            {"id": "X", "from": "a", "to": "b", "content": "hi",
+             "files": [{"filename": "lost.md", "error": "ATTACHMENT_UNAVAILABLE",
+                        "detail": "no url"}]}
+        )
+        # The name is still information — that a file was meant to be here.
+        assert entry["files"] == ["lost.md"]
+        assert entry["files_unavailable"] == [
+            {"filename": "lost.md", "detail": "no url"}
+        ]
+
 
 class TestGlowOutput:
     def test_print_entries_writes_through_glow_stream(self, capsys):

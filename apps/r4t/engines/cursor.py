@@ -27,9 +27,7 @@ TIMEOUT_S = 15
 
 # Where the IDE keeps its state database, per platform. The suffix is the same
 # everywhere; only the application-data root moves. `R4T_CURSOR_STATE_DB` names
-# the file outright, which is the only way in on a machine where the IDE is not
-# the one holding the token — a WSL shell whose Cursor lives on the Windows
-# side, say, reachable under /mnt/c but not at any path this list can guess.
+# the file outright, for a machine no rule reaches.
 STATE_DB_ENV = "R4T_CURSOR_STATE_DB"
 _STATE_DB_SUFFIX = ("Cursor", "User", "globalStorage", "state.vscdb")
 _APP_DATA_ROOTS = {
@@ -37,6 +35,22 @@ _APP_DATA_ROOTS = {
     "win32": [Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")],
 }
 _LINUX_ROOTS = [Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")]
+# A WSL shell reaches the Windows side under /mnt/c, and a seat there commonly
+# runs the CLI on Linux while the IDE — the only thing that holds the token —
+# is installed on Windows. Measured working from such a seat, so it is worth
+# looking rather than declaring the case unreachable. Every Windows profile is
+# a candidate: which one holds the login is not knowable from this side.
+_WSL_USERS_DIR = Path("/mnt/c/Users")
+
+
+def _wsl_candidates() -> list[Path]:
+    if sys.platform != "linux" or not _WSL_USERS_DIR.is_dir():
+        return []
+    try:
+        profiles = sorted(p for p in _WSL_USERS_DIR.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    return [p / "AppData" / "Roaming" for p in profiles]
 
 
 def state_db_candidates() -> list[Path]:
@@ -44,12 +58,18 @@ def state_db_candidates() -> list[Path]:
     named = os.environ.get(STATE_DB_ENV, "").strip()
     if named:
         return [Path(named).expanduser()]
-    roots = _APP_DATA_ROOTS.get(sys.platform, _LINUX_ROOTS)
+    roots = _APP_DATA_ROOTS.get(sys.platform, _LINUX_ROOTS) + _wsl_candidates()
     return [root.joinpath(*_STATE_DB_SUFFIX) for root in roots]
 
 
 def state_db() -> Path | None:
-    return next((p for p in state_db_candidates() if p.is_file()), None)
+    """The first candidate that actually answers. Existing is not enough: a
+    machine can carry several Windows profiles, and a Cursor installed under
+    one of them that was never signed in has a database with no token in it."""
+    return next(
+        (p for p in state_db_candidates() if _token_in(p)),
+        next((p for p in state_db_candidates() if p.is_file()), None),
+    )
 
 
 def quota() -> dict:
@@ -124,10 +144,19 @@ def _cycle_end(payload: dict) -> str | None:
     return None
 
 
+ACCESS_TOKEN_KEY = "cursorAuth/accessToken"
+
+
+def _token_in(db: Path) -> bool:
+    return bool(db.is_file() and _read_state(db, ACCESS_TOKEN_KEY))
+
+
 def _state_value(key: str) -> str | None:
     db = state_db()
-    if db is None:
-        return None
+    return _read_state(db, key) if db is not None else None
+
+
+def _read_state(db: Path, key: str) -> str | None:
     try:
         with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
             row = conn.execute(
@@ -144,7 +173,7 @@ def _state_value(key: str) -> str | None:
 
 
 def _access_token() -> str:
-    token = _state_value("cursorAuth/accessToken")
+    token = _state_value(ACCESS_TOKEN_KEY)
     if not token:
         looked = ", ".join(str(p) for p in state_db_candidates())
         found = state_db()

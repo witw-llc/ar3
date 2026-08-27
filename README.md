@@ -56,12 +56,28 @@ home clone.
 
 Headless and cron shells skip `.bashrc`, where the default install drops its
 source line. Use the absolute shim (`~/.ar3/ar3`, `~/.ar3/a8s`, …), source
-`install.sh` from `.profile`, or schedule the one-liner / local script:
+`install.sh` from `.profile`, or schedule the update below.
+
+## Updating
+
+```bash
+ar3 update
+```
+
+That pulls this install forward and restarts running a8s nodes so their
+handlers re-exec the new code. It reports the version it moved from and to.
+`AR3_VERSION=vX.Y.Z` pins a release and `AR3_CHANNEL=beta` switches tree,
+exactly as at install time. On a working checkout — uncommitted changes, or a
+branch that is not the default — it refuses rather than pulling over your
+work.
+
+`ar3 update` runs `get.sh` from the install itself, so re-running that script
+by hand does the same job, which is what a scheduled update should call:
 
 ```cron
-0 3 * * * /bin/sh -c 'curl --proto "=https" --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh'
-# offline-tolerant once installed:
-# 0 3 * * * /bin/sh $HOME/.ar3/get.sh
+0 3 * * * /bin/sh $HOME/.ar3/get.sh
+# or, to repair an install that is missing or broken:
+# 0 3 * * * /bin/sh -c 'curl --proto "=https" --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh'
 ```
 
 The public [witw-llc/ar3](https://github.com/witw-llc/ar3) is the release

@@ -10,7 +10,115 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## Unreleased
+## 0.1.76
+
+### Added
+- **`a8s_tell` can send files.** The MCP tool took `recipient` and `body` and
+  nothing else, so a member on a rig with `mcp on` could not attach a file at
+  all — a capability the shell form has always had. That gap was a reason to
+  keep a member on the shell rather than a cost worth paying, which is exactly
+  the call it forced on a live seat. The tool now takes `attachments`, a list
+  of absolute paths, and the wake prompt names the argument: a tool argument
+  the prompt does not mention goes unused for the same reason a generically
+  described tool does. Delivery reuses `tell --attach`, and the `=` form
+  specifically — the separate-argument form keeps consuming arguments while
+  they name existing files, so a recipient that matched a filename in the
+  working directory would be swallowed as an attachment. Path validation stays
+  in `tell`, where the size cap and the resolved path in the error already
+  live.
+- **`ar3 update` updates the install in place.** Updating used to start in a
+  browser: open the public mirror, copy the install one-liner, paste it back.
+  The installer was already sitting in every install as `get.sh`, and the
+  README mentioned it once, in a commented-out line inside a cron example —
+  which is to say it was undiscoverable. The verb runs that same script
+  against the copy you invoked (`AR3_DIR` is passed, so it never updates some
+  other install by default), honours `AR3_VERSION` and `AR3_CHANNEL` exactly
+  as at install time, and reports the version it moved from and to. It is
+  **refused on a working checkout** — uncommitted changes, or a branch that is
+  not the remote's default — because `get.sh` reaches the tree with
+  `git pull --ff-only` and `git checkout -f`, and no message printed after
+  that undoes what it did. A detached HEAD sitting exactly on a release tag is
+  allowed: that is what an `AR3_VERSION` pin leaves behind, and the tag must
+  match the `v[0-9]*` grammar `get.sh` itself accepts, since that is the only
+  detached state the installer can have produced. Detached anywhere else is
+  refused — on an ordinary commit, or on a tag named `wip` — because a
+  developer parked on an unpushed commit reports no branch in precisely the
+  same way a pin does.
+  Silence from git is refused too: every clearance is read out of git's own
+  answers, so a `.git` that git will not confirm as a work tree — missing
+  binary, timeout, dubious ownership — leaves this knowing nothing about the
+  tree, and a clean-looking `None` was previously read as permission to
+  overwrite it. This and `ar3 deps` are the only things ar3 writes, and both
+  write ar3's own substrate rather than a product's state.
+- **`a8s ls` lists the names you can reach, not only the ones that run here.**
+  A node only ever heard over a remote had no row at all, so the command
+  answered "what runs here" while reading as "what can I reach" — and an agent
+  told to message a name it could not find went looking for a fault instead of
+  sending. Remote names now list after the local ones with DEFINITION `remote`
+  and the local time each last reached this node; `-q` includes them, since
+  that is the form a script uses to answer "can I reach X". A name that is
+  both registered and a remote sender appears once, as its registry row.
+  "Heard" means arrival — `RECEIVED_REMOTE` — and nothing else: publishing to
+  a name records that the transport took the message, not that anything on the
+  far side read it, so a remote that is down looks identical to one that is
+  fine. Names fold case-insensitively, matching how the registry resolves
+  them, and the newest arrival supplies the spelling. No age cutoff is
+  applied, and the stamp says how fresh the address is — but the list is read
+  out of the transaction log, so a remote whose rows have aged out of
+  `txlog_max_rows` drops off until it speaks again. The log is an event
+  record, not a roster.
+
+### Fixed
+- **`a8s convo` no longer renders a lost attachment as a delivered one.** A
+  file the transfer could not deliver arrives with `error` and `detail` on its
+  entry, and the conversation archive threw both away, keeping only the
+  filename. The line it printed — `- attachment: notes.md` — differed from a
+  delivered file only in being a bare name rather than an absolute path, so a
+  failure was reported in the vocabulary of success and the reader went
+  looking for a file that was never there. The failure now reads
+  `- ATTACHMENT UNAVAILABLE: <name>: <why>`, matching what the wake prompt has
+  always told an agent. The bare-name line stays as it is and is *not* treated
+  as evidence of loss: a message this agent sent keeps its files in an outbox
+  bundle that lookup never searches, and an inbound bundle is reaped after its
+  retention window, so only an entry that actually arrived carrying an error
+  is reported lost. Normalization is where the fix belongs — the archive is
+  written once, so anything dropped there is gone for good. The receive path
+  was carrying the other half of the bug: the per-recipient download returns a
+  *new* envelope holding the error, and both the immediate and deferred paths
+  went on to record the original storage-bearing one, so a corrected renderer
+  would still never have been handed a failure to render. The archive now gets
+  the envelope the recipient actually received. Because that download runs per
+  recipient, an alias fan-out can end with one recipient holding bytes and
+  another holding an error, and one message id is one archive row — so the row
+  reports a file as lost when any recipient's copy was lost, and a failure
+  arriving later is folded into a row already written clean. The direction is
+  deliberate: a lost file described as delivered sends a reader after something
+  that was never written, while the reverse only sends them to check a file
+  they already hold. Per-recipient outcomes are the real model and are #225.
+- **The conversation archive no longer drops a recipient that arrives second.**
+  `messages.message_id` is UNIQUE and the insert was `INSERT OR IGNORE`, so a
+  second write for the same id was discarded whole — the row and its
+  `message_agents` rows together. Any recipient recorded after the first
+  therefore had no conversation at all, which is what a deferred attachment
+  delivery has always been: `a8s convo <name>` was empty for the recipient
+  whose file took the slow path. A second write now attaches its recipients to
+  the existing row instead of vanishing.
+- **`r4t engine cursor quota` finds a Windows-side IDE from WSL.** A seat that
+  runs the CLI on Linux while Cursor itself is installed on Windows now has
+  every `/mnt/c/Users/<profile>` checked after the Linux path — measured
+  working from such a seat, where `R4T_CURSOR_STATE_DB` had been the only way
+  in. Selection also stops at the first database that actually holds a token
+  rather than the first that exists, because a machine can carry several
+  Windows profiles and a Cursor that was never signed in has a database with
+  nothing in it. A locally installed IDE still outranks any of them.
+- **`r4t engine codex quota` says which sign-in carries a quota.** A CLI
+  authenticated with an API key is signed in perfectly well, but a rate limit
+  belongs to a subscription and an API key has none — so the server answers
+  "chatgpt authentication required", which reads as a broken login and sends
+  the reader off to fix something that is not wrong. The failure now names the
+  distinction and points at `codex login status`.
+
+## 0.1.75
 
 ### Added
 - **The `mcp` knob now serves agy.** An agy rig can take the `a8s_tell` tool
@@ -55,6 +163,8 @@ version when the batch is ready to merge.
   alone never produces. `R4T_CURSOR_STATE_DB` points at the database outright
   for the case no rule can guess, such as a WSL shell whose Cursor is
   installed Windows-side.
+
+## 0.1.74
 
 ### Changed
 - **History and day-log headings speak delegator-local time.** A history

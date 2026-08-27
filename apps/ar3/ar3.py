@@ -461,6 +461,140 @@ def cmd_deps(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- update ----------
+
+UPDATE_SCRIPT = "get.sh"
+
+
+def _suite_version() -> str:
+    """Read from disk each call, not through `arkver`'s import: this runs on
+    both sides of an update that rewrites the file underneath us."""
+    try:
+        return (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def _git_out(root: Path, *args: str) -> Optional[str]:
+    """Trimmed stdout of a git command, or None when git failed or is absent.
+    A non-zero exit is an answer here, not an error to report."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+def update_refusal(root: Path) -> Optional[str]:
+    """Why this tree must not be pulled forward, or None to proceed.
+
+    `get.sh` reaches the installed tree with `git pull --ff-only` and, on a
+    pinned version, `git checkout -f`. Against a checkout somebody is working
+    in, that ranges from a confusing failure to discarded work, and no message
+    printed afterwards undoes it. The two states that mean "someone is working
+    here" therefore stop the update before it starts rather than after.
+
+    A detached HEAD sitting exactly on a release tag is not one of them: that
+    is what an `AR3_VERSION` pin leaves behind, and `get.sh` knows how to
+    rejoin the branch from there. A detached HEAD anywhere else is a working
+    state and is refused.
+
+    Silence from git is a refusal, not a pass. Every clearance below is read
+    out of git's own answers, so when git is missing, times out, or declines
+    the directory as dubiously owned, this knows nothing about the tree. A
+    disowned `.git` and an unreadable one are indistinguishable from here, and
+    one of them is a working checkout, so a present-but-unreadable `.git`
+    stops the update instead of clearing it.
+    """
+    if not (root / ".git").exists():
+        return None
+    if _git_out(root, "rev-parse", "--is-inside-work-tree") != "true":
+        return (
+            f"{root} holds a .git that git would not confirm as a work tree — "
+            f"git may be missing, too slow, or refusing the directory as "
+            f"dubiously owned. Those look identical from here, and one of them "
+            f"is a checkout somebody is working in, so this stops rather than "
+            f"assume the unreadable case is the safe one."
+        )
+    status = _git_out(root, "status", "--porcelain")
+    if status is None:
+        return (
+            f"{root} is a git checkout whose status git would not report. "
+            f"Updating pulls this tree forward, which is not something to do "
+            f"without first knowing whether work is in progress here."
+        )
+    if status:
+        return (
+            f"{root} has uncommitted changes. Updating pulls this tree forward, "
+            f"which is not something to do over work in progress — commit or "
+            f"stash first, or point AR3_DIR at the install you meant."
+        )
+    branch = _git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+    if branch is None:
+        # `get.sh` accepts AR3_VERSION only as `v[0-9]*`, so that is the only
+        # detached state it can have created. Any other tag — `wip`, a
+        # release-candidate marker, someone's bookmark — is a working state
+        # wearing a tag, and clearing it would let the installer force this
+        # tree back onto the default branch.
+        tag = _git_out(root, "describe", "--tags", "--exact-match")
+        if not (tag and re.fullmatch(r"v[0-9].*", tag)):
+            return (
+                f"{root} is at a detached HEAD that is not an AR3_VERSION pin "
+                f"(no tag matching {'v[0-9]*'!r}{f'; found {tag!r}' if tag else ''}). "
+                f"That is a working state, and updating would force this tree "
+                f"back onto the default branch. Check out a branch first, or "
+                f"point AR3_DIR at the install you meant."
+            )
+        return None
+    head = _git_out(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
+    default = head.split("/", 1)[1] if head and "/" in head else "main"
+    if branch != default:
+        return (
+            f"{root} is on branch {branch!r}, not {default!r}. This is a working "
+            f"checkout, not an install — updating it would pull that branch "
+            f"forward. Switch to {default!r} first, or point AR3_DIR at the "
+            f"install you meant."
+        )
+    return None
+
+
+def cmd_update(_args: argparse.Namespace) -> int:
+    script = REPO_ROOT / UPDATE_SCRIPT
+    if not script.is_file():
+        print(
+            f"ar3 update: no {UPDATE_SCRIPT} beside this copy ({REPO_ROOT}) — "
+            f"reinstall from github.com/witw-llc/ar3 to get one",
+            file=sys.stderr,
+        )
+        return 1
+    refusal = update_refusal(REPO_ROOT)
+    if refusal:
+        print(f"ar3 update: {refusal}", file=sys.stderr)
+        return 1
+    before = _suite_version()
+    # AR3_DIR is passed rather than left to default: `get.sh` alone would
+    # update whatever lives at ~/.ar3, which is not necessarily the copy the
+    # operator just invoked.
+    env = {**os.environ, "AR3_DIR": str(REPO_ROOT)}
+    try:
+        done = subprocess.run(["sh", str(script)], env=env)
+    except OSError as e:
+        print(f"ar3 update: cannot run {script}: {e}", file=sys.stderr)
+        return 1
+    if done.returncode != 0:
+        return done.returncode
+    after = _suite_version()
+    print()
+    if before == after:
+        print(f"ar3 update: already at {after}")
+    else:
+        print(f"ar3 update: {before} -> {after}")
+    return 0
+
+
 # ---------- cli ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -492,6 +626,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Dependency group to install, e.g. a8s-s3 or r4t (see requirements/*.txt)",
     )
     deps.set_defaults(func=cmd_deps)
+    update = sub.add_parser(
+        "update",
+        help="Update this ar3 install in place",
+        description=(
+            "ar3 update runs the suite's own installer against the copy you "
+            "invoked, which pulls it forward and restarts running a8s nodes so "
+            "handlers re-exec the new code. AR3_VERSION pins a release and "
+            "AR3_CHANNEL selects stable or beta, exactly as at install time. A "
+            "working checkout — dirty, or on a branch other than the default — "
+            "is refused rather than pulled."
+        ),
+    )
+    update.set_defaults(func=cmd_update)
     args = parser.parse_args(argv)
     return args.func(args)
 

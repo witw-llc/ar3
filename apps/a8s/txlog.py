@@ -241,6 +241,45 @@ def read_recent(
     return [(int(row[0]), dict(zip(FIELDS, row[1:]))) for row in rows]
 
 
+def last_heard() -> dict[str, str]:
+    """Newest arrival per remote sender: `{name: utc_stamp}`.
+
+    Arrival is the only evidence this log can offer about a remote being
+    alive. `PUBLISHED` records that we handed a message to the transport, not
+    that anything on the far side read it — a remote that is down and a remote
+    that is fine produce the same row. `RECEIVED_REMOTE` cannot be written
+    unless the far side actually spoke.
+
+    Names fold case-insensitively, matching how the registry resolves them:
+    `Robin` and `robin` are one remote, stamped by whichever spoke last and
+    spelled the way that newest arrival spelled it.
+
+    This reads the transaction log, so it sees only what retention has kept.
+    A remote whose rows have aged out of `txlog_max_rows` drops off the list
+    until it speaks again — the log is an event record, not a roster.
+    """
+    if not transactions_path().is_file():
+        return {}
+    try:
+        with closing(_connect()) as conn:
+            rows = conn.execute(
+                "SELECT sender, MAX(timestamp) FROM transactions "
+                "WHERE event = 'RECEIVED_REMOTE' AND sender != '' "
+                "GROUP BY sender"
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    heard: dict[str, tuple[str, str]] = {}
+    for sender, ts in rows:
+        if not sender or not ts:
+            continue
+        key = str(sender).lower()
+        newest = heard.get(key)
+        if newest is None or str(ts) > newest[1]:
+            heard[key] = (str(sender), str(ts))
+    return {name: stamp for name, stamp in heard.values()}
+
+
 def prune_transactions(max_rows: int | None = None) -> int:
     """Retain the newest configured number of rows and return rows removed."""
     keep = max_rows if max_rows is not None else get_int("txlog_max_rows")

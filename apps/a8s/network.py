@@ -766,6 +766,7 @@ def _deliver_claimed_envelope(
     sender_label = msg.get("from") or "?"
     preview = _preview(msg.get("content", ""))
     delivered_names: list[str] = []
+    delivered_envelopes: list[dict] = []
     deferred: list[Participant] = []
     for recipient in recipients:
         # Per-recipient download: each recipient has its own `.files/`, so
@@ -793,10 +794,19 @@ def _deliver_claimed_envelope(
             msg_for_recipient, recipient, msg_id, sender_label, preview, remote_id
         ):
             delivered_names.append(recipient.name)
+            delivered_envelopes.append(msg_for_recipient)
     if delivered_names:
         import convo
 
-        convo.record(msg, recipients=delivered_names)
+        # The archive must see what the recipients actually got. A failed
+        # download rewrites its own file entries with `error`/`detail`, and
+        # recording `msg` here would file a lost attachment under the same
+        # line a delivered one produces. One call, because one message id is
+        # one row: splitting it dropped every group after the first.
+        convo.record(
+            _worst_attachment_outcome(delivered_envelopes),
+            recipients=delivered_names,
+        )
     seen_id_append(msg_id)
     release_claim(msg_id)
     if delivered_names and publish_control is not None:
@@ -819,6 +829,50 @@ def _receive_wait_seconds() -> int:
 
 def _attachments_missing(msg: dict) -> bool:
     return any(e.get("error") for e in (msg.get("files") or []))
+
+
+def _worst_attachment_outcome(envelopes: list[dict]) -> dict:
+    """One envelope reporting the least fortunate copy of each file.
+
+    The download runs per recipient, so an alias fan-out can end with one
+    recipient holding bytes and another holding an error. The archive keeps
+    one row per message id and cannot hold both truths, so the row reports a
+    file as lost when any recipient's copy was lost. That direction is chosen
+    deliberately: a lost file described as delivered sends a reader hunting
+    for something that was never written, which is the whole of #222, while
+    the reverse only sends them to check a file they already have.
+
+    Copies pair by filename, never by position. `_download_files_to_recipient`
+    appends each success as it lands and every failure afterwards, so two
+    recipients list the same files in different orders precisely when their
+    outcomes differ — which is the only case this function is called to
+    resolve. Pairing by index there overwrites one recipient's delivered file
+    with another's lost one, dropping a name out of the archive entirely.
+
+    Per-recipient outcomes are the real model and are #225.
+    """
+    base = dict(envelopes[0])
+    files = [dict(e) if isinstance(e, dict) else e for e in (base.get("files") or [])]
+    at = {
+        e["filename"]: i
+        for i, e in enumerate(files)
+        if isinstance(e, dict) and e.get("filename")
+    }
+    for env in envelopes[1:]:
+        for other in env.get("files") or []:
+            if not isinstance(other, dict) or not other.get("error"):
+                continue
+            name = other.get("filename")
+            if not name:
+                continue
+            i = at.get(name)
+            if i is None:
+                at[name] = len(files)
+                files.append(dict(other))
+            elif isinstance(files[i], dict) and not files[i].get("error"):
+                files[i] = dict(other)
+    base["files"] = files
+    return base
 
 
 def _write_to_inbox(
@@ -945,7 +999,10 @@ def _submit_deferred_delivery(
                 return
             import convo
 
-            convo.record(msg, recipients=[recipient.name])
+            # `resolved`, not `msg`: this path exists because the first
+            # download failed, so it is the one most likely to be recording a
+            # file that never arrived.
+            convo.record(resolved, recipients=[recipient.name])
             if publish_control is not None:
                 _publish_delivery_receipt(
                     msg, [recipient.name], publish_control, remote_id

@@ -205,14 +205,28 @@ def involves_agent(entry: dict[str, Any], agent: str) -> bool:
 
 
 def entry_from_message(msg: dict[str, Any], *, recipients: list[str] | None = None) -> dict[str, Any]:
-    """Normalize a tell/inbox envelope into a conversation archive entry."""
+    """Normalize a tell/inbox envelope into a conversation archive entry.
+
+    An entry that names a file the transfer could not deliver carries `error`
+    and `detail`. Those are kept: reducing every entry to a bare filename made
+    a lost attachment indistinguishable from a delivered one, and the archive
+    is written once, so what is dropped here can never be recovered.
+    """
     files = msg.get("files") or []
     filenames = [
         (e.get("filename") or "").strip()
         for e in files
         if isinstance(e, dict) and (e.get("filename") or "").strip()
     ]
-    return {
+    unavailable = [
+        {
+            "filename": (e.get("filename") or "").strip(),
+            "detail": str(e.get("detail") or e.get("error") or "").strip(),
+        }
+        for e in files
+        if isinstance(e, dict) and e.get("error") and (e.get("filename") or "").strip()
+    ]
+    entry = {
         "date": (msg.get("date") or "").strip() or _now_iso(),
         "from": (msg.get("from") or "").strip(),
         "to": (msg.get("to") or "").strip(),
@@ -221,6 +235,9 @@ def entry_from_message(msg: dict[str, Any], *, recipients: list[str] | None = No
         "id": (msg.get("id") or "").strip(),
         "recipients": list(recipients or []),
     }
+    if unavailable:
+        entry["files_unavailable"] = unavailable
+    return entry
 
 
 def _now_iso() -> str:
@@ -312,17 +329,79 @@ def load_agent_entries(
         return []
 
 
+def _merge_into_stored(stored_json: str, entry: dict[str, Any]) -> str | None:
+    """Fold a later delivery into the stored row, or None when it adds nothing.
+
+    One message id is one row, but each recipient downloads separately and a
+    deferred recipient records long after an immediate one. Two things from
+    that later write must reach the row:
+
+    `recipients`, because the row is the record of who the message reached.
+    Attaching the name to `message_agents` alone makes the index and the entry
+    disagree — the lookup finds the row for a name the row does not list, so
+    `involves_agent` denies what the query just asserted, and the rendered row
+    names only whoever happened to be written first.
+
+    `files_unavailable`, because leaving the first writer's clean view in place
+    is how a lost file keeps being described as a delivered one.
+    """
+    stored = _decode_entry(stored_json)
+    if stored is None:
+        return None
+    changed = False
+
+    known_to = list(stored.get("recipients") or [])
+    seen_keys = {_name_key(str(name)) for name in known_to}
+    for name in entry.get("recipients") or []:
+        key = _name_key(str(name))
+        if key and key not in seen_keys:
+            seen_keys.add(key)
+            known_to.append(name)
+            changed = True
+    if changed:
+        stored["recipients"] = known_to
+
+    known_lost = stored.get("files_unavailable") or []
+    seen_lost = {(e.get("filename"), e.get("detail")) for e in known_lost}
+    added = [
+        e
+        for e in (entry.get("files_unavailable") or [])
+        if (e.get("filename"), e.get("detail")) not in seen_lost
+    ]
+    if added:
+        stored["files_unavailable"] = known_lost + added
+        changed = True
+
+    return json.dumps(stored, ensure_ascii=False) if changed else None
+
+
 def _insert_entry(entry: dict[str, Any], msg_id: str | None) -> None:
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO messages(message_id, entry_json) VALUES (?, ?)",
             (msg_id, json.dumps(entry, ensure_ascii=False)),
         )
-        if cursor.rowcount == 0:
-            return
-        seq = int(cursor.lastrowid)
+        if cursor.rowcount:
+            seq = int(cursor.lastrowid)
+        else:
+            # The id is already archived — a second recipient of the same
+            # message, or a deferred one landing after the immediate batch.
+            # Returning here dropped that recipient out of the archive
+            # entirely, so `a8s convo <name>` had nothing for it.
+            row = conn.execute(
+                "SELECT seq, entry_json FROM messages WHERE message_id = ?",
+                (msg_id,),
+            ).fetchone()
+            if row is None:
+                return
+            seq = int(row[0])
+            merged = _merge_into_stored(str(row[1]), entry)
+            if merged is not None:
+                conn.execute(
+                    "UPDATE messages SET entry_json = ? WHERE seq = ?", (merged, seq)
+                )
         conn.executemany(
-            "INSERT INTO message_agents(seq, agent_key) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO message_agents(seq, agent_key) VALUES (?, ?)",
             [(seq, key) for key in sorted(_entry_agents(entry))],
         )
 
@@ -387,12 +466,24 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
 
 
 def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
+    """One line per attachment. A file the transfer lost says so and says why.
+
+    The bare-name line is not evidence of failure and must not read as one: a
+    message this agent *sent* keeps its files in an outbox bundle this lookup
+    does not search, and an inbound bundle is reaped after its retention
+    window. Only an entry that arrived carrying an error is reported lost.
+    """
     names = [str(name).strip() for name in (entry.get("files") or []) if str(name).strip()]
+    lost = {
+        str(e.get("filename") or "").strip(): str(e.get("detail") or "").strip()
+        for e in (entry.get("files_unavailable") or [])
+        if isinstance(e, dict) and str(e.get("filename") or "").strip()
+    }
     if not names:
         return []
     msg_id = (entry.get("id") or "").strip()
     bundle_root: Path | None = None
-    if msg_id:
+    if msg_id and not all(name in lost for name in names):
         from registry import find_participant, participants_from_registry
 
         participant = find_participant(participants_from_registry(), agent)
@@ -400,6 +491,12 @@ def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
             bundle_root = inbound_bundle_dir(participant.files_path(), msg_id)
     lines: list[str] = []
     for name in names:
+        if name in lost:
+            detail = lost[name]
+            lines.append(
+                f"- ATTACHMENT UNAVAILABLE: {name}" + (f": {detail}" if detail else "")
+            )
+            continue
         if bundle_root is not None:
             path = bundle_root / name
             if path.is_file():

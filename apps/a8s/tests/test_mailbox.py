@@ -1821,6 +1821,133 @@ class TestStorageDownload:
         }]
         assert body["content"] == "see attached"
 
+    def test_archive_records_the_failure_the_recipient_actually_got(
+        self, fake_home, tmp_path
+    ):
+        """The receive path must hand the archive the resolved envelope.
+
+        `_download_files_to_recipient` returns a NEW envelope carrying
+        `error`/`detail`; the original still carries `storage`. Recording the
+        original taught the renderer nothing — it saw a clean entry and printed
+        the same line a delivered file produces, which is the whole of #222.
+        """
+        import convo
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        s = _StubStorage("only-one")  # cannot serve stub://other/ URLs
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "B",
+            "content": "see attached",
+            "files": [{"filename": "doc.txt", "storage": ["stub://other/99"]}],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s])
+
+        entries = convo.load_entries()
+        assert len(entries) == 1
+        lost = entries[0].get("files_unavailable")
+        assert lost, "archive recorded a lost attachment as a delivered one"
+        assert lost[0]["filename"] == "doc.txt"
+
+    def test_alias_fanout_leaves_no_recipient_out_of_the_archive(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        """Every recipient of one message must reach the archive row.
+
+        Recording one row per download outcome read correctly and was silently
+        destructive: `messages.message_id` is UNIQUE and `_insert_entry` used
+        `INSERT OR IGNORE`, so every group after the first was dropped — the
+        row *and* its `message_agents` recipients. The second recipient then
+        had no conversation at all, which is worse than the bug being fixed.
+        """
+        import convo
+        import network
+        from network import receive_envelope
+        from registry import save_aliases, save_registry
+        from ark.ulid import new as new_ulid
+
+        parts = []
+        for name in ("B", "C"):
+            r = tmp_path / name; r.mkdir()
+            parts.append(Participant(name, r))
+        save_registry({p.name: {"root": str(p.root)} for p in parts})
+        save_aliases({"devs": ["B", "C"]})
+        # wait=0 keeps a failed download on the immediate path instead of
+        # deferring it, so both outcomes land in one batch.
+        monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 0)
+
+        s = _StubStorage("svc")
+        s.bytes_for["stub://svc/7"] = b"the-payload"
+        real_retrieve = s.retrieve
+        seen = {"n": 0}
+
+        def retrieve(url, dest):
+            seen["n"] += 1
+            if seen["n"] > 1:  # the second recipient's copy fails
+                from services import StorageError
+
+                raise StorageError("transient")
+            return real_retrieve(url, dest)
+
+        s.retrieve = retrieve
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "X", "to": "devs",
+            "content": "see attached",
+            "files": [{"filename": "doc.txt", "storage": ["stub://svc/7"]}],
+        }).encode()
+        receive_envelope(envelope, parts, services=[s])
+
+        assert len(convo.load_entries()) == 1
+        for name in ("B", "C"):
+            got = convo.load_agent_entries(name, limit=10)
+            assert got, f"{name} has no conversation entry"
+        # One row cannot hold both truths, and it resolves toward the loss.
+        assert convo.load_entries()[0].get("files_unavailable")
+
+    def test_a_deferred_failure_reaches_a_row_an_earlier_success_wrote(
+        self, fake_home, tmp_path
+    ):
+        """A deferred recipient records the same message id long after the
+        immediate batch. `INSERT OR IGNORE` dropped that write whole, so the
+        deferred recipient never appeared in `a8s convo` and its lost file was
+        never reported against a row already written clean."""
+        import convo
+        from ark.ulid import new as new_ulid
+
+        msg_id = new_ulid()
+        base = {"id": msg_id, "from": "X", "to": "devs", "content": "see attached"}
+        convo.record(
+            {**base, "files": [{"filename": "doc.txt", "path": "/x/doc.txt"}]},
+            recipients=["B"],
+        )
+        convo.record(
+            {**base, "files": [{
+                "filename": "doc.txt",
+                "error": "ATTACHMENT_UNAVAILABLE",
+                "detail": "could not download; contact an administrator",
+            }]},
+            recipients=["C"],
+        )
+
+        assert len(convo.load_entries()) == 1
+        assert convo.load_agent_entries("C", limit=10), "deferred recipient lost"
+        entry = convo.load_entries()[0]
+        lost = entry.get("files_unavailable")
+        assert lost and lost[0]["filename"] == "doc.txt"
+        # The index and the entry must agree. Attaching the name to
+        # message_agents alone lets the lookup find a row that does not list
+        # the name, so involves_agent denies what the query just asserted and
+        # the rendered row credits only whoever was written first.
+        assert convo.involves_agent(entry, "C")
+        assert sorted(entry.get("recipients") or []) == ["B", "C"]
+
     def test_no_services_strips_files(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
@@ -1897,3 +2024,64 @@ class TestStorageDownload:
         body = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert body["files"][0]["error"] == "ATTACHMENT_UNAVAILABLE"
         assert "not a basename" in body["files"][0]["detail"]
+
+
+class TestWorstAttachmentOutcome:
+    """`_worst_attachment_outcome` — the archive keeps one row per message id,
+    so a fan-out whose recipients disagree about a file must resolve to a
+    single view. It resolves toward the loss: a lost file described as
+    delivered sends a reader after something that was never written, while the
+    reverse only sends them to check a file they already hold."""
+
+    def test_no_attachments_passes_the_envelope_through(self):
+        from network import _worst_attachment_outcome
+
+        assert _worst_attachment_outcome([{"content": "hi"}])["content"] == "hi"
+
+    def test_a_loss_outranks_a_success_in_either_order(self):
+        from network import _worst_attachment_outcome
+
+        ok = {"files": [{"filename": "doc.txt", "path": "/x/doc.txt"}]}
+        lost = {"files": [{"filename": "doc.txt", "error": "ATTACHMENT_UNAVAILABLE"}]}
+        assert _worst_attachment_outcome([ok, lost])["files"][0].get("error")
+        assert _worst_attachment_outcome([lost, ok])["files"][0].get("error")
+
+    def test_copies_pair_by_filename_not_position(self):
+        """`_download_files_to_recipient` appends each success as it lands and
+        every failure afterwards, so the orders diverge exactly when the
+        outcomes do — the only case this function is ever called for. Pairing
+        by index overwrote a delivered file with another recipient's lost one,
+        erasing a name from the archive and duplicating another."""
+        from network import _worst_attachment_outcome
+
+        # B got both. C's a.txt failed, so its b.txt success sorts ahead of it.
+        b_got = {"files": [{"filename": "a.txt"}, {"filename": "b.txt"}]}
+        c_got = {"files": [
+            {"filename": "b.txt"},
+            {"filename": "a.txt", "error": "ATTACHMENT_UNAVAILABLE"},
+        ]}
+        files = _worst_attachment_outcome([b_got, c_got])["files"]
+        by_name = {e["filename"]: e for e in files}
+        assert sorted(by_name) == ["a.txt", "b.txt"], "a filename was lost"
+        assert len(files) == 2, "a filename was duplicated"
+        assert by_name["a.txt"].get("error")
+        assert not by_name["b.txt"].get("error"), "a delivered file reported lost"
+
+    def test_a_loss_only_one_recipient_saw_still_lands(self):
+        from network import _worst_attachment_outcome
+
+        files = _worst_attachment_outcome([
+            {"files": [{"filename": "a.txt"}]},
+            {"files": [{"filename": "b.txt", "error": "E"}]},
+        ])["files"]
+        by_name = {e["filename"]: e for e in files}
+        assert by_name["b.txt"].get("error")
+        assert not by_name["a.txt"].get("error")
+
+    def test_the_caller_envelopes_are_left_alone(self):
+        # These are the envelopes already written to each recipient's inbox.
+        from network import _worst_attachment_outcome
+
+        ok = {"files": [{"filename": "doc.txt"}]}
+        _worst_attachment_outcome([ok, {"files": [{"filename": "doc.txt", "error": "E"}]}])
+        assert "error" not in ok["files"][0]

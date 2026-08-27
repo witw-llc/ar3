@@ -900,6 +900,130 @@ class TestCmdLs:
         assert "NAMESPACES" not in capsys.readouterr().out
 
 
+def _heard(sender: str, stamp: str) -> None:
+    """Insert a RECEIVED_REMOTE row with a chosen timestamp. `txlog.log` stamps
+    with now, which cannot express "last heard six days ago"."""
+    import sqlite3
+    from txlog import _COLUMNS, transactions_path, log
+
+    log("RECEIVED_REMOTE", sender=sender, remote="broker")  # ensures the schema
+    with sqlite3.connect(transactions_path()) as conn:
+        conn.execute(
+            f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (stamp, "RECEIVED_REMOTE", "", sender, "", "", "broker", ""),
+        )
+        conn.execute(
+            "DELETE FROM transactions WHERE timestamp != ? AND sender = ?",
+            (stamp, sender),
+        )
+
+
+class TestCmdLsRemotes:
+    """Names only ever heard over the broker are addresses too. Listing only
+    what runs here is what sends an agent hunting for a name it was told it
+    could reach."""
+
+    def test_remote_only_name_is_listed(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert "neil-phone" in out
+        assert "remote" in out
+
+    def test_stamp_is_local_not_utc(self, fake_home, tmp_path, capsys):
+        from ark import clock
+
+        save_registry({})
+        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert clock.stamp("2026-08-24T05:08:45.222Z") in out
+        # The stored form must not reach a surface a model reads every turn.
+        assert "2026-08-24T05:08:45.222Z" not in out
+
+    def test_registered_name_is_not_duplicated(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        _heard("claude", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert out.count("claude") == 1
+        # The registry row wins: it knows where the node lives.
+        assert "last heard" not in out
+
+    def test_registered_name_matches_case_insensitively(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"Claude": {"root": str(a)}})
+        _heard("claude", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls([]) == 0
+        assert "last heard" not in capsys.readouterr().out
+
+    def test_one_remote_spelled_two_ways_is_one_row(self, fake_home, capsys):
+        # The registry resolves names case-insensitively, so a remote that
+        # spells itself differently across sessions is one address, not two.
+        # Listing it twice would invite a reader to wonder which one works.
+        save_registry({})
+        _heard("Robin", "2026-08-24T05:08:45.222Z")
+        _heard("robin", "2026-08-25T06:00:00.000Z")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert out.lower().count("robin") == 1
+        # The newest arrival supplies both the stamp and the spelling.
+        from ark import clock
+
+        assert clock.stamp("2026-08-25T06:00:00.000Z") in out
+
+    def test_publishing_to_a_name_is_not_hearing_from_it(self, fake_home, capsys):
+        from txlog import log
+
+        save_registry({})
+        log("PUBLISHED", recipient="ghost", sender="ares", remote="broker")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        # We handed the transport a message. Nothing proves anyone read it.
+        assert "ghost" not in out
+
+    def test_newest_arrival_wins(self, fake_home, capsys):
+        from ark import clock
+        import sqlite3
+        from txlog import _COLUMNS, transactions_path
+
+        save_registry({})
+        _heard("robin", "2026-08-20T01:00:00.000Z")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute(
+                f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("2026-08-26T17:00:00.000Z", "RECEIVED_REMOTE", "", "robin", "", "", "b", ""),
+            )
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert clock.stamp("2026-08-26T17:00:00.000Z") in out
+        assert clock.stamp("2026-08-20T01:00:00.000Z") not in out
+
+    def test_quiet_includes_remotes(self, fake_home, tmp_path, capsys):
+        a = tmp_path / "a"; a.mkdir()
+        save_registry({"claude": {"root": str(a)}})
+        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls(["-q"]) == 0
+        # The scriptable form is how an agent answers "can I reach X".
+        assert capsys.readouterr().out.splitlines() == ["claude", "neil-phone"]
+
+    def test_remote_alone_still_lists(self, fake_home, capsys):
+        save_registry({})
+        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        assert cmd_ls([]) == 0
+        out = capsys.readouterr().out
+        assert "neil-phone" in out
+        assert "no nodes registered" not in out
+
+    def test_nothing_at_all_still_hints(self, fake_home, capsys):
+        save_registry({})
+        assert cmd_ls([]) == 0
+        assert "no nodes registered" in capsys.readouterr().out
+
+
 class TestCmdPs:
     """`a8s ps` lists only running node processes — docker-style."""
 
