@@ -361,6 +361,33 @@ snapshots that still answer when the live check cannot. A snapshot answer
 carries `"origin": "snapshot"` and `age_seconds` — its age as a number, like
 every other duration r4t reports; the text lines render the human string.
 
+A snapshot answers only while it can still be true, and two independent guards
+say when it cannot. Both apply to every snapshot; either one refuses it.
+
+The first is its stated reset. A bucket whose `reset_time` is already behind us
+is quoting numbers that no longer exist, however young the snapshot is — a
+reading taken a minute before a reset is a minute old and already wrong.
+
+The second is age. Past four hours a snapshot is refused even when every reset
+it names is still ahead: a reset in the future says the window has not turned
+over, but it says nothing about how much of that window was spent in the hours
+since the reading.
+
+A snapshot dated more than a minute in the future is refused as well, because
+its age no longer measures anything — under a minute is a slewing clock and is
+treated as fresh. Every refusal reports the live failure instead, carrying the
+reason. When a snapshot *is* served, the reason the live check failed prints
+*above* the figures rather than after them.
+
+The exit code names which of the three happened, so a script never has to read
+the prose:
+
+| exit | meaning |
+|---|---|
+| `0` | a live answer |
+| `3` | a snapshot, served because the live check failed |
+| `1` | no answer at all — no live check, and no snapshot that can still be true |
+
 This is every dial the account carries, raw. Each bucket's own reading is
 `remaining_fraction`. One number for one rig is [`r4t rig fuel
 <rig>`](r4t-rigs.md#rig-fuel--the-tank-as-one-number), which reads this same

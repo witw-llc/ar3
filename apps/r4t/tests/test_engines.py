@@ -494,3 +494,195 @@ class TestSnapshotRoundTrip:
             engines, "snapshot_path", lambda engine: tmp_path / "absent.json"
         )
         assert engines.load_snapshot("codex") is None
+
+
+class TestStaleSnapshotIsNotAnAnswer:
+    """#218. A failed live check used to be demoted to a `note:` printed under
+    a plausible set of numbers, with exit 0. One engine failed on every
+    invocation for eleven days behind a reading that said
+    `0% remaining · resets 2026-08-18` — served a week after that reset."""
+
+    def _stub(self, monkeypatch, tmp_path, saved_at, reset_time=None):
+        import json as _json
+        import time as _time
+
+        bucket = {"label": "Weekly", "remaining_fraction": 0.0}
+        if reset_time is not None:
+            bucket["reset_time"] = reset_time
+        path = tmp_path / "codex.json"
+        path.write_text(
+            _json.dumps({
+                "saved_at": saved_at,
+                "payload": {"engine": "codex", "origin": "live",
+                            "buckets": [bucket]},
+            }),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(engines, "snapshot_path", lambda engine: path)
+
+        class Boom:
+            @staticmethod
+            def quota():
+                raise engines.QuotaError("no state database")
+
+        monkeypatch.setitem(engines.MODULES, "codex", Boom)
+        return _time
+
+    def test_a_snapshot_inside_the_bound_still_answers(self, tmp_path, monkeypatch):
+        t = self._stub(monkeypatch, tmp_path, __import__("time").time() - 60)
+        payload = engines.quota("codex")
+        assert payload["origin"] == "snapshot"
+        assert "live check failed" in payload["note"]
+        assert t  # a fresh fallback is the behaviour worth keeping
+
+    def test_a_snapshot_past_the_bound_refuses_rather_than_misinform(
+        self, tmp_path, monkeypatch
+    ):
+        import time as _time
+
+        self._stub(
+            monkeypatch, tmp_path,
+            _time.time() - (engines.SNAPSHOT_MAX_AGE_SECONDS + 3600),
+        )
+        with pytest.raises(engines.QuotaError) as exc:
+            engines.quota("codex")
+        # The live failure must survive, not be replaced by the age complaint.
+        assert "no state database" in str(exc.value)
+        assert "may already have been reset" in str(exc.value)
+
+    def test_the_age_bound_backstops_only_buckets_with_no_stated_reset(self):
+        # The bound is a backstop, not a proof. A snapshot can be taken a
+        # minute before a reset, so age never establishes that none was
+        # crossed; `reset_passed` is what answers that.
+        assert engines.SNAPSHOT_MAX_AGE_SECONDS < 5 * 3600
+
+    def _reset_in(self, **delta):
+        import datetime as _dt
+
+        return (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(**delta)).isoformat()
+
+    def test_a_passed_reset_is_refused_even_well_inside_the_age_bound(
+        self, tmp_path, monkeypatch
+    ):
+        """The premise the age bound rested on is false: a snapshot taken near
+        the end of a window is young and already wrong. Three hours old, inside
+        the four-hour bound, and its stated reset passed 85 minutes ago."""
+        import time as _time
+
+        self._stub(
+            monkeypatch, tmp_path,
+            _time.time() - 3 * 3600,
+            self._reset_in(minutes=-85),
+        )
+        with pytest.raises(engines.QuotaError) as exc:
+            engines.quota("codex")
+        assert "no state database" in str(exc.value)
+        assert "has passed" in str(exc.value)
+
+    def test_a_reset_still_ahead_answers_from_the_same_age(
+        self, tmp_path, monkeypatch
+    ):
+        """The other direction of the same discrimination. Identical age; only
+        the reset moved. Without this, refusing everything would pass too."""
+        import time as _time
+
+        self._stub(
+            monkeypatch, tmp_path,
+            _time.time() - 3 * 3600,
+            self._reset_in(minutes=85),
+        )
+        payload = engines.quota("codex")
+        assert payload["origin"] == "snapshot"
+
+    def test_a_reset_still_ahead_does_not_excuse_a_snapshot_past_the_bound(
+        self, tmp_path, monkeypatch
+    ):
+        """The two guards are independent and both apply to every snapshot. A
+        reset in the future says the window has not turned over; it says
+        nothing about how much of it was spent in the hours since the reading."""
+        import time as _time
+
+        self._stub(
+            monkeypatch, tmp_path,
+            _time.time() - (engines.SNAPSHOT_MAX_AGE_SECONDS + 3600),
+            self._reset_in(hours=4),
+        )
+        with pytest.raises(engines.QuotaError) as exc:
+            engines.quota("codex")
+        assert "past the" in str(exc.value)
+
+    def test_an_unparseable_reset_falls_back_to_the_age_bound(
+        self, tmp_path, monkeypatch
+    ):
+        import time as _time
+
+        self._stub(monkeypatch, tmp_path, _time.time() - 60, "not a timestamp")
+        assert engines.quota("codex")["origin"] == "snapshot"
+
+    def test_a_snapshot_a_moment_ahead_is_clock_jitter_and_still_answers(
+        self, tmp_path, monkeypatch
+    ):
+        """The other direction. A slewing clock puts a snapshot fractions of a
+        second ahead; refusing that would be a spurious quota failure."""
+        import time as _time
+
+        self._stub(monkeypatch, tmp_path, _time.time() + 5)
+        assert engines.quota("codex")["origin"] == "snapshot"
+
+    def test_a_snapshot_dated_in_the_future_proves_nothing_and_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        """`max(0, now - saved_at)` clamped a moved clock to an age of nothing,
+        which read as the freshest possible snapshot."""
+        import time as _time
+
+        self._stub(monkeypatch, tmp_path, _time.time() + 10 * 3600)
+        with pytest.raises(engines.QuotaError) as exc:
+            engines.quota("codex")
+        assert "in the future" in str(exc.value)
+
+
+class TestTheCaveatPrecedesTheNumbers:
+    """A note printed under the figures is read after the reader believed them."""
+
+    def test_note_renders_above_the_buckets(self):
+        text = engines.format_text({
+            "engine": "codex",
+            "origin": "snapshot",
+            "age_seconds": 120,
+            "note": "live check failed: no state database",
+            "buckets": [{"label": "Weekly", "remaining_fraction": 0.0}],
+        })
+        lines = text.splitlines()
+        note_at = next(i for i, l in enumerate(lines) if "note:" in l)
+        bucket_at = next(i for i, l in enumerate(lines) if "Weekly" in l)
+        assert note_at < bucket_at
+
+
+class TestQuotaExitCodes:
+    """Three states need three exits. With only two, a caller could tell a
+    working engine from a broken one solely by reading prose — which is how one
+    engine failed for eleven days behind a plausible-looking reading."""
+
+    def _serve(self, monkeypatch, origin):
+        monkeypatch.setattr(
+            engines, "quota",
+            lambda target: {"engine": "codex", "origin": origin, "buckets": [],
+                            "note": None if origin == "live" else "live check failed: x"},
+        )
+
+    def test_a_live_answer_exits_zero(self, monkeypatch, capsys):
+        import r4t as r4t_mod
+
+        self._serve(monkeypatch, "live")
+        assert r4t_mod.main(["engine", "codex", "quota"]) == 0
+        capsys.readouterr()
+
+    def test_a_snapshot_served_after_failure_exits_distinctly(self, monkeypatch, capsys):
+        import r4t as r4t_mod
+
+        self._serve(monkeypatch, "snapshot")
+        rc = r4t_mod.main(["engine", "codex", "quota"])
+        assert rc == r4t_mod.QUOTA_EXIT_STALE
+        assert rc not in (0, 1), "must differ from both live and no-answer"
+        capsys.readouterr()

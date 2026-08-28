@@ -211,6 +211,10 @@ PARSER_HELP = {
 
 HIDDEN_COMMANDS = ("clear", "dispatch", "idle", "judge", "lab", "sandbox")
 
+# `engine <id> quota` served a snapshot because the live check failed. Distinct
+# from 0 (live) and 1 (no answer at all) so a script can tell them apart.
+QUOTA_EXIT_STALE = 3
+
 RUNBOOK_TEMPLATE = """\
 ---
 name: "{name}"
@@ -1541,6 +1545,13 @@ def cmd_engine(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
     else:
         print(engines.format_text(payload))
+    # Three states, three exits: a live answer, a snapshot served because the
+    # live check failed, and (via QuotaError above) no answer at all. They used
+    # to be two, so a caller could only tell a working engine from a broken one
+    # by reading prose — which is how one engine failed for eleven days behind
+    # a plausible-looking reading.
+    if payload.get("origin") == "snapshot":
+        return QUOTA_EXIT_STALE
     return 0
 
 
@@ -1898,6 +1909,9 @@ def _format_fuel(report: dict) -> str:
     if report.get("origin") == "snapshot":
         age = engines.format_age(report.get("age_seconds"))
         lines.append(f"  source: snapshot from {age} ago")
+    # Above the numbers, for the same reason `engines.format_text` puts it there.
+    if report.get("note"):
+        lines.append(f"  note: {report['note']}")
     binding = engines.binding_index(report["buckets"])
     for position, bucket in enumerate(report["buckets"]):
         fraction = bucket.get("remaining_fraction")
@@ -1914,8 +1928,6 @@ def _format_fuel(report: dict) -> str:
         )
     if not report["buckets"]:
         lines.append("  no bucket constrains this model")
-    if report.get("note"):
-        lines.append(f"  note: {report['note']}")
     return "\n".join(lines)
 
 

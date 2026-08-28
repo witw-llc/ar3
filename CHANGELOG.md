@@ -10,6 +10,50 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.77
+
+### Fixed
+- **A sender's "this file was lost" now reaches the agent instead of dying on
+  arrival.** A sender that cannot upload publishes `{filename, error, detail}`
+  with no `storage`, precisely so the recipient learns a file existed and was
+  lost. The receiver's legacy-strip rule emptied the whole `files` array
+  whenever nothing in it carried `storage`, so that entry was destroyed on
+  arrival and the agent saw `files: []` — the same silence the entry was
+  written to break, one hop later. The rule now filters rather than empties:
+  an entry with `storage` **or** `error` survives, and a true legacy
+  filename-only entry is still dropped, which is the contract that rule exists
+  for. Two further hops had to cooperate. The download path skipped any entry
+  without URLs, so in a mixed envelope the lost file was dropped one step after
+  surviving the strip; it now carries the entry through with **the sender's own
+  reason**, rather than restating it as a local download failure. And a
+  sender-declared loss no longer defers delivery: there is no URL to retry, so
+  waiting held the message for the full retry window and then delivered exactly
+  what was available at the start. Only an attachment the sender gave us
+  somewhere to fetch from counts as worth waiting for.
+- **A failed quota check no longer serves a stale number as if it were
+  current.** `r4t engine <id> quota` demoted a live failure to a `note:` line
+  printed *below* a plausible set of figures and exited 0. That is how one
+  engine failed on every invocation for eleven days without anyone noticing:
+  it kept printing `Weekly Limit: 0% remaining · resets 2026-08-18` a week
+  after that reset had already happened. A wrong number stated confidently is
+  not the cautious estimate the fallback was meant to be. Three changes, from
+  #218's own options: a snapshot is refused rather than served when it cannot
+  still be true, and the live failure is raised in its place. Two independent
+  guards say when, and both apply to every snapshot — a bucket stating a reset
+  that has already passed, or an age beyond four hours. Age alone never
+  established that no reset was crossed, since a reading taken a minute before
+  a reset is a minute old and already wrong; and a reset still ahead never
+  established that the reading holds, since it says nothing about how much of
+  the window was spent since. A snapshot dated more than a minute in the
+  future is refused too, its age having stopped measuring anything — under a
+  minute is a slewing clock and still counts as fresh. The caveat now prints
+  *above* the numbers in both renderers, because a warning under the figures
+  is read after the reader has believed them; and a snapshot served after a
+  live failure exits `3`, distinct from `0` for a live answer and `1` for no
+  answer at all, so a script can tell the three apart without parsing prose.
+  `r4t rig fuel` reads through the same path, so a fuel gauge can no longer
+  quote a reset that has already passed.
+
 ## 0.1.76
 
 ### Added

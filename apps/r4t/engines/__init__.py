@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from engines import agy, claude, codex, copilot, cursor, ollama, opencode, run
@@ -113,6 +114,25 @@ def capabilities(preset_or_engine: str) -> list[str]:
     return verbs
 
 
+# How stale a snapshot may be and still be served after a live check fails.
+# One of two independent guards, and it applies to every snapshot. It is not
+# a proof that no reset was missed — age cannot see a boundary crossing, since
+# a snapshot taken a minute before a reset is a minute old and already wrong,
+# which is what `reset_passed` below answers. This bound answers the other
+# question: a reset still ahead says the window did not turn over, but it says
+# nothing about how much of the window was spent in the hours since the
+# reading. A seat once served `0% remaining · resets 2026-08-18` on 2026-08-25
+# — a week past the reset it named — because nothing here bounded the age.
+SNAPSHOT_MAX_AGE_SECONDS = 4 * 3600
+
+# How far into the future a snapshot may be dated before its age stops meaning
+# anything. A clock slewing under NTP moves by fractions of a second, and an
+# age of -0.2s is the same snapshot as one of +0.2s; a clock that has been
+# *stepped* moves by minutes or hours, and then the age bound above is
+# measuring nothing.
+SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 60
+
+
 def snapshot_path(engine: str) -> Path:
     return Path.home() / ".config" / "r4t" / "quota" / f"{engine}.json"
 
@@ -137,8 +157,31 @@ def load_snapshot(engine: str) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError):
         return None
     payload["origin"] = "snapshot"
-    payload["age_seconds"] = max(0.0, round(time.time() - saved_at, 3))
+    # Not clamped at zero: a saved_at in the future means the clock moved, and
+    # a clamp would hide that behind an age of nothing. Renderers clamp for
+    # display; the policy in `quota` needs to see the real sign.
+    payload["age_seconds"] = round(time.time() - saved_at, 3)
     return payload
+
+
+def reset_passed(payload: dict, now: float | None = None) -> tuple[str, str] | None:
+    """The first bucket whose stated reset is already behind us, as
+    (label, reset_time). Such a payload is quoting numbers that no longer
+    exist however young it is — the reset is the fact, the age is a proxy."""
+    at = time.time() if now is None else now
+    for bucket in payload.get("buckets") or []:
+        reset = bucket.get("reset_time")
+        if not isinstance(reset, str) or not reset.strip():
+            continue
+        try:
+            when = datetime.fromisoformat(reset.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when.timestamp() <= at:
+            return str(bucket.get("label") or "Quota"), reset
+    return None
 
 
 def format_age(seconds: float | None) -> str:
@@ -153,8 +196,9 @@ def format_age(seconds: float | None) -> str:
 
 
 def quota(preset_or_engine: str) -> dict:
-    """Live check for the engine behind `preset_or_engine`, falling back to
-    the last snapshot. Raises QuotaError when neither can answer."""
+    """Live check for the engine behind `preset_or_engine`, falling back to a
+    snapshot young enough to still be true. Raises QuotaError when neither can
+    answer."""
     engine = engine_for(preset_or_engine)
     if engine is None:
         raise QuotaError(
@@ -167,6 +211,26 @@ def quota(preset_or_engine: str) -> dict:
         snapshot = load_snapshot(engine)
         if snapshot is None:
             raise
+        crossed = reset_passed(snapshot)
+        if crossed is not None:
+            label, reset = crossed
+            raise QuotaError(
+                f"{exc} — and the last snapshot's {label} reset at {reset}, "
+                f"which has passed, so its numbers no longer exist"
+            ) from exc
+        age = snapshot.get("age_seconds")
+        if isinstance(age, (int, float)) and age < -SNAPSHOT_FUTURE_TOLERANCE_SECONDS:
+            raise QuotaError(
+                f"{exc} — and the last snapshot is dated "
+                f"{format_age(-age)} in the future, so its age proves nothing "
+                f"about whether its numbers were reset"
+            ) from exc
+        if isinstance(age, (int, float)) and age > SNAPSHOT_MAX_AGE_SECONDS:
+            raise QuotaError(
+                f"{exc} — and the last snapshot is {format_age(age)} old, past "
+                f"the {format_age(SNAPSHOT_MAX_AGE_SECONDS)} bound, so its "
+                f"numbers may already have been reset"
+            ) from exc
         snapshot["engine"] = engine
         snapshot["note"] = f"live check failed: {exc}"
         return snapshot
@@ -279,6 +343,10 @@ def format_text(payload: dict) -> str:
         lines.append(
             f"  source: snapshot from {format_age(payload.get('age_seconds'))} ago"
         )
+    # Above the numbers, not below them. A caveat printed after the figures is
+    # read after the reader has already believed them.
+    if payload.get("note"):
+        lines.append(f"  note: {payload['note']}")
     for bucket in payload.get("buckets") or []:
         fraction = bucket.get("remaining_fraction")
         if isinstance(fraction, (int, float)):
@@ -291,6 +359,4 @@ def format_text(payload: dict) -> str:
         lines.append(f"  {bucket.get('label', 'Quota')}: {value}")
     if not payload.get("buckets"):
         lines.append("  no buckets reported")
-    if payload.get("note"):
-        lines.append(f"  note: {payload['note']}")
     return "\n".join(lines)

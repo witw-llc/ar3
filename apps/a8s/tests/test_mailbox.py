@@ -1948,6 +1948,177 @@ class TestStorageDownload:
         assert convo.involves_agent(entry, "C")
         assert sorted(entry.get("recipients") or []) == ["B", "C"]
 
+    def test_a_sender_declared_loss_survives_the_legacy_strip(
+        self, fake_home, tmp_path
+    ):
+        """#212. A sender that could not upload publishes
+        `{filename, error, detail}` with no `storage`, precisely so the
+        recipient learns the file existed and was lost. The legacy-strip rule
+        emptied the whole array whenever nothing carried `storage`, so that
+        entry died on arrival and the agent saw `files: []` — the same silence,
+        one hop later."""
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "phone", "to": "B",
+            "content": "see attached",
+            "files": [{
+                "filename": "photo.jpg",
+                "error": "ATTACHMENT_UNAVAILABLE",
+                "detail": "no storage configured on the sender",
+            }],
+        }).encode()
+        receive_envelope(envelope, [b], services=[_StubStorage("svc")])
+
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert body["files"] == [{
+            "filename": "photo.jpg",
+            "error": "ATTACHMENT_UNAVAILABLE",
+            "detail": "no storage configured on the sender",
+        }]
+        assert body["content"] == "see attached"
+
+    def test_a_mixed_envelope_downloads_the_good_and_carries_the_lost(
+        self, fake_home, tmp_path
+    ):
+        """Surviving the strip is not enough: the download path skipped any
+        entry without URLs, so in a mixed envelope the error entry was dropped
+        one step later, and the sender's own reason with it."""
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        s = _StubStorage("svc")
+        s.bytes_for["stub://svc/1"] = b"the-payload"
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "phone", "to": "B",
+            "content": "one made it",
+            "files": [
+                {"filename": "good.txt", "storage": ["stub://svc/1"]},
+                {"filename": "lost.jpg", "error": "ATTACHMENT_UNAVAILABLE",
+                 "detail": "upload produced no usable URL"},
+            ],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s])
+
+        assert (b.files_bundle_dir(msg_id) / "good.txt").read_bytes() == b"the-payload"
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        by_name = {e["filename"]: e for e in body["files"]}
+        assert sorted(by_name) == ["good.txt", "lost.jpg"]
+        assert not by_name["good.txt"].get("error")
+        # The sender's reason, not one we invented on its behalf.
+        assert by_name["lost.jpg"]["detail"] == "upload produced no usable URL"
+
+    def test_a_sender_declared_loss_does_not_defer_delivery(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        """There is no URL to retry, so waiting cannot change the outcome.
+        Deferring would hold the message for the whole retry window and then
+        deliver exactly what was available at the start."""
+        import network
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
+        submitted = []
+        monkeypatch.setattr(
+            network, "_submit_deferred_delivery",
+            lambda *a, **k: submitted.append(a),
+        )
+
+        s = _StubStorage("svc")
+        s.bytes_for["stub://svc/1"] = b"ok"
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "phone", "to": "B", "content": "hi",
+            "files": [
+                {"filename": "good.txt", "storage": ["stub://svc/1"]},
+                {"filename": "lost.jpg", "error": "ATTACHMENT_UNAVAILABLE"},
+            ],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s])
+
+        assert submitted == [], "deferred on a loss that can never be retried"
+        assert list(inbox_dir("B").iterdir()), "message not delivered"
+
+    def test_a_retryable_failure_still_defers_when_a_loss_shares_the_envelope(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        """The other direction of the same discrimination, and the only shape
+        in which the `source` argument can change anything.
+
+        A sender-declared loss must not defer, but it must not suppress a
+        deferral either. Sync-backed bytes are often still in flight on first
+        touch; treating "some loss is present" as "nothing is worth waiting
+        for" would deliver immediately and stamp a file that was seconds away
+        as permanently unavailable.
+        """
+        import network
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
+        submitted = []
+        monkeypatch.setattr(
+            network, "_submit_deferred_delivery",
+            lambda *a, **k: submitted.append(a),
+        )
+
+        s = _StubStorage("svc")  # URL is claimed but the bytes are not there yet
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "phone", "to": "B", "content": "hi",
+            "files": [
+                {"filename": "inflight.txt", "storage": ["stub://svc/1"]},
+                {"filename": "lost.jpg", "error": "ATTACHMENT_UNAVAILABLE"},
+            ],
+        }).encode()
+        receive_envelope(envelope, [b], services=[s])
+
+        assert submitted, "a file still worth waiting for was not deferred"
+
+    def test_true_legacy_entries_are_still_stripped(self, fake_home, tmp_path):
+        """The contract that rule exists for stands: no storage, no error, no
+        entry."""
+        from network import receive_envelope
+        from registry import save_registry
+        from ark.ulid import new as new_ulid
+
+        b_root = tmp_path / "B"; b_root.mkdir()
+        save_registry({"B": {"root": str(b_root)}})
+        b = Participant("B", b_root)
+
+        msg_id = new_ulid()
+        envelope = json.dumps({
+            "id": msg_id, "from": "old", "to": "B", "content": "hi",
+            "files": [{"filename": "legacy.txt"}],
+        }).encode()
+        receive_envelope(envelope, [b], services=[_StubStorage("svc")])
+        body = json.loads(next(inbox_dir("B").iterdir()).read_text())
+        assert body["files"] == []
+
     def test_no_services_strips_files(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry

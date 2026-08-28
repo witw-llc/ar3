@@ -757,12 +757,23 @@ def _deliver_claimed_envelope(
     # Configured storage services are tried first; http(s) URLs then fall back
     # to a plain GET so presigned links need no receiver-side credentials.
     # Legacy envelopes with filename-only entries (no `storage`) are stripped.
+    # An entry carrying `error` is not one of those: a sender that could not
+    # upload publishes it to say the file existed and was lost, and emptying
+    # the array around it recreates the silence it was written to break.
     raw_files = msg.get("files") or []
     files_have_storage = any((isinstance(e, dict) and e.get("storage")) for e in raw_files)
-    if raw_files and not files_have_storage:
-        out(f"WARN: stripped FILE: payloads from incoming envelope id={msg_id}")
+    kept = [
+        e
+        for e in raw_files
+        if isinstance(e, dict) and (e.get("storage") or e.get("error"))
+    ]
+    if len(kept) != len(raw_files):
+        out(
+            f"WARN: stripped {len(raw_files) - len(kept)} legacy FILE: "
+            f"payload(s) from incoming envelope id={msg_id}"
+        )
         msg = dict(msg)
-        msg["files"] = []
+        msg["files"] = kept
     sender_label = msg.get("from") or "?"
     preview = _preview(msg.get("content", ""))
     delivered_names: list[str] = []
@@ -787,7 +798,7 @@ def _deliver_claimed_envelope(
                 wait_s=0,
                 announce_failures=wait_s <= 0,
             )
-            if _attachments_missing(msg_for_recipient) and wait_s > 0:
+            if _attachments_missing(msg_for_recipient, msg) and wait_s > 0:
                 deferred.append(recipient)
                 continue
         if _write_to_inbox(
@@ -827,8 +838,27 @@ def _receive_wait_seconds() -> int:
         return 0
 
 
-def _attachments_missing(msg: dict) -> bool:
-    return any(e.get("error") for e in (msg.get("files") or []))
+def _attachments_missing(msg: dict, source: dict | None = None) -> bool:
+    """Whether anything worth waiting for is still missing.
+
+    A sender that could not upload publishes an entry carrying `error` and no
+    `storage`. That loss is already final — there is no URL to retry — so
+    deferring on it would hold the message for the whole retry window and then
+    deliver exactly what was available at the start. Only an entry the sender
+    gave us somewhere to fetch from counts as retryable; pass `source` to make
+    that distinction, omit it to ask the flat question.
+    """
+    retryable: set | None = None
+    if source is not None:
+        retryable = {
+            e.get("filename")
+            for e in (source.get("files") or [])
+            if isinstance(e, dict) and e.get("storage")
+        }
+    return any(
+        e.get("error") and (retryable is None or e.get("filename") in retryable)
+        for e in (msg.get("files") or [])
+    )
 
 
 def _worst_attachment_outcome(envelopes: list[dict]) -> dict:

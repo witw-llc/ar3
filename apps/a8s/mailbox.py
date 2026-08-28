@@ -692,7 +692,18 @@ def _download_files_to_recipient(
     for entry in src_files:
         filename = entry.get("filename") or ""
         urls = entry.get("storage") or []
-        if not filename or not urls:
+        if not filename:
+            continue
+        if not urls:
+            # A sender that could not upload publishes the entry precisely to
+            # say the file existed and was lost. Dropping it here repeats the
+            # silence it was written to break, and restating it as a download
+            # failure would replace the sender's reason with our own.
+            if entry.get("error"):
+                carried = {"filename": filename, "error": entry["error"]}
+                if entry.get("detail"):
+                    carried["detail"] = entry["detail"]
+                new_files.append(carried)
             continue
         dest, err = bundle_file_path(dest_root, filename)
         if dest is None:

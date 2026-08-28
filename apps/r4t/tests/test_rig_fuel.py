@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,17 @@ def answers(monkeypatch):
         monkeypatch.setattr(engines.MODULES[engine], "quota", fake)
 
     return install
+
+
+def servable_snapshot() -> dict:
+    """CLAUDE_PAYLOAD with its resets still ahead. A snapshot whose stated
+    reset has already passed is refused outright, so a test about an *aged*
+    answer has to hand it one that is only aged."""
+    payload = copy.deepcopy(CLAUDE_PAYLOAD)
+    ahead = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    for bucket in payload["buckets"]:
+        bucket["reset_time"] = ahead
+    return payload
 
 
 def write_rigs(tmp_path: Path, entry: dict, name: str = "cheap") -> Path:
@@ -299,7 +311,7 @@ class TestCli:
     def test_an_aged_answer_says_where_it_came_from(
         self, r4t_home, tmp_path, capsys, answers
     ):
-        engines.save_snapshot("claude", CLAUDE_PAYLOAD)
+        engines.save_snapshot("claude", servable_snapshot())
         answers(error="usage endpoint unreachable")
         config = write_rigs(tmp_path, claude_rig(model="opus"))
         assert fuel_cli(config) == 0
@@ -311,7 +323,7 @@ class TestCli:
     def test_the_aged_json_carries_seconds_not_a_human_string(
         self, r4t_home, tmp_path, capsys, answers
     ):
-        engines.save_snapshot("claude", CLAUDE_PAYLOAD)
+        engines.save_snapshot("claude", servable_snapshot())
         answers(error="usage endpoint unreachable")
         config = write_rigs(tmp_path, claude_rig(model="opus"))
         assert fuel_cli(config, "--json") == 0
@@ -320,6 +332,18 @@ class TestCli:
         assert report["quota_engine"] == "claude"
         assert isinstance(report["age_seconds"], float)
         assert "age" not in report
+
+    def test_a_snapshot_whose_reset_passed_is_refused_here_too(
+        self, r4t_home, tmp_path, capsys, answers
+    ):
+        """`rig fuel` reads through `engines.quota`, so the gauge cannot quote a
+        reset that has already happened either. The snapshot is saved now — it
+        is the stated reset that is stale, not the reading."""
+        engines.save_snapshot("claude", CLAUDE_PAYLOAD)
+        answers(error="usage endpoint unreachable")
+        config = write_rigs(tmp_path, claude_rig(model="opus"))
+        assert fuel_cli(config) == 1
+        assert "has passed" in capsys.readouterr().err
 
     def test_duplicate_labels_get_exactly_one_star(
         self, r4t_home, tmp_path, capsys, answers
