@@ -1,4 +1,4 @@
 {
-  "description": "Test-only mock CLI definition. The bundled mock-cli script echoes each argv element with a MOCK-CLI: prefix; the FROM:|TO:|TS:|AGE:|MSG: format gives daemon tests a stable string to grep.",
-  "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE"]
+  "description": "Test-only mock CLI definition. The bundled mock_cli.py script echoes each argv element with a MOCK-CLI: prefix; the FROM:|TO:|TS:|AGE:|MSG: format gives daemon tests a stable string to grep.",
+  "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE"]
 }

@@ -279,6 +279,18 @@ class TestHardenStdio:
         assert sys.stdin.errors == "replace"
         assert sys.stdin.read() == "hi"
 
+    def test_floors_a_strict_utf8_stdin(self, monkeypatch):
+        """The ordinary seat: stdin is already UTF-8 and strict, so the branch
+        that repins a code page never runs and the documented escape never
+        happened. An undecodable byte raised mid-read instead — and a reader
+        that has already pulled a valid prefix out of the buffer turns that
+        raise into a truncated message."""
+        wrapper = io.TextIOWrapper(io.BytesIO(b"caf\xe9 au lait"), encoding="utf-8")
+        monkeypatch.setattr(sys, "stdin", wrapper)
+
+        harden_stdio()
+        assert sys.stdin.read() == "caf\\xe9 au lait"
+
     def test_invalid_utf8_stdin_bytes_escape_reversibly(self, monkeypatch):
         wrapper = io.TextIOWrapper(io.BytesIO(b"caf\xe9"), encoding="cp1252")
         monkeypatch.setattr(sys, "stdin", wrapper)

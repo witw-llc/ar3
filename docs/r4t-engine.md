@@ -324,7 +324,7 @@ element — never as one string with spaces in it, which is the wiring that
 fails. The three translated parameters are how a node is tuned:
 
 ```json
-"invoke": ["python3", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
+"invoke": ["$PYTHON", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
            "--permissions", "bypass",
            "--allowed-tools", "Bash(git:*) Read Edit",
            "--agent", "$RECIPIENT",

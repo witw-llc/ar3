@@ -12,7 +12,6 @@ import pytest
 
 import judge
 import state
-from conftest import needs_tzset
 from dispatch import zoned_stamp
 
 NODE = "acme"
@@ -31,7 +30,7 @@ def judge_harness(tmp_path):
             import os, sys
             calls_dir = {str(calls)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w", encoding="utf-8", newline="") as f:
                 f.write(sys.argv[1])
             print(os.environ.get("JUDGE_REPLY", '{{"findings": []}}'))
             sys.exit(int(os.environ.get("JUDGE_EXIT", "0")))
@@ -155,7 +154,6 @@ def test_missing_config_errors_action_first(r4t_home, tmp_path):
     assert "(try: r4t rig add grader" in err
 
 
-@needs_tzset
 def test_run_context_speaks_local_not_utc_iso(r4t_home, zone):
     zone("Asia/Kolkata")
     state.append_log(

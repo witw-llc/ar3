@@ -1,7 +1,7 @@
 {
   "description": "Echoes each message back to its sender — a reachability probe.",
   "invoke": [
-    "python3",
+    "$PYTHON",
     "$A8S_DIR/echo_agent.py",
     "$SENDER",
     "$MESSAGE"

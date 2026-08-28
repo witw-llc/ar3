@@ -652,12 +652,12 @@ def continue_ctx(r4t_home, tmp_path, tells):
             import json, os, sys
             calls_dir = {str(calls)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
                 json.dump(sys.argv[1:], f)
             if "--continue" in sys.argv and not os.path.exists({str(marker)!r}):
                 sys.stderr.write("No previous chats found.\\n")
                 sys.exit(1)
-            open({str(marker)!r}, "w").close()
+            open({str(marker)!r}, "w", encoding="utf-8", newline="").close()
             print("continue harness ran")
             """
         ),
@@ -994,18 +994,6 @@ class TestPromptStatesTheLocalTime:
     which *today* and *tomorrow* land a day off. The intro says the zone
     outright — in the intro rather than the doctrine block, because it is a
     framing statement and `reinforce` keeps its last-read primacy."""
-
-    @pytest.fixture
-    def zone(self, monkeypatch):
-        import time as _time
-
-        def use(name: str) -> None:
-            monkeypatch.setenv("TZ", name)
-            _time.tzset()
-
-        yield use
-        monkeypatch.undo()
-        _time.tzset()
 
     LINE = re.compile(
         r"Local time is \d{4}-\d{2}-\d{2} \d{2}:\d{2} IST\. Every relative time "
@@ -3572,7 +3560,7 @@ class TestWorkdir:
         script = tmp_path / "argv-probe.py"
         script.write_text(
             "import sys\n"
-            f"open({str(seen)!r}, 'w').write(' '.join(sys.argv[1:]))\n",
+            f"open({str(seen)!r}, 'w', encoding='utf-8', newline='').write(' '.join(sys.argv[1:]))\n",
             encoding="utf-8",
         )
         config = json.loads(rig_config.read_text(encoding="utf-8"))

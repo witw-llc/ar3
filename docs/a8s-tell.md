@@ -126,8 +126,13 @@ is the receive-side complement of `tell`. It resolves the node the same way
    `--timeout 0` follows until Ctrl+C.
 3. Print each new envelope as `sender: body` by default. Bodies longer than
    `--body-max` / `TELLS_BODY_MAX` (default **16000** chars; `0` = unlimited)
-   are clipped and followed by a `python3 -c …` command that prints the full
-   `content` from that inbox JSON. With `--glow` and/or `--heading-out` /
+   are clipped and followed by `tells --recover <token>`, which prints the full
+   `content` from that inbox JSON. The token is the envelope's path in
+   base64url, so the printed line survives a paste into any shell — no quoting
+   makes an arbitrary path inert, since bash and PowerShell expand `$name` and
+   `$(...)` inside double quotes and cmd expands `%NAME%`. `tells --show PATH`
+   takes a plain path for a reader who has one. Neither needs an outbox or a
+   registry: a clipped message is recoverable from wherever the reader is. With `--glow` and/or `--heading-out` /
    `--heading-in`, print the same markdown as `a8s convo` (shared
    `format_entry` / GlowStream). Timeout prints one stderr line and exits 1.
 

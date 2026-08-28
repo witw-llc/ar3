@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 import textwrap
 from pathlib import Path
@@ -15,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import engines
+from conftest import write_path_executable
 from engines import check as engine_check
 from r4t import main as r4t_main
 
@@ -32,18 +32,17 @@ def fake_binary(
     `flags`. `strict` makes it reject an unknown long flag the way clap does.
     It records every call when `calls` is given, so a test can prove no probe
     ever asked it to run a turn."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    path = bin_dir / name
-    path.write_text(
+    return write_path_executable(
+        bin_dir,
+        name,
         textwrap.dedent(
             f"""\
-            #!{sys.executable}
             import json, os, sys
             args = sys.argv[1:]
             calls_dir = {str(calls) if calls else None!r}
             if calls_dir:
                 n = len(os.listdir(calls_dir))
-                with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w") as f:
+                with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
                     json.dump(args, f)
             if "--version" in args:
                 print({version!r})
@@ -59,10 +58,7 @@ def fake_binary(
                 print(f"  {{flag}}  does a thing")
             """
         ),
-        encoding="utf-8",
     )
-    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return path
 
 
 CLAUDE_FLAGS = [
@@ -90,15 +86,14 @@ class TestProbeDecoding:
         CLI's UTF-8 help text crashed `engine check` outright. Found in
         review. A raw 0xE9 byte here proves the replace path on every
         platform."""
-        path = bin_dir / "claude"
-        path.write_text(
-            f"#!{sys.executable}\n"
+        write_path_executable(
+            bin_dir,
+            "claude",
             "import sys\n"
             'sys.stdout.buffer.write(b"9.9.9 caf\\xe9\\n")\n'
             f"sys.stdout.buffer.write({' '.join(CLAUDE_FLAGS)!r}.encode())\n"
-            'sys.stdout.buffer.write(b"\\n")\n'
+            'sys.stdout.buffer.write(b"\\n")\n',
         )
-        path.chmod(0o755)
         report = engine_check.check_engine("claude")
         assert report.installed is True
         assert report.verdict == engine_check.ACCEPTED

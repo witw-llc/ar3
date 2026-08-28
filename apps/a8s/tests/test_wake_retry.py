@@ -9,6 +9,7 @@ whole point of the issue is that mail survives what the wake actually does.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -251,7 +252,7 @@ def _register(tmp_path: Path, definition: dict) -> Participant:
 
 def _flaky_def(fixtures_dir: Path, **extra) -> dict:
     return {
-        "invoke": [str(fixtures_dir / "mock-flaky-cli"), "MSG:$MESSAGE"],
+        "invoke": [sys.executable, str(fixtures_dir / "mock_flaky_cli.py"), "MSG:$MESSAGE"],
         **extra,
     }
 
@@ -286,7 +287,7 @@ class TestFailureModesKeepMailDeliverable:
     def test_undefined_var_requeues_the_message(self, fake_home, tmp_path, fixtures_dir):
         _register(
             tmp_path,
-            {"invoke": [str(fixtures_dir / "mock-cli"), "MODEL:$MODEL|$MESSAGE"]},
+            {"invoke": [sys.executable, str(fixtures_dir / "mock_cli.py"), "MODEL:$MODEL|$MESSAGE"]},
         )
         _queue_inbox("A", "unexpanded")
 
@@ -304,7 +305,7 @@ class TestFailureModesKeepMailDeliverable:
         _register(
             tmp_path,
             {
-                "invoke": [str(fixtures_dir / "mock-slow-cli"), "MSG:$MESSAGE"],
+                "invoke": [sys.executable, str(fixtures_dir / "mock_slow_cli.py"), "MSG:$MESSAGE"],
                 "max_wake_seconds": 0.25,
             },
         )
@@ -339,9 +340,9 @@ class TestFailureModesKeepMailDeliverable:
             tmp_path,
             {
                 "pause": 0,
-                "invoke": [str(fixtures_dir / "mock-flaky-cli"), "SINGLE"],
+                "invoke": [sys.executable, str(fixtures_dir / "mock_flaky_cli.py"), "SINGLE"],
                 "batch": {
-                    "invoke": [str(fixtures_dir / "mock-flaky-cli"), "BATCH"],
+                    "invoke": [sys.executable, str(fixtures_dir / "mock_flaky_cli.py"), "BATCH"],
                     "limit": 5,
                 },
             },

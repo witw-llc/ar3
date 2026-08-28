@@ -532,7 +532,12 @@ def harden_stdio() -> None:
     and text in another encoding must be re-encoded before the pipe, not
     smuggled through the locale. Invalid UTF-8 bytes become ``\\xNN``
     escapes (backslashreplace decodes too) — reversible, never replaced with
-    U+FFFD. The interactive Windows console is already UTF-16-to-UTF-8
+    U+FFFD. The raising handlers are floored on a stdin that is ALREADY
+    UTF-8 as well, which is the ordinary case on a modern seat: without that,
+    an undecodable byte raises mid-read, and a reader that has already taken a
+    valid prefix out of the buffer is one ``except`` away from sending the
+    prefix as though it were the message. A deliberate non-raising handler is
+    left alone, exactly as on the way out. The interactive Windows console is already UTF-16-to-UTF-8
     underneath (PEP 528) and passes through untouched.
     """
     if isinstance(sys.stdout, io.TextIOWrapper) and sys.stdout.errors in (
@@ -546,11 +551,13 @@ def harden_stdio() -> None:
             already_utf8 = codecs.lookup(stdin.encoding).name == "utf-8"
         except LookupError:
             already_utf8 = False
-        if not already_utf8:
-            try:
+        try:
+            if not already_utf8:
                 stdin.reconfigure(encoding="utf-8", errors="backslashreplace")
-            except (OSError, ValueError):
-                pass
+            elif stdin.errors in ("strict", "surrogateescape"):
+                stdin.reconfigure(errors="backslashreplace")
+        except (OSError, ValueError):
+            pass
 
 
 # ---------- logging ----------

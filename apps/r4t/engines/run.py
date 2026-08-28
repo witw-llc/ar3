@@ -24,6 +24,7 @@ stays in RUN_ENGINES since the quirk is specific to the launcher path.
 from __future__ import annotations
 
 import os
+import shutil
 import shlex
 import signal
 import subprocess
@@ -321,6 +322,31 @@ def _print_echo(template: list[str], prompt: str) -> None:
     print("r4t engine echo: --- end prompt ---", file=sys.stderr)
 
 
+def resolve_argv0(argv: list[str]) -> list[str]:
+    """`argv` with a bare program name resolved to the path it runs from.
+
+    Windows' CreateProcess appends only `.exe` to a bare name, never `.cmd` —
+    and every npm global install arrives as a `.cmd` shim, which is how codex,
+    opencode and cursor are installed. So `shutil.which` finds the CLI, the
+    check reports it installed, and the exec then fails with WinError 2. Both
+    halves are true at once, which is why it reads as "installed but
+    unverifiable" rather than as a missing binary.
+
+    Resolved here, at the moment the argv is handed to the OS, rather than at
+    composition — the argv r4t echoes and reports stays the readable name the
+    operator would type. A path (already resolved, or given as one) is left
+    alone, and a name that resolves to nothing is left for the OS to reject
+    with its own error.
+    """
+    if not argv:
+        return argv
+    program = argv[0]
+    if os.sep in program or (os.altsep and os.altsep in program):
+        return argv
+    resolved = shutil.which(program)
+    return [resolved, *argv[1:]] if resolved else argv
+
+
 def _spawn(
     argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
 ) -> int:
@@ -330,7 +356,7 @@ def _spawn(
     CLI commonly forks tool subprocesses that `proc.kill()` alone would
     leak, and a grace period lets one that traps SIGTERM exit cleanly."""
     try:
-        proc = _proc_spawn(argv, cwd=cwd, env=env)
+        proc = _proc_spawn(resolve_argv0(argv), cwd=cwd, env=env)
     except OSError as exc:
         raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
     try:

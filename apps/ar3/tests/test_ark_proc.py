@@ -110,7 +110,7 @@ class TestTerminateGroup:
         grandchild_script.write_text(
             "import os, signal, time\n"
             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            f"open({str(pidfile)!r}, 'w', encoding='utf-8').write(str(os.getpid()))\n"
             "time.sleep(60)\n",
             encoding="utf-8",
         )

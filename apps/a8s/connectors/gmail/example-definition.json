@@ -1,7 +1,7 @@
 {
   "description": "Gmail connector: routes tell/<name> to a configured email recipient. Replies are pulled back into a8s every 300s by the idle invoke.",
   "invoke": [
-    "python3",
+    "$PYTHON",
     "$A8S_DIR/connectors/gmail/gmail_connector.py",
     "--to", "REPLACE-WITH-RECIPIENT-EMAIL",
     "--subject", "$SENDER",
@@ -10,7 +10,7 @@
   "idle": {
     "timeout": 300,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/connectors/gmail/gmail_cron.py",
       "--from", "REPLACE-WITH-RECIPIENT-EMAIL"
     ]

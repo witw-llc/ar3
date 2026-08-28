@@ -1,7 +1,7 @@
 {
   "description": "r4t \u2014 the roster. Namespace node: bind a prefix with `a8s namespace <prefix> <node>` and tell <prefix> \u2014 external mail always enters at the roster leader. Roster in <root>/ROSTER.md; rig config out-of-repo at ~/.config/r4t/rigs.json (append --roster / --harness-config to override). The idle invoke resolves the sole ~/.config/r4t roster; with multiple rosters, copy this file per node and append \"--node\", \"<prefix>\" to the IDLE invoke only (dispatch derives the node from --to and rejects --node).",
   "invoke": [
-    "python3",
+    "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
     "dispatch",
     "--root",
@@ -22,7 +22,7 @@
     "format": "envelopes",
     "limit": 20,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "dispatch",
       "--root",
@@ -35,7 +35,7 @@
   "idle": {
     "timeout": 60,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "idle",
       "--root",

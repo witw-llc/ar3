@@ -2,7 +2,7 @@
 
 Each agent has a definition JSON (built-in or custom) that encodes one argv
 under the `invoke` key. `build_command` substitutes `$SENDER` / `$RECIPIENT`
-/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$META` / `$A8S_DIR` /
+/ `$MESSAGE` / `$TIMESTAMP` / `$AGE` / `$META` / `$A8S_DIR` / `$PYTHON` /
 `$DEFINITION_PATH` into it, plus any per-node a8s vars
 (`a8s vars <name> set KEY value`) as `$KEY`.
 `$DEFINITION_PATH` is the resolved path of the agent's own definition file, so
@@ -42,6 +42,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -73,6 +74,7 @@ BUILTIN_PLACEHOLDERS = frozenset({
     "NOW",
     "A8S_DIR",
     "DEFINITION_PATH",
+    "PYTHON",
 })
 
 # Built-ins for the three mailbox path fields. `$NODE` is per-node and always
@@ -452,6 +454,7 @@ def _expand_argv(
       - `$NOW`        wake time in this machine's zone, e.g. `2026-08-16 13:22 PDT`
       - `$A8S_DIR`    the apps/a8s/ directory
       - `$DEFINITION_PATH`  this agent's definition file path
+      - `$PYTHON`     the interpreter running the router
 
     Plus per-node a8s vars (`vars`) as `$KEY` (case-insensitive). Not OS
     environment. Any `$NAME` that is neither a built-in nor present in `vars`
@@ -480,6 +483,12 @@ def _expand_argv(
         "NOW": clock.stamp(),
         "A8S_DIR": str(SCRIPT_DIR),
         "DEFINITION_PATH": definition_path,
+        # The router is already running under a working interpreter, so a
+        # definition that needs one asks for this rather than naming `python3`.
+        # python.org's Windows installer ships python.exe and no python3.exe,
+        # and probing PATH there can find the Microsoft Store alias, a stub
+        # that opens the Store instead of running anything.
+        "PYTHON": sys.executable,
     }
 
     def repl(m: re.Match[str]) -> str:

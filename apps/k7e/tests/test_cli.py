@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import write_path_executable
 
 K7E_PY = str(Path(__file__).resolve().parent.parent / "k7e.py")
 
@@ -193,6 +194,26 @@ class TestDistillExitCode:
         p.write_text(para * 20)
         return str(p)
 
+    def _bridge(self, tmp_path, name, body):
+        """A distill or rerank bridge as a Python program, plus a marker file
+        it writes before doing anything else.
+
+        The marker is the point. Every bridge here used to be
+        `sh -c '<one-liner>'`, and a test that asserts a *failure* could not
+        tell a bridge that answered wrongly from one that never launched —
+        pointing all six at a shell that does not exist left this class at
+        3 failed / 8 passed on both platforms, so five of those greens could
+        not fail. `sh` is also not a thing a Windows box is owed.
+        """
+        marker = tmp_path / f"{name}-ran"
+        script = write_path_executable(tmp_path, name, (
+            "import sys\n"
+            "sys.stdin.read()\n"
+            f"open({str(marker)!r}, 'w', encoding='utf-8').close()\n"
+            + body
+        ))
+        return str(script), marker
+
     def _env(self, tmp_path, command):
         env = os.environ.copy()
         env["K7E_HOME"] = str(tmp_path / "store")
@@ -202,7 +223,7 @@ class TestDistillExitCode:
         return env
 
     def test_a_bridge_that_cannot_launch_fails_the_run(self, tmp_path, journal):
-        env = self._env(tmp_path, 'sh -c \'k7e-no-such-harness "$(cat)"\'')
+        env = self._env(tmp_path, "k7e-no-such-harness")
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
@@ -211,22 +232,61 @@ class TestDistillExitCode:
         assert "LLM call(s) failed" in r.stderr
         assert "No new knowledge extracted." not in r.stdout
 
+    def test_a_command_that_cannot_be_parsed_fails_the_run(self, tmp_path, journal):
+        """A configuration that cannot be parsed fails identically for every
+        file, so it is not the per-file skip `distill` catches ValueError for.
+        Before this it skipped every capture and exited 0, and a sweep reads 0
+        as a successful dream and advances past captures nothing read."""
+        env = self._env(tmp_path, 'k7e-llm --note "unclosed')
+        r = subprocess.run(
+            [sys.executable, K7E_PY, "distill", journal],
+            env=env, capture_output=True, text=True,
+        )
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "LLM call(s) failed" in r.stderr
+        assert "No new knowledge extracted." not in r.stdout
+
+    def test_the_same_journal_stores_through_a_working_bridge(self, tmp_path, journal):
+        """The positive control for the test above. A negative control proves
+        the instrument can report failure; only a positive one proves it can
+        report success, and a silent no-op sits exactly between them — this
+        journal returning `nothing extracted` for a *working* bridge would
+        make the assertion above prove nothing."""
+        payload = json.dumps([{
+            "title": "Parse control", "content": "The bridge ran and answered.",
+            "tags": ["control"],
+        }])
+        bridge, ran = self._bridge(tmp_path, "control", f"print({payload!r})\n")
+        env = self._env(tmp_path, bridge)
+        r = subprocess.run(
+            [sys.executable, K7E_PY, "distill", journal],
+            env=env, capture_output=True, text=True,
+        )
+        assert ran.exists()
+        assert r.returncode == 0, r.stderr
+        assert "No new knowledge extracted." not in r.stdout
+
     def test_a_partial_failure_fails_the_run(self, tmp_path, long_journal):
         """One chunk lost out of many still loses input. The caller's
         watermark is per capture, so exit 0 says the whole capture was read
         and the failed chunk is never offered again."""
-        script = tmp_path / "flaky.sh"
-        script.write_text(
-            "#!/bin/sh\n"
-            "cat >/dev/null\n"
-            f"if [ -f {tmp_path}/fired ]; then exit 7; fi\n"
-            f"touch {tmp_path}/fired\n"
-            'printf \'[{"title":"Deploy branch claim","content":"The note said '
-            'deploys come from the hotfix branch and not from main, cut by the '
-            'owner after the suite is green.","tags":["deploy"]}]\'\n'
-        )
-        script.chmod(0o755)
-        env = self._env(tmp_path, f"sh -c '{script} \"$(cat)\"'")
+        payload = json.dumps([{
+            "title": "Deploy branch claim",
+            "content": "The note said deploys come from the hotfix branch and "
+                       "not from main, cut by the owner after the suite is green.",
+            "tags": ["deploy"],
+        }])
+        # Python rather than `sh -c`, which no Windows box has. What this test
+        # is about is the second chunk failing, not the shell.
+        script = write_path_executable(tmp_path, "flaky", (
+            "import os, sys\n"
+            "sys.stdin.read()\n"
+            f"fired = {str(tmp_path / 'fired')!r}\n"
+            "if os.path.exists(fired): sys.exit(7)\n"
+            "open(fired, 'w', encoding='utf-8').close()\n"
+            f"sys.stdout.write({payload!r})\n"
+        ))
+        env = self._env(tmp_path, str(script))
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", long_journal],
             env=env, capture_output=True, text=True,
@@ -242,14 +302,15 @@ class TestDistillExitCode:
         """A bridge that prints its own auth error and exits 0 looks like a
         good answer to any layer that only checks the status and a non-empty
         stdout. The required shape is a JSON array; its absence is the tell."""
-        env = self._env(
-            tmp_path,
-            "sh -c 'cat >/dev/null; echo \"Error: not authenticated\"'",
+        bridge, ran = self._bridge(
+            tmp_path, "auth-error", "print('Error: not authenticated')\n"
         )
+        env = self._env(tmp_path, bridge)
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
         )
+        assert ran.exists(), "the bridge never launched, so the failure proves nothing"
         assert r.returncode == 1
         assert "no JSON array in output" in r.stderr
         assert "No new knowledge extracted." not in r.stdout
@@ -273,14 +334,11 @@ class TestDistillExitCode:
             ),
             "tags": ["deploy"],
         }])
-        bridge = tmp_path / "bridge.py"
-        bridge.write_text(
-            "#!/usr/bin/env python3\n"
+        bridge = write_path_executable(tmp_path, "bridge", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({payload!r})\n"
-        )
-        bridge.chmod(0o755)
+        ))
         env = self._env(tmp_path, str(bridge))
         subprocess.run(
             [sys.executable, K7E_PY, "config", "rerank", "true"],
@@ -300,11 +358,13 @@ class TestDistillExitCode:
                 [sys.executable, K7E_PY, "store", title, "--content", content],
                 env=env, capture_output=True,
             )
-        env["K7E_RERANK_COMMAND"] = "sh -c 'cat >/dev/null; exit 9'"
+        rerank, rerank_ran = self._bridge(tmp_path, "dead-rerank", "sys.exit(9)\n")
+        env["K7E_RERANK_COMMAND"] = rerank
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
         )
+        assert rerank_ran.exists(), "the reranker never launched"
         assert "[llm:rerank]" in r.stderr, "the reranker path never ran"
         assert r.returncode == 0, r.stderr
         assert "the input they covered was not read" not in r.stderr
@@ -317,17 +377,20 @@ class TestDistillExitCode:
     def test_bracket_shaped_prose_is_not_an_answer(self, tmp_path, journal, prose):
         """A shape check passes anything with brackets in it. Only a payload
         the parser can actually turn into candidates counts as read."""
-        env = self._env(tmp_path, f"sh -c 'cat >/dev/null; echo \"{prose}\"'")
+        bridge, ran = self._bridge(tmp_path, "prose", f"print({prose!r})\n")
+        env = self._env(tmp_path, bridge)
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
         )
+        assert ran.exists(), "the bridge never launched, so the failure proves nothing"
         assert r.returncode == 1
         assert "LLM call(s) failed" in r.stderr
         assert "No new knowledge extracted." not in r.stdout
 
     def test_an_empty_array_stays_a_real_answer(self, tmp_path, journal):
-        env = self._env(tmp_path, 'sh -c \'cat >/dev/null; echo "  []  "\'')
+        bridge, _ = self._bridge(tmp_path, "empty-array", "print('  []  ')\n")
+        env = self._env(tmp_path, bridge)
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
@@ -336,7 +399,8 @@ class TestDistillExitCode:
         assert "No new knowledge extracted." in r.stdout
 
     def test_a_working_bridge_with_nothing_to_say_succeeds(self, tmp_path, journal):
-        env = self._env(tmp_path, 'sh -c \'cat >/dev/null; echo "[]"\'')
+        bridge, _ = self._bridge(tmp_path, "silent", "print('[]')\n")
+        env = self._env(tmp_path, bridge)
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
             env=env, capture_output=True, text=True,
@@ -356,14 +420,11 @@ class TestDistillExitCode:
         payload = json.dumps([
             {"title": "Malformed list content", "content": ["a", "b"]},
         ])
-        bridge = tmp_path / "bridge.py"
-        bridge.write_text(
-            "#!/usr/bin/env python3\n"
+        bridge = write_path_executable(tmp_path, "bridge", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({payload!r})\n"
-        )
-        bridge.chmod(0o755)
+        ))
         env = self._env(tmp_path, str(bridge))
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],
@@ -392,14 +453,11 @@ class TestDistillExitCode:
             {"title": "missing content"},
             401,
         ])
-        bridge = tmp_path / "bridge.py"
-        bridge.write_text(
-            "#!/usr/bin/env python3\n"
+        bridge = write_path_executable(tmp_path, "bridge", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({payload!r})\n"
-        )
-        bridge.chmod(0o755)
+        ))
         env = self._env(tmp_path, str(bridge))
         r = subprocess.run(
             [sys.executable, K7E_PY, "distill", journal],

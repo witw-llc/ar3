@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -20,7 +22,10 @@ import pytest
 from core import TELL_OUTBOX_DIR_ENV
 from tells import TellsUsageError, parse_tells_argv, tells_main
 
-TELLS = Path(__file__).resolve().parent.parent.parent.parent / "tells"
+# Same reason as `tell` in test_tell.py: the extensionless polyglot is
+# bash-and-PowerShell, so Windows runs the `.cmd` sibling instead.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+TELLS = _REPO_ROOT / ("tells.cmd" if os.name == "nt" else "tells")
 
 
 @pytest.fixture(autouse=True)
@@ -147,9 +152,110 @@ def test_format_displayed_content_appends_recovery_command(tmp_path):
     assert out.startswith("abcd\n")
     assert "truncated at 4 chars" in out
     assert "full message:" in out
-    assert "python3 -c" in out
-    assert str(path.resolve()) in out
-    assert "['content']" in out
+    from tells import decode_envelope_path
+
+    token = out.rsplit(" ", 1)[1].rstrip(")")
+    assert decode_envelope_path(token) == str(path.resolve())
+    assert "tells --recover" in out
+
+
+# Directory names a shell would rewrite or execute if the emitted command
+# quoted its argument instead of encoding it. A reviewer measured all of them:
+# `$HOME` and `$(...)` are substituted inside DOUBLE quotes by both bash and
+# PowerShell, and the second is executed. No quoting makes an arbitrary path
+# inert; only encoding does.
+HOSTILE_DIR_NAMES = [
+    "O'Brien sync",
+    "a space and 'quotes'",
+    "$HOME sync",
+    "$(printf SUBSTITUTED) sync",
+]
+
+
+def _emitted_command(tmp_path, name):
+    from tells import format_displayed_content
+
+    inbox = tmp_path / name
+    inbox.mkdir()
+    envelope = inbox / "01MSG.json"
+    body = f"the whole body from {name}, longer than the clip"
+    envelope.write_text(json.dumps({"content": body}), encoding="utf-8")
+    out = format_displayed_content(body, envelope, body_max=6)
+    return out.split("full message:\n", 1)[1].rstrip(")"), body
+
+
+def _shell_env():
+    return {**os.environ, "PATH": f"{_REPO_ROOT}{os.pathsep}{os.environ['PATH']}"}
+
+
+def test_the_emitted_command_has_nothing_a_shell_can_read(tmp_path):
+    r"""The argument is encoded, not quoted, and this is the reason.
+
+    A quoted program path is an expression in PowerShell. An apostrophe breaks
+    bash. And double quotes — which looked like the answer — are worse than
+    they look: bash and PowerShell both expand `$name` and `$(...)` inside
+    them, and cmd expands `%NAME%`. A reviewer ran the emitted command from a
+    directory named `$(printf SUBSTITUTED) sync` and both shells EXECUTED it.
+
+    base64url with the padding stripped is `A-Za-z0-9-_` and nothing else, so
+    there is nothing left for a shell to interpret.
+    """
+    for name in HOSTILE_DIR_NAMES:
+        command, _ = _emitted_command(tmp_path, name)
+        assert re.fullmatch(r"tells --recover [A-Za-z0-9_-]+", command), command
+
+
+def test_the_recovery_command_is_run_exactly_as_printed_in_bash(tmp_path):
+    """Run verbatim, not reconstructed. The version of this test that took the
+    string apart and rebuilt argv proved that a command nobody would type
+    works, and the emitted one was broken in both shells at the time."""
+    for name in HOSTILE_DIR_NAMES:
+        command, body = _emitted_command(tmp_path, name)
+        # `bash -c`, never `-lc`. A LOGIN shell re-reads the profile, which
+        # re-prepends the INSTALLED `~/.ar3` to PATH — so the test ran the
+        # installed `tells`, which predates this option, and failed on a
+        # Windows seat for a reason that had nothing to do with the code under
+        # test. The Windows seat found it; it passes here either way, which is
+        # why it had to be found somewhere else.
+        res = subprocess.run(
+            ["bash", "-c", command],
+            capture_output=True, text=True, env=_shell_env(), cwd=str(tmp_path),
+        )
+        assert res.returncode == 0, (name, res.stderr)
+        assert res.stdout.strip() == body, (name, res.stdout, res.stderr)
+
+
+def test_the_recovery_command_is_run_exactly_as_printed_in_powershell(tmp_path):
+    """The other supported shell, and the one where the earlier shapes failed
+    for a different reason each time."""
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh not installed")
+    for name in HOSTILE_DIR_NAMES:
+        command, body = _emitted_command(tmp_path, name)
+        res = subprocess.run(
+            [pwsh, "-NoProfile", "-Command", command],
+            capture_output=True, text=True, env=_shell_env(), cwd=str(tmp_path),
+        )
+        assert res.returncode == 0, (name, res.stderr)
+        assert res.stdout.strip() == body, (name, res.stdout, res.stderr)
+
+
+def test_show_still_takes_a_path_for_someone_who_has_one(tmp_path):
+    """`--recover` is for pasting. `--show` stays for a reader who has the path
+    in front of them and can quote it in their own shell."""
+    from tells import tells_main
+
+    envelope = tmp_path / "01MSG.json"
+    envelope.write_text(json.dumps({"content": "a body"}), encoding="utf-8")
+    assert tells_main(["--show", str(envelope)]) == 0
+
+
+def test_a_token_that_is_not_one_is_refused(tmp_path):
+    from tells import tells_main
+
+    assert tells_main(["--recover", "not a token!!"]) == 2
+    assert tells_main(["--show", str(tmp_path / "nope.json")]) == 1
 
 
 def test_format_displayed_content_unlimited_when_zero(tmp_path):
@@ -174,8 +280,11 @@ def test_tells_truncates_long_body_with_recovery_command(tmp_path, monkeypatch, 
     assert "xxxxx" in out
     assert "TAIL" not in out
     assert "truncated at 20 chars" in out
-    assert f"{msg_id}.json" in out
-    assert "python3 -c" in out
+    from tells import decode_envelope_path
+
+    assert "tells --recover" in out
+    token = out.rsplit(" ", 1)[1].rstrip(")\n")
+    assert decode_envelope_path(token).endswith(f"{msg_id}.json")
 
 
 def test_tells_body_max_zero_prints_full_body(tmp_path, monkeypatch, capsys):

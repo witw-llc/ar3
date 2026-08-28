@@ -1,7 +1,7 @@
 """Tests for daemon.py — pid-file lifecycle and end-to-end wake_once with the
 mock CLI.
 
-The mock CLI lives at tests/fixtures/mock-cli. tests/fixtures/mock.json
+The mock CLI lives at tests/fixtures/mock_cli.py. tests/fixtures/mock.json
 defines an agent that routes every verb through it with deterministic
 templates. Tests assert on the per-agent log to verify what argv the wake
 subprocess actually received.
@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import signal
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -483,7 +484,7 @@ class TestDeclaredWakeEnv:
             (tmp_path / n).mkdir()
         bad = tmp_path / "bad-env.json"
         bad.write_text(json.dumps({
-            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "MSG:$MESSAGE"],
+            "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "MSG:$MESSAGE"],
             "env": "PATH=/usr/bin",
         }))
         save_registry({
@@ -507,7 +508,7 @@ class TestFilesDirContract:
 
     def _mock_def(self, tmp_path: Path, fixtures_dir: Path, *, files_dir: str | None = None) -> Path:
         invoke = [
-            "$A8S_DIR/tests/fixtures/mock-cli",
+            "$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py",
             "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE",
         ]
         body: dict = {"invoke": invoke}
@@ -778,7 +779,7 @@ class TestAttachedLoopKillRequest:
             nonlocal written
             if not written and daemon_mod._CURRENT_WAKE_PROC is not None:
                 written = True
-                captured["pid"] = daemon_mod._CURRENT_WAKE_PROC.pid
+                captured["proc"] = daemon_mod._CURRENT_WAKE_PROC
                 _write_kill_request("A", foreign_pid)
             return False
 
@@ -789,13 +790,15 @@ class TestAttachedLoopKillRequest:
         elapsed = time.monotonic() - started
 
         assert rc == 0
-        assert "pid" in captured
+        assert "proc" in captured
         assert f"killed by PID {foreign_pid}" in _read_log("A")
-        # The kill actually reaped the subprocess rather than merely
-        # releasing the pid file — os.kill(pid, 0) on an already-waited-on
-        # pid raises ProcessLookupError once the kernel has nothing left.
-        with pytest.raises(ProcessLookupError):
-            os.kill(captured["pid"], 0)
+        # The kill actually reaped the subprocess rather than merely releasing
+        # the pid file. Asked of the Popen itself rather than by probing the
+        # pid: `os.kill(pid, 0)` raising ProcessLookupError is POSIX-shaped —
+        # Windows' os.kill routes through TerminateProcess and does not answer
+        # that question — and a returncode is the stronger claim anyway, since
+        # it can only be set once the process exited AND was waited on.
+        assert captured["proc"].poll() is not None
         # And it happened well inside the 5s MOCK_SLEEP, not because the
         # mock CLI ran to completion on its own.
         assert elapsed < 3.0
@@ -828,19 +831,21 @@ class TestAttachedLoopKillRequest:
 # ---------- idle invoke ----------
 
 def _write_idle_def(path: Path, fixtures_dir: Path, timeout: int) -> None:
-    """Write a definition that wakes via mock-cli on tells AND has an
+    """Write a definition that wakes via mock_cli.py on tells AND has an
     idle.invoke that prints a distinguishable string. The idle command's
     argv echoes 'IDLE-FIRED-FOR:$RECIPIENT' so we can grep the per-agent
     log to assert it ran."""
     path.write_text(json.dumps({
         "invoke": [
-            f"{fixtures_dir}/mock-cli",
+            sys.executable,
+            f"{fixtures_dir}/mock_cli.py",
             "FROM:$SENDER|TO:$RECIPIENT|TS:$TIMESTAMP|AGE:$AGE|MSG:$MESSAGE",
         ],
         "idle": {
             "timeout": timeout,
             "invoke": [
-                f"{fixtures_dir}/mock-cli",
+                sys.executable,
+            f"{fixtures_dir}/mock_cli.py",
                 "IDLE-FIRED-FOR:$RECIPIENT",
             ],
         },
@@ -964,7 +969,7 @@ class TestAttachedLoopIdleIntegration:
         rc = attached_loop(["X"], 0.1, single_pass=True)
         assert rc == 0
         log = _read_log("X")
-        # Wake fired (mock-cli received the message).
+        # Wake fired (mock_cli.py received the message).
         assert "MSG:wake-test" in log
         # Idle did NOT fire — wake_once just touched last-active.
         assert "idle exec:" not in log
@@ -1130,9 +1135,9 @@ class TestBatchWake:
         d.mkdir()
         defn = {
             "pause": 0,
-            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
+            "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "SINGLE"],
             "batch": {
-                "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH"],
+                "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "BATCH"],
                 "limit": 5,
             },
         }
@@ -1189,9 +1194,9 @@ class TestPauseBeforeWake:
     ) -> Path:
         defn = {
             "pause": pause,
-            "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "SINGLE"],
+            "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "SINGLE"],
             "batch": {
-                "invoke": ["$A8S_DIR/tests/fixtures/mock-cli", "BATCH|TO:$RECIPIENT"],
+                "invoke": ["$PYTHON", "$A8S_DIR/tests/fixtures/mock_cli.py", "BATCH|TO:$RECIPIENT"],
                 "limit": limit,
             },
         }
@@ -1358,7 +1363,7 @@ class TestAsyncAttachedLoop:
         d.mkdir()
         defp = tmp_path / "slow-max.json"
         defp.write_text(json.dumps({
-            "invoke": [str(fixtures_dir / "mock-slow-cli"), "MSG:$MESSAGE"],
+            "invoke": [sys.executable, str(fixtures_dir / "mock_slow_cli.py"), "MSG:$MESSAGE"],
             "max_wake_seconds": 0.25,
         }))
         save_registry({"A": {"root": str(d), "definition": str(defp)}})

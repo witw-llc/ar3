@@ -3,10 +3,14 @@
 A running Antigravity (IDE or a persistent `agy --continue` session) exposes
 a localhost Connect-RPC API; `GetUserStatus` carries one `quotaInfo` per
 model. The pools mirror how `agy /usage` presents them: Gemini models burn
-the weekly limit, Claude/GPT models the five-hour one. Pool values only the
-cloud knows (Gemini five-hour, Claude weekly) are simply absent here — the
-cloud path needs gemini-cli's OAuth client pair and stays in n0b. A `--print`
-run exits too fast to serve the API; only persistent sessions answer.
+the weekly limit, Claude/GPT models the five-hour one.
+
+Antigravity meters four pools and the local API carries two. The other two —
+Gemini five-hour and Claude/GPT weekly — are held by the vendor's cloud, which
+answers only to gemini-cli's OAuth client pair. Reading them would mean
+shipping that pair, so this reports what the local API knows and says which
+two it is. A `--print` run exits too fast to serve the API; only persistent
+sessions answer.
 """
 from __future__ import annotations
 
@@ -146,7 +150,13 @@ def parse_user_status(payload: dict) -> dict:
         "origin": "live",
         "plan": plan_info.get("planDisplayName") or plan_info.get("planName"),
         "buckets": list(pools.values()),
-        "note": "local API only — cloud-held pool values are absent (n0b quota agy has them)",
+        # Names the two pools that are missing rather than pointing at another
+        # tool to read them. A note that sends the reader somewhere else is
+        # only useful if they can go there.
+        "note": (
+            "two of four pools — the Gemini five-hour and Claude/GPT weekly "
+            "limits are held by the vendor's cloud and are not readable locally"
+        ),
     }
 
 

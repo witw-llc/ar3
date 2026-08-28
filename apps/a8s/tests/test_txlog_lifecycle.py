@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -149,7 +150,7 @@ class TestWakeStartReturn:
     ):
         d = tmp_path / "a"
         d.mkdir()
-        defn = {"invoke": [str(fixtures_dir / "mock-flaky-cli"), "MSG:$MESSAGE"]}
+        defn = {"invoke": [sys.executable, str(fixtures_dir / "mock_flaky_cli.py"), "MSG:$MESSAGE"]}
         defp = tmp_path / "def.json"
         defp.write_text(json.dumps(defn))
         save_registry({"A": {"root": str(d), "definition": str(defp)}})

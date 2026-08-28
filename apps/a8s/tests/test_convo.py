@@ -114,21 +114,6 @@ class TestRecord:
         assert rows[-1]["content"] == "m4"
 
 
-@pytest.fixture
-def zone(monkeypatch):
-    """Force the process's local zone so a rendered heading is the same string
-    on every machine that runs this suite."""
-    import time as _time
-
-    def use(name: str) -> None:
-        monkeypatch.setenv("TZ", name)
-        _time.tzset()
-
-    yield use
-    monkeypatch.undo()
-    _time.tzset()
-
-
 @pytest.fixture(autouse=True)
 def _utc_zone(zone):
     """`a8s convo` shows local time, so every heading assertion below would

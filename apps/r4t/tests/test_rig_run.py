@@ -16,35 +16,40 @@ from pathlib import Path
 import pytest
 
 import state
+from conftest import write_path_executable
 from engines import run as engine_run
 from r4t import main as r4t_main
 
 
 def recorder(tmp_path: Path, name: str) -> tuple[Path, Path]:
-    """A stand-in CLI that records its argv and a probe variable per call. It
-    is executable with its own shebang rather than run as `python <script>`,
-    because a preset's binary is argv[0] and r4t splices `--model` and its own
-    unattended-turn flags immediately after it."""
-    script = tmp_path / f"{name}-recorder"
+    """A stand-in CLI that records its argv and a probe variable per call.
+
+    It must be executable in its own right rather than run as
+    `python <script>`, because a preset's binary is argv[0] and r4t splices
+    `--model` and its own unattended-turn flags immediately after it — putting
+    the interpreter in argv[0] would break the splice these tests exist to
+    check. `write_path_executable` keeps that property on every platform: the
+    launcher it writes on Windows carries the recorder's own name, so argv[0]
+    is still the CLI and the flags still land where the preset says.
+    """
     calls = tmp_path / f"{name}-calls"
     calls.mkdir(exist_ok=True)
-    script.write_text(
+    script = write_path_executable(
+        tmp_path,
+        f"{name}-recorder",
         textwrap.dedent(
             f"""\
-            #!{sys.executable}
             import json, os, sys
             calls_dir = {str(calls)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
                 json.dump(
                     {{"argv": sys.argv[1:], "knob": os.environ.get("RIG_KNOB", "")}}, f
                 )
             print("recorder ran")
             """
         ),
-        encoding="utf-8",
     )
-    script.chmod(0o755)
     return script, calls
 
 

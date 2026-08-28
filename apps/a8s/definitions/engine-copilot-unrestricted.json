@@ -1,7 +1,7 @@
 {
   "description": "GitHub Copilot CLI as a bare stateless engine node — the same three wakes as engine-copilot, invoked with --permissions bypass, which for copilot is --allow-all: tools, paths and URLs. An unrestricted node acts on untrusted inbound mail — anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account.",
   "invoke": [
-    "python3",
+    "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
     "engine",
     "copilot",
@@ -15,7 +15,7 @@
   "batch": {
     "limit": 20,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
       "copilot",
@@ -29,7 +29,7 @@
   "idle": {
     "timeout": 900,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
       "copilot",

@@ -24,6 +24,7 @@ import pytest
 import dispatch
 import isolate
 import state
+from conftest import write_path_executable
 from dispatch import (
     ATTACHED_FILE_PREFIX,
     DispatchContext,
@@ -55,11 +56,9 @@ NODE = "acme"
 
 
 def _fake_bin(directory: Path, name: str, body: str) -> Path:
-    """Write an executable Python stub named `name` into `directory`."""
-    path = directory / name
-    path.write_text(f"#!{sys.executable}\n" + textwrap.dedent(body), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return path
+    """Write a Python stub named `name` into `directory`, runnable as a binary
+    on whichever platform is running the suite."""
+    return write_path_executable(directory, name, textwrap.dedent(body))
 
 
 @pytest.fixture
@@ -356,7 +355,7 @@ class TestOrgIsolationAppliesToEveryRig:
             # the two prereq probes; then exit 0 so probes pass and the run is a
             # no-op we can inspect.
             if "-c" in a and a[a.index("-c") + 1].startswith("export TELL_OUTBOX_DIR"):
-                open({str(record)!r}, "a").write(repr(a) + "\\n")
+                open({str(record)!r}, "a", encoding="utf-8", newline="").write(repr(a) + "\\n")
             sys.exit(0)
             """,
         )
@@ -413,7 +412,7 @@ class TestContainerTimeoutKill:
             if args and args[0] == "run":
                 time.sleep(30)
             elif args and args[0] == "kill":
-                open({str(record)!r}, "a").write(args[1] + "\\n")
+                open({str(record)!r}, "a", encoding="utf-8", newline="").write(args[1] + "\\n")
             """,
         )
         rig = Rig(name="c", invoke=["harness", "{prompt}"], timeout_seconds=0.5)
@@ -487,7 +486,7 @@ def _recording_sudo(
                 sys.exit(1)
             sys.exit(0)
         if script.startswith("export TELL_OUTBOX_DIR"):
-            open({str(record)!r}, "w").write(repr(a))
+            open({str(record)!r}, "w", encoding="utf-8", newline="").write(repr(a))
         sys.exit(0)
         """,
     )
@@ -500,7 +499,7 @@ def _recording_docker(fakebin, record: Path) -> None:
         import sys
         a = sys.argv[1:]
         if a and a[0] == "run":
-            open({str(record)!r}, "w").write(repr(a))
+            open({str(record)!r}, "w", encoding="utf-8", newline="").write(repr(a))
         """,
     )
 

@@ -1,8 +1,11 @@
 """The semantic track: queued on write, batched on demand, query-only on read.
 
-The tests never need a running ollama — `fake_embeddings` stands in for it, and
-the bare `store` fixture points OLLAMA_URL at a dead port, which is exactly the
-absent-service case.
+No test here needs a running ollama, and only one opens a socket at all.
+`store` turns the track off outright; `fake_embeddings` gives it a working
+stand-in; `dead_embeddings` gives it one that never answers. The degradation
+path used to be driven by pointing OLLAMA_URL at an unusable port, which
+assumed a refused connection is free — true on POSIX, and about four seconds
+per call on Windows.
 """
 import json
 import os
@@ -15,7 +18,26 @@ import engine
 K7E_PY = str(Path(__file__).resolve().parent.parent / "k7e.py")
 
 
+class TestEmbedTextItself:
+    """The one place a real socket is opened, so the rest do not have to.
+
+    Every other caller treats `None` as an absent server; this proves that is
+    what an unreachable one actually produces, rather than an exception
+    escaping into a search."""
+
+    def test_an_unreachable_ollama_returns_none(self, store, monkeypatch):
+        monkeypatch.setenv("K7E_EMBEDDINGS", "ollama")
+        assert engine.embed_text("kestrel rollout", timeout=1.0) is None
+
+
 class TestWritePath:
+    def test_the_bare_store_has_the_track_switched_off(self, store):
+        """The default the other fixtures opt out of. A store that still
+        queued would still search, and searching is what costs four seconds a
+        call on Windows against a port chosen for being unusable."""
+        engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
+        assert engine.pending_embedding_count() == 0
+
     def test_store_queues_and_never_embeds(self, store, fake_embeddings):
         engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
         assert engine.pending_embedding_count() == 1
@@ -43,7 +65,7 @@ class TestBacklog:
         engine.process_pending_embeddings()
         assert fake_embeddings[0][1] == engine.EMBED_TIMEOUT
 
-    def test_absent_ollama_leaves_the_queue_and_search_still_answers(self, store):
+    def test_absent_ollama_leaves_the_queue_and_search_still_answers(self, dead_embeddings):
         engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
         assert engine.process_pending_embeddings() == 0
         assert engine.pending_embedding_count() == 1
@@ -68,7 +90,7 @@ class TestReadPath:
         engine.search("anything")
         assert fake_embeddings[0][1] == 0.25
 
-    def test_absent_ollama_degrades_to_fts(self, store):
+    def test_absent_ollama_degrades_to_fts(self, dead_embeddings):
         engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
         results = engine.search("kestrel rollout")
         assert results[0]["title"] == "Kestrel rollout"
@@ -101,7 +123,7 @@ class TestEmbedPendingCLI:
             [sys.executable, K7E_PY, *args], env=env, capture_output=True, text=True
         )
 
-    def test_json_report_names_the_backlog(self, store):
+    def test_json_report_names_the_backlog(self, store, absent_ollama):
         engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
         res = self.cli(store, "embed-pending", "--json")
         assert res.returncode == 0
@@ -110,7 +132,7 @@ class TestEmbedPendingCLI:
         assert report["pending"] == 1
         assert report["seconds"] >= 0
 
-    def test_search_notes_an_unanswered_track_on_stderr(self, store):
+    def test_search_notes_an_unanswered_track_on_stderr(self, store, absent_ollama):
         engine.store_entry("Kestrel rollout", "Roll the fleet forward", tags=["ops"])
         res = self.cli(store, "search", "kestrel rollout", "--ids")
         assert "K7E-000-00001" in res.stdout

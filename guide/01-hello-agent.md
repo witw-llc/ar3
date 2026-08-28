@@ -47,10 +47,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc
   That clones the suite into `~/.ar3` and adds one `source` line to your
   shell rc. Open a new shell (or re-source the rc) so `PATH` picks it up.
 
-- Python 3 installed (`python3 --version` answers). On Windows the python.org
-  installers give you `python.exe` and no `python3.exe`, so that command fails
-  there even with Python installed — alias `python3` to `python` in your shell,
-  or install Python from the Microsoft Store, which ships `python3`.
+- Python 3 installed. On Windows the python.org installers give you
+  `python.exe` and no `python3.exe`, so `python3 --version` fails there even
+  with Python installed; `python --version` answers instead. The suite resolves
+  whichever of the two you have.
 - **What software are you using?** This chapter is written around **Claude
   Code** — the `claude` CLI, installed and logged in — and every pasted output
   below was captured on it. If you run `cursor`, `codex` or `agy` instead,
@@ -479,32 +479,34 @@ You should see:
 {
   "description": "Claude Code as a bare stateless engine node — `r4t engine claude run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Tune it with --permissions and --allowed-tools on the invoke lines below; `r4t engine claude check` proves the argv still parses.",
   "invoke": [
-    "python3", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
+    "$PYTHON", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
     "--agent", "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ],
   "batch": {
     "limit": 20,
     "invoke": [
-      "python3", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
+      "$PYTHON", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
       "--agent", "$RECIPIENT"
     ]
   },
   "idle": {
     "timeout": 900,
     "invoke": [
-      "python3", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
+      "$PYTHON", "$A8S_DIR/../r4t/r4t.py", "engine", "claude", "run",
       "--idle", "--agent", "$RECIPIENT"
     ]
   }
 }
 ```
 
-Two more substitutions appear there. `$A8S_DIR` is a8s's own directory inside
-the suite, which is how the definition reaches `r4t.py` without a path that
-depends on where you installed ar3; `$AGE` is how long the message sat
-before this wake, in words (`3 minutes ago`), so the turn can tell fresh mail
-from a backlog it is only now getting to.
+Three more substitutions appear there. `$PYTHON` is the interpreter already
+running the router, so a definition never has to guess between `python3` and
+`python`; `$A8S_DIR` is a8s's own directory inside the suite, which is how the
+definition reaches `r4t.py` without a path that depends on where you installed
+ar3; and `$AGE` is how long the message sat before this wake, in words
+(`3 minutes ago`), so the turn can tell fresh mail from a backlog it is only
+now getting to.
 
 (The file on disk puts each argv token on its own line; it is folded here to
 fit the page. The free path's `engine-ollama-opencode.json` is the same shape

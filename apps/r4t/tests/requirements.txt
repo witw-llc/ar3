@@ -1,3 +1,7 @@
 pytest
+# Windows ships no tz database, so `zoneinfo` cannot resolve an IANA key
+# there. The suite pins display zones by name (the `zone` fixture); `TZ`
+# is not an option because Windows has no `time.tzset`.
+tzdata>=2024.1; sys_platform == "win32"
 # Runtime deps the suite exercises — currently none beyond pytest itself.
 -r ../../../requirements/r4t.txt

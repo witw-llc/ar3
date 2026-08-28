@@ -1,7 +1,7 @@
 {
   "description": "Claude Code via `ollama launch`, as a bare stateless engine node — the same three wakes as engine-ollama-claude, invoked with --permissions bypass, which for claude is --permission-mode bypassPermissions: the node runs without prompting, and deny rules in settings.json still apply. Requires a8s var MODEL (`a8s add ... --model=...` or `a8s vars <name> set MODEL ...`). An unrestricted node acts on untrusted inbound mail — anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account.",
   "invoke": [
-    "python3",
+    "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
     "engine",
     "ollama-claude",
@@ -17,7 +17,7 @@
   "batch": {
     "limit": 20,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
       "ollama-claude",
@@ -33,7 +33,7 @@
   "idle": {
     "timeout": 900,
     "invoke": [
-      "python3",
+      "$PYTHON",
       "$A8S_DIR/../r4t/r4t.py",
       "engine",
       "ollama-claude",

@@ -7,11 +7,11 @@ what a live `rclone link` against Google Drive returned.
 from __future__ import annotations
 
 import os
-import stat
 from pathlib import Path
 
 import pytest
 
+from conftest import write_path_executable
 from network import detect_service_kind
 from services import StorageError
 from services.rclone import RcloneService, direct_download_url
@@ -24,19 +24,26 @@ DIRECT = (
 
 
 def fake_rclone(tmp_path: Path, *, link: str = "", rc: int = 0, err: str = "") -> Path:
-    """A stub rclone that logs its argv and prints `link` for the link verb."""
-    path = tmp_path / "fake-rclone"
+    """A stub rclone that logs its argv and prints `link` for the link verb.
+
+    Python rather than shell: `rclone_path` is execed as a bare program path,
+    and Windows cannot run a `#!` file named that way.
+    """
     log = tmp_path / "argv.log"
-    path.write_text(
-        "#!/usr/bin/env bash\n"
-        f'printf "%s\\n" "$*" >> {log}\n'
-        f'if [ "$1" = "link" ]; then printf "%s\\n" {link!r}; fi\n'
-        f'if [ -n {err!r} ]; then printf "%s\\n" {err!r} >&2; fi\n'
-        f"exit {rc}\n",
-        encoding="utf-8",
+    return write_path_executable(
+        tmp_path,
+        "fake-rclone",
+        "import sys\n"
+        "sys.stdout.reconfigure(encoding='utf-8')\n"
+        "sys.stderr.reconfigure(encoding='utf-8')\n"
+        f"with open({str(log)!r}, 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        f"if sys.argv[1:2] == ['link']:\n"
+        f"    print({link!r})\n"
+        f"if {err!r}:\n"
+        f"    print({err!r}, file=sys.stderr)\n"
+        f"sys.exit({rc})\n",
     )
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-    return path
 
 
 def argv_lines(tmp_path: Path) -> list[str]:

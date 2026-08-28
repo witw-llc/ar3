@@ -16,7 +16,11 @@ import pytest
 
 from core import TELL_OUTBOX_DIR_ENV, files_dir, inbound_bundle_dir, outbox_bundle_dir, outbox_dir
 
-TELL = Path(__file__).resolve().parent.parent.parent.parent / "tell"
+# The extensionless polyglot is bash-and-PowerShell; Windows cannot exec it
+# from a path, which is exactly why `tell.cmd` ships beside it. Running the
+# file a Windows user would actually get is more faithful, not less.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+TELL = _REPO_ROOT / ("tell.cmd" if os.name == "nt" else "tell")
 A8S_TELL = [
     sys.executable,
     str(Path(__file__).resolve().parent.parent / "a8s.py"),
@@ -922,12 +926,293 @@ def test_tell_registered_echo_survives_a_raising_stdout(fake_home, tmp_path):
     assert msg["content"] == "over → there"
 
 
-def test_tell_stdin_auto_detect(tmp_path):
+def test_tell_without_a_message_fails_instead_of_waiting(tmp_path):
+    """The five-hour hang, reproduced. Reading stdin whenever it was not a
+    terminal meant an agent that forgot the body got a process that waited
+    rather than an error — `isatty()` is false for a harness pipe that is held
+    open and never closed, which is what an agent's stdin is. The sender saw
+    no output and read that as delivery.
+
+    The read end of a real pipe is passed as stdin and the write end is kept
+    open here, so the child gets exactly that shape. `wait(timeout=...)` is
+    the assertion: against the old code it raises.
+    """
     (tmp_path / ".outbox").mkdir()
-    res = _run(tmp_path, "gerry", stdin="auto-detected body")
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen(
+            [*A8S_TELL, "gerry"],
+            cwd=str(tmp_path),
+            stdin=read_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_merge_tell_env(tmp_path, None),
+        )
+        try:
+            out, err = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise AssertionError(
+                "tell waited on a stdin nobody was going to close"
+            )
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert proc.returncode == 2, (proc.returncode, err)
+    assert "no message" in err
+    assert not list((tmp_path / ".outbox").glob("*.json")), "it sent something"
+
+
+
+def _tell_with_stdin(tmp_path, producer_argv, wait_sec=None):
+    """Run `tell` with a real pipe fed by a real producer, the way a shell does."""
+    (tmp_path / ".outbox").mkdir(exist_ok=True)
+    env = _merge_tell_env(tmp_path, None)
+    if wait_sec is not None:
+        env["TELL_STDIN_WAIT_SEC"] = str(wait_sec)
+    producer = subprocess.Popen(producer_argv, stdout=subprocess.PIPE)
+    try:
+        res = subprocess.run(
+            [*A8S_TELL, "gerry"], cwd=str(tmp_path), stdin=producer.stdout,
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    finally:
+        producer.stdout.close()
+        producer.wait()
+    return res
+
+
+def test_a_piped_body_needs_no_dash(tmp_path):
+    """The friction this restores. Refusing every pipe was the safe end of a
+    choice and it cost the ordinary `echo hi | tell bob`."""
+    res = _tell_with_stdin(tmp_path, [sys.executable, "-c", "print('piped body')"])
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
-    assert msg["content"] == "auto-detected body"
+    assert msg["content"] == "piped body"
+
+
+def test_a_long_piped_body_arrives_whole(tmp_path):
+    """The reason the deadline covers the FIRST CHARACTER and not the read. A
+    clock over the whole body truncates a long message, which is the silent
+    failure the deadline was added to avoid — so the fix would have become the
+    defect, in a shape no short test can see."""
+    res = _tell_with_stdin(
+        tmp_path, [sys.executable, "-c", "print('L' * 200000)"]
+    )
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert len(msg["content"].strip()) == 200000
+
+
+def test_a_slow_producer_still_gets_its_body_sent(tmp_path):
+    """A producer that takes a moment to say anything is still a producer. It
+    has to beat the deadline on its first character, and nothing after.
+
+    The deadline is raised for this case rather than the sleep shortened. Two
+    seconds is a wall clock: on a loaded machine it expires before the sleeping
+    producer speaks, the refusal is correct, and the test fails for a reason
+    that has nothing to do with the contract it is testing. A Windows run found
+    exactly that, arriving as a thirty-second timeout rather than an assertion.
+    """
+    res = _tell_with_stdin(
+        tmp_path,
+        [sys.executable, "-c",
+         "import time,sys; time.sleep(1); sys.stdout.write('slow body'); sys.stdout.flush()"],
+        wait_sec=30,
+    )
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "slow body"
+
+
+def test_the_pipe_wait_uses_no_api_that_windows_refuses(tmp_path):
+    """`select` on Windows is WinSock-backed and takes sockets only, so a pipe
+    raises there — `echo hi | tell.cmd bob` would have caught the error and
+    exited 2 without sending, on the one platform this batch is about. A
+    reviewer caught it from the documented contract; no POSIX run can.
+
+    Asserted on the source because the failure is platform-specific and this
+    suite has no Windows runner."""
+    source = (Path(__file__).resolve().parent.parent / "tell.py").read_text(
+        encoding="utf-8"
+    )
+    # Code, not prose — the comment above the fix names `select` on purpose.
+    code = [
+        line for line in source.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    offenders = [
+        line.strip() for line in code
+        if re.search(r"(^|[^\w.])select\s*\.|import\s+select\b", line)
+    ]
+    assert not offenders, (
+        f"tell.py reaches for select, which cannot watch a pipe on "
+        f"Windows: {offenders}"
+    )
+
+def test_an_undecodable_byte_past_the_buffer_does_not_truncate(tmp_path):
+    """The shape a reviewer executed against this exact tree. The first
+    character comes out of a decoded buffer, so an invalid byte far enough in
+    raises on the SECOND read with a valid prefix already in hand: 9,000 bytes
+    of body arrived as one character, exit 0, and the sender was told it went.
+
+    Two things stop it. Stdin escapes an undecodable byte rather than raising
+    on it, so the body survives whole and reversibly; and if a read fails
+    anyway, the send does not happen. Asserted here on the body, because a
+    complete message is the outcome the sender needs — not a clean error."""
+    producer = [
+        sys.executable, "-c",
+        "import sys; sys.stdout.buffer.write(b'A' * 9000 + b'\\xff' + b'B'); "
+        "sys.stdout.buffer.flush()",
+    ]
+    (tmp_path / ".outbox").mkdir(exist_ok=True)
+    env = _merge_tell_env(tmp_path, None)
+    env["PYTHONIOENCODING"] = "utf-8:strict"
+    proc = subprocess.Popen(producer, stdout=subprocess.PIPE)
+    try:
+        res = subprocess.run(
+            [*A8S_TELL, "gerry"], cwd=str(tmp_path), stdin=proc.stdout,
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    finally:
+        proc.stdout.close()
+        proc.wait()
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "A" * 9000 + "\\xff" + "B", (
+        f"a {len(msg['content'])}-character body arrived for a 9002-byte one"
+    )
+
+
+class TestThePipeDeadlineIsOverridable:
+    """The knob has to be tested where it is read, not through a sleeping
+    producer. A producer that beats the default deadline beats it whether or
+    not the override is honoured, so the integration test cannot prove the
+    override works — it passed unchanged against a build that ignored the
+    environment entirely."""
+
+    def test_it_reads_the_environment(self, monkeypatch):
+        import tell as tell_mod
+
+        monkeypatch.setenv(tell_mod.TELL_STDIN_WAIT_ENV, "30")
+        assert tell_mod._stdin_wait_sec() == 30.0
+
+    def test_the_default_stands_when_it_is_unset(self, monkeypatch):
+        import tell as tell_mod
+
+        monkeypatch.delenv(tell_mod.TELL_STDIN_WAIT_ENV, raising=False)
+        assert tell_mod._stdin_wait_sec() == tell_mod.STDIN_WAIT_SEC
+
+    @pytest.mark.parametrize("value", ["", "nonsense", "0", "-4"])
+    def test_a_value_that_is_not_a_deadline_falls_back(self, monkeypatch, value):
+        """A zero or a negative would turn the wait off and make every pipe
+        look empty, which is the failure the deadline exists to avoid. An
+        unreadable value is a typo, not an instruction."""
+        import tell as tell_mod
+
+        monkeypatch.setenv(tell_mod.TELL_STDIN_WAIT_ENV, value)
+        assert tell_mod._stdin_wait_sec() == tell_mod.STDIN_WAIT_SEC
+
+
+def test_an_undecodable_byte_through_the_dash_is_not_a_lone_surrogate(tmp_path):
+    """The same floor, on the path that was already shipping. Under
+    `PYTHONUTF8=1` the interpreter's stdin handler is surrogateescape, which
+    does not raise — it produces a LONE SURROGATE, and `tell x -` wrote that
+    into an envelope under exit 0. The content cannot be re-encoded to UTF-8 by
+    anything downstream, so the envelope is poisoned where it sits.
+
+    Measured on Windows by a field seat, on the `-` path, which no part of the
+    pipe work touched. Both raising handlers are floored for that reason."""
+    (tmp_path / ".outbox").mkdir(exist_ok=True)
+    env = _merge_tell_env(tmp_path, None)
+    env["PYTHONUTF8"] = "1"
+    producer = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys; sys.stdout.buffer.write(b'A' * 9000 + b'\\xff' + b'B'); "
+         "sys.stdout.buffer.flush()"],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        res = subprocess.run(
+            [*A8S_TELL, "gerry", "-"], cwd=str(tmp_path), stdin=producer.stdout,
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+    finally:
+        producer.stdout.close()
+        producer.wait()
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "A" * 9000 + "\\xff" + "B"
+    # The point of the escape: what came out survives a round trip.
+    msg["content"].encode("utf-8")
+
+
+class TestAPipeThatFailsMidReadSendsNothing:
+    """The prefix must never be committed. A reader thread that swallows its
+    own exception and hands back what it already had is a silent truncation
+    with an exit code of zero, which is the family this whole change is about.
+    """
+
+    class _FailsAfterTheFirstCharacter:
+        def __init__(self, error):
+            self.error = error
+            self.reads = 0
+
+        def isatty(self):
+            return False
+
+        def read(self, size=-1):
+            self.reads += 1
+            if self.reads == 1:
+                return "A"
+            raise self.error
+
+    def test_the_exception_crosses_back_to_the_caller(self, monkeypatch):
+        import tell as tell_mod
+
+        monkeypatch.setattr(
+            tell_mod.sys, "stdin",
+            self._FailsAfterTheFirstCharacter(ValueError("bad byte")),
+        )
+        with pytest.raises(tell_mod.TellStdinError):
+            tell_mod._read_pipe_before(5.0)
+
+    def test_an_os_error_is_fatal_too(self, monkeypatch):
+        import tell as tell_mod
+
+        monkeypatch.setattr(
+            tell_mod.sys, "stdin",
+            self._FailsAfterTheFirstCharacter(OSError("pipe went away")),
+        )
+        with pytest.raises(tell_mod.TellStdinError):
+            tell_mod._read_pipe_before(5.0)
+
+    def test_tell_exits_nonzero_and_writes_no_envelope(self, tmp_path, monkeypatch):
+        import tell as tell_mod
+
+        outbox = tmp_path / ".outbox"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.setattr(
+            tell_mod.sys, "stdin",
+            self._FailsAfterTheFirstCharacter(ValueError("bad byte")),
+        )
+        rc = tell_mod.tell_main(["gerry"])
+        assert rc != 0
+        assert not list(outbox.glob("*.json")), "it sent a truncated body"
+
+
+def test_a_body_still_arrives_through_the_dash(tmp_path):
+    """The positive control beside it: closing the door on implicit stdin must
+    not close the documented one, which every form in the docs already uses."""
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "gerry", "-", stdin="the body\n")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "the body"
 
 
 def test_tell_stamps_from_when_registered(fake_home, tmp_path, monkeypatch):

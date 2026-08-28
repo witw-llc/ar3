@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
-
-needs_tzset = pytest.mark.skipif(
-    not hasattr(time, "tzset"), reason="TZ only takes effect via tzset (not on Windows)"
-)
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
@@ -47,15 +43,47 @@ def _no_var_cache_leak():
 
 @pytest.fixture
 def zone(monkeypatch):
-    """Force the process's local zone, and put it back afterwards."""
+    """Force the zone every rendered stamp reads in.
+
+    Not via `TZ`. `time.tzset()` does not exist on Windows and the C library
+    there never consults `TZ`, so a fixture built that way raises
+    AttributeError before a single assertion runs.
+
+    `ark.clock`'s two conversion points are redirected instead. `to_local` is
+    wrapped rather than replaced, so the stored-stamp parsing stays the real
+    one and only the final conversion moves. `dispatch` is patched as well
+    because it does `from ark.clock import local_now`, and that copies the
+    binding — rebinding the name in `ark.clock` alone would leave `dispatch`
+    pointing at the original. `stamp` and `zone_label` need no such treatment:
+    they resolve `local_now` from their own module's globals when called.
+
+    What this does not prove is that the display clock reads the *machine's*
+    zone. That is `ark.clock`'s own contract, tested in `test_ark_clock.py`
+    where `TZ` is the subject rather than the setup.
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    import dispatch
+    from ark import clock
+
+    real_to_local = clock.to_local
 
     def use(name: str) -> None:
-        monkeypatch.setenv("TZ", name)
-        time.tzset()
+        tz = ZoneInfo(name)
 
-    yield use
-    monkeypatch.undo()
-    time.tzset()
+        def local_now() -> datetime:
+            return datetime.now(timezone.utc).astimezone(tz)
+
+        def to_local(ts):
+            dt = real_to_local(ts)
+            return None if dt is None else dt.astimezone(tz)
+
+        monkeypatch.setattr(clock, "local_now", local_now)
+        monkeypatch.setattr(clock, "to_local", to_local)
+        monkeypatch.setattr(dispatch, "local_now", local_now)
+
+    return use
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +157,33 @@ def repo(tmp_path):
     return root
 
 
+def write_path_executable(directory: Path, name: str, source: str) -> Path:
+    """Put a Python stub on PATH under `name`, for product code that resolves a
+    binary with `shutil.which` and execs it by name.
+
+    POSIX gets the stub itself, shebang and exec bit. Windows can do neither: it
+    cannot exec a shebang file, and `shutil.which` there matches only PATHEXT
+    extensions, so a bare `claude` is not even found. The stub lands as
+    `<name>.py` beside a `<name>.cmd` launcher, which is what PATHEXT resolves
+    and what Windows can run. Returns the path product code will find.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        (directory / f"{name}.py").write_text(source, encoding="utf-8")
+        launcher = directory / f"{name}.cmd"
+        launcher.write_text(
+            "@echo off\r\n"
+            f'"{sys.executable}" "%~dp0{name}.py" %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n",
+            encoding="utf-8",
+        )
+        return launcher
+    path = directory / name
+    path.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
 @pytest.fixture
 def fake_harness(tmp_path):
     """A tiny harness that records its prompt and echoes — no LLM calls."""
@@ -141,7 +196,7 @@ def fake_harness(tmp_path):
             import os, sys
             calls_dir = {str(out)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w", encoding="utf-8", newline="") as f:
                 f.write(sys.argv[1])
             print("fake harness ran")  # short: stays under the stdout-reply threshold
             """
@@ -198,7 +253,7 @@ def chatty_harness(tmp_path):
             import json, os, sys, time
             calls_dir = {str(out)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.txt"), "w", encoding="utf-8", newline="") as f:
                 f.write(sys.argv[1])
             outbox = os.environ["TELL_OUTBOX_DIR"]
             os.makedirs(outbox, exist_ok=True)
@@ -208,7 +263,7 @@ def chatty_harness(tmp_path):
             for i in range(sends):
                 to = recipients[i % len(recipients)]
                 msg_id = f"{{time.time_ns():026d}}"
-                with open(os.path.join(outbox, msg_id + ".json"), "w") as f:
+                with open(os.path.join(outbox, msg_id + ".json"), "w", encoding="utf-8", newline="") as f:
                     json.dump(
                         {{"id": msg_id, "to": to, "content": body.format(i=i), "files": []}},
                         f,

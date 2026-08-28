@@ -430,19 +430,125 @@ def parse_tell_argv(
     return recipient, attachments, message_argv, check, split
 
 
+STDIN_WAIT_SEC = 2.0
+TELL_STDIN_WAIT_ENV = "TELL_STDIN_WAIT_SEC"
+
+
+def _stdin_wait_sec() -> float:
+    """The pipe deadline, overridable.
+
+    Two seconds is a wall clock, and a producer that is merely slow to start
+    races it: on a loaded machine the deadline can expire before a sleeping
+    producer says anything, and the refusal is correct but the margin is not
+    something a test can depend on. A caller that knows its producer is slow
+    raises it; the suite sets it so its slow-producer case measures the
+    contract rather than the box's load.
+    """
+    raw = os.environ.get(TELL_STDIN_WAIT_ENV)
+    if not raw:
+        return STDIN_WAIT_SEC
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return STDIN_WAIT_SEC
+    return seconds if seconds > 0 else STDIN_WAIT_SEC
+
+
 def resolve_message_body(message_argv: list[str]) -> str | None:
+    """The body, or None when there is not one.
+
+    Four cases, and the difference between the last two is the whole design.
+
+    `-` reads stdin however long that takes: the caller asked for it, so
+    waiting is the instruction rather than a surprise.
+
+    At a TERMINAL with no message, the body is typed and ends at Ctrl-D. That
+    is what `mail` and `write` have always done, and a terminal EOF is the
+    user's own decision.
+
+    A PIPE with no message is the case that has to be careful. Reading it
+    unconditionally is what hung a send for five hours: `isatty()` is false for
+    every pipe, including one a harness holds open and never closes, so a
+    caller that forgot the body got a process that waited while its sender read
+    the silence as delivery. Refusing it outright is the other extreme and
+    costs the ordinary `echo hi | tell bob`, which has to be retyped with `-`.
+
+    So a pipe is read with a deadline. A real producer is already writing and
+    arrives at once; a pipe with nobody behind it fails in seconds and names
+    `-`. No case waits without a bound, and no case loses a body silently — the
+    slow producer that misses the deadline gets an error, not a truncation.
+    """
     if message_argv == ["-"]:
         if sys.stdin.isatty():
-            return None
+            print("tell: reading the message; end with Ctrl-D", file=sys.stderr)
         return sys.stdin.read()
     if message_argv:
         return join_args(message_argv)
     if sys.stdin.isatty():
+        print("tell: reading the message; end with Ctrl-D", file=sys.stderr)
+        return sys.stdin.read() or None
+    return _read_pipe_before(_stdin_wait_sec())
+
+
+def _read_pipe_before(deadline_sec: float) -> str | None:
+    """Stdin if a producer is there, None if the deadline passes with nothing.
+
+    Only the FIRST character is waited for. Once a producer has spoken it is a
+    real one, and the rest of the body is read to EOF with no clock on it — a
+    deadline over the whole read would truncate a long message, which is the
+    silent failure this exists to avoid.
+
+    A thread rather than `select`. `select` on Windows is WinSock-backed and
+    takes sockets only; a pipe raises there, so `echo hi | tell bob` through
+    `tell.cmd` would have failed to send on the one platform this batch is
+    about. `PeekNamedPipe` through ctypes is the native answer and is a second
+    code path that only one machine can run. A daemon thread is one path for
+    both, and if the read never returns the thread dies with the process.
+
+    A read that fails after the first character has to be fatal. The first
+    character is prefetched out of a decoded buffer, so a body whose invalid
+    byte falls past that buffer raises on the SECOND read with a valid prefix
+    already in hand — and sending the prefix is exactly the silent truncation
+    that reading a pipe at all is supposed to avoid. The exception crosses back
+    to the caller and the send does not happen.
+    """
+    import threading
+
+    if sys.stdin is None:
         return None
-    data = sys.stdin.read()
-    if not data:
+
+    first: list[str] = []
+    rest: list[str] = []
+    failure: list[BaseException] = []
+    spoke = threading.Event()
+
+    def read() -> None:
+        try:
+            head = sys.stdin.read(1)
+            if head:
+                first.append(head)
+        except BaseException as e:  # re-raised on the calling thread
+            failure.append(e)
+            spoke.set()
+            return
+        spoke.set()
+        if not head:
+            return
+        try:
+            rest.append(sys.stdin.read())
+        except BaseException as e:
+            failure.append(e)
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    if not spoke.wait(deadline_sec):
         return None
-    return data
+    reader.join()
+    if failure:
+        raise TellStdinError(f"could not read the piped message: {failure[0]}")
+    if not first:
+        return None
+    return ("".join(first) + "".join(rest)) or None
 
 
 def write_outbox_envelope(
@@ -476,6 +582,11 @@ class TellUsageError(Exception):
     pass
 
 
+class TellStdinError(Exception):
+    """Stdin was there and could not be read to the end. Distinct from "no
+    message": a partial body must not be sent as if it were the whole one."""
+
+
 class TellHelp(Exception):
     pass
 
@@ -494,7 +605,8 @@ def _print_usage() -> None:
     print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
     print(f"       size limit: {TELL_FILE_MAX_ENV} (bytes or 50m), else max_file_bytes / 50MiB", file=sys.stderr)
     print("       body on stdin keeps the shell out of it: - <<'EOF' … EOF, or - < body.md", file=sys.stderr)
-    print("       message may be `-` to read stdin; stdin is used when piped", file=sys.stderr)
+    print("       message may be `-` to read stdin, however long that takes", file=sys.stderr)
+    print("       a pipe with no message is read too, if it speaks within seconds", file=sys.stderr)
 
 
 def _optional_sender(outbox: Path | None = None) -> tuple[str, dict] | None:
@@ -728,8 +840,17 @@ def tell_main(argv: list[str]) -> int:
         _print_usage()
         return 2
 
-    body = resolve_message_body(message_argv)
+    try:
+        body = resolve_message_body(message_argv)
+    except TellStdinError as e:
+        print(f"tell: {e}", file=sys.stderr)
+        return 1
     if body is None:
+        print(
+            "tell: no message — pass one as arguments, pipe one in, or `-` to "
+            "wait on stdin for as long as it takes",
+            file=sys.stderr,
+        )
         _print_usage()
         return 2
 

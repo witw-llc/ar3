@@ -10,6 +10,370 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.78
+
+### Fixed
+
+- **The test suites can be started on Windows.** All four `tests/run` scripts
+  hardcoded the venv `bin/` layout, which Windows does not use — it puts the
+  interpreter in `Scripts/` — so the runner died on its first line and Windows
+  verification stayed manual. The layout is now chosen by which directory
+  exists rather than by probing the OS, because Git Bash looks POSIX enough
+  that `$OSTYPE` does not answer the question. (#200, #201)
+- **A working Python install is enough to run the suite and wake an agent.**
+  The runners, the bash half of the `ar3` / `a8s` / `r4t` / `k7e` shims, and all
+  twenty bundled definitions named `python3`. python.org's Windows installer
+  ships `python.exe` and no `python3.exe`, so that install got a working CLI
+  through the `.cmd`/`.ps1` shims and definitions that failed at wake time.
+  Shims and runners now resolve `python3`, then `python`, then `py -3` — the
+  order the PowerShell half already used — and every candidate has to *run*
+  before it is accepted, because on Windows the first `python` on PATH is often
+  the Microsoft Store alias, a stub that opens the Store and exits non-zero.
+  The definitions take a new `$PYTHON` placeholder instead, which resolves to
+  the interpreter already running the router, so they do not probe PATH at all.
+  (#173)
+- **`r4t engine` finds an npm-installed CLI on Windows and can also run it.**
+  Both the check probes and the turn spawn handed the OS a bare program name.
+  Windows' CreateProcess appends only `.exe` to a bare name, never `.cmd` — and
+  every npm global install arrives as a `.cmd` shim, which is how codex,
+  opencode and cursor are installed. `shutil.which` found them, so `engine
+  check` reported the CLI installed and then failed to execute it, reading as
+  *installed but unverifiable*; `engine run` could not spawn it at all. The
+  program is resolved at the moment the argv reaches the OS, so what r4t echoes
+  and reports stays the readable name. Found by the Windows seat against the
+  real `codex`, while verifying an unrelated test fix. `claude` ships as a
+  `.exe`, which is why this went unseen.
+- **The PowerShell shims accept an interpreter only once it has run.** The
+  `.ps1` files are what a PowerShell user actually gets — PowerShell prefers
+  `<name>.ps1` over both the `.cmd` and the extensionless polyglot — and they
+  took the resolution *order* from the fix above without the liveness probe
+  that goes with it. `Get-Command python3` finds the Microsoft Store alias, a
+  stub that opens the Store and exits non-zero, so the shim ran it, exited 49,
+  and never reached the working `python` sitting beside it. Reproduced before
+  it was fixed, and driven in the tests by `pwsh`, which is cross-platform —
+  so unlike the `.cmd` guard this one runs on the CI runners rather than only
+  where the platform is. The PowerShell half of the four polyglots got the
+  same treatment. (#173)
+- **`r4t engine agy quota` stops naming a tool nobody has, and says what it
+  means.** Its note read *"local API only — cloud-held pool values are absent
+  (n0b quota agy has them)"*, which pointed the reader at a private program on
+  one machine and did not say what was missing. Antigravity meters four pools
+  and the local API carries two; the note now names the other two and why they
+  are not readable. A check fails the suite if any shipped source names a tool
+  outside the suite.
+
+- **The recovery command `tells` prints cannot be rewritten by a shell.** It is
+  meant to be pasted, and no quoting makes an arbitrary path inert: a quoted
+  program path is an expression in PowerShell, an apostrophe breaks bash, and
+  double quotes are worse than they look — bash and PowerShell both expand
+  `$name` and `$(...)` inside them, and cmd expands `%NAME%`. Run from a
+  directory named `$(printf SUBSTITUTED) sync`, both shells executed it. The
+  argument is encoded now rather than quoted: `tells --recover <token>`, where
+  the token is base64url with the padding stripped and therefore
+  `A-Za-z0-9-_` and nothing else. `--show` still takes a real path for a reader
+  who has one. The tests run the emitted string verbatim through bash and
+  PowerShell from four directory names built to attack it.
+
+- **CI stops being able to run out.** A private repo gets 3,000 Actions minutes
+  a month and the repo was at 2,902 of them. Measured across every run this
+  month rather than estimated: PR checks were 1,561 billed minutes and the
+  release workflow's macOS leg was 1,140 — the second largest line from the
+  smallest number of runs, because **a hosted macOS minute bills at ten times a
+  Linux one**. The other half of the PR bill is a floor, not work: GitHub bills
+  **a minimum of one minute per job**, so eight seconds-long jobs cost eight
+  minutes a run whatever they do.
+  Both now run on the owner's own machine, where minutes are not metered and
+  not capped — which is the part that matters, because a spent allowance can no
+  longer block a merge. `version` and `pii-check` stay on GitHub's runners so
+  the two gates never depend on one laptop being awake, and `r4t-isolation`
+  stays hosted because it tests an OS boundary with Linux containers and a Mac's
+  container VM would change what it proves. Draft pull requests run nothing, and
+  the `push: main` trigger is gone — release.yml already runs the full suites
+  there, `tests/` and its PII scan included. Projected: **727 billed minutes a
+  month, down from 2,910.**
+
+- **`tell` has three stdin shapes, and the one nobody asked for cannot wait
+  forever.** It read stdin whenever stdin was not a terminal, which looked like
+  a convenience and was a trap: `isatty()` is false for every pipe, including one a harness holds
+  open and never closes — which is what an agent's stdin is. A call that forgot
+  the body did not get an error, it got a process that waited. One sat for five
+  hours while its sender read the silence as delivery.
+
+  Requiring `-` fixed that and cost the ordinary `echo hi | tell bob`, so the
+  rule is now about which stdin, not whether. `-` reads it however long that
+  takes, because the caller asked. A **terminal** with no message reads a typed
+  body until Ctrl-D, the way `mail` and `write` always have. A **pipe** with no
+  message is read with a deadline on the first character only — a real producer
+  is already writing and arrives at once, and a pipe with nobody behind it fails
+  in two seconds and names `-`.
+
+  The deadline covers the first character rather than the whole read on purpose:
+  a clock over the body would truncate a long message, and a slow producer that
+  misses it gets an error rather than half a message. The wait is a thread, not
+  `select`, because `select` on Windows is WinSock-backed and takes sockets
+  only — a pipe raises there, so the convenience would have failed to send on
+  the one platform this batch is about.
+
+  `-` and a terminal still read to EOF, on purpose: the caller asked for one
+  and the other ends when the user says so. A pipe that has spoken has no clock
+  on it either. The bounded case is exactly the pipe nobody asked to be read.
+
+  A read that fails after the first character is fatal rather than partial. The
+  first character is prefetched out of a decoded buffer, so an undecodable byte
+  further in raises on the second read with a valid prefix already in hand, and
+  a reader that keeps the prefix sends a truncated body under exit 0 — the same
+  silent success in a new place. Stdin now escapes an undecodable byte instead
+  of raising on it, which is what its own contract already promised and never
+  delivered on a seat whose locale is already UTF-8, and any read that fails
+  anyway stops the send.
+
+  The floor turned out to fix a defect on a path this change never touched.
+  Under `PYTHONUTF8=1` the interpreter's own stdin handler is surrogateescape,
+  which does not raise — it yields a **lone surrogate** — so `tell <name> -`
+  with an undecodable byte wrote `\udcff` into an envelope and exited 0. That
+  content raises on any re-encode to UTF-8, which poisons the envelope where it
+  sits rather than at the moment it was made. Measured on a Windows seat against
+  the previous head. Both raising handlers are floored, so the byte arrives as
+  the documented escape on every path in.
+
+  The pipe deadline takes `TELL_STDIN_WAIT_SEC` for a caller who knows their
+  producer is slow. Two seconds is a wall clock, and a producer that only sleeps
+  before speaking races it — on a loaded machine the refusal is correct and the
+  timing is not something a caller, or a test, can depend on.
+
+  The tests reproduce the hang with a real pipe whose write end is held open,
+  so they fail against the old behaviour rather than merely passing against the
+  new; a 200,000-character body proves the deadline never reaches it; and a
+  9,002-byte body with an invalid byte past the buffer boundary arrives whole,
+  where it used to arrive as one character.
+
+- **A shim change runs the tests that guard shims.** The cross-shim checks
+  are globbed and live in the a8s suite, but the per-PR workflow routes by
+  path: a change to `r4t.ps1` ran the r4t suite and never the guards, and
+  `r4t.cmd` and `k7e.cmd` were in no filter at all, so a change to either ran
+  nothing. The guard that is supposed to catch a seventh shim, or a revert,
+  could stay green by not running — the same defect as a test that cannot
+  fail, one layer out. Every root shim routes to that job now, globbed in the
+  workflow the same way the tests glob them, and a check reads the workflow
+  and fails if a guarded shim has no route.
+
+- **The `python3` migration reaches the paths a user copies.** Fixing the
+  shims, the runners and the twenty bundled definitions left the samples and
+  the printed hints still naming an interpreter a python.org Windows install
+  does not have. The Gmail connector's example definition — which its README
+  tells the reader to copy — invoked `python3` twice and failed at wake time;
+  `docs/r4t-engine.md` taught custom definitions the same way. Both use
+  `$PYTHON` now, the placeholder the router expands to the interpreter it is
+  running. And `tells` printed a `python3 -c` command for recovering a clipped
+  body, which is a command the reader is meant to paste: it names a `tells` verb
+  now. The interpreter's own path was not enough: a quoted program path is an
+  *expression* in PowerShell and needs `&` in front of it, and an apostrophe in
+  the path — an ordinary profile name — breaks the quoting in bash. The verb
+  needs no outbox and no registry, so a clipped message is recoverable from
+  wherever the reader is standing. Quoting the path was the first answer and it
+  was not enough either; see the encoded-token entry above for what it takes to
+  make an arbitrary path inert.
+
+- **Every Ark CLI on Windows reported success, whatever happened.** The six
+  `.cmd` shims ended their python branch with `exit /b %ERRORLEVEL%` inside a
+  parenthesised `if` block — and `cmd.exe` expands `%VAR%` for a whole block at
+  parse time, so that returned the value from *before* the block ran: the
+  `where python` result, always 0. A failing command exited 0, `&&` chains
+  continued past failures, and any caller reading the exit code was lied to.
+  Found by pointing the `tell` tests at the shim a Windows user actually runs;
+  it is in the shipped launcher, so no amount of testing the bash polyglot
+  would have shown it.
+
+  **Delayed expansion is not the fix, and the first attempt at this shipped a
+  worse defect than the one it closed.** `%*` is substituted into the line
+  first and `!` is expanded in the result second, so with delayed expansion on
+  every entrypoint silently ate exclamation marks out of the arguments it
+  forwarded: `tell bob "ship!"` lost the bang, and a body containing `!PATH!`
+  became environment data. A truthful exit code is not worth corrupting the
+  message. Each interpreter runs on its own line now, outside any block,
+  reached by a label, so `%ERRORLEVEL%` is read at that line's own parse time
+  with delayed expansion off. The guard pins the absence of both — no
+  parenthesised blocks, and no delayed expansion anywhere in the file. The files
+  stay LF: the claim that labels need CRLF, because cmd.exe seeks by byte offset
+  when it jumps, did not survive contact with the platform — an LF copy
+  dispatched through its labels identically on real Windows, no failing shape
+  could be named, and committed CRLF makes `git diff --check` report every line.
+
+  The same restructure retires `where` as acceptance. `where python` answers
+  whether a name resolves, not whether it runs, so a Microsoft Store alias
+  sent the shim into that branch to return the alias's failure and never
+  reach a working `py -3` — the exact class the bash and PowerShell halves
+  already probe for. Every candidate is now run with `-c "pass"` before it is
+  believed, in all three halves. (#173)
+- **A 50,000-character test parameter stopped taking its own case out on
+  Windows.** pytest sets `PYTEST_CURRENT_TEST` to the node ID on every setup
+  and teardown, and Windows caps a single environment variable at 32,767
+  characters — so a parametrised case whose value *is* its node ID errored
+  twice before its own assertions ran, from pytest's bookkeeping rather than
+  from anything under test. An explicit `id=` fixes it, and a guard now fails
+  if any collected node ID could overflow that cap, since no POSIX machine can
+  show this. (#200)
+- **k7e's LLM command survives being on Windows.** Two silent defects at the
+  same call, found once the stall below stopped hiding the end of the suite.
+  `shlex.split` defaults to POSIX rules, where a backslash escapes the next
+  character — so `C:\Users\me\llm.py` became `C:Usersmellm.py`, and every
+  absolute Windows path `K7E_LLM_COMMAND` can hold was destroyed before the
+  spawn saw it. And the program was execed as a bare name, which CreateProcess
+  resolves by appending only `.exe`, never the `.cmd` an npm-installed CLI
+  arrives as — the same defect already fixed in `r4t engine`. The model's
+  output was also decoded through the ANSI code page rather than UTF-8, so an
+  em-dash came back as mojibake. Backslash-as-escape is turned off on Windows
+  rather than `posix=False` switched on, and rather than the backslashes
+  pre-doubled: non-POSIX mode saves the bare path and then retains the quote
+  characters inside every token, so a quoted `"C:\Program Files\llm.exe"` is
+  looked up with its quotes attached and a `sh -c '<script>'` bridge reaches
+  the shell as a command *name*; pre-doubling fixes both of those and leaves a
+  third, since POSIX rules treat a backslash as literal inside *single* quotes
+  where the doubling is never undone.
+
+  **Turning the escape off is not free either, and a reviewer priced it.** A
+  backslash on Windows is a separator everywhere except immediately before a
+  double quote, so `python -c "print(\"hi\")"` came out as `print(\hi\)` —
+  the quotes gone, the backslashes kept, a JSON payload corrupted on its way
+  to a bridge with nothing to report it. `shlex` cannot express that rule, so
+  the Windows branch is its own tokenizer and implements the platform's:
+  `2n` backslashes before a `"` are `n` and the quote quotes, `2n+1` are `n`
+  and the quote is literal, and a run not before a quote is left exactly as
+  written. That is what `CommandLineToArgvW` does, which is what the program
+  on the other end parses with. `"C:\tools\"` is an unterminated string
+  under that rule and says so; `"C:\tools\\"` is how the path is written.
+  POSIX keeps `shlex.split` unchanged. Both branches are driven directly in
+  the tests, including what each wrong one does, because neither is reachable
+  from the other's machine.
+
+  **Two more rules the first tokenizer was missing, both found by a review and
+  both silent.** A `'` may open a group only where a token begins and close one
+  only where a token ends. Windows quoting has no single-quote form at all, so
+  an apostrophe inside a token is a letter in a name — and without the opening
+  half, the two apostrophes in `C:\Users\O'Brien's\llm.exe` balanced, read as
+  grouping, and were **deleted from the path**. Without the closing half, the
+  apostrophe in `--msg 'it won't parse'` closed the group and vanished, so one
+  argument became two and a character went missing. With both, that message
+  parses as what the operator wrote. Double quotes are exempt and keep toggling
+  mid-token, which is ordinary Windows quoting. And inside a quoted string `""`
+  is one literal quote — the platform's other escape, and the one a doubled
+  JSON payload uses: `"{""key"":""value""}"` reached the bridge as
+  `{key:value}` with every quote cancelled out.
+- **A k7e distill run stops reporting success after skipping every capture.**
+  A command string that cannot be parsed raised out of `llm_argv` into the
+  per-file catch in `distill`, which exists so that one damaged capture cannot
+  wedge a sweep. A configuration failure is not a file failure — it fails
+  identically for every file — so a whole directory was skipped while the
+  process exited 0, and `dream_sweep` reads 0 as a successful dream and
+  advances its watermark past captures nothing ever read. It reaches the exit
+  code now, through the same failure record a launch failure uses. Found
+  through an apostrophe: `C:\Users\O'Brien\llm.exe` is an ordinary Windows
+  profile name and POSIX rules open a quote on it that never closes, so the
+  single-quoted grouping is now tried first and a literal apostrophe second —
+  every command string that parsed before parses the same way, and some that
+  raised now parse. A string that mixes the two cannot mean both, so an
+  apostrophe at the *edge* of a token after that second attempt is refused
+  rather than run: `--msg 'it won't parse'` reached the bridge as three
+  arguments and exited 0, which is the same silent success by a shorter road.
+  Inside a token it stays a character, because that is the shape the fallback
+  was written for. (#200)
+- **Five k7e tests that could not fail now can.** Every bridge in
+  `TestDistillExitCode` was `sh -c '<one-liner>'`, and a test asserting a
+  *failure* could not tell a bridge that answered wrongly from one that never
+  launched. Pointing all six at a shell that does not exist left the class at
+  3 failed / 8 passed — byte-identical, and reproducible on both platforms.
+  The bridges are Python programs that write a marker before doing anything
+  else, and the tests assert it, so a bridge that cannot launch is now the
+  loudest thing in the room: the same mutation fails seven instead of three.
+  `sh` was never something a Windows box was owed either. (#200)
+- **k7e's test fixtures can be executed on Windows.** Eleven of them wrote a
+  `#!` script and set the exec bit — the third app with the same defect, and
+  invisible all night because the suite never reached them. `chmod` is a no-op
+  there and CreateProcess will not run a `.py` as a program. They go through
+  the same `write_path_executable` helper a8s and r4t already use; the three
+  that were shell scripts are Python now, and the one that reached for
+  `sh -c` does not need a shell at all. (#200)
+- **The k7e suite finishes on Windows.** `test_eval_recall.py` never returned
+  there — read as a hang, and it was arithmetic. The fixture kept the semantic
+  track away from ollama by pointing `OLLAMA_URL` at an unusable port, which
+  assumes a refused connection is free: true on POSIX, and **4.13 seconds per
+  call** on the Windows seat, which does not honour the socket timeout for a
+  refused connect. A class doing dozens of searches then spends minutes
+  failing to reach a server it was never supposed to consult. Worse than slow:
+  its result depended on the failure path, so a class whose docstring promised
+  determinism did not have it.
+
+  The track is turned **off by configuration** in the shared store fixture
+  instead, which `_embeddings_enabled()` already honours, and the fixtures
+  that want it turn it back on — a working stand-in, or one that never
+  answers, neither of which opens a socket. Exactly one test opens a real one,
+  to prove that an unreachable ollama does produce the `None` every other
+  caller treats as absence. Tier A's measured recall is unchanged, which is
+  the evidence that the switch changed cost and not behaviour. (#232)
+- **The test fixtures write UTF-8 rather than the locale code page.** The fake
+  harnesses record the prompt they were handed with a bare `open(path, "w")`,
+  which on Windows writes cp1252 — where an em-dash is the single byte `0x97`,
+  not a valid UTF-8 start byte — so the strict UTF-8 read on the other side
+  died. 22 r4t tests, and the readers were correct all along. `newline=""`
+  goes with it: a recording of argv has to be what was passed, and Windows
+  text mode rewrites every `\n` on the way out. A guard asserts the rule over
+  the whole r4t test tree with no exemptions, since the calls live inside
+  generated scripts where the syntax tree sees only a string. The equivalent
+  write in ar3's and k7e's fixtures is fixed at the same time; a8s had none.
+  The product code was audited for the same shape and has none: every envelope
+  and registry write goes through `json.dumps`, which escapes to ASCII, and
+  `ark.fsio.atomic_write_text` has always named UTF-8. (#200)
+- **The suites pin a display zone without asking for a clock Windows has not
+  got.** Five fixtures across a8s and r4t forced the zone with `TZ` plus
+  `time.tzset()`. `tzset` does not exist on Windows and the C library there
+  never reads `TZ`, so every test taking one of those fixtures raised
+  AttributeError at setup and again at teardown — 117 error entries over 62
+  distinct tests in a8s alone, 110 of them in `test_convo.py`, where the
+  wrapper is autouse and every test in the module took it whether it cared
+  about time or not. The zone is forced at `ark.clock`'s own conversion points
+  instead, which is what those tests are after: that a heading or a log line
+  renders in a known zone. That the clock reads the *machine's* zone stays
+  tested where `TZ` is the subject rather than the setup. `r4t`'s `zoned_stamp`
+  went through the shared clock at the same time, rather than keeping its own
+  `datetime.now().astimezone()`. (#200, #201)
+- **The r4t rig-run recorder, the last fixture family Windows could not
+  execute.** It could not simply be run as `python <script>`: a preset's binary
+  is argv[0] and r4t splices `--model` and its unattended-turn flags
+  immediately after it, so the interpreter in argv[0] would break the very
+  splice those tests check. The launcher written on Windows carries the
+  recorder's own name, so argv[0] stays the CLI and the constraint holds on
+  both platforms. About 23 tests. (#200)
+- **The last two a8s fixtures Windows could not execute.** The rclone stub was
+  a `#!` shell script named as `rclone_path` and execed outright; it is Python
+  now, behind the same launcher the other fixtures use. And the `tell` tests
+  ran the extensionless polyglot by path, which Windows cannot exec — they run
+  `tell.cmd`, which ships beside it for exactly this reason and was simply
+  never used. Between them, about thirteen tests. (#200, #201)
+- **The a8s daemon suite no longer hangs on Windows.** It was a consequence of
+  the fixture defect below rather than anything in the daemon: the wake
+  subprocess never started, so `proc.poll()` had nothing to report and the
+  wake loop spun at 20 Hz forever, surviving `pytest-timeout` at 60s. Curing
+  the fixtures ended it — the class that ran unbounded past fifteen minutes
+  now finishes in under three seconds. One assertion in it was POSIX-shaped
+  besides: it proved the wake had been reaped with `os.kill(pid, 0)` raising
+  `ProcessLookupError`, which Windows' `os.kill` does not answer. It asks the
+  `Popen` for a returncode instead, which is the stronger claim anyway. (#201)
+- **The a8s test fixtures can be executed on Windows.** `mock-cli` and its two
+  siblings were `#!/usr/bin/env bash` scripts named by explicit path, so
+  Windows could neither exec them nor append a `.cmd`. The daemon got
+  `OSError [WinError 193]`, which is not the `FileNotFoundError` it catches, so
+  it surfaced as an uncaught error — the Windows seat counted **61 native a8s
+  tests** on that signature, the largest single cause in that suite. Ported to
+  Python and invoked through `$PYTHON`. Some paths swallow the error and
+  degrade quietly rather than raising, so a few tests were passing over a
+  broken invoke and now exercise what they claim to. (#200, #201)
+- **The r4t suite's fake binaries can be executed on Windows.** Test helpers
+  wrote a `#!` stub and set the exec bit; Windows can run neither, and
+  `shutil.which` there matches only PATHEXT extensions, so product code that
+  resolves a binary by name did not even find one. One shared helper now writes
+  a `.cmd` launcher beside the stub on Windows and the stub itself elsewhere.
+  Reported as 46 of 64 native failures. (#200)
+
 ## 0.1.77
 
 ### Fixed

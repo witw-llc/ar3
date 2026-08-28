@@ -64,10 +64,17 @@ from pathlib import Path
 # the display contract rather than degrading to a stub: local time, always
 # carrying its zone, with `ark.clock`'s abbreviation rule.
 try:
-    from ark.clock import stamp as local_stamp, zone_label as local_zone
+    from ark.clock import (
+        local_now,
+        stamp as local_stamp,
+        zone_label as local_zone,
+    )
 except ImportError:
+    def local_now() -> datetime:
+        return datetime.now().astimezone()
+
     def local_zone(when: datetime | None = None) -> str:
-        dt = when or datetime.now().astimezone()
+        dt = when or local_now()
         abbr = dt.strftime("%Z")
         if abbr.isalpha() and len(abbr) <= 5:
             return abbr
@@ -92,7 +99,7 @@ except ImportError:
         return dt.astimezone()
 
     def local_stamp(ts: str | datetime | None = None, *, seconds: bool = False) -> str:
-        dt = datetime.now().astimezone() if ts is None else _local_dt(ts)
+        dt = local_now() if ts is None else _local_dt(ts)
         if dt is None:
             return str(ts)
         fmt = "%Y-%m-%d %H:%M:%S" if seconds else "%Y-%m-%d %H:%M"
@@ -102,7 +109,7 @@ def zoned_stamp() -> str:
     """History and day-log heading stamp: local display plus the UTC offset,
     because a zone abbreviation alone is not a reversible instant when the
     reader's machine or zone differs from the writer's."""
-    dt = datetime.now().astimezone()
+    dt = local_now()
     base = local_stamp(dt, seconds=True)
     off = dt.strftime("%z") or "+0000"
     tag = f"UTC{off[:3]}:{off[3:5]}"

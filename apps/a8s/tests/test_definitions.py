@@ -380,24 +380,14 @@ class TestNowPlaceholder:
     UTC — definitions pick it deliberately because it is machine-readable and
     stable, and rewriting it would rewrite every definition's meaning."""
 
-    @pytest.fixture
-    def zone(self, monkeypatch):
-        import time as _time
-
-        def use(name: str) -> None:
-            monkeypatch.setenv("TZ", name)
-            _time.tzset()
-
-        yield use
-        monkeypatch.undo()
-        _time.tzset()
-
     def test_now_expands_to_local_time_with_its_zone(self, zone):
         zone("America/Los_Angeles")
         (got,) = _expand_argv(["$NOW"], "A", "B", "hi")
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} P[DS]T", got)
 
-    def test_now_follows_the_machines_zone(self, zone):
+    def test_now_follows_the_display_clocks_zone(self, zone):
+        # A second zone, so the assertion above cannot be satisfied by a
+        # hardcoded Pacific label.
         zone("Asia/Kolkata")
         (got,) = _expand_argv(["$NOW"], "A", "B", "hi")
         assert got.endswith(" IST")
@@ -1150,19 +1140,13 @@ class TestBatchInvoke:
         assert "A sent" in prompt and "hi" in prompt
         assert "B sent" in prompt and "yo" in prompt
 
-    def test_batch_prompt_opens_with_the_local_time(self, monkeypatch):
+    def test_batch_prompt_opens_with_the_local_time(self, zone):
         """The real fix for the UTC hallucination is the text the model reads.
         The batch prompt is composed by a8s itself, so it says it outright."""
-        import time as _time
         from definitions import build_batch_prompt
 
-        monkeypatch.setenv("TZ", "Asia/Kolkata")
-        _time.tzset()
-        try:
-            first = build_batch_prompt("neil", []).splitlines()[0]
-        finally:
-            monkeypatch.undo()
-            _time.tzset()
+        zone("Asia/Kolkata")
+        first = build_batch_prompt("neil", []).splitlines()[0]
         assert re.fullmatch(
             r"Local time is \d{4}-\d{2}-\d{2} \d{2}:\d{2} IST\. Every date and "
             r"time you read or write is this zone unless it carries an "

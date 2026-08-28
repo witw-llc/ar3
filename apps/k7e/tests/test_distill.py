@@ -12,6 +12,7 @@ import pytest
 import distill
 import engine
 import hygiene
+from conftest import write_path_executable
 
 
 class TestDistillRequiresLLM:
@@ -59,14 +60,11 @@ class TestDistillContentType:
                 "tags": ["postgres"],
             },
         ]
-        wrapper = tmp_path / "fake-llm.py"
-        wrapper.write_text(
-            "#!/usr/bin/env python3\n"
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({json.dumps(payload)!r})\n"
-        )
-        wrapper.chmod(0o755)
+        ))
         monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
 
         source = tmp_path / "notes.md"
@@ -639,14 +637,11 @@ class TestDistillVoiceRule:
 
     def _prompts_for(self, tmp_path, monkeypatch, text):
         log = tmp_path / "prompts.log"
-        wrapper = tmp_path / "fake-llm.py"
-        wrapper.write_text(
-            "#!/usr/bin/env python3\n"
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
             "import sys\n"
-            f"open({str(log)!r}, 'a').write(sys.stdin.read() + '\\n\\x00\\n')\n"
+            f"open({str(log)!r}, 'a', encoding='utf-8', newline='').write(sys.stdin.read() + '\\n\\x00\\n')\n"
             "print('[]')\n"
-        )
-        wrapper.chmod(0o755)
+        ))
         monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
 
         source = tmp_path / "capture.md"
@@ -685,14 +680,11 @@ class TestDistillVoiceRule:
                 "tags": ["audit"],
             }
         ]
-        wrapper = tmp_path / "fake-llm.py"
-        wrapper.write_text(
-            "#!/usr/bin/env python3\n"
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({json.dumps(payload)!r})\n"
-        )
-        wrapper.chmod(0o755)
+        ))
         monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
 
         source = tmp_path / "capture.md"
@@ -721,14 +713,11 @@ class TestDistillSlashTags:
                 "tags": [tag],
             }
         ]
-        wrapper = tmp_path / "fake-llm.py"
-        wrapper.write_text(
-            "#!/usr/bin/env python3\n"
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
             "import sys\n"
             "sys.stdin.read()\n"
             f"print({json.dumps(payload)!r})\n"
-        )
-        wrapper.chmod(0o755)
+        ))
         monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
 
         source = tmp_path / "notes.md"

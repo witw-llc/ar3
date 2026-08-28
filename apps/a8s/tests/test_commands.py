@@ -2666,20 +2666,6 @@ class TestCmdTellWithSplitFileArg:
 
 
 class TestCmdLogs:
-    @pytest.fixture
-    def zone(self, monkeypatch):
-        """Force the process's local zone so a rendered line is the same
-        string on every machine that runs this suite."""
-        import time as _time
-
-        def use(name: str) -> None:
-            monkeypatch.setenv("TZ", name)
-            _time.tzset()
-
-        yield use
-        monkeypatch.undo()
-        _time.tzset()
-
     def test_single_agent_preserves_append_order(self, fake_home, tmp_path, capsys, zone):
         zone("UTC")
         root = tmp_path / "x"; root.mkdir()

@@ -9,6 +9,7 @@ import pytest
 
 import distill
 import engine
+from conftest import write_path_executable
 
 pytestmark = pytest.mark.llm
 
@@ -38,9 +39,7 @@ def store(tmp_path, monkeypatch):
     engine.reset(tmp_path)
     engine.init()
 
-    wrapper = tmp_path / "ollama-stdin.py"
-    wrapper.write_text(
-        "#!/usr/bin/env python3\n"
+    wrapper = write_path_executable(tmp_path, "ollama-stdin", (
         "import json, os, sys, urllib.request\n"
         'url = os.environ.get("OLLAMA_URL", "http://localhost:11434")\n'
         'model = os.environ.get("K7E_TEST_LLM_MODEL", "qwen3:0.6b")\n'
@@ -49,8 +48,7 @@ def store(tmp_path, monkeypatch):
         'req = urllib.request.Request(f"{url}/api/generate", data=data, headers={"Content-Type": "application/json"})\n'
         "with urllib.request.urlopen(req, timeout=180) as resp:\n"
         '    print(json.loads(resp.read()).get("response", "").strip())\n'
-    )
-    wrapper.chmod(0o755)
+    ))
     monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
 
     cfg_path = tmp_path / "config.json"

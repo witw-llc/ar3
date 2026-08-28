@@ -1,4 +1,7 @@
 from __future__ import annotations
+import re
+from pathlib import Path as _P
+REPO_ROOT = _P(__file__).resolve().parent.parent.parent.parent
 
 import subprocess
 import sys
@@ -25,7 +28,7 @@ def fake_cli(tmp_path: Path, name: str = "fake-engine") -> Path:
             import json, os, sys
             calls_dir = {str(calls)!r}
             n = len(os.listdir(calls_dir))
-            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w") as f:
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
                 json.dump(sys.argv[1:], f)
             print("fake engine ran")
             """
@@ -909,7 +912,7 @@ except ProcessLookupError:
     CHILD = (
         "import os, signal, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "open(sys.argv[1], 'w', encoding='utf-8', newline='').write(str(os.getpid()))\n"
         "time.sleep(60)\n"
     )
 
@@ -952,3 +955,102 @@ except ProcessLookupError:
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "DEAD", result.stdout + result.stderr
+
+
+class TestArgv0IsResolvedBeforeExec:
+    """Windows' CreateProcess appends only `.exe` to a bare name, never `.cmd`.
+    Every npm global install is a `.cmd` shim — codex, opencode and cursor all
+    arrive that way — so `shutil.which` finds the CLI and the exec then fails
+    with WinError 2. The Windows seat measured both halves against the real
+    `codex`: `which` returned `codex.CMD`, `subprocess.run(['codex', ...])`
+    raised WinError 2, and the same call with the resolved path succeeded.
+    """
+
+    def test_a_bare_name_becomes_the_path_it_runs_from(self, tmp_path, monkeypatch):
+        target = tmp_path / "codex.CMD"
+        target.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            engine_run.shutil, "which",
+            lambda name: str(target) if name == "codex" else None,
+        )
+        assert engine_run.resolve_argv0(["codex", "--version"]) == [
+            str(target), "--version"
+        ]
+
+    def test_a_path_is_left_alone(self, tmp_path, monkeypatch):
+        def _boom(_name):  # resolution must not even be attempted
+            raise AssertionError("a path should not be resolved again")
+
+        monkeypatch.setattr(engine_run.shutil, "which", _boom)
+        given = str(tmp_path / "codex")
+        assert engine_run.resolve_argv0([given, "--version"]) == [given, "--version"]
+
+    def test_a_name_that_resolves_to_nothing_is_left_for_the_os_to_reject(
+        self, monkeypatch
+    ):
+        """Substituting None would hand subprocess a nonsense argv and lose the
+        OS's own error, which is the one the operator needs."""
+        monkeypatch.setattr(engine_run.shutil, "which", lambda _name: None)
+        assert engine_run.resolve_argv0(["nope", "-x"]) == ["nope", "-x"]
+
+    def test_an_empty_argv_is_not_indexed(self, monkeypatch):
+        monkeypatch.setattr(engine_run.shutil, "which", lambda _name: None)
+        assert engine_run.resolve_argv0([]) == []
+
+    def test_the_spawn_path_execs_the_resolved_program(self, tmp_path, monkeypatch):
+        """The composed argv keeps the readable name; only what reaches the OS
+        is resolved."""
+        seen: list[list[str]] = []
+
+        class _Proc:
+            returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(
+            engine_run, "_proc_spawn",
+            lambda argv, cwd, env=None: (seen.append(list(argv)), _Proc())[1],
+        )
+        monkeypatch.setattr(
+            engine_run.shutil, "which",
+            lambda name: f"/resolved/{name}.CMD" if name == "codex" else None,
+        )
+        engine_run._spawn(["codex", "--version"], tmp_path, 5)
+        assert seen == [["/resolved/codex.CMD", "--version"]]
+
+
+class TestNoUserFacingStringNamesAToolOutsideTheSuite:
+    """A note that tells the reader to run something they do not have is worse
+    than no note. The owner hit one in `engine agy quota`: it pointed at a
+    private tool on his own machine, which no user of this repo can install.
+
+    Scoped to r4t, where the defect was. `tools/no-private-tools.py` is the
+    repo-wide one and runs at release, because a scan of every app cannot live
+    in one app's path-filtered suite.
+    """
+
+    # r4t's own sources only. A repo-wide scan living in one app's suite is
+    # green whenever the workflow routes elsewhere — the same hole that let a
+    # shim guard sleep through a shim change. The repo-wide version is
+    # `tools/no-private-tools.py`, which `release.yml` runs over the whole tree.
+    FORBIDDEN = re.compile(r"\b(n0b)\b|~/bin/|\$HOME/bin/")
+    SOURCES = sorted(
+        path
+        for path in (REPO_ROOT / "apps" / "r4t").rglob("*.py")
+        if "tests" not in path.parts and "_vendor" not in path.parts
+    )
+
+    def test_the_scan_found_sources(self):
+        assert len(self.SOURCES) > 5, len(self.SOURCES)
+
+    def test_no_source_names_a_private_tool(self):
+        offenders = []
+        for path in self.SOURCES:
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if self.FORBIDDEN.search(line):
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+        assert not offenders, (
+            "a shipped source names a tool the reader does not have:\n"
+            + "\n".join(offenders)
+        )

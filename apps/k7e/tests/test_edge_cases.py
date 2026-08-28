@@ -3,13 +3,40 @@ import pytest
 import engine
 
 
+# Windows caps a single environment variable at 32,767 characters, and pytest
+# puts the node ID in PYTEST_CURRENT_TEST on every setup and teardown. A
+# parametrised case whose value IS its node ID therefore takes itself out
+# before its own assertions run — two errors per case, from pytest's
+# bookkeeping rather than from anything under test, and invisible on POSIX
+# where no such cap exists. `pytest.param(..., id="short-name")` is the fix.
+MAX_NODE_ID_CHARS = 4000
+
+
+def test_no_node_id_could_overflow_a_windows_environment_variable(request):
+    """Complete only on a full run: `-k` narrows `session.items` too."""
+    oversize = [
+        f"{item.nodeid[:100]}... ({len(item.nodeid)} chars)"
+        for item in request.session.items
+        if len(item.nodeid) > MAX_NODE_ID_CHARS
+    ]
+    assert not oversize, (
+        "a node ID this long is set into PYTEST_CURRENT_TEST and Windows "
+        "refuses it:\n" + "\n".join(oversize)
+    )
+
+
 class TestEdgeCases:
     @pytest.mark.parametrize("title,content,should_store", [
         ("Normal Title", "Normal content", True),
         ("Unicode: 🎉🚀", "Emoji content 🌍", True),
         ("日本語タイトル", "Japanese content here", True),
         ("Title with: colons", "YAML-breaking colons: in: content", True),
-        ("Title", "x" * 50000, True),  # very long content
+        # An explicit id, because pytest puts the node ID in
+        # PYTEST_CURRENT_TEST and Windows caps one environment variable at
+        # 32,767 characters. Without it the parameter IS the node ID, and
+        # pytest's own bookkeeping raises at setup and again at teardown —
+        # while the assertions here are fine.
+        pytest.param("Title", "x" * 50000, True, id="very-long-content"),
         ("A" * 200, "very long title", True),
     ])
     def test_store_and_retrieve(self, store, title, content, should_store):

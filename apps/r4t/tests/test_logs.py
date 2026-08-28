@@ -52,42 +52,28 @@ def test_lines_limits_backfill(r4t_home, capsys):
     assert out[1:] == ["r4t: SUPPRESSED acme:phil -> acme:gerry thread=01X repeat=2"]
 
 
-def test_day_header_names_the_utc_day_and_the_local_zone(r4t_home, monkeypatch, capsys):
+def test_day_header_names_the_utc_day_and_the_local_zone(r4t_home, zone, capsys):
     """The file is named in UTC because its name is a sort key; the reader is
     somewhere else. Near midnight the two name different days, so both are
     stated rather than one silently standing for the other."""
-    import time as _time
-
     # A zone with no daylight saving, so the expected label is the same in
     # every month this suite is ever run in.
-    monkeypatch.setenv("TZ", "Asia/Kolkata")
-    _time.tzset()
-    try:
-        seed_log()
-        assert run_logs() == 0
-        header = capsys.readouterr().out.splitlines()[0]
-        utc_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        assert header == f"— log day {utc_day} UTC (this machine reads IST)"
-    finally:
-        monkeypatch.undo()
-        _time.tzset()
+    zone("Asia/Kolkata")
+    seed_log()
+    assert run_logs() == 0
+    header = capsys.readouterr().out.splitlines()[0]
+    utc_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert header == f"— log day {utc_day} UTC (this machine reads IST)"
 
 
-def test_status_states_the_zone_the_roster_speaks(r4t_home, repo, monkeypatch, capsys):
+def test_status_states_the_zone_the_roster_speaks(r4t_home, repo, zone, capsys):
     """Every prompt this node composes names a zone; `r4t status` names the
     same one, so an operator reading a member's "tomorrow" knows which
     midnight it meant."""
-    import time as _time
-
     state.stamp_root(NODE, repo)
-    monkeypatch.setenv("TZ", "Asia/Kolkata")
-    _time.tzset()
-    try:
-        assert r4t_main(["status", "--node", NODE]) == 0
-        out = capsys.readouterr().out
-    finally:
-        monkeypatch.undo()
-        _time.tzset()
+    zone("Asia/Kolkata")
+    assert r4t_main(["status", "--node", NODE]) == 0
+    out = capsys.readouterr().out
     line = next(ln for ln in out.splitlines() if ln.startswith("time: "))
     assert re.fullmatch(r"time: \d{4}-\d{2}-\d{2} \d{2}:\d{2} IST", line)
 

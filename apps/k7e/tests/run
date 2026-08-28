@@ -4,9 +4,47 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$TESTS_DIR/.venv"
 
+# python.org's Windows installer ships python.exe and no python3.exe, so the
+# bare name the rest of this repo uses is not enough to bootstrap the venv.
+# Same order the .ps1 shims resolve in, plus a liveness check: on Windows the
+# `python` found first is often the Microsoft Store alias, which is a stub that
+# opens the Store and exits non-zero instead of running anything.
+find_python() {
+    local candidate
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "" >/dev/null 2>&1; then
+            PY=("$candidate")
+            return 0
+        fi
+    done
+    if command -v py >/dev/null 2>&1 && py -3 -c "" >/dev/null 2>&1; then
+        PY=(py -3)
+        return 0
+    fi
+    return 1
+}
+
+fresh=""
 if [ ! -d "$VENV" ]; then
-    python3 -m venv "$VENV"
-    "$VENV/bin/pip" install -q -r "$TESTS_DIR/requirements.txt"
+    if ! find_python; then
+        echo "tests/run: no working python3, python, or py on PATH" >&2
+        exit 127
+    fi
+    "${PY[@]}" -m venv "$VENV"
+    fresh=1
 fi
 
-exec "$VENV/bin/python" -m pytest "$TESTS_DIR" "$@"
+# A Windows venv puts the interpreter in Scripts/, every other platform in
+# bin/. Decided by which directory exists rather than by probing the OS: Git
+# Bash and MSYS look POSIX enough that $OSTYPE does not answer this.
+if [ -d "$VENV/Scripts" ]; then
+    VENV_BIN="$VENV/Scripts"
+else
+    VENV_BIN="$VENV/bin"
+fi
+
+if [ -n "$fresh" ]; then
+    "$VENV_BIN/python" -m pip install -q -r "$TESTS_DIR/requirements.txt"
+fi
+
+exec "$VENV_BIN/python" -m pytest "$TESTS_DIR" "$@"

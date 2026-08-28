@@ -172,7 +172,7 @@ class TestReaderThreadPump:
     ):
         d = tmp_path / "a"
         d.mkdir()
-        defn = {"invoke": [str(fixtures_dir / "mock-cli"), "one", "two"]}
+        defn = {"invoke": [sys.executable, str(fixtures_dir / "mock_cli.py"), "one", "two"]}
         defp = tmp_path / "def.json"
         defp.write_text(json.dumps(defn))
         save_registry({"A": {"root": str(d), "definition": str(defp)}})

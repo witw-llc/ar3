@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -23,6 +24,50 @@ sys.path.insert(0, str(_PKG_DIR))
 sys.path.append(str(_PKG_DIR.parent.parent))
 
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
+
+
+@pytest.fixture
+def zone(monkeypatch):
+    """Force the zone every rendered stamp reads in, for the whole suite.
+
+    Not via `TZ`. `time.tzset()` does not exist on Windows and the C library
+    there never consults `TZ`, so a fixture built that way raises
+    `AttributeError` before a single assertion runs — it took out sixty tests
+    on the Windows seat, the largest cause left in this suite.
+
+    `ark.clock`'s two conversion points are redirected instead, which is what
+    these tests are actually after: that a heading or a log line renders in a
+    known zone. That the zone *comes from the machine* is `ark.clock`'s own
+    contract and is tested there, where `TZ` is the thing under test rather
+    than the way to set one up.
+
+    `to_local` is wrapped rather than replaced, so the stored-stamp parsing
+    the caller depends on stays the real one and only the final conversion
+    moves. Zone names are IANA keys resolved through `zoneinfo`, so `%Z`
+    comes from the tz database and reads `PDT` on every platform instead of
+    Windows' `Pacific Daylight Time`.
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from ark import clock
+
+    real_to_local = clock.to_local
+
+    def use(name: str) -> None:
+        tz = ZoneInfo(name)
+        monkeypatch.setattr(
+            clock, "local_now", lambda: datetime.now(timezone.utc).astimezone(tz)
+        )
+        monkeypatch.setattr(
+            clock,
+            "to_local",
+            lambda ts: (lambda dt: None if dt is None else dt.astimezone(tz))(
+                real_to_local(ts)
+            ),
+        )
+
+    return use
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +156,33 @@ def fake_home(tmp_path, monkeypatch):
     yield tmp_path
 
 
+def write_path_executable(directory: Path, name: str, source: str) -> Path:
+    """Write a Python stub the OS can execute, and return the path to exec.
+
+    A `#!` file plus the exec bit is a POSIX-only idea. Windows raises
+    `OSError [WinError 193]` on one, whether it is found on PATH or named
+    outright, so a stub written that way is not a stand-in for a binary there
+    at all. On Windows the logic lands as `<name>.py` beside a `<name>.cmd`
+    launcher — which is both what PATHEXT resolves and what an explicit path
+    can point at — and everywhere else as the stub itself.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        (directory / f"{name}.py").write_text(source, encoding="utf-8")
+        launcher = directory / f"{name}.cmd"
+        launcher.write_text(
+            "@echo off\r\n"
+            f'"{sys.executable}" "%~dp0{name}.py" %*\r\n'
+            "exit /b %ERRORLEVEL%\r\n",
+            encoding="utf-8",
+        )
+        return launcher
+    path = directory / name
+    path.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
 @pytest.fixture
 def agents_root() -> Path:
     """Existing per-tool agent fixture directories under apps/a8s/tests/agents/."""
@@ -119,5 +191,5 @@ def agents_root() -> Path:
 
 @pytest.fixture
 def fixtures_dir() -> Path:
-    """Pytest-only fixtures (mock-cli, definition JSONs) under apps/a8s/tests/fixtures/."""
+    """Pytest-only fixtures (mock_cli.py, definition JSONs) under apps/a8s/tests/fixtures/."""
     return Path(__file__).resolve().parent / "fixtures"

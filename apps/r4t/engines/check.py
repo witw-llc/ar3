@@ -34,7 +34,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from engines.run import RUN_ENGINES, RunError, _build_argv_template
+from engines.run import RUN_ENGINES, RunError, _build_argv_template, resolve_argv0
 
 __all__ = ["PROBES", "EngineReport", "check_engine", "check_all", "format_text"]
 
@@ -138,7 +138,7 @@ def _run(argv: list[str]) -> tuple[int, str]:
     hung check."""
     try:
         proc = subprocess.run(
-            argv,
+            resolve_argv0(argv),
             capture_output=True,
             # Explicit decode: Windows' locale default is the ANSI code page
             # with strict errors, and a CLI's UTF-8 help text crashes it —

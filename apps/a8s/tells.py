@@ -60,6 +60,7 @@ class TellsVersion(Exception):
 
 _USAGE = (
     "usage: tells [-f|--follow] [--timeout SEC] [--body-max N] [--glow [THEME]] "
+    "[--show PATH | --recover TOKEN] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
 )
 
@@ -93,6 +94,7 @@ class TellsOptions:
     glow_theme: str | None = None
     heading_out: str | None = None
     heading_in: str | None = None
+    show: str | None = None
 
     @property
     def follow_forever(self) -> bool:
@@ -127,14 +129,57 @@ def format_displayed_content(content: str, envelope_path: Path, body_max: int) -
     if body_max <= 0 or len(text) <= body_max:
         return text
     path = str(envelope_path.resolve())
-    cmd = (
-        "python3 -c \"import json; "
-        f"print(json.load(open({path!r}))['content'])\""
-    )
+    # The printed command is meant to be PASTED, so its argument has to be inert
+    # in whatever shell receives it — and no quoting achieves that. A quoted
+    # program path is an expression in PowerShell and needs `&`; an apostrophe
+    # in the path breaks bash; and double quotes are worse than they look,
+    # because bash and PowerShell both expand `$name` and `$(...)` inside them
+    # and cmd expands `%NAME%`. A path holding `$HOME` came back rewritten, and
+    # one holding `$(...)` was executed. All measured.
+    #
+    # So the argument is not quoted. It is encoded: base64url with the padding
+    # stripped is `A-Za-z0-9-_` and nothing else, which no shell interprets.
+    # `--show` still takes a real path for someone who has one and can quote it
+    # themselves; `--recover` is the form that survives a paste.
+    cmd = f"tells --recover {encode_envelope_path(path)}"
     return (
         f"{text[:body_max]}\n"
         f"… (truncated at {body_max} chars; full message:\n{cmd})"
     )
+
+
+def encode_envelope_path(path_str: str) -> str:
+    """An absolute path as `A-Za-z0-9-_`, which every shell leaves alone."""
+    import base64
+
+    raw = base64.urlsafe_b64encode(path_str.encode("utf-8"))
+    return raw.decode("ascii").rstrip("=")
+
+
+def decode_envelope_path(token: str) -> str:
+    import base64
+
+    padded = token + "=" * (-len(token) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+
+
+def show_envelope_body(path_str: str) -> int:
+    """Print one stored envelope's `content` in full. The other half of the
+    recovery hint: `tells` clipped it, so `tells` prints it back."""
+    import json
+
+    path = Path(path_str)
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"tells: no such message: {path}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"tells: cannot read {path}: {e}", file=sys.stderr)
+        return 1
+    _configure_stdout()
+    print(envelope.get("content", ""))
+    return 0
 
 
 def parse_tells_argv(argv: list[str]) -> TellsOptions:
@@ -149,6 +194,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     follow = False
     timeout_explicit = False
     body_max = resolve_body_max()
+    show: str | None = None
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
     glow_theme = default_glow
     i = 0
@@ -174,6 +220,19 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             if i >= len(rest):
                 raise TellsUsageError("--body-max requires a character count")
             body_max = resolve_body_max(rest[i])
+        elif arg == "--show":
+            i += 1
+            if i >= len(rest):
+                raise TellsUsageError("--show requires the path to a message")
+            show = rest[i]
+        elif arg == "--recover":
+            i += 1
+            if i >= len(rest):
+                raise TellsUsageError("--recover requires the token tells printed")
+            try:
+                show = decode_envelope_path(rest[i])
+            except Exception as e:
+                raise TellsUsageError(f"--recover: not a token tells printed: {e}") from e
         elif arg == "--glow":
             if i + 1 < len(rest) and not _argv_looks_like_option(rest[i + 1]):
                 i += 1
@@ -195,6 +254,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         glow_theme=glow_theme,
         heading_out=heading_out,
         heading_in=heading_in,
+        show=show,
     )
     if follow and timeout_explicit and timeout != 0:
         raise TellsUsageError("cannot use -f/--follow with a positive --timeout")
@@ -370,6 +430,11 @@ def tells_main(argv: list[str]) -> int:
         print(f"tells: {e}", file=sys.stderr)
         _print_usage()
         return 2
+
+    if opts.show is not None:
+        # Addressed by path, so it needs no outbox and no registry — a clipped
+        # message has to be recoverable from wherever the reader is standing.
+        return show_envelope_body(opts.show)
 
     from convo import DEFAULT_HEADING_IN, DEFAULT_HEADING_OUT, open_glow_stdout
 

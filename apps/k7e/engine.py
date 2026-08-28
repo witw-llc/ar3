@@ -609,10 +609,169 @@ def note_llm_failure(purpose: str, detail: str) -> None:
 _note_llm_failure = note_llm_failure
 
 
+def _split_windows(cmd_str, *, single_quotes):
+    """Tokenize a command string by Windows' own quoting rules.
+
+    `shlex` cannot express them. POSIX rules make a backslash an escape, which
+    destroys every absolute path. Turning the escape off keeps the paths and
+    then loses the one case where a backslash on Windows really is an escape:
+    immediately before a double quote. `python -c "print(\\"hi\\")"` came out
+    as `print(\\hi\\)` — the quotes gone, the backslashes kept, a JSON payload
+    silently corrupted on its way to a bridge.
+
+    The rule CreateProcess and `CommandLineToArgvW` use, which is what the
+    receiving program will parse with: a run of `2n` backslashes before a `"`
+    is `n` backslashes and the quote does its quoting; `2n+1` is `n`
+    backslashes and a literal `"`. Anywhere else a backslash is just a
+    character. `"C:\\tools\\"` is therefore an unterminated string, and it
+    RAISES here — which is a deliberate divergence: `CommandLineToArgvW`
+    tolerates a quote left open at the end and returns what it has. This is not
+    emulating that parser. It recovers what an operator meant from a setting and
+    hands `subprocess` an argv list, which re-quotes it; an unterminated quote
+    in a config is a typo far more often than an intent, and `"C:\\tools\\"`
+    quietly becoming `C:\\tools"` is the failure this whole area keeps
+    producing. `"C:\\tools\\\\"` is the way to write the path.
+
+    `single_quotes` groups on `'` as well. Windows quoting has no single-quote
+    form, but a Git Bash box can hold a `sh -c '<script>'` bridge, so it is
+    tried first and dropped on failure. Inside single quotes the backslash
+    rule is off, matching the shell that form belongs to.
+    """
+    argv = []
+    token = []
+    started = False
+    quote = None
+    i = 0
+    end = len(cmd_str)
+    while i < end:
+        char = cmd_str[i]
+        if char == "\\" and quote != "'":
+            run = i
+            while run < end and cmd_str[run] == "\\":
+                run += 1
+            count = run - i
+            if run < end and cmd_str[run] == '"':
+                token.append("\\" * (count // 2))
+                started = True
+                if count % 2:
+                    token.append('"')
+                    i = run + 1
+                else:
+                    i = run
+                continue
+            token.append("\\" * count)
+            started = True
+            i = run
+            continue
+        if quote == '"' and char == '"' and cmd_str[i + 1:i + 2] == '"':
+            # Inside a quoted string, `""` is one literal quote. It is the only
+            # way to write a quote without a backslash, and it is how a doubled
+            # JSON payload arrives: `"{""key"":""value""}"`. Without this the
+            # pairs cancel each other and the quotes vanish from the value.
+            token.append('"')
+            i += 2
+            continue
+        if quote is None and (
+            char == '"' or (single_quotes and char == "'" and not started)
+        ):
+            # `'` may only OPEN a group at a token boundary. Windows quoting has
+            # no single-quote form at all, so inside a token an apostrophe is a
+            # character — `C:\Users\O'Brien's\llm.exe` has two of them and they
+            # balance, which read as grouping and DELETED them both from a path.
+            # A `sh -c '<script>'` bridge still groups, because its quote follows
+            # a space.
+            quote = char
+            started = True
+        elif char == quote:
+            if quote == "'" and cmd_str[i + 1:i + 2] not in ("", " ", "\t"):
+                # A `'` closes a group only at a token boundary, mirroring the
+                # rule that lets it open one. Without that, the apostrophe in
+                # `--msg 'it won't parse'` closed the group and was deleted, so
+                # one argument became two and a character vanished. With it, the
+                # string parses as what the operator wrote. Double quotes are
+                # exempt: `a"b"c` is ordinary Windows quoting and toggles inside
+                # a token.
+                token.append(char)
+                started = True
+            else:
+                quote = None
+        elif quote is None and char in " \t":
+            if started:
+                argv.append("".join(token))
+                token = []
+                started = False
+        else:
+            token.append(char)
+            started = True
+        i += 1
+    if quote is not None:
+        raise ValueError("No closing quotation")
+    if started:
+        argv.append("".join(token))
+    return argv
+
+
+def llm_argv(cmd_str, *, windows=None):
+    """The configured LLM command as argv, split for the running platform.
+
+    POSIX keeps `shlex.split`. Windows gets its own rules, because it does not
+    have POSIX's: a backslash is a path separator there, so `shlex` reads
+    `C:\\Users\\me\\llm.py` as `C:Usersmellm.py` and destroys every absolute
+    path this setting can hold before the spawn sees it. `_split_windows`
+    carries that platform's actual contract.
+
+    CreateProcess also appends only `.exe` to a bare program name, never
+    `.cmd`, which is how an npm-installed CLI arrives. `shutil.which` matches
+    PATHEXT and finds it. Resolution happens here, at the spawn, so the
+    configured string stays what the operator wrote, and a name that resolves
+    to nothing is left alone for the OS to answer for.
+
+    `windows` overrides the platform, for tests: neither branch is reachable
+    from the other's machine, and both have to be.
+    """
+    import shlex
+    import shutil
+
+    if windows is None:
+        windows = os.name == "nt"
+
+    if not windows:
+        argv = shlex.split(cmd_str)
+    else:
+        try:
+            argv = _split_windows(cmd_str, single_quotes=True)
+        except ValueError:
+            # An apostrophe in a Windows path — `C:\Users\O'Brien\llm.exe`, an
+            # ordinary profile name — opens a group that never closes. Read as
+            # a literal character it parses, which is what the platform means.
+            # Tried second so a `sh -c '<script>'` bridge keeps its grouping.
+            argv = _split_windows(cmd_str, single_quotes=False)
+            stray = next(
+                (t for t in argv if t.startswith("'") or t.endswith("'")), None
+            )
+            if stray is not None:
+                # Literal is the right reading when the apostrophe sits INSIDE
+                # a token — a path component, a name. At a token's edge it is
+                # the opposite: `--msg 'it won't parse'` splits one argument
+                # into three and launches, where before this fallback it
+                # raised. An unclosable string has no correct reading, so the
+                # loud answer is the right one; that costs a bare program name
+                # beginning with an apostrophe, which is rejected rather than
+                # run.
+                raise ValueError(
+                    f"unbalanced apostrophe at the edge of {stray!r}: "
+                    "single-quote grouping and a literal apostrophe cannot "
+                    'both be meant; quote the argument with " instead'
+                )
+
+    if argv and os.sep not in argv[0] and not (os.altsep and os.altsep in argv[0]):
+        argv[0] = shutil.which(argv[0]) or argv[0]
+    return argv
+
+
 def _call_llm(prompt, purpose="summarize", timeout=120):
     """Invoke the configured stdin→stdout CLI for an LLM purpose."""
     import config
-    import shlex
     import subprocess
 
     cmd_str = config.resolve_command(purpose)
@@ -620,9 +779,12 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
         return None
 
     try:
-        cmd = shlex.split(cmd_str)
+        cmd = llm_argv(cmd_str)
         result = subprocess.run(
             cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+            # The model's output is UTF-8; without this, Windows decodes it
+            # through the ANSI code page.
+            encoding="utf-8", errors="replace",
             cwd=str(config._k7e_home()),
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -646,6 +808,16 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
     except OSError as e:
         _note_llm_failure(purpose, f"launch failed: {e}")
         print(f"  [llm:{purpose}] launch failed: {e}", file=sys.stderr)
+    except ValueError as e:
+        # The command string cannot be parsed. That is the *configuration*,
+        # not the file being read — it fails identically for every file — so
+        # it has to reach the exit code. `distill` catches ValueError per file
+        # on purpose, to keep one damaged capture from wedging a sweep, and a
+        # parse error escaping into that catch skipped every capture in a
+        # directory while exiting 0. A sweep reads 0 as a successful dream and
+        # advances its watermark past captures nothing ever read.
+        _note_llm_failure(purpose, f"command cannot be parsed: {e}")
+        print(f"  [llm:{purpose}] command cannot be parsed: {e}", file=sys.stderr)
     return None
 
 
