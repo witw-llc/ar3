@@ -10,6 +10,40 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## Unreleased
+
+### Changed
+
+- **The `tell` contract says what a `.cmd` argument is worth.** Windows cannot
+  execute a `.cmd` directly, so `CreateProcess` runs it through `cmd.exe` and
+  hands over one command-line *string* — and `cmd.exe` treats a raw LF as a
+  command terminator, so every argument from the first newline on is discarded,
+  inside quotes or not, with exit code 0. A multi-line body arrives as its first
+  line and a `FILE:` line naming an attachment vanishes with it. Nothing the
+  batch file does can recover that: the string was interpreted before the shim
+  ran.
+
+  The lossless fix is a native `.exe` entry point — what pip, Scoop and Bun ship
+  and npm does not — and it is **deferred past 1.0**. Researched rather than
+  guessed: prebuilt launchers exist at 98–183 KB and are redistributable, so the
+  binary is not the cost. The cost is everything around it that nobody has
+  priced — code signing, SmartScreen and Defender reputation for an unsigned
+  fresh binary, antivirus false positives, an ARM64 build toolchain, and what a
+  binary does to an installer that fetches only text. Meanwhile no caller in the
+  suite needs it: r4t cannot spawn a `.cmd` at all, so it fails loudly rather
+  than truncating.
+
+  What ships instead is the sentence that was missing. `docs/a8s-tell.md` now
+  states, in a table, what argv guarantees and what it does not: single-line
+  arguments are forwarded intact, anything multi-line through a `.cmd` is
+  truncated, and **stdin is byte-exact on every platform**. That is the rule
+  everywhere and the only correct one on Windows — and it is the better habit
+  regardless, because a shell never gets to expand `$HOME` or a backtick inside
+  a message body. The same sentence is in the `docs/a8s.md` command table, where
+  a reader meets the shim.
+
+  A workaround stated plainly beats a defect stated nowhere. (#230)
+
 ## 0.1.78
 
 ### Fixed

@@ -20,6 +20,45 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 | Router | `apps/a8s/mailbox.py` (`route_outboxes`) |
 | Receive-side | `apps/a8s/tells.py` (`tells_main`) — see below |
 
+## What argv guarantees, and where it does not
+
+**A `.cmd` shim does not forward arguments the way a native program does.**
+Windows cannot execute a `.cmd` directly, so `CreateProcess` runs it through
+`cmd.exe` and hands over one command-line *string*. `cmd.exe` treats a raw LF
+as a command terminator, so every argument from the first newline on is
+discarded — inside quotes or not, with exit code 0 and no warning on either
+side. A multi-line body passed as one argv element arrives as its first line,
+and a `FILE:` line naming an attachment vanishes with the rest (#230).
+
+Nothing the batch file does can recover it: `cmd.exe` has already interpreted
+the string before the shim runs. This is not particular to this suite — npm and
+pnpm ship `.cmd` shims with the same property, and it goes unnoticed because
+most CLIs pass short single-line arguments.
+
+So the contract is:
+
+| what you pass | guarantee |
+|---|---|
+| single-line argv (a recipient, flags, a one-line body) | forwarded intact on every platform |
+| **anything multi-line, through a `.cmd`** | **truncated at the first newline** |
+| stdin — `-`, a pipe, `- < file.md`, `- <<'EOF'` | byte-exact on every platform |
+| `--file` / `--attach` | a path, not body text; unaffected |
+
+**Multi-line and arbitrary payloads travel on stdin or `--file`.** That is the
+rule on every platform, and it is the only correct one on Windows. It is also
+the better habit generally, because the shell never gets a chance to expand
+`$HOME`, `%USERPROFILE%`, backticks or anything else inside a message.
+
+A `tell.ps1` invoked from PowerShell does not go through `cmd.exe`, so it is
+not exposed — but *which* file a bare `tell` resolves to depends on command
+precedence and `PATHEXT`, which is environment-specific rather than guaranteed.
+A caller that needs certainty names the file.
+
+The lossless fix for argv is a native `.exe` entry point, which is what pip,
+Scoop and Bun ship and what npm does not. It is deferred past 1.0 — the
+reasoning, the measured launcher sizes and the costs nobody has priced are in
+[the research](https://github.com/witw-llc/ar3-private/wiki/Reference-Windows-Entry-Point-Research).
+
 ## Send path (async)
 
 0. **`tell --check`** — optional self-test: verifies the resolved outbox is writable (creates the path when missing). A recipient name validates registry routing when the resolved outbox is a registered one; on a staging outbox it reports `not checked` rather than guessing. No envelope written.
