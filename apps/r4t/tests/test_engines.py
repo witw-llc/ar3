@@ -9,6 +9,11 @@ from engines import agy, claude, codex, copilot, cursor
 from engines.base import QuotaError, window_label
 
 
+# Engines whose CLI exposes no way to read remaining subscription without
+# spending a turn, so their module implements no quota verb.
+QUOTALESS = {"muse"}
+
+
 class TestResolution:
     def test_engine_ids_resolve_to_themselves(self):
         for name in engines.MODULES:
@@ -24,14 +29,24 @@ class TestResolution:
     def test_case_and_whitespace_are_forgiven(self):
         assert engines.engine_for("  Codex ") == "codex"
 
-    def test_every_engine_answers_for_quota(self):
+    def test_an_engine_answers_quota_only_when_its_module_implements_one(self):
+        # muse is the first engine with no usage surface to read at all —
+        # engines/muse.py says why it therefore defines no quota(). Naming it
+        # here keeps this a guard: an engine that loses its quota check by
+        # accident still fails, and adding muse to QUOTALESS is the deliberate
+        # act that records a second one.
         for name in engines.MODULES:
-            assert "quota" in engines.capabilities(name)
+            answers = "quota" in engines.capabilities(name)
+            assert answers is (name not in QUOTALESS)
 
     def test_only_the_verified_engines_also_answer_for_run(self):
-        run_engines = {"claude", "codex", "agy", "copilot", "cursor", "opencode"}
+        run_engines = {
+            "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse",
+        }
         for name in engines.MODULES:
-            expected = ["quota", "run", "check"] if name in run_engines else ["quota"]
+            expected = [] if name in QUOTALESS else ["quota"]
+            if name in run_engines:
+                expected += ["run", "check"]
             assert engines.capabilities(name) == expected
 
     def test_capability_resolves_through_presets(self):

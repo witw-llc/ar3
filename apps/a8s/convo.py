@@ -19,7 +19,7 @@ import sqlite_store
 from core import conversations_path, inbound_bundle_dir, out
 from settings import get_int
 
-from ark import clock
+from ar3 import clock
 
 __all__ = [
     "DEFAULT_HEADING_IN",
@@ -118,8 +118,8 @@ heading templates:
   Message body and attachment lines are appended after the heading block.
 
 examples:
-  a8s convo neil-macbook -f --limit 10 --glow
-  a8s convo neil-macbook -f --from ares
+  a8s convo my-desktop -f --limit 10 --glow
+  a8s convo my-desktop -f --from ares
   a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
   a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
 

@@ -39,8 +39,8 @@ from core import (
     TELL_OUTBOX_DIR_ENV,
 )
 from mailbox import _split_content_and_files
-from ark.fsio import atomic_write_text
-from ark.ulid import new as new_ulid
+from ar3.fsio import atomic_write_text
+from ar3.ulid import new as new_ulid
 
 DEFAULT_FILE_MAX_BYTES = 50 * 1024 * 1024
 

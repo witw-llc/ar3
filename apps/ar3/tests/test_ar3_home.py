@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ark.home import app_home
+from ar3.home import app_home
 
 
 class TestOverride:

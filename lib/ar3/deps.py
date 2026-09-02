@@ -1,5 +1,5 @@
 """On-demand heavy dependencies — the tier-2 half of the suite's dependency
-foundation. `ark/vendor.py` ships small, pinned, always-present packages
+foundation. `ar3/vendor.py` ships small, pinned, always-present packages
 inside the repo; this module is the opposite shape: a group named by a
 `requirements/<group>.txt` file (boto3 for S3 storage, textual for the r4t
 TUI) that most installs never touch and that only `ar3 deps <group>` (never
@@ -20,7 +20,7 @@ Installing is `install_group`'s job alone, invoked by the `ar3 deps` verb.
 the group dir into `sys.path` ahead of site-packages/dist-packages but
 behind stdlib and the vendored dir — a fetched group beats an older copy of
 the same package already installed system- or venv-wide, while stdlib and
-`ark.vendor`'s prepend-at-0 stay authoritative over anything fetched.
+`ar3.vendor`'s prepend-at-0 stay authoritative over anything fetched.
 """
 from __future__ import annotations
 
@@ -33,20 +33,20 @@ import sys
 import sysconfig
 from pathlib import Path
 
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENTS_DIR = REPO_ROOT / "requirements"
 
 
 def deps_root() -> Path:
     """Base directory fetched dependency groups live under:
-    `XDG_DATA_HOME/ark/deps` (or `~/.local/share/ark/deps` when unset) —
-    the same override-then-default shape `ark.home.app_home` uses for
+    `XDG_DATA_HOME/ar3/deps` (or `~/.local/share/ar3/deps` when unset) —
+    the same override-then-default shape `ar3.home.app_home` uses for
     `XDG_CONFIG_HOME`, applied to the data-home variable instead."""
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
-    return base / "ark" / "deps"
+    return base / "ar3" / "deps"
 
 
 def interpreter_key() -> str:

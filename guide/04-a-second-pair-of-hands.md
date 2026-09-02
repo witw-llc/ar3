@@ -32,7 +32,7 @@ About 20 minutes.
 
 Two edits: the runbook grows a member, and the rig config grows a rig.
 
-**Replace** `~/ark/silo/r4t.md` — the `## Roster` section (leave the
+**Replace** `~/ar3/silo/r4t.md` — the `## Roster` section (leave the
 frontmatter, `## Mission` and `## Rituals` as they are)
 
 ```markdown
@@ -80,7 +80,7 @@ the same breath, because the leader now has somebody to message:
 r4t rig add helper ollama-opencode --model qwen3.6
 r4t rig set helper echo true
 r4t rig unset silo echo
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t runbook check
 ```
 
@@ -93,7 +93,7 @@ Reference it from your runbook: `- **Rig:** helper`
 set helper echo = true in /home/you/.config/r4t/rigs.json
 unset silo echo in /home/you/.config/r4t/rigs.json
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (2 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (2 member(s), leader Wren)
 ```
 
 Two members, still one leader. From this turn on, Wren's prompt carries the
@@ -108,7 +108,7 @@ Give Wren a task that names Moss:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "Ask Moss for three name ideas for our roster mascot, an octopus. Pick your favorite and tell me."
 tells --timeout 300
 ```
@@ -129,7 +129,7 @@ ticker:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t logs -n 40
 ```
 
@@ -183,7 +183,7 @@ what one member sends another.
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t tell --as Wren --to Moss "Three verbs that describe what an octopus does. Just the list."
 r4t logs -n 7
 ```
@@ -222,7 +222,7 @@ Now look at the roster as a whole:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t status
 ```
 
@@ -242,7 +242,7 @@ Health
   ✓ no runaway signs (10 turn(s) last 10m, 1 live now)
   ✓ all 2 member(s) healthy
 
-Roster  (repo settings: /home/you/ark/silo/r4t.md)
+Roster  (repo settings: /home/you/ar3/silo/r4t.md)
   ✓ Wren  rig=silo  budget=7/8  [leader, turn running, pid 43251]
   ✓ Moss  rig=helper  budget=7.1/8
 
@@ -299,7 +299,7 @@ not run at all. Confirm why from the two surfaces that know:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t status
 r4t logs -n 2
 ```
@@ -316,7 +316,7 @@ Health
   ✓ no runaway signs (9 turn(s) last 10m, 1 live now)
   ⚠ Moss resting — rig helper exhausted, 1 queued, ready in ~59 min   (try: raise rig_budget_max/rig_budget_earn_per_hour, or the subscription is out of quota)
 
-Roster  (repo settings: /home/you/ark/silo/r4t.md)
+Roster  (repo settings: /home/you/ar3/silo/r4t.md)
   ✓ Wren  rig=silo  budget=7/8  [leader, turn running, pid 43251]
   ✓ Moss  rig=helper  budget=8/8  rig=0/1  1 queued  RESTING (rig helper, ready in ~59 min)
 
@@ -408,7 +408,7 @@ Health
   ✓ no runaway signs (9 turn(s) last 10m, 1 live now)
   ✓ all 2 member(s) healthy
 
-Roster  (repo settings: /home/you/ark/silo/r4t.md)
+Roster  (repo settings: /home/you/ar3/silo/r4t.md)
   ✓ Wren  rig=silo  budget=7/8  [leader, turn running, pid 43251]
   ✓ Moss  rig=helper  budget=7.1/8
 
@@ -456,7 +456,7 @@ repo with `silo`, by design.)
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 git add r4t.md
 git commit -q -m "silo roster: Moss joins — helper rig, echo lifted from Wren"
 ```

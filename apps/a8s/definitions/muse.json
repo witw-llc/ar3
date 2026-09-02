@@ -1,0 +1,9 @@
+{
+  "description": "Meta Muse default — `muse exec`, approvals off but the sandbox on, fresh session every wake.",
+  "invoke": [
+    "muse", "exec",
+    "--approval-mode", "never",
+    "--user-input-auto-resolve",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}

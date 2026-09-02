@@ -604,10 +604,16 @@ class TestExecuteAndSpawn:
         assert capsys.readouterr().err == ""
 
 
+QUOTALESS = {"muse"}  # see engines/muse.py
+
+
 class TestCapabilities:
     def test_run_engines_report_every_verb(self):
         for name in engine_run.RUN_ENGINES:
-            assert engines.capabilities(name) == ["quota", "run", "check"]
+            expected = ["run", "check"] if name in QUOTALESS else [
+                "quota", "run", "check"
+            ]
+            assert engines.capabilities(name) == expected
 
     def test_non_run_engines_report_only_quota(self):
         for name in engines.MODULES:
@@ -865,8 +871,8 @@ class TestEngineRunFlagsCli:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
 class TestRelocatedFallbackTeardown:
-    """The relocated-copy fallbacks (ark unimportable) must carry the same
-    capture-pgid-before-SIGTERM behavior as ark.proc: a leader that has
+    """The relocated-copy fallbacks (ar3 unimportable) must carry the same
+    capture-pgid-before-SIGTERM behavior as ar3.proc: a leader that has
     already been reaped when SIGKILL fires must not strand a SIGTERM-ignoring
     grandchild in the still-live process group."""
 
@@ -874,14 +880,14 @@ class TestRelocatedFallbackTeardown:
 import importlib.abc, os, pathlib, signal, sys, time
 
 
-class BlockArk(importlib.abc.MetaPathFinder):
+class BlockAr3(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == "ark" or fullname.startswith("ark."):
-            raise ImportError("ark blocked (relocated-copy simulation)")
+        if fullname == "ar3" or fullname.startswith("ar3."):
+            raise ImportError("ar3 blocked (relocated-copy simulation)")
         return None
 
 
-sys.meta_path.insert(0, BlockArk())
+sys.meta_path.insert(0, BlockAr3())
 sys.path.insert(0, {r4t_dir!r})
 
 {import_and_kill}

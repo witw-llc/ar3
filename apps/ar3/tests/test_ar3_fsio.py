@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from ark.fsio import atomic_write_text
+from ar3.fsio import atomic_write_text
 
 
 class TestBasics:

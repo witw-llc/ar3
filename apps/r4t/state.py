@@ -68,11 +68,11 @@ else:
     import fcntl
 
 # The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
-# container with no repo root, so `ark` is not always reachable — unlike
-# arkver's "unknown version" degrade, a ULID has no no-op fallback, so the
+# container with no repo root, so `ar3` is not always reachable — unlike
+# ar3ver's "unknown version" degrade, a ULID has no no-op fallback, so the
 # except branch carries a working minimal reimplementation instead of a stub.
 try:
-    from ark.ulid import new as new_ulid
+    from ar3.ulid import new as new_ulid
 except ImportError:
     import secrets
 
@@ -87,7 +87,7 @@ except ImportError:
 # Same relocation concern as `new_ulid` above; r4t carries no legacy config
 # dir, so the fallback needs neither an override nor a migration path.
 try:
-    from ark.home import app_home as _app_home
+    from ar3.home import app_home as _app_home
 except ImportError:
     def _app_home(app: str, env_override: str | None) -> Path:
         override = (env_override or "").strip()
@@ -101,7 +101,7 @@ except ImportError:
 # os.replace + cleanup-on-failure contract, minus the fsync/mode knobs no
 # r4t call site needs.
 try:
-    from ark.fsio import atomic_write_text as _atomic_write
+    from ar3.fsio import atomic_write_text as _atomic_write
 except ImportError:
     def _atomic_write(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,10 +312,10 @@ def archive_history(node: str, name: str) -> Path | None:
 
 # ---------- locks ----------
 
-# Same relocation concern as the ark imports at the top; the container copy
+# Same relocation concern as the ar3 imports at the top; the container copy
 # is POSIX-only, so the fallback keeps only the POSIX probe.
 try:
-    from ark.proc import pid_alive as _pid_alive
+    from ar3.proc import pid_alive as _pid_alive
 except ImportError:
     def _pid_alive(pid: int) -> bool:
         if pid <= 0:

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 
-from ark.clock import local_now, stamp, time_stamp, to_local, zone_label
+from ar3.clock import local_now, stamp, time_stamp, to_local, zone_label
 
 needs_tzset = pytest.mark.skipif(
     not hasattr(time, "tzset"), reason="TZ only takes effect via tzset (not on Windows)"

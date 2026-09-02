@@ -1,6 +1,6 @@
-"""Tests for the `ark` foundation package's vendoring hook.
+"""Tests for the `ar3` foundation package's vendoring hook.
 
-`ensure_vendor()` (ark/vendor.py) prepends `ark/_vendor` to `sys.path` so a
+`ensure_vendor()` (ar3/vendor.py) prepends `ar3/_vendor` to `sys.path` so a
 vendored import like `paho.mqtt.client` resolves to the copy the suite
 tested rather than whatever a system or venv install happens to provide.
 These tests run the hook in a subprocess with `-S` (skip `site` — no
@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_VENDOR_DIR = _REPO_ROOT / "ark" / "_vendor"
+_LIB = _REPO_ROOT / "lib"
+_VENDOR_DIR = _LIB / "ar3" / "_vendor"
 _VENDOR_TXT = _VENDOR_DIR / "vendor.txt"
 _VENDORED_PAHO_INIT = _VENDOR_DIR / "paho" / "mqtt" / "__init__.py"
 
@@ -35,11 +36,11 @@ def _run(script: str, env_overrides: dict) -> subprocess.CompletedProcess:
 
 
 class TestEnsureVendor:
-    def test_vendored_paho_resolves_under_ark_vendor(self):
+    def test_vendored_paho_resolves_under_ar3_vendor(self):
         script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
-            "from ark.vendor import ensure_vendor\n"
+            f"sys.path.insert(0, {str(_LIB)!r})\n"
+            "from ar3.vendor import ensure_vendor\n"
             "ensure_vendor()\n"
             "import paho\n"
             "import paho.mqtt.client\n"
@@ -59,25 +60,25 @@ class TestEnsureVendor:
         install riding along in the subprocess."""
         script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
+            f"sys.path.insert(0, {str(_LIB)!r})\n"
             "import paho.mqtt.client\n"
         )
         result = _run(script, {})
         assert result.returncode != 0
         assert "paho" in result.stderr
 
-    def test_ark_no_vendor_leaves_sys_path_untouched(self):
+    def test_ar3_no_vendor_leaves_sys_path_untouched(self):
         script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
-            "from ark.vendor import ensure_vendor\n"
+            f"sys.path.insert(0, {str(_LIB)!r})\n"
+            "from ar3.vendor import ensure_vendor\n"
             "before = list(sys.path)\n"
             "ensure_vendor()\n"
             "after = list(sys.path)\n"
             "print('SAME' if before == after else 'CHANGED')\n"
             "print(any('_vendor' in p for p in after))\n"
         )
-        result = _run(script, {"ARK_NO_VENDOR": "1"})
+        result = _run(script, {"AR3_NO_VENDOR": "1"})
         assert result.returncode == 0, result.stderr
         lines = result.stdout.strip().splitlines()
         assert lines[0] == "SAME"
@@ -86,8 +87,8 @@ class TestEnsureVendor:
     def test_ensure_vendor_is_idempotent(self):
         script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(_REPO_ROOT)!r})\n"
-            "from ark.vendor import ensure_vendor\n"
+            f"sys.path.insert(0, {str(_LIB)!r})\n"
+            "from ar3.vendor import ensure_vendor\n"
             "ensure_vendor()\n"
             "first = list(sys.path)\n"
             "ensure_vendor()\n"
@@ -128,9 +129,9 @@ class TestVendorPin:
 
 class TestMqttTransportUsesVendorHook:
     def test_mqtt_transport_module_calls_ensure_vendor_before_import(self):
-        """The wiring in transports/mqtt.py: `ark.vendor.ensure_vendor()` runs
+        """The wiring in transports/mqtt.py: `ar3.vendor.ensure_vendor()` runs
         before `import paho.mqtt.client`, guarded by try/except ImportError so
-        a relocated copy without the `ark` package still degrades to the
+        a relocated copy without the `ar3` package still degrades to the
         pre-existing behavior (system paho, or WARN-skip if truly absent)."""
         mqtt_py = _REPO_ROOT / "apps" / "a8s" / "transports" / "mqtt.py"
         text = mqtt_py.read_text(encoding="utf-8")

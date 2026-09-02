@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from ark import clock
-from ark.ulid import new as new_ulid, parse as parse_ulid
+from ar3 import clock
+from ar3.ulid import new as new_ulid, parse as parse_ulid
 
 from commands import (
     cmd_add,
@@ -102,11 +102,11 @@ class TestCmdAddBundledDefinition:
     def test_bare_kind_resolves_bundled(self, fake_home, agent_root, capsys):
         from definitions import default_definition_path
 
-        rc = cmd_add(["neil-macbook", str(agent_root), "filedrop"])
+        rc = cmd_add(["my-desktop", str(agent_root), "filedrop"])
         assert rc == 0
         out = capsys.readouterr().out
         assert str(default_definition_path("filedrop")) in out
-        assert load_registry()["neil-macbook"]["definition"] == str(default_definition_path("filedrop"))
+        assert load_registry()["my-desktop"]["definition"] == str(default_definition_path("filedrop"))
 
     def test_bare_kind_with_json_suffix(self, fake_home, agent_root):
         from definitions import default_definition_path
@@ -926,17 +926,17 @@ class TestCmdLsRemotes:
     def test_remote_only_name_is_listed(self, fake_home, tmp_path, capsys):
         a = tmp_path / "a"; a.mkdir()
         save_registry({"claude": {"root": str(a)}})
-        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        _heard("my-phone", "2026-08-24T05:08:45.222Z")
         assert cmd_ls([]) == 0
         out = capsys.readouterr().out
-        assert "neil-phone" in out
+        assert "my-phone" in out
         assert "remote" in out
 
     def test_stamp_is_local_not_utc(self, fake_home, tmp_path, capsys):
-        from ark import clock
+        from ar3 import clock
 
         save_registry({})
-        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        _heard("my-phone", "2026-08-24T05:08:45.222Z")
         assert cmd_ls([]) == 0
         out = capsys.readouterr().out
         assert clock.stamp("2026-08-24T05:08:45.222Z") in out
@@ -971,7 +971,7 @@ class TestCmdLsRemotes:
         out = capsys.readouterr().out
         assert out.lower().count("robin") == 1
         # The newest arrival supplies both the stamp and the spelling.
-        from ark import clock
+        from ar3 import clock
 
         assert clock.stamp("2026-08-25T06:00:00.000Z") in out
 
@@ -986,7 +986,7 @@ class TestCmdLsRemotes:
         assert "ghost" not in out
 
     def test_newest_arrival_wins(self, fake_home, capsys):
-        from ark import clock
+        from ar3 import clock
         import sqlite3
         from txlog import _COLUMNS, transactions_path
 
@@ -1005,17 +1005,17 @@ class TestCmdLsRemotes:
     def test_quiet_includes_remotes(self, fake_home, tmp_path, capsys):
         a = tmp_path / "a"; a.mkdir()
         save_registry({"claude": {"root": str(a)}})
-        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        _heard("my-phone", "2026-08-24T05:08:45.222Z")
         assert cmd_ls(["-q"]) == 0
         # The scriptable form is how an agent answers "can I reach X".
-        assert capsys.readouterr().out.splitlines() == ["claude", "neil-phone"]
+        assert capsys.readouterr().out.splitlines() == ["claude", "my-phone"]
 
     def test_remote_alone_still_lists(self, fake_home, capsys):
         save_registry({})
-        _heard("neil-phone", "2026-08-24T05:08:45.222Z")
+        _heard("my-phone", "2026-08-24T05:08:45.222Z")
         assert cmd_ls([]) == 0
         out = capsys.readouterr().out
-        assert "neil-phone" in out
+        assert "my-phone" in out
         assert "no nodes registered" not in out
 
     def test_nothing_at_all_still_hints(self, fake_home, capsys):
@@ -1894,7 +1894,7 @@ class TestCmdRemoteFolder:
         return d
 
     def test_registers_remote_storage_and_ledger(self, fake_home, shared, capsys):
-        from ark.ulid import is_ulid
+        from ar3.ulid import is_ulid
         from core import folder_ledger_path
 
         rc = cmd_remote(["box", str(shared)])
@@ -2176,7 +2176,7 @@ class TestCmdRemoteFolder:
         assert load_network_config()["remotes"]["box"]["joined"] != first
 
     def test_health_reports_ok_and_consumes_nothing(self, fake_home, shared, capsys):
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
         from commands import cmd_health
 
         cmd_remote(["box", str(shared)])
@@ -2755,7 +2755,7 @@ class TestCmdLogs:
 class TestCmdTrace:
     def test_prints_correlated_boundaries(self, fake_home, capsys):
         from txlog import log
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         log("PUBLISHED", msg_id=msg_id, sender="alice", recipient="bob", remote="mqtt")
@@ -2780,7 +2780,7 @@ class TestCmdTrace:
         assert "usage: a8s trace <ULID>" in capsys.readouterr().err
 
     def test_reports_no_events(self, fake_home, capsys):
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         assert cmd_trace([msg_id]) == 1

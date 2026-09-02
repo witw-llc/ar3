@@ -156,10 +156,10 @@ the agent and write its instructions:
 **Run**
 
 ```bash
-mkdir -p ~/ark/solo ~/ark/me
+mkdir -p ~/ar3/solo ~/ar3/me
 ```
 
-**Create** `~/ark/solo/AGENTS.md`
+**Create** `~/ar3/solo/AGENTS.md`
 
 ```markdown
 # solo
@@ -186,7 +186,7 @@ prompt, get an answer.
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ar3/solo
 r4t engine claude run --timeout 600 "You are my release assistant for a project called Foghorn. Record in STATUS.md that I am shipping 0.4.0 and that it needs a changelog before it goes out. Acknowledge in one sentence."
 ```
 
@@ -205,7 +205,7 @@ model-written block in this chapter; the command output around them is exact.
 `--model` tag the local presets need:
 
 ```bash
-cd ~/ark/solo
+cd ~/ar3/solo
 r4t engine ollama-opencode run --model qwen3.6 --timeout 600 "You are my release assistant for a project called Foghorn. Record in STATUS.md that I am shipping 0.4.0 and that it needs a changelog before it goes out. Acknowledge in one sentence."
 ```
 
@@ -221,7 +221,7 @@ Look at what landed on disk:
 **Run**
 
 ```bash
-cat ~/ark/solo/STATUS.md
+cat ~/ar3/solo/STATUS.md
 ```
 
 You should see:
@@ -280,7 +280,7 @@ a reply. Read what it wrote instead of what it said:
 **Run**
 
 ```bash
-cat ~/ark/solo/STATUS.md
+cat ~/ar3/solo/STATUS.md
 ```
 
 You should see, in the middle of the file:
@@ -326,8 +326,8 @@ No other work started or restarted.
 **Run**
 
 ```bash
-ls ~/ark/solo
-cat ~/ark/solo/LESSONS.md
+ls ~/ar3/solo
+cat ~/ar3/solo/LESSONS.md
 ```
 
 You should see:
@@ -366,9 +366,9 @@ You should see, on stderr, before the answer:
 r4t engine echo: argv: claude --permission-mode dontAsk --allowedTools 'Bash(tell:*) Bash(a8s convo:*) Read Edit Write Glob Grep WebFetch WebSearch TodoWrite' --exclude-dynamic-system-prompt-sections -p '{prompt}'
 r4t engine echo: --- prompt ---
 Smart cold boot:
-1. Read /home/you/ark/solo/STATUS.md, then /home/you/ark/solo/AGENTS.md and /home/you/ark/solo/LESSONS.md if present. Use these absolute paths even if your workspace root differs. They are the durable source of truth; you have no transcript memory.
+1. Read /home/you/ar3/solo/STATUS.md, then /home/you/ar3/solo/AGENTS.md and /home/you/ar3/solo/LESSONS.md if present. Use these absolute paths even if your workspace root differs. They are the durable source of truth; you have no transcript memory.
 2. Stay idle and exit unless there is clear direction or active work. Never restart completed work. Be token-frugal; no wordy prose.
-3. Before exit, rewrite /home/you/ark/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ark/solo/LESSONS.md — append-only, one short bullet each, never rewrite or delete existing lessons. Never edit AGENTS.md.
+3. Before exit, rewrite /home/you/ar3/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ar3/solo/LESSONS.md — append-only, one short bullet each, never rewrite or delete existing lessons. Never edit AGENTS.md.
 
 Routed input:
 Say OK.
@@ -421,16 +421,16 @@ what `run` wants, so the definition is the command you have been typing — and
 the suite ships one per engine, already written. You name it; you do not write
 it.
 
-`~/ark/me` is your **filedrop seat**: a directory a8s delivers your mail
+`~/ar3/me` is your **filedrop seat**: a directory a8s delivers your mail
 into, with no CLI to wake — you read it with `tells`. Register both, then
 look at the roster:
 
 **Run**
 
 ```bash
-a8s add me ~/ark/me filedrop
+a8s add me ~/ar3/me filedrop
 # claude can be replaced with cursor, codex, or agy depending on your preferred software
-a8s add solo ~/ark/solo engine-claude
+a8s add solo ~/ar3/solo engine-claude
 a8s ls
 ```
 
@@ -438,7 +438,7 @@ a8s ls
 on the same line as an a8s var:
 
 ```bash
-a8s add solo ~/ark/solo engine-ollama-opencode --model=qwen3.6
+a8s add solo ~/ar3/solo engine-ollama-opencode --model=qwen3.6
 ```
 
 `a8s vars solo set MODEL qwen3.6` changes that later without re-adding the
@@ -447,14 +447,14 @@ node.
 You should see:
 
 ```
-added me -> /home/you/ark/me
+added me -> /home/you/ar3/me
 definition: /home/you/.ar3/apps/a8s/definitions/filedrop.json  (explicit)
 wake_path: recorded this shell's PATH for every node's wakes
-added solo -> /home/you/ark/solo
+added solo -> /home/you/ar3/solo
 definition: /home/you/.ar3/apps/a8s/definitions/engine-claude.json  (explicit)
 NAME   STATUS    DEFINITION      ROOT
-me     stopped   filedrop        /home/you/ark/me
-solo   stopped   engine-claude   /home/you/ark/solo
+me     stopped   filedrop        /home/you/ar3/me
+solo   stopped   engine-claude   /home/you/ar3/solo
 ```
 
 That third line appears once, on the first `a8s add` on a machine. A woken
@@ -534,7 +534,7 @@ r4t. [docs/r4t-engine.md](../docs/r4t-engine.md) has the full flag list.
 One more thing before mail can work: nothing so far has told solo to answer
 anybody. Add that rule to the file that already holds its character.
 
-**Replace** `~/ark/solo/AGENTS.md` (whole file — one new section at the end)
+**Replace** `~/ar3/solo/AGENTS.md` (whole file — one new section at the end)
 
 ```markdown
 # solo
@@ -594,7 +594,7 @@ Ask it something only its own notes can answer:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell solo "What release am I shipping, and what is still needed before it goes out?"
 tells --timeout 300
 ```
@@ -609,10 +609,10 @@ solo: Shipping Foghorn 0.4.0. Outstanding before it goes out: the 0.4.0 changelo
 ```
 
 That round trip crossed the full machinery: your envelope was written to
-`~/ark/me/.outbox/`, the router stamped you as the sender and moved it to
+`~/ar3/me/.outbox/`, the router stamped you as the sender and moved it to
 solo's inbox, solo's handler ran `r4t engine ... run` with your text as the
 routed input, the engine composed the cold-boot prompt around it, and the
-reply rode the same road back into `~/ark/me/.inbox/`.
+reply rode the same road back into `~/ar3/me/.inbox/`.
 
 And solo knew about Foghorn 0.4.0. Nothing in that message mentioned it, and
 this was a fresh process with no transcript — it read its own `STATUS.md`,
@@ -666,8 +666,8 @@ You should see:
 
 ```
 NAME   STATUS                DEFINITION      ROOT
-me     running (pid 73526)   filedrop        /home/you/ark/me
-solo   stopped               engine-claude   /home/you/ark/solo
+me     running (pid 73526)   filedrop        /home/you/ar3/me
+solo   stopped               engine-claude   /home/you/ar3/solo
 ```
 
 And the per-agent log says what actually moved:
@@ -747,7 +747,7 @@ and chapter 2 is where they arrive. k7e waits until chapter 5.
 
 solo's character is the file you brought with you. Change it:
 
-**Replace** `~/ark/solo/AGENTS.md` — the opening paragraph only, leaving the
+**Replace** `~/ar3/solo/AGENTS.md` — the opening paragraph only, leaving the
 memory line and the `## How you reply` section as they are:
 
 ```markdown
@@ -760,7 +760,7 @@ No restart needed — every wake is a fresh turn that re-reads the file:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell solo "What are you watching over today?"
 tells --timeout 300
 ```
@@ -785,7 +785,7 @@ source, so leave them out:
 **Run**
 
 ```bash
-cd ~/ark/solo
+cd ~/ar3/solo
 git init -q
 printf 'STATUS.md\nLESSONS.md\nLESSONS-ARCHIVE.md\n' > .gitignore
 git add AGENTS.md .gitignore

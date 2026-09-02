@@ -17,11 +17,11 @@ To find this guide later: search the repo for **filedrop**.
 ## Setup (once)
 
 ```bash
-mkdir -p ~/filedrops/neil-macbook
-a8s add neil-macbook ~/filedrops/neil-macbook filedrop
+mkdir -p ~/filedrops/my-desktop
+a8s add my-desktop ~/filedrops/my-desktop filedrop
 
 # Keep the handler running so mail lands in .inbox even when nobody is watching
-a8s start neil-macbook
+a8s start my-desktop
 ```
 
 `filedrop` is the bundled definition (`definitions/filedrop.json`): file-proxy
@@ -31,7 +31,7 @@ delivery, no CLI wake. Same pattern for a per-app seat (`cursor-drop`, etc.).
 
 ```bash
 # Optional for humans: set once in your shell rc
-export TELL_OUTBOX_DIR=~/filedrops/neil-macbook/.outbox
+export TELL_OUTBOX_DIR=~/filedrops/my-desktop/.outbox
 
 # Watch inbound only (no echo of what you sent — prefer this over `a8s convo -f`)
 tells -f
@@ -48,7 +48,7 @@ default. Otherwise outbound mail is stamped from the wrong seat (classic
 ```bash
 export TELL_OUTBOX_DIR=~/filedrops/cursor-drop/.outbox
 tells -f          # background OK; .inbox still fills when this is down
-tell neil-macbook - <<'EOF'
+tell my-desktop - <<'EOF'
 done with the refactor
 EOF
 ```
@@ -63,7 +63,7 @@ Bridges that register **several names on one Drive/sync mount** are intentional:
 
 ```bash
 a8s add my-google /mnt/gdrive/a8s filedrop
-a8s add neil-email /mnt/gdrive/a8s filedrop
+a8s add my-email /mnt/gdrive/a8s filedrop
 ```
 
 Inbound already shares `<root>/.inbox/` and preserves envelope `to`. Outbound

@@ -13,7 +13,13 @@ fi
 
 # The shims at the repo root — ar3, a8s, tell, tells, r4t, k7e — resolve from here.
 export AR3_ROOT
-export PATH="$AR3_ROOT:$PATH"
+# get.sh writes the source line to every rc the user's shells read, and some
+# of those read each other (Debian's .profile sources .bashrc), so this runs
+# more than once per shell. Prepend only when absent.
+case ":$PATH:" in
+  *":$AR3_ROOT:"*) ;;
+  *) export PATH="$AR3_ROOT:$PATH" ;;
+esac
 
 export AR3_CACHE="$HOME/.cache/ar3"
 [ -d "$AR3_CACHE" ] || mkdir -p "$AR3_CACHE"

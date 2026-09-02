@@ -265,4 +265,7 @@ class TestCheckCli:
 
     def test_check_is_advertised_as_a_verb(self):
         for name in engines.run.RUN_ENGINES:
-            assert engines.capabilities(name) == ["quota", "run", "check"]
+            expected = ["run", "check"] if name == "muse" else [
+                "quota", "run", "check"
+            ]
+            assert engines.capabilities(name) == expected

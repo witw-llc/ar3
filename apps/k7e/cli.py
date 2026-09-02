@@ -7,14 +7,14 @@ import sys
 import time
 from pathlib import Path
 
-# `arkver` sits at the repo root and carries the suite semver. A copy of this
+# `ar3ver` sits at the repo root and carries the suite semver. A copy of this
 # tree relocated away from that root (the isolation container copies apps/r4t
 # alone to /opt/r4t) still has to run: the version is a nicety, never a
 # dependency, so a missing module degrades to "unknown" instead of killing
 # the CLI on import.
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+sys.path.append(str(Path(__file__).resolve().parents[2] / "lib"))
 try:
-    from arkver import version_line  # noqa: E402
+    from ar3ver import version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
         import platform

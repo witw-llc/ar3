@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-import ar3
+import cli as ar3
 
 
 def _row(rows, name):

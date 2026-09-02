@@ -103,7 +103,7 @@ values, its default and a line to paste: [Runbook options](r4t-runbook.md).
 
 The shortest whole runbook builds on a shipped one. `triforce` is three
 members around one repo — one who talks to you, one who builds, one who tries
-to break it — and `ark-suite` is the same three under release discipline.
+to break it — and `ar3-suite` is the same three under release discipline.
 They resolve by name, like an a8s bundled definition; you never copy one to
 use it.
 
@@ -190,7 +190,7 @@ registering it is therefore not a code-execution decision made silently.
 
 **`extends:` declares the base**, and there are two merge rules, one per
 document level: frontmatter merges per key, and an H2 section **replaces the
-base's whole**. The base is a built-in name (`triforce`, `ark-suite`) or a path
+base's whole**. The base is a built-in name (`triforce`, `ar3-suite`) or a path
 relative to the file. Chains compose up to five deep, which is also how a
 runbook splits across files — each file naming only its own sections.
 

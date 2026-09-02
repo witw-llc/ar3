@@ -8,21 +8,25 @@ import pytest
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
-# `arkver` sits at the repo root, shared by every CLI. Put it on the path here
-# rather than relying on ar3's own import having run first.
-sys.path.append(str(_PKG.parent.parent))
+# `ar3ver` and the `ar3` foundation package live under `lib/`, shared by every
+# CLI. Put that on the path here rather than relying on the app's own import
+# having run first.
+sys.path.append(str(_PKG.parent.parent / "lib"))
 
-import ar3  # noqa: E402
+# The app's entry module is `cli`, not `ar3`: a top-level package named `ar3`
+# cannot share a sys.path entry with a module of the same name, and the
+# package is the one that has to win.
+import cli  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _no_real_subprocess(monkeypatch):
     """No test may execute a real harness CLI. Probes that want to exercise
-    subprocess behaviour re-patch `ar3.subprocess.run` themselves."""
+    subprocess behaviour re-patch `cli.subprocess.run` themselves."""
     def forbidden(*args, **kwargs):
         raise AssertionError(f"tests must not spawn real processes: {args!r}")
 
-    monkeypatch.setattr(ar3.subprocess, "run", forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
 
 
 @pytest.fixture
@@ -36,6 +40,6 @@ def homes(tmp_path, monkeypatch):
         root.mkdir()
         monkeypatch.setenv(env, str(root))
         roots[name] = root
-    monkeypatch.setattr(ar3.shutil, "which", lambda _binary: None)
-    monkeypatch.setattr(ar3, "REPO_ROOT", tmp_path / "absent-bin")
+    monkeypatch.setattr(cli.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(cli, "REPO_ROOT", tmp_path / "absent-bin")
     return roots

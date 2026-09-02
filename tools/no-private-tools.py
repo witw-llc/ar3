@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # an installed copy never has.
 FORBIDDEN = re.compile(r"\b(n0b)\b|~/bin/|\$HOME/bin/")
 
-SCANNED = ("apps", "ark", "docs", "guide")
+SCANNED = ("apps", "lib", "docs", "guide")
 SKIP_PARTS = {"_vendor", "__pycache__", ".venv", "tests"}
 
 

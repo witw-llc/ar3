@@ -33,7 +33,7 @@ from network import (
 )
 from registry import save_aliases, save_namespaces, save_registry, save_namespace_options
 from transports import Transport, TransportError
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 from delivery_receipt import build_delivery_receipt, parse_delivery_receipt
 
 

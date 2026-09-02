@@ -695,7 +695,7 @@ def _check_name(name: str, kind: str) -> str | None:
 def parse_engine_line(value: str) -> dict:
     """`<engine-id> [--model M] [--permissions MODE] [--allowed-tools SPEC]
     [--timeout S]` -> the rig spec it names. The flag set is closed on
-    purpose: this is the Ark's own translated vocabulary, not an argv
+    purpose: this is AR3's own translated vocabulary, not an argv
     passthrough into a repo-controlled file."""
     try:
         tokens = shlex.split(value)

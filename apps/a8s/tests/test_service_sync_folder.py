@@ -23,7 +23,7 @@ from services.sync_folder import (
     marker_for,
     parse_marker,
 )
-from ark.ulid import ALPHABET, new as new_ulid
+from ar3.ulid import ALPHABET, new as new_ulid
 
 # Real message IDs, minted now rather than a fixed literal: a bundle's own
 # name is what ages it under the default retention sweep, so a constant

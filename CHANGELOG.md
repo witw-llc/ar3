@@ -14,6 +14,127 @@ version when the batch is ready to merge.
 
 ### Changed
 
+- **Both PII gates fail closed.** `tools/pii-scan.py` turned a failed
+  `git ls-files` into an empty file list and then printed "clean";
+  `.github/pii_check.py` turned an unknown ref or a checkout with no main into
+  an empty diff and exited 0. A gate that cannot read its input must say so:
+  both now raise `GitUnavailable` and exit nonzero.
+- **The whole-tree scanner is no longer exempt from itself.** It listed its own
+  path in `SKIP_PATHS` while its docstring named a real machine as the worked
+  example — so the one file guaranteed to contain the string could not be
+  checked for it. The example is gone, and only the two pattern-list files stay
+  exempt, because those *are* the strings being hunted.
+- **`get.sh` writes to the login file bash will actually read.** Login bash
+  reads the first of `.bash_profile`, `.bash_login`, `.profile` and ignores the
+  rest, so a user who already had a `.bash_profile` never saw the line written
+  to `.profile` — the original command-not-found case, still open. It now picks
+  whichever login file exists. The rc list moved to positional parameters so a
+  `$HOME` containing a space is one path rather than two.
+- **The PII checkers no longer print the pattern that fired, or the line that
+  matched it.** Both are the PII. A pattern is a bare name or hostname, and
+  GitHub masks a secret's whole value rather than the individual lines inside
+  it, so a failing `pii-check` job published to its own log exactly what the
+  secret exists to keep out of one. Both `.github/pii_check.py` and
+  `tools/pii-scan.py` now report `<file>: matches PII pattern #N`, where N is
+  the pattern's position in the loaded list — enough to find it in the local
+  file, and meaningless to anyone reading the log. The diff checker gained file
+  attribution in the process, so its failure names a place instead of a line.
+- `tests/test_pii.py::test_load_patterns_requires_env_or_local_file` asserted
+  nothing on a machine that happened to carry
+  `.github/pii-patterns.local.txt` — it skipped its own assertion behind an
+  `if`. It now points the loader at a path that cannot exist and always runs.
+- **The relocated-copy fallback test blocked the wrong module name.**
+  `TestRelocatedFallbackTeardown` simulates a container copy that cannot import
+  the foundation package, by refusing `ark` on the meta path. After the rename
+  it refused a name nothing imports, so `ar3.proc` loaded normally and the
+  fallback under test never ran. It blocks `ar3` now.
+- **An idle-fairness test measured its budget in loop passes.**
+  `TestIdleFairness` gave the second agent twelve passes to get a slot, but the
+  idle block skips itself entirely while an async wake is in flight, and a pass
+  costs microseconds where the wake's subprocess costs milliseconds. On an idle
+  machine it always passed; on a loaded CI runner it failed four times in ten.
+  The budget is wall-clock now, and the loop yields while a wake is in flight.
+  The rotation it guards is unchanged: breaking it still fails the test.
+- Example rig names are `ar3-lead` / `ar3-eng` / `ar3-generalist`, in the docs,
+  the tests and `org/AR3/r4t.md`, and the comments that placed the foundation
+  package at the repo root say `<repo>/lib`.
+- **The foundation package is `ar3`, and it lives in `lib/`.** `ark.ulid`,
+  `ark.home`, `ark.fsio`, `ark.proc`, `ark.envseam` and `ark.vendor` are now
+  `ar3.*`; `arkver` is `ar3ver`. Both moved to `lib/` because a directory named
+  `ar3` cannot sit beside the `ar3` shim file at the repo root, and the shims
+  cannot move — `apps/r4t/isolate.py` mounts the root into containers to put
+  them on `PATH`. Every entry point and conftest now appends `<repo>/lib` to
+  `sys.path` instead of the repo root, which is also where `ar3ver` moved to.
+  For the same name collision, the front door's entry module is
+  `apps/ar3/cli.py` rather than `ar3.py`; a module named `ar3` on the same path
+  shadows the package. `docs/ark.md` is `docs/ar3-foundation.md`, the built-in
+  runbook `ark-suite` is `ar3-suite`, and `ARK_NO_VENDOR` is `AR3_NO_VENDOR`.
+- **Dependency groups install under `~/.local/share/ar3/deps`**, not
+  `.../ark/deps`. Pre-v1, so no migration: `ar3 deps <group>` refetches into the
+  new location and the old directory can be deleted.
+
+### Added
+
+- **Meta Muse is an engine.** `muse` joins `claude`, `codex`, `agy`, `copilot`,
+  `cursor` and `opencode` as a preset, a run engine, a check probe and three
+  bundled a8s definitions (`muse.json`, `engine-muse.json`,
+  `engine-muse-unrestricted.json`). Headless shape is `muse exec` with a
+  positional prompt; `--permissions` translates to muse's own vocabulary —
+  `ask` returns it to `on-request`, `auto` is `--approval-mode never`, and
+  `bypass` is `--yolo`, which drops approvals, the sandbox and the workspace
+  trust gate together. Verified end to end against Muse Code 1.0.1: composed
+  argv, `r4t engine muse check`, and one live turn.
+- **`muse` is the first engine that answers no `quota` verb, and the registry
+  says so instead of pretending.** Muse Code exposes no usage, limits or
+  balance surface, and the only limit-shaped numbers on disk are a model's
+  context and output windows. `apps/r4t/engines/muse.py` therefore implements
+  no `quota()`; `r4t engine list` prints `[run, check]`, and `r4t engine muse
+  quota` refuses while naming the engines that can answer. Engine dispatch
+  gained the guard that makes that a clean refusal rather than an
+  `AttributeError`. A muse rig cannot be fuel-gated — see the wiki's
+  `Engine-Muse`, section 13.
+- **`muse` refuses `--continue`, with the reason.** `muse resume` is an
+  interactive subcommand that opens the workspace session picker, and `muse
+  exec` rejects `--last` outright, so there is no headless resume to splice.
+  `--allowed-tools` and an explicit `mcp: true` refuse the same way: muse takes
+  tool policy from a named permission profile, and it speaks MSP as a server
+  rather than consuming MCP.
+
+### Fixed
+
+- **A private machine name is out of the docs, and the PII guard can now see
+  the tree it ships.** `docs/a8s-filedrop.md` used a real machine name as its
+  worked example, and the public wiki's filedrop recipe sends agents to that
+  page to learn the mechanics — so every agent following it copied the name.
+  Two more device names sat in `a8s tx` help and the filedrop doc. All are
+  placeholders now. The guard could not have caught any of them: it scans the
+  git *diff*, so a name committed before its pattern existed appears in no
+  future diff and ships forever. `tools/pii-scan.py` scans the whole tracked
+  tree from the same pattern list, and refuses to report clean when no
+  patterns are configured.
+- **The release gate now actually gates.** `publish` — the job that pushes the
+  public mirror — did not depend on `wiki-gardener`, so neither the wiki
+  garden check nor `tools/no-private-tools.py` could stop a release, despite a
+  comment saying a defect "stops a release the way a failing suite does". A
+  second comment credited `tests/test_pii.py` with scanning release contents;
+  that file only unit-tests the checker against a synthetic diff string and
+  reads no repo content at all. `publish` now depends on that job, and the new
+  tree scan runs in it.
+
+- **The installer reaches the shell you actually type in.** `get.sh` chose one
+  rc file from `$SHELL`, but `$SHELL` names the login shell, not the shell the
+  terminal opens, and a non-interactive install often reports `/bin/sh` — which
+  lands the source line in `.profile`, the one file an interactive non-login
+  bash never reads. The suite installed cleanly and then every command was
+  `command not found`. It now writes each rc the user's shells actually read,
+  creating only `.profile` when absent. `install.sh` prepends to `PATH` only
+  when the entry is missing, so a shell that reads two of those files (Debian's
+  `.profile` sources `.bashrc`) still gets one entry.
+
+## 0.1.79
+
+### Changed
+
 - **The `tell` contract says what a `.cmd` argument is worth.** Windows cannot
   execute a `.cmd` directly, so `CreateProcess` runs it through `cmd.exe` and
   hands over one command-line *string* — and `cmd.exe` treats a raw LF as a

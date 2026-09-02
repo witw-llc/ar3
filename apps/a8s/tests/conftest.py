@@ -19,9 +19,9 @@ import pytest
 # `apps/a8s/tests/conftest.py` -> `apps/a8s/`
 _PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG_DIR))
-# `ark` sits at the repo root, shared by every app. Put it on the path here
+# `ar3` sits in `<repo>/lib`, shared by every app. Put it on the path here
 # rather than relying on some a8s module having run first.
-sys.path.append(str(_PKG_DIR.parent.parent))
+sys.path.append(str(_PKG_DIR.parent.parent / "lib"))
 
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
 
@@ -35,9 +35,9 @@ def zone(monkeypatch):
     `AttributeError` before a single assertion runs — it took out sixty tests
     on the Windows seat, the largest cause left in this suite.
 
-    `ark.clock`'s two conversion points are redirected instead, which is what
+    `ar3.clock`'s two conversion points are redirected instead, which is what
     these tests are actually after: that a heading or a log line renders in a
-    known zone. That the zone *comes from the machine* is `ark.clock`'s own
+    known zone. That the zone *comes from the machine* is `ar3.clock`'s own
     contract and is tested there, where `TZ` is the thing under test rather
     than the way to set one up.
 
@@ -50,7 +50,7 @@ def zone(monkeypatch):
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
-    from ark import clock
+    from ar3 import clock
 
     real_to_local = clock.to_local
 
@@ -72,10 +72,10 @@ def zone(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_ambient_xdg(monkeypatch):
-    """a8s honors XDG_CONFIG_HOME (ark.home), and CI runners export it. Every
+    """a8s honors XDG_CONFIG_HOME (ar3.home), and CI runners export it. Every
     test here fabricates state under a fake HOME, so an ambient XDG base would
     silently point resolution somewhere else; XDG-order behavior itself is
-    covered by the foundation's own suite (test_ark_home.py)."""
+    covered by the foundation's own suite (test_ar3_home.py)."""
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 

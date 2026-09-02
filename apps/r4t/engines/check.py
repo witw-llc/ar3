@@ -89,6 +89,14 @@ PROBES: dict[str, Probe] = {
         "agy prints its Go flag listing and exits, so the listing is the check",
     ),
     "opencode": Probe("opencode", ("run", "--help"), _OPENCODE_HELP),
+    # Verified against Muse Code 1.0.1: `muse exec --not-a-flag --help` and
+    # `--approval-mode nonsense --help` both print the help and exit 0, so
+    # muse never parses the rest of the line and the listing is the check.
+    "muse": Probe(
+        "muse", ("exec", "--help"),
+        "muse's --help prints and exits whatever else is on the line, so its "
+        "flag listing is the only place an unknown flag shows up",
+    ),
     # The launchers: `ollama launch <cli> ... -- <cli flags>`. Everything
     # before the separator is ollama's own; everything after is the CLI's, and
     # that is the half a preset gets wrong.

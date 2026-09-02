@@ -1,4 +1,4 @@
-"""Tests for ark.proc.pid_alive — the one cross-platform pid probe.
+"""Tests for ar3.proc.pid_alive — the one cross-platform pid probe.
 
 No nt skip: on a Windows checkout these same tests exercise the
 OpenProcess/GetExitCodeProcess branch for real (#2's acceptance run).
@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 
-from ark.proc import pid_alive
+from ar3.proc import pid_alive
 
 
 def test_own_pid_is_alive():

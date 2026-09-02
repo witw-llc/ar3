@@ -2,14 +2,14 @@
 
 The guide's promise is that what a reader types produces what the page shows.
 The banner is the very first output in the very first chapter, so a silent
-drift there is the worst one available. `ar3.py` owns the strings; the chapter
+drift there is the worst one available. `cli.py` owns the strings; the chapter
 and the guide's own README quote them.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-import ar3
+import cli as ar3
 
 GUIDE = Path(__file__).resolve().parents[3] / "guide"
 

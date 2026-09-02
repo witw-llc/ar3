@@ -48,7 +48,7 @@ def visible_a8s_names() -> dict[str, str]:
             continue
         for line in (res.stdout or "").splitlines():
             # `ls -q` is bare names; the other two lead with the name and
-            # then describe it (`local  [neil-macbook]`, `silo -> silo-node`).
+            # then describe it (`local  [my-desktop]`, `silo -> silo-node`).
             name = line.strip().split()[0] if line.strip() else ""
             if name:
                 found.setdefault(name, kind)

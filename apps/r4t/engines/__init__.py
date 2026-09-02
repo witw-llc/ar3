@@ -37,7 +37,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from engines import agy, claude, codex, copilot, cursor, ollama, opencode, run
+from engines import agy, claude, codex, copilot, cursor, muse, ollama, opencode, run
 from engines.base import QuotaError
 
 __all__ = [
@@ -58,6 +58,7 @@ MODULES = {
     "cursor": cursor,
     "agy": agy,
     "opencode": opencode,
+    "muse": muse,
     "ollama": ollama,
 }
 
@@ -205,8 +206,16 @@ def quota(preset_or_engine: str) -> dict:
             f"unknown engine or preset '{preset_or_engine}' "
             f"(engines: {', '.join(sorted(MODULES))})"
         )
+    checker = capability(engine, "quota")
+    if checker is None:
+        answering = sorted(e for e in MODULES if capability(e, "quota"))
+        raise QuotaError(
+            f"{engine} answers no quota verb — it exposes no usage surface to "
+            f"read without spending a turn (engines that do: "
+            f"{', '.join(answering)})"
+        )
     try:
-        payload = MODULES[engine].quota()
+        payload = checker()
     except QuotaError as exc:
         snapshot = load_snapshot(engine)
         if snapshot is None:

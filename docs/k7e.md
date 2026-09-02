@@ -15,7 +15,7 @@ Three commitments shape every design decision:
 - **Files are truth.** Knowledge lives as flat markdown on your disk. The search
   index (SQLite FTS5 + optional embeddings) is a cache you can delete and
   rebuild anytime. No database lock-in, no opaque blobs, no cloud.
-- **The core is stdlib, per the [suite doctrine](ark.md#1-dependencies).**
+- **The core is stdlib, per the [suite doctrine](ar3-foundation.md#1-dependencies).**
   Storage and keyword search (FTS5) import nothing beyond Python's standard
   library and work fully offline — k7e reaches for no dependency at all, in or
   out of the foundation's tiers. Semantic search uses ollama embeddings;

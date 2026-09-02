@@ -12,9 +12,9 @@ import pytest
 
 K7E_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(K7E_DIR))
-# `ark` sits at the repo root, shared by every app. Put it on the path here
+# `ar3` sits in `<repo>/lib`, shared by every app. Put it on the path here
 # rather than relying on some k7e module having run first.
-sys.path.append(str(K7E_DIR.parent.parent))
+sys.path.append(str(K7E_DIR.parent.parent / "lib"))
 
 import config
 

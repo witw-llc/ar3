@@ -13,7 +13,7 @@ substrate instead. It reads a8s/r4t/k7e state and probes prerequisites, and it
 never runs another product's commands for you — when something is missing,
 `ar3` names the real command to fix it. What `ar3` writes is its own substrate
 and never a product's state: `ar3 deps` fetches on-demand heavy dependencies
-into `~/.local/share/ark/deps`, and `ar3 update` maintains the suite install
+into `~/.local/share/ar3/deps`, and `ar3 update` maintains the suite install
 itself.
 
 ```
@@ -83,13 +83,13 @@ one agent harness answering), 1 otherwise — so it can gate a setup script.
 A handful of features depend on a heavy package most installs never need —
 boto3 for a8s's S3 storage service. Those packages are not vendored and not
 required at install time; the feature that needs one calls
-`ark.deps.use_group` and degrades to a WARN naming the fix when the group is
+`ar3.deps.use_group` and degrades to a WARN naming the fix when the group is
 not there.
 
 `ar3 deps` lists every group defined under `requirements/*.txt` with its
 installed/missing status for the running interpreter. `ar3 deps <group>`
 fetches that one group with `uv pip install --target` (or plain `pip` when
-`uv` is not on PATH) into `~/.local/share/ark/deps/<interpreter>/<group>` —
+`uv` is not on PATH) into `~/.local/share/ar3/deps/<interpreter>/<group>` —
 one directory per Python build, so an interpreter upgrade or a machine move
 never half-loads an incompatible install. Outside the install tree itself,
 this is the only directory `ar3` ever writes to.

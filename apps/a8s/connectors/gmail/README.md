@@ -54,7 +54,7 @@ stdlib, and no dependency on the `gas` CLI.
    human — if it routes to your inbox, name it after yourself):
 
    ```
-   a8s add <name> <ark-repo>/apps/a8s/connectors/gmail ~/.<name>-gmail.json
+   a8s add <name> <ar3-repo>/apps/a8s/connectors/gmail ~/.<name>-gmail.json
    a8s start <name>
    ```
 

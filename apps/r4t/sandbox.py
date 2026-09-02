@@ -43,13 +43,13 @@ from pathlib import Path
 import state
 
 # The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
-# container with no repo root, so `ark` is not always reachable there — and a
+# container with no repo root, so `ar3` is not always reachable there — and a
 # caged turn is exactly the case that needs the zone stated, because a
 # container boots UTC until `rig.env` sets `TZ`. So the fallback reimplements
 # the display contract rather than degrading to a stub: local time, always
-# carrying its zone, with `ark.clock`'s abbreviation rule.
+# carrying its zone, with `ar3.clock`'s abbreviation rule.
 try:
-    from ark.clock import stamp as local_stamp
+    from ar3.clock import stamp as local_stamp
 except ImportError:
     def _local_zone(when: datetime | None = None) -> str:
         dt = when or datetime.now().astimezone()
@@ -86,12 +86,12 @@ except ImportError:
 from rig import RigError, build_preset_invoke, format_preset_invoke, preset_names
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ark` is not always reachable there.
+# into a container with no repo root, so `ar3` is not always reachable there.
 try:
-    from ark.proc import terminate_group as _terminate_group
+    from ar3.proc import terminate_group as _terminate_group
 except ImportError:
     def _terminate_group(pid: int, *, grace_seconds: float = 0.5) -> None:
-        # Mirrors ark.proc.terminate_group: the pgid is resolved once, before
+        # Mirrors ar3.proc.terminate_group: the pgid is resolved once, before
         # SIGTERM, so a leader that exits during the grace period cannot
         # strand SIGKILL with no pid left to resolve; pid stands in as the
         # pgid when getpgid cannot answer (true for any start_new_session

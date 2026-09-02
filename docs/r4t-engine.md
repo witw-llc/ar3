@@ -23,7 +23,8 @@ r4t engine <id> run [--dir DIR] [--model M] [--agent NAME] [--timeout S]
 ```
 
 Supported engines: `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`,
-and the `ollama-claude` / `ollama-codex` / `ollama-opencode` local launchers —
+`muse`, and the `ollama-claude` / `ollama-codex` / `ollama-opencode` local
+launchers —
 the ones whose headless, unattended invocation is verified (an unsupported id
 is a clear error naming this set). The `ollama-*` engines run local models
 through `ollama launch`: no cloud quota spent, but each needs `--model` (an
@@ -98,6 +99,7 @@ spending a turn.
 | `copilot` | **error** — `-p` needs `--allow-all-tools` at all | `--allow-all-tools` | `--allow-all` |
 | `agy` | **error** — see below | **error** — see below | `--dangerously-skip-permissions --mode accept-edits` |
 | `opencode` | drop `--auto` | `--auto` | = `auto` + a note |
+| `muse` | drop `--approval-mode never` + `--user-input-auto-resolve` | `--approval-mode never` | `--yolo` |
 | `ollama-*` | as the wrapped engine | as the wrapped engine | as the wrapped engine |
 
 **The asymmetry rule.** A mode *below* an engine's floor is a hard error naming
@@ -142,13 +144,17 @@ r4t engine claude run --allowed-tools "Bash(git:*) Bash(gh:*) Read Edit" "land t
 
 Only `claude` and `ollama-claude` take a tool allowlist per invocation; every
 other engine errors with the reason (copilot takes `--allow-tool`/`--deny-tool`
-per tool; cursor, opencode and agy express tool policy only in config files).
+per tool; cursor, opencode and agy express tool policy only in config files;
+muse takes a named `--permission-profile` rather than a list).
 
 #### `--continue`
 
 Resumes the conversation the CLI already has in `--dir`, in the preset's own
 idiom — `--continue` for claude, cursor, agy and opencode,
-`exec resume --last --include-non-interactive` for codex. **The caller asserts
+`exec resume --last --include-non-interactive` for codex. `muse` refuses:
+`muse resume` is an interactive subcommand that opens the workspace session
+picker, and `muse exec` rejects `--last` outright, so there is no headless
+resume to pass through. **The caller asserts
 this turn continues live work; an idle or independent wake must not pass it.**
 `engine run` is one CLI and one operator decision, so the engine layer cannot
 enforce that rule — it can only refuse to pretend otherwise. `--idle
@@ -263,9 +269,9 @@ much as at a keyboard.
 Every engine in `RUN_ENGINES` ships its own bundled
 `apps/a8s/definitions/engine-<id>.json` (`engine-claude.json`,
 `engine-codex.json`, `engine-agy.json`, `engine-copilot.json`,
-`engine-cursor.json`, `engine-opencode.json`, `engine-ollama-claude.json`,
-`engine-ollama-codex.json`, `engine-ollama-opencode.json`), each wiring all
-three wake paths:
+`engine-cursor.json`, `engine-opencode.json`, `engine-muse.json`,
+`engine-ollama-claude.json`, `engine-ollama-codex.json`,
+`engine-ollama-opencode.json`), each wiring all three wake paths:
 
 ```bash
 a8s add my-bare-node ~/somewhere engine-cursor
@@ -357,7 +363,15 @@ r4t engine claude quota --json
 ```
 
 One component per engine under `apps/r4t/engines/`; live answers persist as
-snapshots that still answer when the live check cannot. A snapshot answer
+snapshots that still answer when the live check cannot.
+
+**Not every engine answers.** `muse` is the first that cannot: Muse Code
+exposes no usage, limits or balance surface, and nothing on disk carries an
+entitlement — the only limit-shaped numbers in its model catalog are a model's
+context and output windows. So `apps/r4t/engines/muse.py` implements no `quota`
+function, `r4t engine list` prints `[run, check]` for it, and `r4t engine muse
+quota` refuses while naming the engines that do answer. A verb the registry
+advertises and can never satisfy would be worse than the refusal. A snapshot answer
 carries `"origin": "snapshot"` and `age_seconds` — its age as a number, like
 every other duration r4t reports; the text lines render the human string.
 

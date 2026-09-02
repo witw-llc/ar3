@@ -5,16 +5,18 @@ new ar3 app can navigate it because it feels like the ones already learned. The
 doctrine governs **how** apps do things, never **how much** they need: r4t taking
 a TUI dependency and k7e taking none are both compliant.
 
-`ark/` is the foundation package that makes the rules true. It sits at the repo
-root and every app reaches it the way it already reaches `arkver` — each entry
-point appends the repo root to `sys.path`, then imports `ark.<module>`, with
-import sites degrading gracefully when one app is relocated away from the repo
-(the isolation container copies `apps/r4t` alone). The shared modules are
-`ark.ulid`, `ark.home` (config-home resolution), `ark.fsio` (`atomic_write_text`),
-`ark.proc` (`spawn` / `terminate_group`), `ark.envseam` (the reserved-env
-contract), and `ark.vendor` (the vendoring hook). Beyond stdlib there are exactly
-two tiers: **tier 1** is `ark/_vendor/`, unmodified PyPI releases pinned with
-verified sha256 in `ark/_vendor/vendor.txt`; **tier 2** is the foundation's deps
+`lib/ar3/` is the foundation package that makes the rules true. It sits under
+`lib/` rather than at the repo root, because the root already holds the `ar3`
+shim and a directory cannot share a name with a file beside it. Every app
+reaches it the way it already reaches `ar3ver`, which lives there too — each
+entry point appends `<repo>/lib` to `sys.path`, then imports `ar3.<module>`,
+with import sites degrading gracefully when one app is relocated away from the
+repo (the isolation container copies `apps/r4t` alone). The shared modules are
+`ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`),
+`ar3.proc` (`spawn` / `terminate_group`), `ar3.envseam` (the reserved-env
+contract), and `ar3.vendor` (the vendoring hook). Beyond stdlib there are exactly
+two tiers: **tier 1** is `ar3/_vendor/`, unmodified PyPI releases pinned with
+verified sha256 in `ar3/_vendor/vendor.txt`; **tier 2** is the foundation's deps
 mechanism, which fetches on demand.
 
 ## 1. Dependencies
@@ -23,7 +25,7 @@ mechanism, which fetches on demand.
 - **Hot paths stay stdlib permanently.** `tell` is the named case and takes no
   dependency, ever.
 - Anything beyond stdlib arrives **only through the foundation's two tiers**:
-  vendored code in `ark/_vendor/`, or fetched through the foundation's deps
+  vendored code in `ar3/_vendor/`, or fetched through the foundation's deps
   mechanism.
 - **No app-local vendor directory. No app-local pip logic.**
 - An unavailable optional dependency **degrades with a warning at the point of
@@ -32,8 +34,8 @@ mechanism, which fetches on demand.
 ## 2. Filesystem
 
 - **One config-home resolution**, honoring `XDG_CONFIG_HOME`, used by every app:
-  `ark.home`.
-- **One `atomic_write` helper**, `ark.fsio`, with `fsync` and mode `0600`
+  `ar3.home`.
+- **One `atomic_write` helper**, `ar3.fsio`, with `fsync` and mode `0600`
   available as flags.
 - **One state-directory shape** across apps.
 - No app re-implements another app's path resolution. An app that needs another
@@ -50,14 +52,14 @@ mechanism, which fetches on demand.
 - **Shared exit-code meanings**, declared in the foundation: `0` success, `1`
   failure, `124` timeout, matching `timeout(1)`. Any further code is declared in
   the foundation before it is used, never invented locally.
-- **`--version` is answered by `arkver` everywhere.**
+- **`--version` is answered by `ar3ver` everywhere.**
 
 The test to apply to any proposed CLI change: a user who learns one ar3 app has
 learned the grammar of all of them, including the ones that do not exist yet.
 
 ## 4. Processes
 
-- **One spawn/kill escalation policy**, `ark.proc`, used everywhere: `SIGTERM`,
+- **One spawn/kill escalation policy**, `ar3.proc`, used everywhere: `SIGTERM`,
   a grace period, then `SIGKILL`, applied to the **process group** rather than
   the process.
 - **One timeout convention**, with `124` as its exit code.

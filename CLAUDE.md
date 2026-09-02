@@ -23,14 +23,18 @@ teaches them.
   the standard library — the suite doctrine's dependency rule, which k7e
   happens to satisfy with no dependencies at all.
   See [`docs/k7e.md`](docs/k7e.md) for usage and architecture.
-- **`ark/`** — The foundation package: the code every app shares. `ark.ulid`,
-  `ark.home` (config-home resolution), `ark.fsio` (`atomic_write_text`),
-  `ark.proc` (`spawn` / `terminate_group`), `ark.envseam` (the reserved-env
-  contract), `ark.vendor` (the vendoring hook). Beyond stdlib there are two
-  tiers and no third: `ark/_vendor/` carries pinned, sha256-verified PyPI
+- **`lib/ar3/`** — The foundation package: the code every app shares. `ar3.ulid`,
+  `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`),
+  `ar3.proc` (`spawn` / `terminate_group`), `ar3.envseam` (the reserved-env
+  contract), `ar3.vendor` (the vendoring hook). Beyond stdlib there are two
+  tiers and no third: `lib/ar3/_vendor/` carries pinned, sha256-verified PyPI
   releases (tier 1); the foundation's deps mechanism fetches the rest (tier 2).
-  Apps import it via the same repo-root `sys.path` mechanics they already use
-  for `arkver`.
+  It lives under `lib/` rather than at the repo root because the root already
+  holds the `ar3` shim, and a directory cannot share a name with a file beside
+  it. Every entry point and conftest puts `<repo>/lib` on `sys.path`, which is
+  also where `ar3ver` now sits. For the same reason the front door's entry
+  module is `apps/ar3/cli.py`, not `ar3.py`: a module named `ar3` on the same
+  path would shadow the package.
 - **`apps/ar3/`** — The front door. Reads suite state and probes prerequisites;
   it never mutates anything and never wraps another product's verbs. See
   [`docs/ar3.md`](docs/ar3.md).
@@ -78,7 +82,7 @@ Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
 
 Every app in ar3 shares one doctrine — dependencies, filesystem, CLI feel,
 processes, integration, docs and release. It is stated as rules in
-[`docs/ark.md`](docs/ark.md); read it before adding a convention here.
+[`docs/ar3-foundation.md`](docs/ar3-foundation.md); read it before adding a convention here.
 
 ### Shebangs
 
@@ -143,7 +147,7 @@ and on-disk pid/log paths. The contract changes only when the user declares 1.0.
   `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`
 - **PR titles are synopses, not labels.** A batch PR is still titled by what it
   contains — `0.1.55 — merge to main is the release, changelog, plan states,
-  and the Ark's own roster`, never `0.1.55 — batch`. The title is the only part
+  and AR3's own roster`, never `0.1.55 — batch`. The title is the only part
   most readers see, and after the squash it is the commit subject on `main`.
 
 ### Issue references — forward-looking only, and `#N` is this repo

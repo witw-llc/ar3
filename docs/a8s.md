@@ -342,7 +342,8 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `cursor.json`   | Cursor Agent CLI (`agent`) with `-p --trust --force --approve-mcps` for headless tool use, fresh session every wake. Marker is `CURSOR.md`.                                                                                                                       |
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --auto`, fresh session every wake. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `ollama-opencode.json` | OpenCode via `ollama launch` — requires a8s var `MODEL`. Example: `a8s add bob ./ ollama-opencode --model=qwen3.6`. |
-| `engine-<id>.json`     | Nine bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
+| `muse.json`     | Meta Muse (`muse exec`) with `--approval-mode never` and `--user-input-auto-resolve`, fresh session every wake. The sandbox stays on; `--user-input-auto-resolve` is what stops an unattended turn blocking when the model reaches for `request_user_input`. |
+| `engine-<id>.json`     | Ten bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `muse`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](r4t.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
@@ -624,7 +625,7 @@ EOF
 
 # Register with a mounted root directory
 a8s add my-email /mnt/gdrive/my-email/ my-filedrop.json
-# Or: a8s add neil-macbook ~/filedrops/neil-macbook filedrop
+# Or: a8s add my-desktop ~/filedrops/my-desktop filedrop
 ```
 
 ### How it works

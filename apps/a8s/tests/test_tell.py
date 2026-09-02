@@ -1381,26 +1381,26 @@ class TestTellRegistryOutboxDiscovery:
     def test_uses_unique_seat_from_cwd(self, fake_home, tmp_path):
         from registry import save_registry
 
-        seat = tmp_path / "neil-macbook"
+        seat = tmp_path / "my-desktop"
         bob = tmp_path / "bob"
         seat.mkdir()
         bob.mkdir()
-        save_registry({"neil-macbook": {"root": str(seat)}, "bob": {"root": str(bob)}})
+        save_registry({"my-desktop": {"root": str(seat)}, "bob": {"root": str(bob)}})
         res = _run_raw(seat, "bob", "from seat root")
         assert res.returncode == 0, res.stderr
         _name, msg = _read_outbox(seat / ".outbox")
         assert msg["content"] == "from seat root"
-        assert msg.get("from") == "neil-macbook"
+        assert msg.get("from") == "my-desktop"
 
     def test_uses_seat_from_subdir(self, fake_home, tmp_path):
         from registry import save_registry
 
-        seat = tmp_path / "neil-macbook"
+        seat = tmp_path / "my-desktop"
         bob = tmp_path / "bob"
         nested = seat / "notes"
         nested.mkdir(parents=True)
         bob.mkdir()
-        save_registry({"neil-macbook": {"root": str(seat)}, "bob": {"root": str(bob)}})
+        save_registry({"my-desktop": {"root": str(seat)}, "bob": {"root": str(bob)}})
         res = _run_raw(nested, "bob", "from nested")
         assert res.returncode == 0, res.stderr
         _name, msg = _read_outbox(seat / ".outbox")

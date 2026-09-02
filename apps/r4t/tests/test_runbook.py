@@ -19,7 +19,7 @@ from roster import RosterError, load_roster, resolve_roster_path
 from runbook import NodeVars, RunbookError, load_runbook
 
 TRIFORCE = runbook.BUILTIN_DIR / "triforce.md"
-ARK_SUITE = runbook.BUILTIN_DIR / "ark-suite.md"
+AR3_SUITE = runbook.BUILTIN_DIR / "ar3-suite.md"
 
 
 def write(root: Path, text: str, name: str = runbook.RUNBOOK_NAME) -> Path:
@@ -67,7 +67,7 @@ def trusted(r4t_home):
 
 class TestBuiltins:
     def test_both_ship(self):
-        assert set(runbook.builtin_names()) >= {"triforce", "ark-suite"}
+        assert set(runbook.builtin_names()) >= {"triforce", "ar3-suite"}
 
     def test_triforce_is_the_worked_example(self):
         """§3's expectation, decision for decision: three engine lines, one
@@ -102,9 +102,9 @@ class TestBuiltins:
         assert book.charter.startswith("How this team works")
 
     def test_ark_suite_extends_triforce_and_replaces_the_charter(self):
-        book = load_runbook(ARK_SUITE)
-        assert book.chain == ["triforce", "ark-suite"]
-        assert book.source_of("Charter") == "ark-suite"
+        book = load_runbook(AR3_SUITE)
+        assert book.chain == ["triforce", "ar3-suite"]
+        assert book.source_of("Charter") == "ar3-suite"
         assert book.source_of("Mission") == "triforce"
         assert book.source_of("Roster") == "triforce"
         assert "The merge ladder has four rungs" in book.charter
@@ -126,7 +126,7 @@ AR3_ROOT = Path(__file__).resolve().parents[3] / "org" / "AR3"
     not (AR3_ROOT / runbook.RUNBOOK_NAME).is_file(),
     reason="org/ is the suite's own operations and never leaves the private repo",
 )
-class TestArksOwnRoster:
+class TestAr3sOwnRoster:
     """The acceptance test the format was designed against: six files in
     three formats became one `r4t.md`, and the roster that develops ar3 has
     to load with nothing wrong and nothing worth warning about."""
@@ -167,7 +167,7 @@ class TestArksOwnRoster:
         assert all(m.knowledge_on for m in book.roster.members)
         assert sorted(book.cells) == ["build", "leadership", "product"]
         assert sorted(book.rigs) == [
-            "ark-eng-claude", "ark-eng-cursor", "ark-generalist", "ark-lead",
+            "ar3-eng-claude", "ar3-eng-cursor", "ar3-generalist", "ar3-lead",
         ]
         assert sorted(book.rituals) == ["mission-review", "weekly-review"]
         assert "The throttle on all AI work is the human brain" in book.mission
@@ -185,7 +185,7 @@ class TestArksOwnRoster:
     def test_a_rig_block_states_the_argv_the_members_run(self, book):
         """The `Allowed tools:` line is the reason these rigs exist: bare
         `Bash`, because the members develop ar3 and need git and python."""
-        lead = book.rigs["ark-lead"]
+        lead = book.rigs["ar3-lead"]
         assert lead.argv("GO") == [
             "claude", "--model", "opus",
             "--permission-mode", "dontAsk",
@@ -194,7 +194,7 @@ class TestArksOwnRoster:
             "--exclude-dynamic-system-prompt-sections", "-p", "GO",
         ]
         assert (lead.rig_budget_earn_per_hour, lead.rig_budget_max) == (12.0, 12.0)
-        assert book.rigs["ark-generalist"].model_resolver == "agy-live"
+        assert book.rigs["ar3-generalist"].model_resolver == "agy-live"
 
     def test_the_files_it_replaced_are_gone(self):
         assert runbook.legacy_conflict(AR3_ROOT) is None
@@ -434,12 +434,12 @@ class TestRigs:
             ## Roster
 
             ### Lead
-            - **Rig:** ark-lead
+            - **Rig:** ar3-lead
             - **Leader:** yes
 
             ## Rigs
 
-            ### ark-lead
+            ### ar3-lead
             - **Engine:** claude --model opus --permissions bypass
             - **Allowed tools:** Bash Read Edit Write
             - **Rig budget:** 12 per hour, max 12
@@ -449,7 +449,7 @@ class TestRigs:
 
             The lead's rig.
         """)
-        rig = runbook.load_for_root(node, node=trusted).rigs["ark-lead"]
+        rig = runbook.load_for_root(node, node=trusted).rigs["ar3-lead"]
         assert rig.error is None
         assert rig.permissions == "bypass"
         assert rig.allowed_tools == "Bash Read Edit Write"
@@ -619,12 +619,12 @@ class TestValidation:
 
             ### Mira
             - **Engine:** claude --model opus
-            - **Rig:** ark-lead
+            - **Rig:** ar3-lead
             - **Leader:** yes
         """)
         err = "; ".join(runbook.load_for_root(node).roster.find("Mira").errors)
         assert "carries both Engine: and Rig:" in err
-        assert "'ark-lead'" in err and "claude --model opus" in err
+        assert "'ar3-lead'" in err and "claude --model opus" in err
 
     def test_a_member_with_neither_has_nothing_to_run(self, node):
         write(node, """
@@ -1101,7 +1101,7 @@ class TestExtends:
     def test_a_chain_of_three(self, node):
         write(node, """
             ---
-            extends: "ark-suite"
+            extends: "ar3-suite"
             ---
 
             ## Roster
@@ -1111,9 +1111,9 @@ class TestExtends:
             - **Leader:** yes
         """)
         book = runbook.load_for_root(node)
-        assert book.chain == ["triforce", "ark-suite", "r4t.md"]
+        assert book.chain == ["triforce", "ar3-suite", "r4t.md"]
         assert book.source_of("Mission") == "triforce"
-        assert book.source_of("Charter") == "ark-suite"
+        assert book.source_of("Charter") == "ar3-suite"
         assert book.source_of("Roster") == "r4t.md"
 
     def test_a_relative_path_is_the_file_split(self, node):
@@ -1436,13 +1436,13 @@ class TestReadPath:
 AR3 = """
     ---
     name: "AR3"
-    extends: "ark-suite"
+    extends: "ar3-suite"
     workdir: "../.."
     comms: "open"
     egress: true
     ---
 
-    # AR3 — the Ark's own roster
+    # AR3 — AR3's own roster
 
     The suite building the suite.
 
@@ -1472,22 +1472,22 @@ AR3 = """
 
     ## Rigs
 
-    ### ark-lead
+    ### ar3-lead
     - **Engine:** claude --model opus --permissions bypass
     - **Allowed tools:** Bash Read Edit Write Glob Grep WebFetch WebSearch TodoWrite
     - **Rig budget:** 12 per hour, max 12
 
     Widened from the preset's `Bash(tell:*)` to bare `Bash`.
 
-    ### ark-eng-claude
+    ### ar3-eng-claude
     - **Engine:** claude --model sonnet --permissions bypass
     - **Rig budget:** 20 per hour, max 20
 
-    ### ark-eng-cursor
+    ### ar3-eng-cursor
     - **Engine:** cursor --model composer-2.5 --permissions bypass
     - **Rig budget:** 20 per hour, max 20
 
-    ### ark-generalist
+    ### ar3-generalist
     - **Engine:** agy --model gemini-3.1-pro-low --permissions bypass
     - **Rig budget:** 30 per hour, max 20
 
@@ -1500,35 +1500,35 @@ AR3 = """
     - **Do not A/B member tiers here.** This roster is an instrument.
 
     ### Mira
-    - **Rig:** ark-lead
+    - **Rig:** ar3-lead
     - **Leader:** yes
     - **Cell:** leadership
     - **Knowledge:** on
     - **Role:** Roster lead — holds the mission and routes every question
 
     ### Nora
-    - **Rig:** ark-generalist
+    - **Rig:** ar3-generalist
     - **Cell:** product
     - **Lead:** Mira
     - **Knowledge:** on
     - **Role:** Product manager
 
     ### Tess
-    - **Rig:** ark-generalist
+    - **Rig:** ar3-generalist
     - **Cell:** product
     - **Lead:** Nora
     - **Knowledge:** on
     - **Role:** Documentation
 
     ### Silas
-    - **Rig:** ark-eng-claude
+    - **Rig:** ar3-eng-claude
     - **Cell:** build
     - **Lead:** Mira
     - **Knowledge:** on
     - **Role:** Lead engineer
 
     ### Juno
-    - **Rig:** ark-eng-cursor
+    - **Rig:** ar3-eng-cursor
     - **Cell:** build
     - **Lead:** Silas
     - **Knowledge:** on
@@ -1556,14 +1556,14 @@ class TestAcceptanceExample:
         write(node, AR3)
         book = runbook.load_for_root(node, node=trusted)
         assert book.name == "AR3"
-        assert book.chain == ["triforce", "ark-suite", "r4t.md"]
+        assert book.chain == ["triforce", "ar3-suite", "r4t.md"]
         assert [m.name for m in book.roster.members] == [
             "Mira", "Nora", "Tess", "Silas", "Juno"
         ]
         assert book.roster.leader().name == "Mira"
         assert sorted(book.cells) == ["build", "leadership", "product"]
         assert sorted(book.rigs) == [
-            "ark-eng-claude", "ark-eng-cursor", "ark-generalist", "ark-lead"
+            "ar3-eng-claude", "ar3-eng-cursor", "ar3-generalist", "ar3-lead"
         ]
         assert sorted(book.rituals) == ["mission-review", "weekly-review"]
         assert not [m.name for m in book.roster.members if m.errors]
@@ -1575,7 +1575,7 @@ class TestAcceptanceExample:
     def test_the_notes_became_prose(self, node):
         write(node, AR3)
         section = runbook.load_for_root(node).sections["Rigs"]
-        assert "Widened from the preset's" in section.block("ark-lead").prose
+        assert "Widened from the preset's" in section.block("ar3-lead").prose
 
     def test_the_org_config_moved_into_frontmatter(self, node):
         from org import load_org

@@ -22,23 +22,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-# `arkver` sits at the repo root and carries the suite semver. A copy of this
+# `ar3ver` sits at the repo root and carries the suite semver. A copy of this
 # tree relocated away from that root (the isolation container copies apps/r4t
 # alone to /opt/r4t) still has to run: the version is a nicety, never a
 # dependency, so a missing module degrades to "unknown" instead of killing the
 # CLI on import.
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+sys.path.append(str(Path(__file__).resolve().parents[2] / "lib"))
 try:
-    from arkver import version_line  # noqa: E402
+    from ar3ver import version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
         import platform
 
         return f"{app} unknown (ar3, python {platform.python_version()})"
 
-from ark import envseam  # noqa: E402
-from ark.home import app_home  # noqa: E402
-from ark.proc import pid_alive as ark_pid_alive  # noqa: E402
+from ar3 import envseam  # noqa: E402
+from ar3.home import app_home  # noqa: E402
+from ar3.proc import pid_alive as ar3_pid_alive  # noqa: E402
 
 # ---------- constants ----------
 
@@ -71,7 +71,7 @@ MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
 SCRIPT_DIR = Path(__file__).resolve().parent
 BIN_ROOT = SCRIPT_DIR.parent.parent
 DEFINITIONS_DIR = SCRIPT_DIR / "definitions"
-# a8s owns this reserved-env contract; ark.envseam holds the canonical names
+# a8s owns this reserved-env contract; ar3.envseam holds the canonical names
 # so r4t can refuse a rig config the same two vars without hand-listing them.
 TELL_OUTBOX_DIR_ENV = envseam.TELL_OUTBOX_DIR_ENV
 TELL_FILE_MAX_ENV = envseam.TELL_FILE_MAX_ENV
@@ -98,7 +98,7 @@ def resolve_a8s_home() -> Path:
          installs)
 
     Does not create the directory — callers that write should mkdir. See
-    ``ark.home.app_home`` — every app in the suite resolves through it.
+    ``ar3.home.app_home`` — every app in the suite resolves through it.
     """
     return app_home("a8s", os.environ.get("A8S_HOME"), legacy=Path.home() / ".a8s")
 
@@ -501,7 +501,7 @@ def unique_path(p: Path) -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
-    return ark_pid_alive(pid)
+    return ar3_pid_alive(pid)
 
 
 def harden_stdio() -> None:

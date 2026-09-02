@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from ark.proc import spawn, terminate_group
+from ar3.proc import spawn, terminate_group
 
 
 def _pid_is_alive(pid: int) -> bool:

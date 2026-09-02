@@ -1,10 +1,10 @@
 Chapter 1's agent on the main path (Claude Code), backed by the bundled
 `engine-claude` definition — one headless turn per wake, with
 STATUS.md/LESSONS.md as its memory. Copy AGENTS.md into your agent
-directory (e.g. `~/ark/solo/`), then:
+directory (e.g. `~/ar3/solo/`), then:
 
     # claude can be replaced with cursor, codex, or agy
-    a8s add solo ~/ark/solo engine-claude
+    a8s add solo ~/ar3/solo engine-claude
     a8s start solo
 
 No definition file to write: `engine-claude` ships with the suite. The

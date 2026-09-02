@@ -30,7 +30,7 @@ from core import (
 from daemon import _settle_wake, _wake_retry_ready, attached_loop
 from mailbox import ensure_mailboxes
 from registry import save_registry
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
 
 def _main_thread_only(patched):

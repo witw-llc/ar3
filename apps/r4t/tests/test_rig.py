@@ -668,7 +668,7 @@ class TestMcpHomeRefusals:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "codex", "copilot", "cursor", "ollama",
+            "agy", "claude", "codex", "copilot", "cursor", "muse", "ollama",
             "ollama-claude", "ollama-codex", "ollama-copilot", "ollama-opencode",
             "opencode",
         ]
@@ -681,6 +681,7 @@ class TestHarnessPresets:
         assert tiers == {
             "agy": "big", "claude": "big", "codex": "big",
             "copilot": "moderate", "cursor": "moderate", "opencode": "moderate",
+            "muse": "big",
             "ollama": "small", "ollama-opencode": "small",
             "ollama-claude": "small", "ollama-codex": "small",
             "ollama-copilot": "small",
@@ -1236,22 +1237,22 @@ class TestAllowedToolsRigKey:
 
     def test_set_get_round_trip_and_argv_effect(self, tmp_path):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "ark-eng", "claude")
-        set_rig_value(path, "ark-eng", "allowed_tools", "Bash(git:*) Bash(gh:*) Read Edit")
-        s = rig_setting(path, "ark-eng", "allowed_tools")
+        add_preset_rig(path, "ar3-eng", "claude")
+        set_rig_value(path, "ar3-eng", "allowed_tools", "Bash(git:*) Bash(gh:*) Read Edit")
+        s = rig_setting(path, "ar3-eng", "allowed_tools")
         assert (s.value, s.explicit) == ("Bash(git:*) Bash(gh:*) Read Edit", True)
-        argv = load_rig_config(path).rigs["ark-eng"].argv("hi")
+        argv = load_rig_config(path).rigs["ar3-eng"].argv("hi")
         assert argv[argv.index("--allowedTools") + 1] == "Bash(git:*) Bash(gh:*) Read Edit"
         assert "TodoWrite" not in " ".join(argv)
 
     def test_it_survives_rig_swap(self, tmp_path):
         # The #136 reproduction: the hand edit used to vanish on the next swap.
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "ark-lead", "claude")
-        set_rig_value(path, "ark-lead", "allowed_tools", "Bash(git:*) Read")
-        set_rig_value(path, "ark-lead", "permissions", "bypass")
-        swap_preset_rig(path, "ark-lead", "ollama-claude", model="qwen3.6")
-        rig = load_rig_config(path).rigs["ark-lead"]
+        add_preset_rig(path, "ar3-lead", "claude")
+        set_rig_value(path, "ar3-lead", "allowed_tools", "Bash(git:*) Read")
+        set_rig_value(path, "ar3-lead", "permissions", "bypass")
+        swap_preset_rig(path, "ar3-lead", "ollama-claude", model="qwen3.6")
+        rig = load_rig_config(path).rigs["ar3-lead"]
         assert (rig.allowed_tools, rig.permissions, rig.error) == (
             "Bash(git:*) Read", "bypass", None
         )
@@ -1261,14 +1262,14 @@ class TestAllowedToolsRigKey:
 
     def test_swapping_onto_a_harness_that_cannot_express_it_is_refused(self, tmp_path):
         path = tmp_path / "rigs.json"
-        add_preset_rig(path, "ark-lead", "claude")
-        set_rig_value(path, "ark-lead", "allowed_tools", "Read")
+        add_preset_rig(path, "ar3-lead", "claude")
+        set_rig_value(path, "ar3-lead", "allowed_tools", "Read")
         with pytest.raises(RigError) as exc:
-            swap_preset_rig(path, "ark-lead", "cursor")
-        assert "ark-lead" in str(exc.value)
+            swap_preset_rig(path, "ar3-lead", "cursor")
+        assert "ar3-lead" in str(exc.value)
         assert "cli-config.json" in str(exc.value)
         # Nothing was written: the rig still runs claude.
-        assert load_rig_config(path).rigs["ark-lead"].preset == "claude"
+        assert load_rig_config(path).rigs["ar3-lead"].preset == "claude"
 
     @pytest.mark.parametrize("preset", ["codex", "cursor", "opencode", "agy", "copilot"])
     def test_unsupported_presets_refuse_it_at_set_time(self, tmp_path, preset):

@@ -47,9 +47,9 @@ from rig import (
 )
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ark` is not always reachable there.
+# into a container with no repo root, so `ar3` is not always reachable there.
 try:
-    from ark.fsio import atomic_write_text as _atomic_write
+    from ar3.fsio import atomic_write_text as _atomic_write
 except ImportError:
     def _atomic_write(path: Path, text: str) -> None:
         """Write `text` to `path` via a same-directory temp file + os.replace,
@@ -59,7 +59,7 @@ except ImportError:
         os.replace(tmp, path)
 
 try:
-    from ark.proc import spawn as _proc_spawn, terminate_group as _terminate_group
+    from ar3.proc import spawn as _proc_spawn, terminate_group as _terminate_group
 except ImportError:
     def _proc_spawn(
         argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
@@ -70,7 +70,7 @@ except ImportError:
         )
 
     def _terminate_group(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
-        # Mirrors ark.proc.terminate_group: the pgid is resolved once, before
+        # Mirrors ar3.proc.terminate_group: the pgid is resolved once, before
         # SIGTERM, so a leader that exits during the grace period cannot
         # strand SIGKILL with no pid left to resolve; pid stands in as the
         # pgid when getpgid cannot answer (true for any start_new_session
@@ -111,7 +111,7 @@ __all__ = [
 ]
 
 RUN_ENGINES = frozenset({
-    "claude", "codex", "agy", "copilot", "cursor", "opencode",
+    "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse",
     "ollama-claude", "ollama-codex", "ollama-opencode",
 })
 

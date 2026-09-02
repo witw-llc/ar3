@@ -33,7 +33,7 @@ About 20 minutes, most of it waiting on turns.
 - Chapter 4 complete: roster `silo` with Wren (leader, `Continue: 15m`) and
   Moss (helper, echo), both answering.
 - Chapter 5 is useful background and not a prerequisite: this chapter drives
-  k7e through r4t rather than by hand, so the `~/ark/bin/ask` bridge you built
+  k7e through r4t rather than by hand, so the `~/ar3/bin/ask` bridge you built
   there is not needed here. A member's store distills through the member's own
   rig.
 
@@ -50,7 +50,7 @@ know and a roster could not derive:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "I want to ship the new r4t.md this Friday. Any reason not to?"
 tells --timeout 300
 ```
@@ -114,7 +114,7 @@ the repo both of them read.
 
 Now the line that turns it on:
 
-**Replace** `~/ark/silo/r4t.md` — in Wren's block, add one field under
+**Replace** `~/ar3/silo/r4t.md` — in Wren's block, add one field under
 `Continue:`
 
 ```markdown
@@ -127,7 +127,7 @@ Now the line that turns it on:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t runbook check
 ```
 
@@ -136,7 +136,7 @@ You should see:
 ```
 runbook: triforce -> r4t.md
 warning: Wren: Knowledge is on with rig 'silo' — a small-model class that smooths specifics out of distilled notes; consider a distill-rig override, and note budgets are bytes, not tokens (see docs/r4t-knowledge.md)
-/home/you/ark/silo/r4t.md: OK (2 member(s), leader Wren, 1 warning(s))
+/home/you/ar3/silo/r4t.md: OK (2 member(s), leader Wren, 1 warning(s))
 ```
 
 The warning is r4t telling you the truth about the free path before you find
@@ -152,7 +152,7 @@ Ask the same question again:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "Same question again: Friday for the r4t.md ship. Yes or no, and why?"
 tells --timeout 300
 sed -n '/^## Output/,$p' "$(ls -d $TURNS/* | tail -1)"
@@ -224,7 +224,7 @@ None of this is free, and r4t prices it per wake. Every capture carries a
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t logs --agent wren --full | grep "^- prompt:" | tail -5
 ```
 
@@ -265,7 +265,7 @@ Which means the way to break it is to point the dreaming somewhere else.
 turn rig is too small to write good notes, exactly as that warning suggests.
 Name a rig you never created:
 
-**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
+**Replace** `~/ar3/silo/r4t.md` — Wren's `Knowledge:` line
 
 ```markdown
 - **Knowledge:** medium scribe
@@ -319,7 +319,7 @@ in a member's private machinery, and it stayed there.
 
 Take the override off and let the dreaming fall back to Wren's own rig:
 
-**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
+**Replace** `~/ar3/silo/r4t.md` — Wren's `Knowledge:` line
 
 ```markdown
 - **Knowledge:** on
@@ -416,7 +416,7 @@ Health
   ✓ no runaway signs (2 turn(s) last 10m)
   ✓ all 2 member(s) healthy
 
-Roster  (repo settings: /home/you/ark/silo/r4t.md)
+Roster  (repo settings: /home/you/ar3/silo/r4t.md)
   ✓ Wren  rig=silo  budget=6.6/8  [leader]
   ✓ Moss  rig=helper  budget=8/8
 ```
@@ -431,7 +431,7 @@ arithmetic while you learned something else.
 The budget is a real dial, and the cheapest way to feel it is to make it too
 small:
 
-**Replace** `~/ark/silo/r4t.md` — Wren's `Knowledge:` line
+**Replace** `~/ar3/silo/r4t.md` — Wren's `Knowledge:` line
 
 ```markdown
 - **Knowledge:** 512
@@ -440,10 +440,10 @@ small:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "One line: what is the ship rule?"
 tells --timeout 300
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t logs --agent wren --full | grep "^- prompt:" | tail -1
 ```
 
@@ -483,7 +483,7 @@ The runbook line is repo state. The store is not:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 git add r4t.md
 git commit -q -m "silo roster: Wren remembers — Knowledge on"
 ```

@@ -58,13 +58,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ark` is not always reachable there —
+# into a container with no repo root, so `ar3` is not always reachable there —
 # and a caged turn is exactly the case that needs the zone stated, because a
 # container boots UTC until `rig.env` sets `TZ`. So the fallback reimplements
 # the display contract rather than degrading to a stub: local time, always
-# carrying its zone, with `ark.clock`'s abbreviation rule.
+# carrying its zone, with `ar3.clock`'s abbreviation rule.
 try:
-    from ark.clock import (
+    from ar3.clock import (
         local_now,
         stamp as local_stamp,
         zone_label as local_zone,

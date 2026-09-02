@@ -20,7 +20,7 @@ About 20 minutes. Nothing new to install.
 
 ## 3. Starting state
 
-- Chapter 1 complete: `solo` answers a `tell` from your seat at `~/ark/me`,
+- Chapter 1 complete: `solo` answers a `tell` from your seat at `~/ar3/me`,
   and `ar3` shows the a8s section green.
 - A harness chapter 1 got working — `ollama` with `qwen3.6` through OpenCode
   on the free path, the Cursor agent CLI (`agent`) on the subscription path.
@@ -46,16 +46,16 @@ Make the directory and let r4t write the starter:
 **Run**
 
 ```bash
-mkdir -p ~/ark/silo
-cd ~/ark/silo
+mkdir -p ~/ar3/silo
+cd ~/ar3/silo
 r4t init
 ```
 
 You should see:
 
 ```
-runbook: wrote starter /home/you/ark/silo/r4t.md
-next: r4t add /home/you/ark/silo
+runbook: wrote starter /home/you/ar3/silo/r4t.md
+next: r4t add /home/you/ar3/silo
 ```
 
 That file is a **runbook**, and it did not start empty. Its frontmatter says
@@ -98,7 +98,7 @@ here, because it is about to bite in a useful way.
 
 The starter's team is three. Ours is one. Replace the file:
 
-**Replace** `~/ark/silo/r4t.md` (whole file)
+**Replace** `~/ar3/silo/r4t.md` (whole file)
 
 ```markdown
 ---
@@ -238,7 +238,7 @@ You should see:
 
 ```
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (1 member(s), leader Wren)
 ```
 
 The first line is the inheritance chain, base first. Now register the roster:
@@ -246,17 +246,17 @@ The first line is the inheritance chain, base first. Now register the roster:
 **Run**
 
 ```bash
-r4t add ~/ark/silo
+r4t add ~/ar3/silo
 ```
 
 You should see:
 
 ```
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (1 member(s), leader Wren)
 
-added silo -> /home/you/ark/silo
-  runbook:   /home/you/ark/silo/r4t.md
+added silo -> /home/you/ar3/silo
+  runbook:   /home/you/ar3/silo/r4t.md
   address:   silo (leader Wren), silo:<member> for a member with Ingress:
   ceiling:   permissions auto
 
@@ -284,9 +284,9 @@ You should see:
 
 ```
 NAME   STATUS                DEFINITION               ROOT                       NAMESPACES
-me     running (pid 27063)   filedrop                 /home/you/ark/me           
-silo   running (pid 27414)   r4t                      /home/you/ark/silo         silo:
-solo   running (pid 15721)   engine-ollama-opencode   /home/you/ark/solo         
+me     running (pid 27063)   filedrop                 /home/you/ar3/me           
+silo   running (pid 27414)   r4t                      /home/you/ar3/silo         silo:
+solo   running (pid 15721)   engine-ollama-opencode   /home/you/ar3/solo         
 ```
 
 Wren has chapter 1's job now, so retire the bare node and let the roster's
@@ -308,7 +308,7 @@ solo: stopped
 removed solo
 ```
 
-`~/ark/solo` and everything in it stays on disk — only the registration went
+`~/ar3/solo` and everything in it stays on disk — only the registration went
 away. The address is what moved: one name on the registry reaches a whole
 roster, and a roster can grow.
 
@@ -323,7 +323,7 @@ start, and on the free path for the model's as well.
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "In one sentence: what is your job on this roster?"
 tells --timeout 300
 ```
@@ -384,7 +384,7 @@ one line per lifecycle event, no message bodies, no transcripts:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t logs -n 12
 ```
 
@@ -469,7 +469,7 @@ You should see:
 swapped rig 'silo' to ollama-opencode in /home/you/.config/r4t/rigs.json
   invoke: ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (1 member(s), leader Wren)
 ```
 
 ## 10. Check
@@ -479,7 +479,7 @@ The codeword is the health check. Ask again:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "What was the codeword?"
 tells --timeout 300
 ```
@@ -496,7 +496,7 @@ Then ask r4t where the roster stands:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t status
 ```
 
@@ -516,7 +516,7 @@ Health
   ✓ no runaway signs (3 turn(s) last 10m)
   ✓ all 1 member(s) healthy
 
-Roster  (repo settings: /home/you/ark/silo/r4t.md)
+Roster  (repo settings: /home/you/ar3/silo/r4t.md)
   ✓ Wren  rig=silo  budget=4.7/8  [leader]
 
 Rigs  (your configuration: /home/you/.config/r4t/rigs.json)
@@ -544,7 +544,7 @@ where you can read them. Chapter 4 makes the budget bite.
 
 One line in the runbook: bound how long Wren's conversation may sit idle.
 
-**Replace** `~/ark/silo/r4t.md` — in Wren's block, swap the `Continue:` line
+**Replace** `~/ar3/silo/r4t.md` — in Wren's block, swap the `Continue:` line
 for a duration:
 
 ```markdown
@@ -568,7 +568,7 @@ You should see:
 
 ```
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (1 member(s), leader Wren)
 ```
 
 ## 12. Commit point
@@ -580,7 +580,7 @@ commands.)
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 git init -q
 git add r4t.md
 git commit -q -m "silo roster: Wren, continue 15m"

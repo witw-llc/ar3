@@ -44,8 +44,8 @@ from typing import Any
 
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
-from ark.fsio import replace_with_retry
-from ark.ulid import new as new_ulid, parse as parse_ulid
+from ar3.fsio import replace_with_retry
+from ar3.ulid import new as new_ulid, parse as parse_ulid
 
 _KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
 

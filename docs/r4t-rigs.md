@@ -30,8 +30,8 @@ if a roster member or pin still references the rig, naming what does; pass
 ## `rig run` — one headless turn as a rig
 
 ```bash
-r4t rig run ark-eng "summarize what changed on this branch"
-r4t rig run ark-eng --dir ~/work/proj --agent my-node --wait "check the deploy"
+r4t rig run ar3-eng "summarize what changed on this branch"
+r4t rig run ar3-eng --dir ~/work/proj --agent my-node --wait "check the deploy"
 r4t rig run cheap --idle          # the quiet-tick consolidation pass
 ```
 
@@ -94,7 +94,7 @@ When the bucket holds less than one turn:
 
 - **Default: refuse.** Nothing runs, nothing is charged, and stderr names the
   level, the wait until one turn is back, and both flags below. The exit code
-  is 1, since [ark.md](ark.md) reserves exit-code meanings to the foundation;
+  is 1, since [ar3-foundation.md](ar3-foundation.md) reserves exit-code meanings to the foundation;
   `--json`'s `reason` is `resting`, which is how a caller tells a rig that
   needs retrying later from a turn that failed.
 - **`--wait`** holds for the refill and then runs. One stderr line states the
@@ -113,8 +113,8 @@ ungated rig, else `max`, `earn_per_hour`, `level_before`, `level_after`,
 ## `rig fuel` — the tank as one number
 
 ```bash
-r4t rig fuel ark-eng          # 0.00-1.00, the dial the next turn hits first
-r4t rig fuel ark-eng --json
+r4t rig fuel ar3-eng          # 0.00-1.00, the dial the next turn hits first
+r4t rig fuel ar3-eng --json
 ```
 
 ```
@@ -170,7 +170,7 @@ fuel is how much subscription is left to spend. `--json` prints to **stdout**
 
 ```json
 {
-  "rig": "ark-eng",
+  "rig": "ar3-eng",
   "preset": "claude",
   "quota_engine": "claude",
   "model": "opus",
@@ -428,8 +428,8 @@ exposed through this surface; use `rig add`/`swap` to change the harness.
 ## Permission stance and tool allowlist (`permissions` / `allowed_tools`)
 
 ```bash
-r4t rig set ark-eng permissions bypass
-r4t rig set ark-eng allowed_tools "Bash(git:*) Bash(gh:*) Read Edit Write"
+r4t rig set ar3-eng permissions bypass
+r4t rig set ar3-eng allowed_tools "Bash(git:*) Bash(gh:*) Read Edit Write"
 ```
 
 `permissions` takes `ask`, `auto` or `bypass` — ar3's three words for a

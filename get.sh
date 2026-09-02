@@ -91,19 +91,58 @@ main() {
     return 0
   fi
 
+  # One rc file does not cover one user. $SHELL describes the login shell,
+  # not the shell they open a terminal on, and a non-interactive installer
+  # often reports /bin/sh — which lands the line in .profile, the one file an
+  # interactive non-login bash never reads. That is a suite that installs
+  # cleanly and then cannot be run. Write every rc their shells actually read;
+  # install.sh guards its own PATH prepend, so a shell reading two of them
+  # still ends up with one entry.
+  #
+  # bash needs both halves and they are not interchangeable. Interactive
+  # non-login bash reads .bashrc and nothing else. Login bash reads the FIRST
+  # of .bash_profile, .bash_login, .profile that exists and ignores the rest —
+  # so a user who already has a .bash_profile never reads the line we put in
+  # .profile, which is the exact command-not-found case this is here to fix.
+  # Pick whichever login file they already have, and fall back to .profile.
+  #
+  # The rc for the shell the user actually runs is created when missing. Not
+  # creating it is what the old single-target code effectively did, and it is
+  # how the install silently did nothing: a zsh user with no .zshrc got the
+  # line written where zsh never looks.
+  set -- "$HOME/.profile"
   case "${SHELL:-/bin/sh}" in
-    */zsh)  RC="$HOME/.zshrc" ;;
-    */bash) RC="$HOME/.bashrc" ;;
-    *)      RC="$HOME/.profile" ;;
+    */zsh)
+      set -- "$HOME/.zshrc"
+      ;;
+    */bash)
+      if   [ -f "$HOME/.bash_profile" ]; then RC_LOGIN="$HOME/.bash_profile"
+      elif [ -f "$HOME/.bash_login" ];   then RC_LOGIN="$HOME/.bash_login"
+      else                                    RC_LOGIN="$HOME/.profile"
+      fi
+      set -- "$HOME/.bashrc" "$RC_LOGIN"
+      ;;
+    *)
+      # $SHELL told us nothing useful (often /bin/sh from a non-interactive
+      # installer), so write only to rc files that already exist, plus
+      # .profile. Creating an rc for a shell they may not use is the one case
+      # where guessing costs something.
+      if [ -f "$HOME/.bashrc" ]; then set -- "$@" "$HOME/.bashrc"; fi
+      if [ -f "$HOME/.zshrc" ];  then set -- "$@" "$HOME/.zshrc";  fi
+      ;;
   esac
 
+  # Positional parameters rather than a space-joined string: $HOME can contain
+  # a space, and `for RC in $RC_TARGETS` would split one path into two.
   SOURCE_LINE=". \"$AR3_DIR/install.sh\""
-  if grep -qsF "$AR3_DIR/install.sh" "$RC"; then
-    echo "Shell rc already sources install.sh ($RC)"
-  else
-    printf '\n# ar3 (https://github.com/witw-llc/ar3)\n%s\n' "$SOURCE_LINE" >> "$RC"
-    echo "Added to $RC: $SOURCE_LINE"
-  fi
+  for RC in "$@"; do
+    if grep -qsF "$AR3_DIR/install.sh" "$RC"; then
+      echo "Shell rc already sources install.sh ($RC)"
+    else
+      printf '\n# ar3 (https://github.com/witw-llc/ar3)\n%s\n' "$SOURCE_LINE" >> "$RC"
+      echo "Added to $RC: $SOURCE_LINE"
+    fi
+  done
 
   # On Windows the rc line only reaches Git Bash shells. PowerShell and
   # cmd.exe resolve the .cmd/.ps1 shims through the Windows user Path, so
@@ -150,8 +189,8 @@ main() {
   echo "Done. Open a new shell (or run the source line above), then:"
   echo "  $AR3_DIR/ar3 doctor"
   echo "Agent-skill install is opt-in: change the rc line to add --skills."
-  echo "Headless/cron shells skip .bashrc — use $AR3_DIR/ar3 (absolute) or"
-  echo "source install.sh from .profile; re-run this script to update."
+  echo "Cron and other non-interactive shells read no rc at all — call"
+  echo "$AR3_DIR/ar3 by absolute path there; re-run this script to update."
 }
 
 _install_git() {

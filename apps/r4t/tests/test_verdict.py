@@ -9,7 +9,7 @@ import state
 import verdict
 from rig import load_rig_config
 from roster import load_roster
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
 NODE = "acme"
 

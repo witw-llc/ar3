@@ -757,7 +757,7 @@ class TestAttachedLoopKillRequest:
         save_registry({"A": {"root": str(d), "definition": str(fixtures_dir / "mock-slow.json")}})
         ensure_mailboxes(Participant("A", d))
 
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir("A") / f"{msg_id}.json").write_text(
@@ -955,7 +955,7 @@ class TestAttachedLoopIdleIntegration:
         # Drop a self-tell so there's an inbox message to drain. We can't
         # tell ourselves through routing (sender exclusion), so write the
         # routed message directly into the inbox.
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
         msg_id = new_ulid()
         (inbox_dir("X") / f"{msg_id}.json").write_text(json.dumps({
             "id": msg_id,
@@ -1028,12 +1028,19 @@ class TestIdleFairness:
 
         monkeypatch.setattr(daemon_mod, "maybe_run_idle", track_idle)
 
-        passes = 0
+        # The budget is wall-clock, not loop passes. B cannot be reached while
+        # A's async idle invoke is still in flight — the idle block skips
+        # itself entirely on `_wake_in_flight()` — and a pass costs
+        # microseconds while that subprocess costs milliseconds. A budget of
+        # twelve passes therefore expires long before rotation gets a chance,
+        # which on an idle machine never happened and under CPU contention is
+        # a coin flip. Yield while a wake is in flight so it can finish.
+        deadline = time.monotonic() + 30.0
 
         def keep_a_always_ready(_event, timeout=None):
-            nonlocal passes
-            passes += 1
-            if "B" in fired or passes > 12:
+            if daemon_mod._wake_in_flight():
+                time.sleep(0.005)
+            if "B" in fired or time.monotonic() > deadline:
                 daemon_mod._STOP_EVENT.set()
             return True
 
@@ -1311,7 +1318,7 @@ class TestAsyncAttachedLoop:
         ensure_mailboxes(a)
         ensure_mailboxes(b)
 
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir("A") / f"{msg_id}.json").write_text(
@@ -1369,7 +1376,7 @@ class TestAsyncAttachedLoop:
         save_registry({"A": {"root": str(d), "definition": str(defp)}})
         ensure_mailboxes(Participant("A", d))
 
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir("A") / f"{msg_id}.json").write_text(
@@ -1408,7 +1415,7 @@ class TestSharedHandlerStarvation:
     other agents a shared handler serves."""
 
     def _queue(self, name: str, content: str) -> str:
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir(name) / f"{msg_id}.json").write_text(
@@ -1511,7 +1518,7 @@ class TestSharedHandlerWakeFairness:
     (single_pass) stays index-0 ordered."""
 
     def _queue(self, name: str, content: str) -> None:
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         (inbox_dir(name) / f"{msg_id}.json").write_text(

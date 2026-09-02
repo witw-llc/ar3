@@ -6,7 +6,7 @@ in each app's own suite.
 """
 from __future__ import annotations
 
-from ark import envseam
+from ar3 import envseam
 
 
 class TestContractShape:

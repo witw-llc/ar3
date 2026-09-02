@@ -35,7 +35,7 @@ whole roster running, one line per event:
 
 ```
 r4t: QUEUED gerry from neil thread=01M06DTTFGQ5K18ZAP1J5JCWP0 hop=0 depth=2
-r4t: TURN gerry 2 msg rig=ark-lead continue prompt=18.4k
+r4t: TURN gerry 2 msg rig=ar3-lead continue prompt=18.4k
 r4t: DONE gerry exit 0 in 192.4s
 r4t: RESTING phil resting (member budget 0.4, ready in ~7 min) (1 queued)
 ```

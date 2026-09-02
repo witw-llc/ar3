@@ -46,10 +46,10 @@ local HTTP API:
 **Run**
 
 ```bash
-mkdir -p ~/ark/bin
+mkdir -p ~/ar3/bin
 ```
 
-**Create** `~/ark/bin/ask`
+**Create** `~/ar3/bin/ask`
 
 ```python
 #!/usr/bin/env python3
@@ -83,8 +83,8 @@ the answer for the same reason.
 **Run**
 
 ```bash
-chmod +x ~/ark/bin/ask
-k7e config llm_command "$HOME/ark/bin/ask"
+chmod +x ~/ar3/bin/ask
+k7e config llm_command "$HOME/ar3/bin/ask"
 k7e status
 ```
 
@@ -102,13 +102,13 @@ You should see (the `k7e config` confirmation, then the bridge and search
 rows of `k7e status`):
 
 ```
-llm_command = /home/you/ark/bin/ask
-  LLM fallback: /home/you/ark/bin/ask ✓
-  LLM summarize: /home/you/ark/bin/ask (via llm_command)
-  LLM decompose: /home/you/ark/bin/ask (via llm_command)
-  LLM distill: /home/you/ark/bin/ask (via llm_command)
-  LLM compile: /home/you/ark/bin/ask (via llm_command)
-  LLM rerank: /home/you/ark/bin/ask (via llm_command)
+llm_command = /home/you/ar3/bin/ask
+  LLM fallback: /home/you/ar3/bin/ask ✓
+  LLM summarize: /home/you/ar3/bin/ask (via llm_command)
+  LLM decompose: /home/you/ar3/bin/ask (via llm_command)
+  LLM distill: /home/you/ar3/bin/ask (via llm_command)
+  LLM compile: /home/you/ar3/bin/ask (via llm_command)
+  LLM rerank: /home/you/ar3/bin/ask (via llm_command)
   Embeddings: ollama running but model 'nomic-embed-text' not found
     → Install: ollama pull nomic-embed-text
   Search: FTS5 (keyword) ✓
@@ -204,10 +204,10 @@ is for. Write the mess down the way it actually looks:
 **Run**
 
 ```bash
-mkdir -p ~/ark/silo
+mkdir -p ~/ar3/silo
 ```
 
-**Create** `~/ark/silo/NOTES.md`
+**Create** `~/ar3/silo/NOTES.md`
 
 ```markdown
 # scratch notes — the silo roster, thursday
@@ -236,8 +236,8 @@ give every member its own Workdir.
 **Run**
 
 ```bash
-k7e distill ~/ark/silo/NOTES.md --dry-run
-k7e distill ~/ark/silo/NOTES.md
+k7e distill ~/ar3/silo/NOTES.md --dry-run
+k7e distill ~/ar3/silo/NOTES.md
 ```
 
 ## 6. Expected receipt
@@ -433,8 +433,8 @@ A second store costs nothing:
 **Run**
 
 ```bash
-K7E_HOME=~/ark/lore k7e store "Inkwell is the roster mascot" --tags silo --content "An octopus. Moss drafted three names, Wren picked Inkwell."
-K7E_HOME=~/ark/lore k7e list
+K7E_HOME=~/ar3/lore k7e store "Inkwell is the roster mascot" --tags silo --content "An octopus. Moss drafted three names, Wren picked Inkwell."
+K7E_HOME=~/ar3/lore k7e list
 ```
 
 You should see:

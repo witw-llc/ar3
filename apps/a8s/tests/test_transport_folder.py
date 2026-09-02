@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 from core import folder_ledger_path
 from transports import TransportError
 from transports.folder import FolderTransport
@@ -37,7 +37,7 @@ def _ulid_at_ms(ms: int) -> str:
     The skew grace is measured in milliseconds, so these tests need to place a
     ULID a known distance from another one rather than merely above or below.
     """
-    from ark.ulid import ALPHABET
+    from ar3.ulid import ALPHABET
 
     chars = []
     n = ms
@@ -118,7 +118,7 @@ class TestPublish:
     def test_a_rename_that_never_wins_is_reported(self, fake_home, folder, monkeypatch):
         import os
 
-        import ark.fsio as fsio
+        import ar3.fsio as fsio
 
         monkeypatch.setattr(fsio, "REPLACE_BACKOFF_SECONDS", 0.0)
         monkeypatch.setattr(fsio, "REPLACE_BACKOFF_CAP_SECONDS", 0.0)

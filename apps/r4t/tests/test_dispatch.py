@@ -29,7 +29,7 @@ from dispatch import (
 from rig import McpPlan, Rig, RigError, build_preset_invoke, load_rig_config
 from roster import load_roster, parse_roster
 from r4t import main as r4t_main
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
 NODE = "acme"
 
@@ -1519,7 +1519,7 @@ class TestStdoutFallback:
             "\x1b[0m\n> build · qwen3:0.6b\n\x1b[0m\n"
             '\x1b[0m✱ \x1b[0mGlob "**/sample.txt"\x1b[90m 1 match\x1b[0m\n'
             "\x1b[0m→ \x1b[0mRead sample.txt\n"
-            "Shell cwd was reset to /home/you/ark/silo\n"
+            "Shell cwd was reset to /home/you/ar3/silo\n"
         )
 
         def chrome_only(rig, prompt, cwd, *, env=None, variant=0):
@@ -1536,7 +1536,7 @@ class TestStdoutFallback:
             "\x1b[0m\n> build · qwen3.6:latest\n\x1b[0m\n"
             "\x1b[0m→ \x1b[0mRead GOAL.md\n"
             + ANSWER
-            + "\nShell cwd was reset to /home/you/ark/silo\n"
+            + "\nShell cwd was reset to /home/you/ar3/silo\n"
         )
 
         def noisy_answer(rig, prompt, cwd, *, env=None, variant=0):
@@ -1876,7 +1876,7 @@ class TestCleanTranscript:
             '\x1b[0m✱ \x1b[0mGlob "**/x.txt"\x1b[90m 1 match\x1b[0m\n'
             "\x1b[0m→ \x1b[0mRead x.txt\n"
             "The contents are fine.\n"
-            "Shell cwd was reset to /home/you/ark/silo\n"
+            "Shell cwd was reset to /home/you/ar3/silo\n"
         )
         assert dispatch.clean_transcript(raw) == "The contents are fine."
 

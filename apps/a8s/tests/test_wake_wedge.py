@@ -26,7 +26,7 @@ from core import Participant, agent_log_path, inbox_dir
 from daemon import attached_loop
 from mailbox import ensure_mailboxes
 from registry import save_registry
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
 import daemon as daemon_mod
 

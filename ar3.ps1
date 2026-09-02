@@ -1,4 +1,4 @@
-$Ar3Path = Join-Path $PSScriptRoot "apps/ar3/ar3.py"
+$Ar3Path = Join-Path $PSScriptRoot "apps/ar3/cli.py"
 
 # python3, then python, then py -3 — the same order the bash half resolves
 # in. A candidate has to RUN before it is accepted, not merely be found: on

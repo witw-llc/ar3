@@ -112,7 +112,7 @@ naming the set. Heading text is matched case-insensitively.
 | Key | Values | Default | Sample | What it sets |
 |---|---|---|---|---|
 | `Engine:` | an engine line (below) | — | `- **Engine:** claude --model opus` | An inline rig for this member alone. |
-| `Rig:` | a rig name — letters, digits, `_`, `-` | — | `- **Rig:** ark-lead` | The rig class, resolved in `## Rigs` first, then the machine's `rigs.json`. |
+| `Rig:` | a rig name — letters, digits, `_`, `-` | — | `- **Rig:** ar3-lead` | The rig class, resolved in `## Rigs` first, then the machine's `rigs.json`. |
 | `Leader:` | boolean — exactly one member per runbook | `no` | `- **Leader:** yes` | Mail addressed to the node itself lands here. A value outside the boolean vocabulary is a field-level error, not a silent `no`. |
 | `Ingress:` | boolean | `off`; `on` for the leader | `- **Ingress:** on` | Whether `tell node:member` from outside the roster delivers here. |
 | `Cell:` | a cell name declared in `## Cells` | unset | `- **Cell:** build` | The cell this member belongs to. |
@@ -225,7 +225,7 @@ merging, so a resolved runbook carries none of it.
 
 | Rule | Value |
 |---|---|
-| Built-in bases | `ark-suite`, `triforce` — resolved by name, never copied |
+| Built-in bases | `ar3-suite`, `triforce` — resolved by name, never copied |
 | Path bases | anything starting `./` `../` `/` `~`, containing a slash, or ending `.md`; relative to the file that names it |
 | Frontmatter merge | per key — the deriving file's key wins |
 | Section merge | an `##` section **replaces** the base's whole; it never blends |
@@ -253,7 +253,7 @@ it should have come from. `r4t runbook check` prints them all at once.
 | `appears twice — which one wins must never be a question` | a repeated `##` heading | merge the two into one |
 | `frontmatter line is not `key: value`` | a bare line between the `---` markers | give it a key, or delete it |
 | `frontmatter opened with `---` and never closed` | a missing second `---` | close the block |
-| `names no built-in runbook — built-ins are:` | `extends:` naming an unknown built-in | use `triforce` or `ark-suite`, or write a path |
+| `names no built-in runbook — built-ins are:` | `extends:` naming an unknown built-in | use `triforce` or `ar3-suite`, or write a path |
 | `does not resolve — no file at` | `extends:` naming a missing file | fix the path; it resolves against this file's directory |
 | `extends: forms a cycle` | two files naming each other | break the loop |
 | `extends: chain is deeper than 5` | more than five hops | flatten the chain |

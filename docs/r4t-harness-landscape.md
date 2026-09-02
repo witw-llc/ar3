@@ -44,6 +44,7 @@ cold behavior, cross-directory scope probe.
 | `codex` | `codex exec --sandbox workspace-write … {prompt}` | `resume --last --include-non-interactive` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
+| `muse` | `muse exec --approval-mode never --user-input-auto-resolve {prompt}` | **no** | none | Meta Muse; `--yolo` is bypass. No quota verb — the CLI exposes no usage surface |
 | `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
 | `ollama-claude` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
 | `ollama-codex` | `ollama launch codex --model … -y -- exec --sandbox workspace-write` | no | `codex-config` | Requires `--model` |
@@ -114,6 +115,7 @@ the last column; see
 | codex (preset) | `exec resume --last --include-non-interactive` | cwd-filtered; `--include-non-interactive` is what lets `--last` see the `codex exec` sessions a roster creates, and the preset passes it | `resume <SESSION_ID>` (bin#256) | yes (`--last`), graded **moderate** |
 | cursor (preset) | `--continue` | per-directory (MD5 of the absolute cwd) | distinct workdirs | yes, graded **good** |
 | opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
+| muse (preset) | `muse resume --last` exists | per-workspace, but the subcommand is **interactive** — it opens the session picker, and `muse exec` rejects `--last` | `muse exec --session-id <uuid>` (#17) | **no** — no headless resume exists |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
 | copilot (preset) | `--continue` exists | **machine-global** | `--session-id <id>` at creation, `-r, --resume=<id>` under `-p` (#17) | **no** until the pin path replaces `--continue` in the preset |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
@@ -143,6 +145,7 @@ should expose `a8s` tell the way current MCP presets do.
 | opencode / ollama-opencode | env / config (`opencode-env`) | yes | Default-on |
 | cursor | `.cursor/mcp.json` in worktree (`cursor-file`) | yes | Opt-in (writes into the repo) |
 | agy | `$HOME/.gemini/config/mcp_config.json` (`agy-home`) | **no** — `$HOME` is the only lever | Opt-in; allowed only under `run_as`, where that home is the member's own |
+| muse | none | no | Speaks MSP and *serves* it (`muse serve`); not an MCP client |
 | ollama (bare) | none | no | No tools |
 | Gemini CLI | `mcpServers` in user/project `settings.json`; `gemini mcp add` | file-scoped | Same family as agy’s constraint |
 | Cline | `cline_mcp_settings.json` / `cline mcp` | global (isolatable via `--data-dir` / `CLINE_DIR`) | Confirm path for installed major |

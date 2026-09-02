@@ -15,7 +15,7 @@ import os
 import time
 from pathlib import Path
 
-from ark.ulid import new as new_ulid
+from ar3.ulid import new as new_ulid
 
 # A rename fails on Windows while any process holds the source open, and a
 # freshly written file in a watched folder is opened immediately by whatever

@@ -106,9 +106,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ark` is not always reachable there.
+# into a container with no repo root, so `ar3` is not always reachable there.
 try:
-    from ark.envseam import ROUTING_OWNED as _ROUTING_OWNED
+    from ar3.envseam import ROUTING_OWNED as _ROUTING_OWNED
 except ImportError:
     _ROUTING_OWNED = ("TELL_OUTBOX_DIR", "TELL_FILE_MAX")
 
@@ -247,6 +247,34 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_default": "auto",
         "continue_argv": ["--continue"],
         "no_prior_conversation": r"no previous chats found",
+    },
+    "muse": {
+        # No `continue_argv`. `muse resume` is a top-level subcommand that
+        # opens the workspace session picker, and `muse exec` rejects it
+        # outright ("unknown option --last", verified against Muse Code
+        # 1.0.1), so there is no headless continuation to splice. `muse exec
+        # --session-id` names a session rather than resuming the last one,
+        # which is where per-member pinning (#17) will look.
+        # No `mcp` idiom either: muse speaks MSP and serves it (`muse serve`),
+        # so it is an MCP *server*'s counterpart, not a client that can be
+        # handed one.
+        "text_tier": "big",
+        "description": "Meta Muse (`muse`) — matches apps/a8s/definitions/muse.json",
+        "a8s_definition": "muse.json",
+        "headless": "exec (positional prompt)",
+        "invoke": [
+            "muse",
+            "exec",
+            "--approval-mode",
+            "never",
+            # Unattended, the model may still reach for request_user_input.
+            # This offers the tool and auto-cancels the prompt, so the turn
+            # ends instead of waiting on a terminal nobody is sitting at.
+            "--user-input-auto-resolve",
+            "{prompt}",
+        ],
+        "model_argv": ["--model", "{model}"],
+        "model_anchor": "exec",
     },
     "opencode": {
         "text_tier": "moderate",
@@ -547,6 +575,33 @@ _CLAUDE_PERMISSIONS = EnginePermissions(
     },
 )
 
+_MUSE_PERMISSIONS = EnginePermissions(
+    anchor="exec",
+    modes={
+        # Back to muse's own default (`--approval-mode on-request`). The
+        # auto-resolve flag goes with it: it exists to stop an unattended turn
+        # blocking on a prompt, and `ask` is the mode that wants the prompt.
+        "ask": PermissionRule(
+            drop_pair=("--approval-mode",),
+            drop=("--user-input-auto-resolve",),
+        ),
+        "auto": PermissionRule(),
+        # `--yolo` is one flag for three things: approvals off, sandbox off,
+        # and the workspace trusted for the run, which loads that workspace's
+        # own skills and rules. The approval flag comes out because --yolo
+        # supersedes it.
+        "bypass": PermissionRule(
+            drop_pair=("--approval-mode",),
+            add=("--yolo",),
+            note=(
+                "muse 'bypass' is --yolo: approvals AND the filesystem/network "
+                "sandbox both go, and the workspace is trusted for the run, so "
+                "its skills and rules load too"
+            ),
+        ),
+    },
+)
+
 _CODEX_PERMISSIONS = EnginePermissions(
     anchor="exec",
     modes={
@@ -628,6 +683,7 @@ PERMISSION_TRANSLATION: dict[str, EnginePermissions] = {
     "opencode": _OPENCODE_PERMISSIONS,
     "agy": _AGY_PERMISSIONS,
     "copilot": _COPILOT_PERMISSIONS,
+    "muse": _MUSE_PERMISSIONS,
     # The launchers carry the wrapped engine's own tokens after `--`, so they
     # take the wrapped engine's rules; only the anchor differs.
     "ollama-claude": EnginePermissions(anchor="--", modes=_CLAUDE_PERMISSIONS.modes),
@@ -650,6 +706,9 @@ _ALLOWED_TOOLS_REASONS = {
     "opencode": "opencode takes its `permission` map only from opencode.json, never per invocation",
     "agy": "agy takes toolPermission only from settings.json, never per invocation",
     "copilot": "copilot takes --allow-tool/--deny-tool per tool, not one allowlist",
+    "muse": "muse takes tool policy from a permission profile "
+             "(--permission-profile) or its settings, never as one "
+             "per-invocation allowlist",
     "ollama": "bare `ollama run` has no tool use at all",
 }
 
@@ -664,6 +723,11 @@ _CONTINUE_REASONS = {
     "ollama-claude": "continuation through `ollama launch claude` is not verified",
     "ollama-codex": "continuation through `ollama launch codex` is not verified",
     "ollama": "bare `ollama run` keeps no conversation to continue",
+    "muse": (
+        "`muse resume` is an interactive subcommand that opens the workspace "
+        "session picker, and `muse exec` rejects --last outright, so there is "
+        "no headless resume to pass through"
+    ),
 }
 
 # How well a CLI survives r4t's shape of continuation, from the measured
@@ -1357,6 +1421,11 @@ def mcp_enabled(mcp: bool | None, preset: str | None) -> bool:
 def mcp_unsupported_reason(preset: str | None) -> str:
     if preset == "ollama":
         return "bare `ollama run` has no tool use at all"
+    if preset == "muse":
+        return (
+            "muse speaks MSP and serves it (`muse serve`); it hosts sessions "
+            "for a client rather than consuming MCP servers itself"
+        )
     if preset:
         return f"preset {preset!r} has no per-invocation MCP idiom"
     return "the rig records no preset, so there is no idiom to inject with"
@@ -2089,7 +2158,7 @@ def remove_rig(path: Path, rig_name: str) -> str:
 # ENABLE_PROMPT_CACHING_1H). Doctrine is FRUGAL: an entry earns its place with a
 # documented reason, because this is the one rig key whose effect r4t cannot see.
 #
-# The turn environment is r4t's own channel: the ark.envseam reserved-env
+# The turn environment is r4t's own channel: the ar3.envseam reserved-env
 # contract (TELL_OUTBOX_DIR points at the member's staging outbox, TELL_FILE_MAX
 # the attachment cap — both computed and injected by a8s routing, same as the
 # other apps refuse to let a rig override) plus PWD, pinned to the member's

@@ -23,7 +23,7 @@ Nothing here deletes: a storage service that reaches back into a bucket to
 remove objects is a foot nuke, and S3 already has the feature.
 
 boto3 is imported lazily and is an on-demand dependency (`requirements/
-a8s-s3.txt`, fetched with `ar3 deps a8s-s3`), pulled in via `ark.deps.
+a8s-s3.txt`, fetched with `ar3 deps a8s-s3`), pulled in via `ar3.deps.
 use_group` rather than vendored. It carries the standard credential chain —
 env vars, shared config, SSO, instance and container roles — which is the
 whole reason to depend on it rather than sign requests by hand: an operator
@@ -109,7 +109,7 @@ class S3Service(StorageService):
     def _client(self) -> Any:
         if self._client_cache is not None:
             return self._client_cache
-        from ark.deps import use_group
+        from ar3.deps import use_group
         use_group("a8s-s3")
         try:
             import boto3

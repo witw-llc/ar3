@@ -25,7 +25,7 @@ UNKNOWN = "unknown"
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 def suite_version() -> str:
@@ -65,7 +65,7 @@ def latest_public_version(timeout_s: float = DEFAULT_TIMEOUT_S) -> str | None:
     """
     req = urllib.request.Request(
         _TAGS_URL,
-        headers={"User-Agent": "ark/1", "Accept": "application/vnd.github+json"},
+        headers={"User-Agent": "ar3/1", "Accept": "application/vnd.github+json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:

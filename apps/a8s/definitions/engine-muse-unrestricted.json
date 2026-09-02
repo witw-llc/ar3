@@ -1,0 +1,44 @@
+{
+  "description": "Meta Muse as a bare stateless engine node \u2014 the same three wakes as engine-muse, invoked with --permissions bypass, which for muse is --yolo: approvals, the filesystem/network sandbox and the workspace trust gate all go at once, so the turn is no longer confined to its workspace and loads that workspace's own skills and rules. An unrestricted node acts on untrusted inbound mail \u2014 anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "muse",
+    "run",
+    "--permissions",
+    "bypass",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "run",
+      "--permissions",
+      "bypass",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "run",
+      "--permissions",
+      "bypass",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

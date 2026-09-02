@@ -12,9 +12,9 @@ import pytest
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
-# `ark` sits at the repo root, shared by every app. Put it on the path here
+# `ar3` sits in `<repo>/lib`, shared by every app. Put it on the path here
 # rather than relying on some r4t module having run first.
-sys.path.append(str(_PKG.parent.parent))
+sys.path.append(str(_PKG.parent.parent / "lib"))
 
 
 def pytest_configure(config):
@@ -49,23 +49,23 @@ def zone(monkeypatch):
     there never consults `TZ`, so a fixture built that way raises
     AttributeError before a single assertion runs.
 
-    `ark.clock`'s two conversion points are redirected instead. `to_local` is
+    `ar3.clock`'s two conversion points are redirected instead. `to_local` is
     wrapped rather than replaced, so the stored-stamp parsing stays the real
     one and only the final conversion moves. `dispatch` is patched as well
-    because it does `from ark.clock import local_now`, and that copies the
-    binding — rebinding the name in `ark.clock` alone would leave `dispatch`
+    because it does `from ar3.clock import local_now`, and that copies the
+    binding — rebinding the name in `ar3.clock` alone would leave `dispatch`
     pointing at the original. `stamp` and `zone_label` need no such treatment:
     they resolve `local_now` from their own module's globals when called.
 
     What this does not prove is that the display clock reads the *machine's*
-    zone. That is `ark.clock`'s own contract, tested in `test_ark_clock.py`
+    zone. That is `ar3.clock`'s own contract, tested in `test_ar3_clock.py`
     where `TZ` is the subject rather than the setup.
     """
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
 
     import dispatch
-    from ark import clock
+    from ar3 import clock
 
     real_to_local = clock.to_local
 

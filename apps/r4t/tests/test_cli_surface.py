@@ -149,7 +149,7 @@ class TestStrayPositionalAdoption:
         assert ns.prompt == "hello"
 
     def test_rig_run_namespace_adopts_prompt_without_action(self):
-        ns = self._fabricated(rig="ark-lead", prompt=None)
+        ns = self._fabricated(rig="ar3-lead", prompt=None)
         assert r4t._adopt_stray_positionals(ns, ["hello"]) == []
         assert ns.prompt == "hello"
 

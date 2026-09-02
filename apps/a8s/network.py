@@ -51,8 +51,8 @@ from registry import resolve_name
 from services import StorageService
 from transports import OnMessage, Transport, TransportError
 import txlog
-from ark.fsio import atomic_write_text
-from ark.ulid import is_ulid
+from ar3.fsio import atomic_write_text
+from ar3.ulid import is_ulid
 
 
 # Process-local lock guarding the seen-ids ring rotation. Multiple subscriber

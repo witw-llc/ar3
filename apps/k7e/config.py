@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ark.home import app_home
+from ar3.home import app_home
 
 LLM_FALLBACK_KEY = "llm_command"
 LLM_FALLBACK_ENV = "K7E_LLM_COMMAND"

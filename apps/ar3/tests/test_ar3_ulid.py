@@ -1,6 +1,6 @@
 """Tests for the pure-stdlib ULID module — ar3's foundation layer.
 
-`ark` lives at the repo root because every app shares it (a8s and r4t both
+`ar3` lives in `<repo>/lib` because every app shares it (a8s and r4t both
 generated their own copy of this exact module before the extraction).
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from ark.ulid import ALPHABET, LENGTH, is_ulid, new, parse
+from ar3.ulid import ALPHABET, LENGTH, is_ulid, new, parse
 
 
 class TestNew:

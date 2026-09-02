@@ -6,11 +6,11 @@ substrate instead. It reads a8s/r4t/k7e state passively and probes
 prerequisites — there is no `ar3 tell`, no `ar3 dispatch`, no passthrough:
 every action belongs to the CLI that owns it, and ar3's job is to tell you
 which command that is. The one exception is `ar3 deps`, which fetches
-on-demand heavy dependencies (boto3, textual) into `~/.local/share/ark/deps`:
+on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`:
 that directory is substrate ar3 itself owns, not product state, and it is the
 only thing ar3 ever writes.
 
-Home resolution imports the same `ark.home.app_home` resolver the products
+Home resolution imports the same `ar3.home.app_home` resolver the products
 themselves call (A8S_HOME / R4T_HOME / K7E_HOME), so ar3's reporting can
 never go stale against a product's own resolution.
 """
@@ -27,14 +27,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# `arkver` sits at the repo root and carries the suite semver. A copy of this
+# `ar3ver` sits at the repo root and carries the suite semver. A copy of this
 # tree relocated away from that root (the isolation container copies apps/r4t
 # alone to /opt/r4t) still has to run: the version is a nicety, never a
 # dependency, so a missing module degrades to "unknown" instead of killing
 # the CLI on import.
-sys.path.append(str(Path(__file__).resolve().parents[2]))
+sys.path.append(str(Path(__file__).resolve().parents[2] / "lib"))
 try:
-    from arkver import update_note, version_line  # noqa: E402
+    from ar3ver import update_note, version_line  # noqa: E402
 except ImportError:
     def version_line(app: str) -> str:
         import platform
@@ -44,9 +44,9 @@ except ImportError:
     def update_note(timeout_s: float = 0) -> str:
         return "unknown (no VERSION file beside this copy)"
 
-from ark import deps as ark_deps  # noqa: E402
-from ark.home import app_home  # noqa: E402
-from ark.proc import pid_alive  # noqa: E402
+from ar3 import deps as ar3_deps  # noqa: E402
+from ar3.home import app_home  # noqa: E402
+from ar3.proc import pid_alive  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -433,7 +433,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 # ---------- deps ----------
 
 def _deps_status_row(group: str) -> Row:
-    dir_ = ark_deps.ensure_group(group)
+    dir_ = ar3_deps.ensure_group(group)
     if dir_ is not None:
         return (True, group, f"installed at {dir_}", None)
     return (False, group, "not installed", f"ar3 deps {group}")
@@ -441,9 +441,9 @@ def _deps_status_row(group: str) -> Row:
 
 def cmd_deps(args: argparse.Namespace) -> int:
     group = getattr(args, "group", None)
-    groups = ark_deps.known_groups()
+    groups = ar3_deps.known_groups()
     if not group:
-        interpreter_dir = ark_deps.deps_root() / ark_deps.interpreter_key()
+        interpreter_dir = ar3_deps.deps_root() / ar3_deps.interpreter_key()
         print(f"ar3 deps — on-demand heavy dependencies  ({interpreter_dir})")
         print()
         _print_rows([_deps_status_row(g) for g in groups])
@@ -453,7 +453,7 @@ def cmd_deps(args: argparse.Namespace) -> int:
         print(f"ar3 deps: no such group {group!r} (known: {known})", file=sys.stderr)
         return 2
     try:
-        dest = ark_deps.install_group(group)
+        dest = ar3_deps.install_group(group)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"ar3 deps {group}: {e}", file=sys.stderr)
         return 1
@@ -467,7 +467,7 @@ UPDATE_SCRIPT = "get.sh"
 
 
 def _suite_version() -> str:
-    """Read from disk each call, not through `arkver`'s import: this runs on
+    """Read from disk each call, not through `ar3ver`'s import: this runs on
     both sides of an update that rewrites the file underneath us."""
     try:
         return (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip() or "unknown"
@@ -617,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "ar3 deps lists known dependency groups (requirements/*.txt) with "
             "installed/missing status for the running interpreter. ar3 deps "
-            "<group> installs that group into ~/.local/share/ark/deps — the "
+            "<group> installs that group into ~/.local/share/ar3/deps — the "
             "one thing ar3 ever writes."
         ),
     )

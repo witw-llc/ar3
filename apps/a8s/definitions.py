@@ -59,7 +59,7 @@ from core import (
 from registry import load_registry, resolve_recipient
 from settings import get_setting
 
-from ark import clock
+from ar3 import clock
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
 ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "

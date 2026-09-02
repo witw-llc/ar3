@@ -100,8 +100,8 @@ from registry import (
     unresolved_mailboxes,
 )
 from txlog import last_heard, read_events
-from ark import clock
-from ark.ulid import is_ulid, new as new_ulid, parse as parse_ulid
+from ar3 import clock
+from ar3.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
 
 # ---------- registry management commands ----------
@@ -2142,7 +2142,7 @@ def cmd_transactions(args: list[str]) -> int:
             "examples:\n"
             "  a8s tx --limit 40\n"
             "  a8s tx -f --event DISCARDED --event FILE_UPLOAD_FAILED\n"
-            "  a8s tx --from neil-phone --to ares\n\n"
+            "  a8s tx --from my-phone --to ares\n\n"
             "`a8s trace <ULID>` follows one envelope end to end; this is the view\n"
             "for when you do not have a ULID yet. Retention is `txlog_max_rows`.\n"
         ),

@@ -1,9 +1,9 @@
 Chapter 1's agent on the free path (OpenCode via ollama, qwen3.6), backed by
 `r4t engine ollama-opencode run` — one headless turn per wake, with
 STATUS.md/LESSONS.md as its memory.
-Copy both files into your agent directory (e.g. `~/ark/solo/`), then:
+Copy both files into your agent directory (e.g. `~/ar3/solo/`), then:
 
-    a8s add solo ~/ark/solo ~/ark/solo/solo.json
+    a8s add solo ~/ar3/solo ~/ar3/solo/solo.json
     a8s start solo
 
 The persona is the opening paragraph of AGENTS.md — the chapter's customize

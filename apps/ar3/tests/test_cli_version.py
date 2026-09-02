@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-import ar3
-import arkver
+import cli as ar3
+import ar3ver
 
 _REAL_RUN = subprocess.run
 _ROOT = Path(__file__).resolve().parents[3]
@@ -25,7 +25,7 @@ _A8S = _ROOT / "apps" / "a8s" / "a8s.py"
 # Name to the argv its root shim runs. `tell` and `tells` are shims to
 # `a8s tell` / `a8s tells`, not scripts of their own.
 ENTRY_POINTS = {
-    "ar3": [str(_ROOT / "apps" / "ar3" / "ar3.py")],
+    "ar3": [str(_ROOT / "apps" / "ar3" / "cli.py")],
     "a8s": [str(_A8S)],
     "r4t": [str(_ROOT / "apps" / "r4t" / "r4t.py")],
     "k7e": [str(_ROOT / "apps" / "k7e" / "k7e.py")],
@@ -50,7 +50,7 @@ def test_cli_reports_the_suite_version(name, argv, real_subprocess, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert (
         proc.stdout.strip()
-        == f"{name} {arkver.suite_version()} (ar3, python {platform.python_version()})"
+        == f"{name} {ar3ver.suite_version()} (ar3, python {platform.python_version()})"
     )
 
 
@@ -66,7 +66,7 @@ def test_every_top_level_shim_has_an_entry_point_covered():
 
 def test_a_relocated_entry_point_still_runs(real_subprocess, tmp_path):
     """The isolation container copies `apps/r4t` alone to /opt/r4t, so the repo
-    root is not two levels up and `arkver` is not importable. A CLI must not
+    root is not two levels up and `ar3ver` is not importable. A CLI must not
     die on import because the version file moved."""
     import shutil
 

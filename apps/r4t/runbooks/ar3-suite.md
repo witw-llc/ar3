@@ -1,12 +1,12 @@
 ---
-name: "ark-suite"
+name: "ar3-suite"
 extends: "triforce"
 workdir: "."
 comms: "open"
 egress: true
 ---
 
-# Ark suite
+# AR3 suite
 
 The Triforce roster under release discipline. Take this one when the repo is a
 product other people install: it keeps Triforce's three members and replaces

@@ -156,7 +156,7 @@ class TestCmdShimsPropagateTheExitCode:
 
     `cmd.exe` expands `%VAR%` for a whole parenthesised block at parse time,
     so `exit /b %ERRORLEVEL%` written inside `if ... ( ... )` returns the value
-    ERRORLEVEL held *before* the block ran. Every Ark CLI on Windows reported
+    ERRORLEVEL held *before* the block ran. Every AR3 CLI on Windows reported
     success unconditionally.
 
     Delayed expansion fixes that read and breaks the arguments. `%*` is

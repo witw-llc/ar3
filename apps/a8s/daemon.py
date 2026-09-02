@@ -50,8 +50,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core
-from ark import clock
-from ark.proc import terminate_group
+from ar3 import clock
+from ar3.proc import terminate_group
 from settings import get_float, get_setting
 from core import (
     MAX_WAKE_ATTEMPTS,
@@ -1144,7 +1144,7 @@ def _kill_wake_subprocess_group() -> None:
     """SIGTERM-then-SIGKILL the current wake's subprocess group. Targets the
     whole process tree on POSIX so the LLM CLI dies along with our wake
     wrapper; on Windows, where there is no process group to target,
-    `ark.proc.terminate_group` falls back to a plain SIGTERM of the wake
+    `ar3.proc.terminate_group` falls back to a plain SIGTERM of the wake
     process itself. Delegated to the foundation rather than reimplemented
     here — `os.getpgid`/`os.killpg` don't exist on `nt`, and this helper now
     runs from the iteration-top kill-request branch on every platform, not
@@ -1539,7 +1539,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 # top. This is the mechanism on every platform: SIGUSR1
                 # (POSIX only — Windows has no user-definable signal, and no
                 # console-control substitute that can target a background
-                # process, see docs/ark.md's process doctrine) is a latency
+                # process, see docs/ar3-foundation.md's process doctrine) is a latency
                 # optimisation on top, killing the subprocess group early
                 # via `_on_kill_signal`. The group kill also happens here so
                 # a Windows `a8s kill` — or a POSIX one that raced the signal

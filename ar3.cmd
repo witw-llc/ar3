@@ -11,7 +11,7 @@ rem cmd expands %VAR% for a whole block at parse time, so inside one it
 rem returns the value from before the block ran. The labels below keep
 rem every read on its own line, which is why there are no blocks here.
 set "BIN_DIR=%~dp0"
-set "AR3=%BIN_DIR%apps\ar3\ar3.py"
+set "AR3=%BIN_DIR%apps\ar3\cli.py"
 
 rem Each candidate has to RUN before it is believed. On Windows the first
 rem `python` on PATH is often the Microsoft Store alias, which resolves

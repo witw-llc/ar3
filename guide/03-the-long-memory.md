@@ -18,7 +18,7 @@ About 20 minutes.
 ## 3. Starting state
 
 - Chapter 2 complete: roster `silo` registered with `r4t add`, Wren answering
-  a `tell` from your seat at `~/ark/me`, and the customize step left
+  a `tell` from your seat at `~/ar3/me`, and the customize step left
   `Continue: 15m` in his runbook block.
 - Wren's conversation is live — if you just restarted the machine, send one
   message so there is a conversation to flush.
@@ -44,7 +44,7 @@ the rest of this chapter a test rather than a demonstration.
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t runbook check
 ```
 
@@ -52,7 +52,7 @@ You should see:
 
 ```
 runbook: triforce -> r4t.md
-/home/you/ark/silo/r4t.md: OK (1 member(s), leader Wren)
+/home/you/ar3/silo/r4t.md: OK (1 member(s), leader Wren)
 ```
 
 The idle window rides the same field that turns the conversation on, so a
@@ -65,7 +65,7 @@ Give Wren a fact to hold, and prove he has it:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "Hold this fact for later: the supply cache is at grid square K-19, and the codeword is TIDEPOOL. Confirm."
 tells --timeout 300
 ```
@@ -83,7 +83,7 @@ that went out is whole.) Now end the conversation:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t flush wren
 ```
 
@@ -159,7 +159,7 @@ path. Ask for the fact back:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "What was the codeword, and where is the supply cache?"
 tells --timeout 300
 ```
@@ -192,7 +192,7 @@ with only ollama can read along, the machinery is identical):
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t rig swap silo cursor --model claude-fable-5-medium
 ```
 
@@ -208,10 +208,10 @@ Then message him and read the log:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "New rig, same Wren? Tell me the codeword and the cache location."
 tells --timeout 300
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t logs -n 4
 ```
 
@@ -264,10 +264,10 @@ delete the state file, then send the recall:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t flush wren
 rm agents/wren/STATUS.md
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "What was the codeword? Answer in one line."
 tells --timeout 300
 ```
@@ -276,10 +276,10 @@ You should see:
 
 ```
 tell -> silo: What was the codeword? Answer in one line.
-silo:wren: $ find /home/you/ark/silo/agents/wren -maxdepth 3 -iname '*.md' -o -iname '*.txt' -o -iname '*.json' | head -30
+silo:wren: $ find /home/you/ar3/silo/agents/wren -maxdepth 3 -iname '*.md' -o -iname '*.txt' -o -iname '*.json' | head -30
 (no output)
 
-$ ls /home/you/ark/silo/agents/wren/ 2>/dev/null || echo "EMPTY"
+$ ls /home/you/ar3/silo/agents/wren/ 2>/dev/null || echo "EMPTY"
 (no output)
 
 No file contains a codeword for me to read. If you meant to attach or place a STATUS.md here, I'll load it when it's available.
@@ -339,10 +339,10 @@ flush:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "The codeword is TIDEPOOL and the supply cache is at grid square K-19."
 tells --timeout 300
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t flush wren
 head -16 agents/wren/STATUS.md
 ```
@@ -374,7 +374,7 @@ chapter has been circling:
 **Run**
 
 ```bash
-cd ~/ark/me
+cd ~/ar3/me
 tell silo "Codeword and cache location, one line."
 tells --timeout 300
 ```
@@ -396,7 +396,7 @@ Park the whole roster on your way out — one flag, every member:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 r4t flush --all
 ```
 
@@ -431,7 +431,7 @@ machine died right now:
 **Run**
 
 ```bash
-cd ~/ark/silo
+cd ~/ar3/silo
 git add r4t.md agents/wren/STATUS.md
 git commit -q -m "silo: Wren's first memory dump"
 ```

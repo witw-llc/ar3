@@ -27,13 +27,13 @@ import threading
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-# `ark` sits at the repo root (core.py already put it on sys.path) and vendors
+# `ar3` sits in `<repo>/lib` (core.py already put it on sys.path) and vendors
 # paho-mqtt so an a8s install with no pip still gets the transport. A copy of
-# this tree relocated away from that root, or a run under `ARK_NO_VENDOR`,
+# this tree relocated away from that root, or a run under `AR3_NO_VENDOR`,
 # falls back to whatever `paho` a system install or venv provides — the import
 # below either resolves it or raises, same as before the vendor hook existed.
 try:
-    from ark.vendor import ensure_vendor
+    from ar3.vendor import ensure_vendor
 
     ensure_vendor()
 except ImportError:

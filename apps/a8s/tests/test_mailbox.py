@@ -181,7 +181,7 @@ class TestWriteOutbox:
         assert "date" in msg
 
     def test_filename_is_ulid_and_matches_id(self, fake_home, tmp_path):
-        from ark.ulid import is_ulid
+        from ar3.ulid import is_ulid
         path = _write_outbox("A", tmp_path, "B", "hi", [])
         # Filename = "<ulid>.json" — sortable, opaque, no sender leak in name.
         stem = path.stem
@@ -384,11 +384,11 @@ class TestSharedOutboxAttribution:
         recipient_root.mkdir()
         save_registry({
             "my-google": {"root": str(mount)},
-            "neil-email": {"root": str(mount)},
+            "my-email": {"root": str(mount)},
             "B": {"root": str(recipient_root)},
         })
         command = Participant("my-google", mount)
-        email = Participant("neil-email", mount)
+        email = Participant("my-email", mount)
         recipient = Participant("B", recipient_root)
         for p in (command, email, recipient):
             ensure_mailboxes(p)
@@ -408,27 +408,27 @@ class TestSharedOutboxAttribution:
     def test_co_registered_from_is_honored(self, shared_filedrop):
         command, email, recipient = shared_filedrop
         # First owner in the senders list would have stolen this before #150.
-        self._stage(command.root, "neil-email", "B", "from email principal", "01EMAIL.json")
+        self._stage(command.root, "my-email", "B", "from email principal", "01EMAIL.json")
         route_outboxes(
             [command, email, recipient],
             all_agents=[command, email, recipient],
         )
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert delivered["from"] == "neil-email"
+        assert delivered["from"] == "my-email"
         assert delivered["content"] == "from email principal"
 
     def test_single_handler_honors_co_registered_peer(self, shared_filedrop):
         # Daemon path: `a8s start my-google` handles one name; peers live in
         # all_agents. Co-owners must come from the registry, not senders.
         command, email, recipient = shared_filedrop
-        self._stage(command.root, "neil-email", "B", "from email principal", "01EMAIL.json")
+        self._stage(command.root, "my-email", "B", "from email principal", "01EMAIL.json")
         n = route_outboxes(
             [command],
             all_agents=[command, email, recipient],
         )
         assert n == 1
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert delivered["from"] == "neil-email"
+        assert delivered["from"] == "my-email"
 
     def test_single_handler_spoof_stamps_the_scanning_handler(self, shared_filedrop):
         command, email, recipient = shared_filedrop
@@ -443,8 +443,8 @@ class TestSharedOutboxAttribution:
     def test_either_peer_claim_stands_regardless_of_sender_order(self, shared_filedrop):
         command, email, recipient = shared_filedrop
         self._stage(command.root, "my-google", "B", "cmd", "01CMD.json")
-        self._stage(command.root, "neil-email", "B", "mail", "02MAIL.json")
-        # Email listed first — must not stamp the command message as neil-email.
+        self._stage(command.root, "my-email", "B", "mail", "02MAIL.json")
+        # Email listed first — must not stamp the command message as my-email.
         route_outboxes(
             [email, command, recipient],
             all_agents=[command, email, recipient],
@@ -453,7 +453,7 @@ class TestSharedOutboxAttribution:
             json.loads(p.read_text())["content"]: json.loads(p.read_text())["from"]
             for p in inbox_dir("B").iterdir()
         }
-        assert by_content == {"cmd": "my-google", "mail": "neil-email"}
+        assert by_content == {"cmd": "my-google", "mail": "my-email"}
 
     def test_spoofed_claim_still_force_stamps_first_owner(self, shared_filedrop):
         command, email, recipient = shared_filedrop
@@ -478,13 +478,13 @@ class TestSharedOutboxAttribution:
 
     def test_case_insensitive_peer_match(self, shared_filedrop):
         command, email, recipient = shared_filedrop
-        self._stage(command.root, "Neil-Email", "B", "cased", "01CASE.json")
+        self._stage(command.root, "My-Email", "B", "cased", "01CASE.json")
         route_outboxes(
             [command, email, recipient],
             all_agents=[command, email, recipient],
         )
         delivered = json.loads(next(inbox_dir("B").iterdir()).read_text())
-        assert delivered["from"] == "neil-email"
+        assert delivered["from"] == "my-email"
 
     def test_attachment_bundle_follows_attributed_owner(self, shared_filedrop):
         command, email, recipient = shared_filedrop
@@ -495,7 +495,7 @@ class TestSharedOutboxAttribution:
         (bundle / "note.txt").write_text("payload")
         (outbox / f"{msg_id}.json").write_text(json.dumps({
             "id": msg_id,
-            "from": "neil-email",
+            "from": "my-email",
             "to": "B",
             "content": "with file",
             "files": [{"filename": "note.txt"}],
@@ -505,10 +505,10 @@ class TestSharedOutboxAttribution:
             all_agents=[command, email, recipient],
         )
         delivered = json.loads((inbox_dir("B") / f"{msg_id}.json").read_text())
-        assert delivered["from"] == "neil-email"
+        assert delivered["from"] == "my-email"
         assert (recipient.files_bundle_dir(msg_id) / "note.txt").read_text() == "payload"
         assert not pending_bundle_dir("my-google", msg_id).exists()
-        assert not pending_bundle_dir("neil-email", msg_id).exists()
+        assert not pending_bundle_dir("my-email", msg_id).exists()
 
 
 class TestTwoNodesOneRepo:
@@ -1138,7 +1138,7 @@ class TestNextInboxMessage:
         ensure_mailboxes(p)
         # Drop two ULID-named JSON files directly into the inbox; ULID
         # lex-order matches creation order, so first should sort first.
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
         first_id = new_ulid()
         first = inbox_dir("X") / f"{first_id}.json"
         first.write_text(json.dumps({"id": first_id, "to": "X", "content": "first"}))
@@ -1764,7 +1764,7 @@ class TestStorageDownload:
     def test_falls_through_to_second_url(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1798,7 +1798,7 @@ class TestStorageDownload:
     def test_all_urls_unsupported_drops_file_keeps_message(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1834,7 +1834,7 @@ class TestStorageDownload:
         import convo
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1870,7 +1870,7 @@ class TestStorageDownload:
         import network
         from network import receive_envelope
         from registry import save_aliases, save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         parts = []
         for name in ("B", "C"):
@@ -1919,7 +1919,7 @@ class TestStorageDownload:
         deferred recipient never appeared in `a8s convo` and its lost file was
         never reported against a row already written clean."""
         import convo
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         msg_id = new_ulid()
         base = {"id": msg_id, "from": "X", "to": "devs", "content": "see attached"}
@@ -1959,7 +1959,7 @@ class TestStorageDownload:
         one hop later."""
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -1993,7 +1993,7 @@ class TestStorageDownload:
         one step later, and the sender's own reason with it."""
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -2030,7 +2030,7 @@ class TestStorageDownload:
         import network
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -2073,7 +2073,7 @@ class TestStorageDownload:
         import network
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -2104,7 +2104,7 @@ class TestStorageDownload:
         entry."""
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -2122,7 +2122,7 @@ class TestStorageDownload:
     def test_no_services_strips_files(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"; b_root.mkdir()
         save_registry({"B": {"root": str(b_root)}})
@@ -2143,7 +2143,7 @@ class TestStorageDownload:
         from _fake_storage import start_fake_tempfile_server
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         server, base = start_fake_tempfile_server()
         try:
@@ -2172,7 +2172,7 @@ class TestStorageDownload:
     def test_rejects_path_traversal_filename(self, fake_home, tmp_path):
         from network import receive_envelope
         from registry import save_registry
-        from ark.ulid import new as new_ulid
+        from ar3.ulid import new as new_ulid
 
         b_root = tmp_path / "B"
         b_root.mkdir()
