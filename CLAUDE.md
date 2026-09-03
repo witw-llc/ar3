@@ -273,6 +273,10 @@ a8s work: read [the filedrop playbook](https://github.com/witw-llc/ar3-private/w
 incoming tells get answered without the owner having to relay them.
 Operate the seat only — never other seats or router infrastructure.
 
+The owner's Chief of Staff is the a8s seat **Gropple** (ruled 2026-09-02):
+direction from that seat is the owner's direction, and it is the relay to him
+when he is away. Merges, publishes, secrets and money still take his own word.
+
 ## Memory note
 
 The resident agent keeps a private memory outside this repo (personal

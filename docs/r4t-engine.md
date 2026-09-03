@@ -88,7 +88,7 @@ spending a turn.
   carries a permission map r4t must stop overriding.
 - `auto` — the engine approves tool use without prompting. The engine's deny
   rules still apply, so `auto` means "ask nothing", never "permit everything".
-  Eight of the nine presets already sit here.
+  Nine of the ten presets already sit here.
 - `bypass` — the engine's strongest available auto-approval.
 
 | Engine | `ask` | `auto` | `bypass` |
@@ -299,7 +299,7 @@ The three `ollama-*` definitions additionally need `--model` — set the a8s var
 --model=qwen3.6`, or `a8s vars my-bare-node set MODEL qwen3.6` after the
 fact) — since the launcher has no default model of its own.
 
-Each of the nine also ships an `engine-<id>-unrestricted` variant: the same
+Each of the ten also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by
 engine, and each variant's own description says which — codex trades its
 sandbox for `--dangerously-bypass-approvals-and-sandbox`, claude moves to
@@ -319,9 +319,17 @@ not ask. Only for an agent on its own machine and its own account.
 The stance lives on the definition's own invoke lines, chosen by name at `add`
 time — the base variants never grow it.
 
-A custom node beyond these nine is a copy: `a8s defs add` installs a template
+A custom node beyond these ten is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for
 recipes.
+
+A wake's `PATH` is whatever the process that ran `a8s start` had — see
+[Wake environment](a8s.md#wake-environment-optional). `a8s start` and `a8s
+define` both probe an engine definition's own binary (not just the always-
+present interpreter) against that environment and warn by name before the
+node ever wakes; if a turn still fails to spawn, `failed to spawn 'codex':
+not on PATH (<the PATH searched>)` names exactly what was looked for and
+where, instead of a bare `[Errno 2] No such file or directory`.
 
 ### Mapping a definition's parameters onto `engine run`
 

@@ -12,6 +12,80 @@ version when the batch is ready to merge.
 
 ## Unreleased
 
+### Added
+
+- **`a8s storage <name> <s3-url>` installs `boto3` right then.** The verb
+  that creates the need installs the dependency: registering an `s3`
+  storage fetches the `a8s-s3` tier-2 group on the spot instead of leaving
+  a WARN that names `ar3 deps a8s-s3` as a second command. The S3 client
+  self-heals the same way on first real use — a hand-edited config, or an
+  install from before this existed — so `a8s health` and normal message
+  routing install rather than warn too, and a failed fetch says why instead
+  of pointing at `ar3 deps`. `ar3 deps <group>` stays the explicit form for
+  scripts and `ar3 doctor`; it fetches unconditionally through
+  `install_group`, while the verbs above go through `require_group`, which
+  installs only when the group is missing and then activates it on
+  `sys.path` so the next import succeeds in the same process.
+
+### Fixed
+
+- **The start-time PATH probe now looks through an engine definition to the
+  engine binary.** An `engine-*.json` definition's `invoke` is `$PYTHON
+  r4t.py engine <id> run …` — the always-present interpreter, one level above
+  the binary (`codex`, `claude`, …) r4t actually execs — so the `a8s start`
+  warning added for #121 found python and stopped, and an idle wake could
+  still fail hours later with a bare `failed to spawn 'codex': [Errno 2] No
+  such file or directory`. `a8s start` and `a8s define` now hand an engine
+  invocation to `r4t engine <id> check` under the wake's own environment and
+  name the missing binary and the PATH searched; a turn that still fails to
+  spawn reports `not on PATH (<the PATH>)` instead of a bare Errno 2 (#243).
+- **The bundled `lib/` outranks an installed package.** Every entry point and
+  conftest *appended* `<repo>/lib` to `sys.path`, which puts it behind
+  site-packages: any unrelated distribution named `ar3` answered the suite's
+  own imports first. Measured against a venv carrying a canary `ar3`, all six
+  CLIs died on import. The directory goes to the front now, and a shadow
+  package on `PYTHONPATH` is a `--version` control across all six. The first
+  fix only inserted the path when absent, so a shadow already ahead of it on
+  `PYTHONPATH` — a caller passing `PYTHONPATH=shadow:<repo>/lib` — still won:
+  the guard saw the real path already present and skipped the insert. Every
+  entry point now removes every existing occurrence of its own path before
+  inserting at 0, and the control covers a shadow placed ahead of the real
+  `lib` on `PYTHONPATH`, not just one placed alone on it.
+- **The whole-tree scan reads what git stores, not the working tree.**
+  `tools/pii-scan.py` never looked at a path name, followed a symlink instead
+  of reading the target text git actually ships, and swallowed `OSError` /
+  `UnicodeDecodeError` on anything it could not decode — so a leak in a file
+  name, in a link target, or in a file with one non-UTF-8 byte was reported
+  clean. It scans the path name and the index blob now, decodes with
+  `surrogateescape` so undecodable content is still read, and fails closed on
+  any object it cannot get. A file whose *path* is the hit is reported as
+  `tracked file #N` rather than by name, since printing it would publish the
+  PII into the log of the job that found it. The suffix skip meant for binary
+  regular-file content — a `.png`'s bytes are not text — was applied before
+  the blob's mode was checked, so a tracked *symlink* named `link.png` was
+  skipped too even though its blob is the link target text, not image bytes.
+  Suffix skipping now applies only to regular-file blobs; a symlink entry
+  (mode `120000`) is always scanned.
+- **A pattern source that parses to nothing is refused.** `PII_PATTERNS='#
+  comment only'` loaded zero patterns and both gates exited 0 — the whole-tree
+  scan announcing "clean across the tracked tree (0 pattern(s))". Being
+  unconfigured and being configured with a comment have the same consequence,
+  so `load_patterns` now raises `NoPatterns` for both and both entry points
+  refuse to report clean.
+- The test that proves the PII report carries no PII now runs the checkers
+  instead of re-composing their output. It built the report string itself and
+  inspected that, so a mutation putting the matched line or the pattern back
+  into either production `print` passed it untouched; both mutations fail it
+  now.
+- **`r4t engine --help` lists `muse`, and the engine page counts ten.** muse
+  shipped as a run engine, a check probe and two bundled definitions in
+  0.1.80, and neither surface was told: the help enumerated the previous six
+  and [`docs/r4t-engine.md`](docs/r4t-engine.md) still said nine presets, nine
+  `-unrestricted` variants and "beyond these nine". Both now read
+  `RUN_ENGINES`, so the next engine fails a test on the way in.
+
+## 0.1.80
+
 ### Changed
 
 - **Both PII gates fail closed.** `tools/pii-scan.py` turned a failed
@@ -1452,7 +1526,7 @@ version when the batch is ready to merge.
   and an `idle` block, so a quiet node runs one consolidation pass per quiet
   period and no more. [`docs/r4t-engine.md`](docs/r4t-engine.md) documents
   how a definition's parameters map onto `engine run`.
-- **All nine `RUN_ENGINES` ship a bundled, add-and-go engine node.** Every
+- **Every `RUN_ENGINES` engine ships a bundled, add-and-go engine node.** Every
   engine `r4t engine run` supports now has its own
   `apps/a8s/definitions/engine-<id>.json` — `a8s add name ./dir engine-cursor`
   works unedited, no copy-and-tweak required. Each single-message wake states

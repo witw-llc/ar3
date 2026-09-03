@@ -271,6 +271,8 @@ Dedup runs on two levels, because one machine may run several daemons and each o
 
 A remote carries the message; a **storage service** carries the bytes. Without one, a `FILE:` attachment is local-only — the sender's path does not exist on the receiving cluster. Register a service and a8s uploads each attachment, puts the resulting URLs in the envelope, and the receiver downloads them into its own `.files/`.
 
+A kind that needs a heavy package (today, `s3` needs `boto3`) installs it the moment `a8s storage` registers that kind — no second command to remember. `ar3 deps <group>` is the explicit form of the same mechanism, for scripts and for `ar3 doctor`.
+
 | | |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s storage`                                      | List configured services (kind, URL, opts; passwords masked).                                                                                                     |
@@ -285,7 +287,7 @@ Six kinds ship:
 | ---- | --- | ----- |
 | `sync_folder` | a bare folder path | A folder your sync client already watches. Point two machines at the same folder and the bytes cross by themselves — nothing is published, so there is no host, no credential and no URL that resolves outside the folder. The desktop and laptop answer; use `rclone` on headless and VM machines. `--retain-days` sweeps bundles older than the window (default 3 days; `0` keeps forever). |
 | `tempfile_org` | `https://tempfile.org` | Zero signup, ephemeral. `--expiry_hours` 1/6/24/48. |
-| `s3` | `s3://bucket[/prefix]` | Any S3-compatible endpoint. Needs `boto3` **on the uploader only** — uploads return presigned GET URLs, so receivers need no credentials. |
+| `s3` | `s3://bucket[/prefix]` | Any S3-compatible endpoint. Needs `boto3` **on the uploader only**, installed automatically when the storage is registered — uploads return presigned GET URLs, so receivers need no credentials. |
 | `file_sync` | `file:///abs/path` | A folder some other tool already syncs. a8s copies in and hands out the public URL; it does no syncing itself. Requires a store whose public URL is **derivable from the path** — a webserver or CDN over the synced directory, `rclone serve`, a Nextcloud public folder. For Drive/OneDrive/Dropbox use `rclone` instead. Needs `--base-url`. |
 | `webdav` | `webdav://host/path` | PUTs directly. For stores whose upload host and public host differ. Needs `--base-url`. |
 | `rclone` | `rclone://remote/path` | Uploads through an rclone remote you already configured, then asks it for the public URL. The answer for **Google Drive** and anything else that mints an opaque per-file id. Uploader needs rclone; the receiver still needs nothing. |
@@ -489,7 +491,7 @@ Precedence, lowest first:
 
 a8s injecting last is deliberate: a node that declares `TELL_OUTBOX_DIR` in its own `env` still answers into the outbox a8s routes to, because a node writing into someone else's outbox is worse than a node that does not answer at all.
 
-`a8s start` probes each node's harness against this composed environment, so a node fixed by either knob stops warning.
+`a8s start` probes each node's harness against this composed environment, so a node fixed by either knob stops warning. For an `engine-*` definition (`invoke` is `$PYTHON r4t.py engine <id> run …`) the probe looks past the always-present interpreter to the engine's own binary (`codex`, `claude`, …), asking `r4t engine <id> check` under the same environment — and `a8s define` runs the same check right when the definition is set, not 900s later at the first idle wake.
 
 ### wake_shell (optional)
 

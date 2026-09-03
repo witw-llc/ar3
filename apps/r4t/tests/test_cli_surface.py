@@ -209,3 +209,48 @@ class TestStrayPositionalAdoption:
         assert args.target == "codex"
         assert args.action == "run"
         assert args.prompt == "Test"
+
+
+class TestTheEngineSurfaceCountsTheEnginesItShips:
+    """`muse` shipped as a run engine, a check probe and two bundled
+    definitions, and neither the CLI's own help nor the engine page was told.
+    A reader asking either one "what can I run?" got an answer short by one.
+
+    Both assertions read `RUN_ENGINES`, so the next engine fails them on the
+    way in rather than after review.
+    """
+
+    #: Enough to name the count on either side of today's.
+    NUMBER_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+
+    @staticmethod
+    def _engine_help(capsys) -> str:
+        with pytest.raises(SystemExit):
+            r4t.build_parser().parse_args(["engine", "--help"])
+        return capsys.readouterr().out
+
+    def test_the_help_names_every_run_capable_engine(self, capsys):
+        from engines import run as engine_run
+
+        text = self._engine_help(capsys)
+        for engine in sorted(engine_run.RUN_ENGINES):
+            if engine.startswith("ollama-"):
+                assert "ollama-*" in text
+                continue
+            assert re.search(rf"\b{re.escape(engine)}\b", text), f"{engine} missing"
+
+    def test_the_engine_page_states_the_current_count(self):
+        """Three sentences on the page carry the count in prose. All three
+        still said nine."""
+        from pathlib import Path
+
+        from engines import run as engine_run
+
+        page = (
+            Path(r4t.__file__).resolve().parents[2] / "docs" / "r4t-engine.md"
+        ).read_text(encoding="utf-8")
+        current = self.NUMBER_WORDS[len(engine_run.RUN_ENGINES)]
+        stale = self.NUMBER_WORDS[len(engine_run.RUN_ENGINES) - 1]
+        for shape in ("the {} presets", "the {} also", "these {}"):
+            assert shape.format(current) in page
+            assert shape.format(stale) not in page

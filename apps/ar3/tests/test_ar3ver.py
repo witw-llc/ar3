@@ -1,6 +1,6 @@
 """Tests for the shared suite-version module.
 
-`ar3ver` lives at the repo root because all six CLIs answer `--version` from
+`ar3ver` lives in `<repo>/lib` because all six CLIs answer `--version` from
 it. The update check reaches the public mirror, so every test here stubs the
 network: a test suite that phones GitHub is a test suite that fails on a plane.
 """

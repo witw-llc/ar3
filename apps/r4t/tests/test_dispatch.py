@@ -2235,6 +2235,21 @@ class TestRunHarness:
         assert "failed to spawn" in out
         assert not timed_out
 
+    def test_spawn_failure_names_the_path_searched(self, tmp_path):
+        # #243: the failure the operator sees hours later at a wake has to
+        # name the PATH the turn actually got, not a bare Errno 2 that reads
+        # the same whether the wake's PATH is missing one entry or all of them.
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        rig = Rig(name="t", invoke=["no-such-harness-r4t-dispatch", "{prompt}"])
+        code, out, _dur, timed_out = run_harness(
+            rig, "x", tmp_path, env={"PATH": str(empty_bin)}
+        )
+        assert code == 127
+        assert "no-such-harness-r4t-dispatch" in out
+        assert str(empty_bin) in out
+        assert not timed_out
+
     def test_turn_cwd_reaches_a_launcher_wrapped_harness(self, tmp_path, monkeypatch):
         """The `*-ollama` presets put `ollama launch <tool> -- <argv>` in front of
         the harness. The turn's workdir has to survive that hop, or every relative

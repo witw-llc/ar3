@@ -13,8 +13,11 @@ import pytest
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
 # `ar3` sits in `<repo>/lib`, shared by every app. Put it on the path here
-# rather than relying on some r4t module having run first.
-sys.path.append(str(_PKG.parent.parent / "lib"))
+# rather than relying on some r4t module having run first, and at the front
+# rather than the end: appended, it loses to the site-packages of whatever
+# interpreter runs the suite, so an unrelated `ar3` distribution would be what
+# the tests exercise.
+sys.path.insert(0, str(_PKG.parent.parent / "lib"))
 
 
 def pytest_configure(config):

@@ -3,8 +3,12 @@
 TempFile.org-specific HTTP behavior lives in test_service_tempfile_org.py."""
 from __future__ import annotations
 
+import inspect
+import sys
+
 from network import (
     configured_service_ids,
+    deps_group_for,
     detect_service_kind,
     load_network_config,
     load_services,
@@ -160,3 +164,45 @@ class TestServicesFollowTheConfig:
             "services": {"drop": {"service": "sync_folder", "url": str(tmp_path)}},
         })
         assert load_services()[0] is load_services()[0]
+
+
+class TestDepsGroupFor:
+    """#242: `deps_group_for` is the one place a kind names the `ar3 deps`
+    group it needs, so `a8s storage` can install it instead of a service
+    failing at first real use with a WARN pointing at a second command."""
+
+    #: kind -> its service module, by the same names `_build_service` and
+    #: `detect_service_kind` dispatch on.
+    _KIND_MODULES = {
+        "tempfile_org": "services.tempfile_org",
+        "s3": "services.s3",
+        "file_sync": "services.file_sync",
+        "webdav": "services.webdav",
+        "rclone": "services.rclone",
+        "sync_folder": "services.sync_folder",
+    }
+
+    def test_s3_needs_a8s_s3(self):
+        assert deps_group_for("s3") == "a8s-s3"
+
+    def test_unknown_kind_needs_nothing(self):
+        assert deps_group_for("telepathy") is None
+
+    def test_every_kind_that_imports_ar3_deps_has_a_group_mapped(self):
+        # A kind whose module reaches into `ar3.deps` (`require_group` /
+        # `use_group`) carries a heavy on-demand import; one that does not
+        # needs nothing installed. This fails the moment a new kind adds a
+        # tier-2 import without naming its group here.
+        for kind, module_name in self._KIND_MODULES.items():
+            __import__(module_name)
+            src = inspect.getsource(sys.modules[module_name])
+            uses_deps = "ar3.deps" in src
+            group = deps_group_for(kind)
+            if uses_deps:
+                assert group is not None, (
+                    f"{kind} ({module_name}) imports ar3.deps but names no group"
+                )
+            else:
+                assert group is None, (
+                    f"{kind} ({module_name}) names group {group!r} but never imports ar3.deps"
+                )

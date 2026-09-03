@@ -9,9 +9,11 @@ a TUI dependency and k7e taking none are both compliant.
 `lib/` rather than at the repo root, because the root already holds the `ar3`
 shim and a directory cannot share a name with a file beside it. Every app
 reaches it the way it already reaches `ar3ver`, which lives there too — each
-entry point appends `<repo>/lib` to `sys.path`, then imports `ar3.<module>`,
-with import sites degrading gracefully when one app is relocated away from the
-repo (the isolation container copies `apps/r4t` alone). The shared modules are
+entry point puts `<repo>/lib` at the front of `sys.path` — ahead of
+site-packages, so an installed package named `ar3` cannot answer the import —
+then imports `ar3.<module>`, with import sites degrading gracefully when one
+app is relocated away from the repo (the isolation container copies
+`apps/r4t` alone). The shared modules are
 `ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`),
 `ar3.proc` (`spawn` / `terminate_group`), `ar3.envseam` (the reserved-env
 contract), and `ar3.vendor` (the vendoring hook). Beyond stdlib there are exactly
@@ -30,6 +32,8 @@ mechanism, which fetches on demand.
 - **No app-local vendor directory. No app-local pip logic.**
 - An unavailable optional dependency **degrades with a warning at the point of
   use**. It never fails a command that did not need it.
+- **A verb that needs a tier-2 group installs it on first use; the user never
+  runs a second command.**
 
 ## 2. Filesystem
 

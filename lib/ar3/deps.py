@@ -12,15 +12,17 @@ old directory is simply never looked at again — a clean miss instead of a
 half-compatible `.so` crashing an import. Nothing here ever deletes an old
 key's directory; that is left for the user to prune.
 
-`ensure_group` only ever reads — it degrades a caller with a WARN naming the
-fix (`ar3 deps <group>`) rather than installing anything itself, so an
+`ensure_group` only ever reads — it never installs anything itself, so an
 import site can call it unconditionally without turning a read into a write.
-Installing is `install_group`'s job alone, invoked by the `ar3 deps` verb.
-`use_group` is the one-line call an import site makes: ensure, then insert
-the group dir into `sys.path` ahead of site-packages/dist-packages but
-behind stdlib and the vendored dir — a fetched group beats an older copy of
-the same package already installed system- or venv-wide, while stdlib and
-`ar3.vendor`'s prepend-at-0 stay authoritative over anything fetched.
+Installing is `install_group`'s job, called directly by the `ar3 deps` verb
+and, through `require_group`, by whichever verb first discovers the need:
+the rule is that the verb creating the need installs the dependency, never
+a WARN sending the user to run a second command. `use_group` is the
+one-line call an import site makes: ensure, then insert the group dir into
+`sys.path` ahead of site-packages/dist-packages but behind stdlib and the
+vendored dir — a fetched group beats an older copy of the same package
+already installed system- or venv-wide, while stdlib and `ar3.vendor`'s
+prepend-at-0 stay authoritative over anything fetched.
 """
 from __future__ import annotations
 
@@ -222,12 +224,48 @@ def use_group(group: str) -> bool:
             file=sys.stderr,
         )
         return False
-    path_str = str(dir_)
-    if path_str not in sys.path:
-        for i, entry in enumerate(sys.path):
-            if "site-packages" in entry or "dist-packages" in entry:
-                sys.path.insert(i, path_str)
-                break
-        else:
-            sys.path.append(path_str)
+    _activate(dir_)
     return True
+
+
+def _activate(dir_: Path) -> None:
+    """Put a group directory on `sys.path` ahead of the first
+    site-packages/dist-packages entry (append when there is none). Shared by
+    `use_group` and `require_group`: a group that is installed but not on the
+    path is exactly as unimportable as one that was never fetched."""
+    path_str = str(dir_)
+    # Presence is not precedence: a group directory already on the path
+    # *behind* site-packages loses to a stale global copy exactly as if it
+    # were absent, so every existing occurrence is removed before the one
+    # authoritative insertion.
+    while path_str in sys.path:
+        sys.path.remove(path_str)
+    for i, entry in enumerate(sys.path):
+        if "site-packages" in entry or "dist-packages" in entry:
+            sys.path.insert(i, path_str)
+            return
+    sys.path.append(path_str)
+
+
+def require_group(group: str, *, reason: str) -> Path:
+    """Ensure `group` is installed, installing it right now when it is not.
+
+    This is the mechanism behind "the verb that creates the need installs
+    the dependency": a caller that is about to *use* a group — not merely
+    import-and-degrade, as `use_group` does — calls this instead of sending
+    the user to run `ar3 deps <group>` themselves. Prints the same
+    before/after lines a person running `ar3 deps <group>` would see:
+    `installing <group> (<reason>) …` then `installed <group> into <dir>`.
+    A group that already satisfies its pins prints nothing. Either way the
+    group directory is activated on `sys.path` with `use_group`'s precedence
+    before returning — installed and importable are the same promise here.
+    Raises whatever `install_group` raises on a failed fetch — the
+    caller turns that into its own error, naming what actually went wrong
+    rather than pointing at a second command."""
+    dir_ = ensure_group(group)
+    if dir_ is None:
+        print(f"installing {group} ({reason}) …", file=sys.stderr)
+        dir_ = install_group(group)
+        print(f"installed {group} into {dir_}", file=sys.stderr)
+    _activate(dir_)
+    return dir_

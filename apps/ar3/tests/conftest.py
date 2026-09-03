@@ -10,8 +10,10 @@ _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
 # `ar3ver` and the `ar3` foundation package live under `lib/`, shared by every
 # CLI. Put that on the path here rather than relying on the app's own import
-# having run first.
-sys.path.append(str(_PKG.parent.parent / "lib"))
+# having run first, and at the front rather than the end: appended, it loses
+# to the site-packages of whatever interpreter runs the suite, so an unrelated
+# `ar3` distribution would be what the tests exercise.
+sys.path.insert(0, str(_PKG.parent.parent / "lib"))
 
 # The app's entry module is `cli`, not `ar3`: a top-level package named `ar3`
 # cannot share a sys.path entry with a module of the same name, and the

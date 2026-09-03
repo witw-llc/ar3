@@ -538,6 +538,16 @@ class TestExecuteAndSpawn:
         with pytest.raises(engine_run.RunError, match="failed to spawn"):
             engine_run._spawn(["/no/such/binary-r4t-engine"], tmp_path, 5)
 
+    def test_spawn_failure_names_the_path_searched(self, tmp_path):
+        # #243: a bare, unresolvable name goes through PATH, and the operator
+        # needs to see exactly what was searched — not a bare Errno 2 that
+        # matches the shell's own PATH, not the wake's.
+        env = {"PATH": str(tmp_path / "empty-bin")}
+        with pytest.raises(engine_run.RunError) as exc:
+            engine_run._spawn(["no-such-engine-binary-r4t"], tmp_path, 5, env=env)
+        assert "no-such-engine-binary-r4t" in str(exc.value)
+        assert str(tmp_path / "empty-bin") in str(exc.value)
+
     def test_echo_writes_argv_and_prompt_to_stderr(self, tmp_path, capsys):
         script, calls = fake_cli(tmp_path)
         import rig as rig_module

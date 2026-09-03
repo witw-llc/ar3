@@ -19,6 +19,7 @@ from ar3.ulid import new as new_ulid, parse as parse_ulid
 from commands import (
     cmd_add,
     cmd_alias,
+    cmd_define,
     cmd_definitions,
     cmd_kill,
     cmd_logs,
@@ -1576,6 +1577,74 @@ class TestHarnessWarningAtStart:
         assert capsys.readouterr().err == ""
 
 
+class TestEngineHarnessWarning:
+    """#243 — an `engine-*.json` definition's invoke is `$PYTHON r4t.py engine
+    <id> run …`. `harness_program` resolves that to the interpreter, which is
+    always present, so the general probe above never looks past it to the
+    engine binary r4t execs one level down (`codex`, `claude`, …). The probe
+    instead hands an engine invocation to r4t's own `engine <id> check`."""
+
+    def _engine_invoke(self, engine):
+        return [
+            "$PYTHON", "$A8S_DIR/../r4t/r4t.py", "engine", engine, "run",
+            "--agent", "$RECIPIENT", "$MESSAGE",
+        ]
+
+    def _register(self, agent_root, tmp_path, path_dir, *, engine="codex"):
+        path = tmp_path / "engine-probe-definition.json"
+        path.write_text(json.dumps({
+            "description": "engine probe",
+            "invoke": self._engine_invoke(engine),
+            "env": {"PATH": str(path_dir)},
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+        return path
+
+    def test_a_missing_engine_binary_is_named_at_start(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        empty_bin = tmp_path / "empty-bin"
+        empty_bin.mkdir()
+        self._register(agent_root, tmp_path, empty_bin)
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "codex" in err
+        assert "PATH" in err
+        assert str(empty_bin) in err
+
+    def test_a_present_engine_binary_says_nothing(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_codex = bin_dir / "codex"
+        fake_codex.write_text("#!/bin/sh\nexit 0\n")
+        fake_codex.chmod(0o755)
+        self._register(agent_root, tmp_path, bin_dir)
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        assert capsys.readouterr().err == ""
+
+    def test_the_same_probe_fires_at_define(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        assert cmd_add(["probe", str(agent_root)]) == 0
+        empty_bin = tmp_path / "empty-bin-define"
+        empty_bin.mkdir()
+        def_path = tmp_path / "engine-probe-definition.json"
+        def_path.write_text(json.dumps({
+            "description": "engine probe",
+            "invoke": self._engine_invoke("codex"),
+            "env": {"PATH": str(empty_bin)},
+        }))
+        capsys.readouterr()
+        assert cmd_define(["probe", str(def_path)]) == 0
+        err = capsys.readouterr().err
+        assert "codex" in err
+        assert "PATH" in err
+
+
 class _StartedProc:
     pid = 99999
 
@@ -2571,6 +2640,101 @@ class TestCmdStorage:
         svc = load_services()[0]
         assert svc.id == "fm"
         assert svc._auth_header() == "Basic bWVAZXhhbXBsZS5jb206aHVudGVyMg=="
+
+
+class TestCmdStorageInstallsDeps:
+    """#242: the verb that creates the need installs the dependency —
+    `a8s storage <name> <s3-url>` fetches `a8s-s3` right then rather than
+    leaving a WARN pointing at `ar3 deps`. Every test here monkeypatches
+    `ar3.deps.ensure_group`/`install_group` directly, so nothing hits the
+    network or touches the real `~/.local/share/ar3/deps`."""
+
+    def test_missing_group_is_installed_and_the_service_registers(
+        self, fake_home, monkeypatch
+    ):
+        from ar3 import deps as ar3_deps
+
+        calls: list[str] = []
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: None)
+
+        def fake_install(g):
+            calls.append(g)
+            dir_ = ar3_deps.group_dir(g)
+            dir_.mkdir(parents=True, exist_ok=True)
+            return dir_
+
+        monkeypatch.setattr(ar3_deps, "install_group", fake_install)
+        rc = cmd_storage(["mybucket", "s3://my-bucket"])
+        assert rc == 0
+        assert calls == ["a8s-s3"]
+        assert load_network_config()["services"]["mybucket"]["service"] == "s3"
+
+    def test_install_failure_leaves_the_service_unregistered(
+        self, fake_home, capsys, monkeypatch
+    ):
+        from ar3 import deps as ar3_deps
+
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: None)
+
+        def fail(g):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(ar3_deps, "install_group", fail)
+        rc = cmd_storage(["mybucket", "s3://my-bucket"])
+        assert rc != 0
+        assert "mybucket" not in load_network_config()["services"]
+        err = capsys.readouterr().err
+        assert "no network" in err
+        assert "ar3 deps" not in err
+
+    def test_satisfied_group_installs_nothing(self, fake_home, monkeypatch):
+        from ar3 import deps as ar3_deps
+
+        dir_ = ar3_deps.group_dir("a8s-s3")
+        dir_.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: dir_)
+
+        def boom(g):
+            raise AssertionError("install_group must not run when already satisfied")
+
+        monkeypatch.setattr(ar3_deps, "install_group", boom)
+        rc = cmd_storage(["mybucket", "s3://my-bucket"])
+        assert rc == 0
+        assert load_network_config()["services"]["mybucket"]["service"] == "s3"
+
+    def test_a_kind_with_no_group_never_touches_deps(self, fake_home, monkeypatch):
+        from ar3 import deps as ar3_deps
+
+        def boom(g):
+            raise AssertionError("no group is mapped for tempfile_org")
+
+        monkeypatch.setattr(ar3_deps, "ensure_group", boom)
+        monkeypatch.setattr(ar3_deps, "install_group", boom)
+        rc = cmd_storage(["tempfile", "https://tempfile.org"])
+        assert rc == 0
+
+    def test_health_installs_a_missing_group_instead_of_warning(
+        self, fake_home, capsys, monkeypatch
+    ):
+        save_network_config({
+            "remotes": {},
+            "services": {"mybucket": {"service": "s3", "url": "s3://my-bucket"}},
+        })
+        calls: list[str] = []
+
+        def fake_require_group(group, *, reason):
+            calls.append(group)
+            raise RuntimeError("no network in test")
+
+        monkeypatch.setattr("ar3.deps.require_group", fake_require_group)
+        from commands import cmd_health
+
+        cmd_health()
+        out = capsys.readouterr().out
+        assert calls == ["a8s-s3"]
+        assert "storage mybucket: FAIL" in out
+        assert "no network in test" in out
+        assert "run `ar3 deps" not in out
 
 
 class TestCmdUnstorage:

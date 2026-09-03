@@ -333,6 +333,120 @@ class TestUseGroup:
             sys.path[:] = original
 
 
+class TestRequireGroup:
+    """The mechanism behind #242: the verb that discovers a group is
+    missing installs it right then, rather than sending the user to run
+    `ar3 deps <group>` themselves."""
+
+    def test_satisfied_group_installs_nothing(self, monkeypatch, tmp_path, capsys):
+        dir_ = ar3_deps.group_dir("fakegroup")
+        dir_.mkdir(parents=True)
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda _g: dir_)
+
+        def _boom(_g):
+            raise AssertionError("install_group must not run when satisfied")
+
+        monkeypatch.setattr(ar3_deps, "install_group", _boom)
+        assert ar3_deps.require_group("fakegroup", reason="testing") == dir_
+        assert capsys.readouterr().err == ""
+
+    def test_missing_group_installs_and_narrates_it(self, monkeypatch, tmp_path):
+        calls = []
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda _g: None)
+
+        def fake_install(g):
+            calls.append(g)
+            dir_ = ar3_deps.group_dir(g)
+            dir_.mkdir(parents=True)
+            return dir_
+
+        monkeypatch.setattr(ar3_deps, "install_group", fake_install)
+        dest = ar3_deps.require_group("fakegroup", reason="testing")
+        assert calls == ["fakegroup"]
+        assert dest == ar3_deps.group_dir("fakegroup")
+
+    def test_before_and_after_lines_go_to_stderr(self, monkeypatch, capsys):
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda _g: None)
+        monkeypatch.setattr(
+            ar3_deps, "install_group",
+            lambda g: ar3_deps.group_dir(g),
+        )
+        ar3_deps.require_group("fakegroup", reason="testing this")
+        err = capsys.readouterr().err
+        assert "installing fakegroup (testing this)" in err
+        assert f"installed fakegroup into {ar3_deps.group_dir('fakegroup')}" in err
+
+    def test_a_package_imports_solely_from_the_freshly_installed_group(
+        self, monkeypatch, tmp_path
+    ):
+        # The reviewer's control: a clean machine fetches the group, and the
+        # very next import in the same process must resolve from it. A
+        # helper that installs without activating passes every other test
+        # here and still leaves boto3 unimportable.
+        import importlib.util
+        import sys as _sys
+
+        group_dir = tmp_path / "fakegroup"
+        group_dir.mkdir()
+        (group_dir / "dependency_canary.py").write_text("VALUE = 'fetched'\n")
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: None)
+        monkeypatch.setattr(ar3_deps, "install_group", lambda g: group_dir)
+        monkeypatch.setattr(_sys, "path", list(_sys.path))
+        _sys.modules.pop("dependency_canary", None)
+        assert importlib.util.find_spec("dependency_canary") is None
+
+        assert ar3_deps.require_group("fakegroup", reason="testing") == group_dir
+
+        assert str(group_dir) in _sys.path
+        spec = importlib.util.find_spec("dependency_canary")
+        assert spec is not None and spec.origin == str(group_dir / "dependency_canary.py")
+
+    def test_an_already_satisfied_group_is_activated_too(
+        self, monkeypatch, tmp_path
+    ):
+        import sys as _sys
+
+        group_dir = tmp_path / "fakegroup"
+        group_dir.mkdir()
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: group_dir)
+        monkeypatch.setattr(
+            ar3_deps, "install_group",
+            lambda g: (_ for _ in ()).throw(AssertionError("must not install")),
+        )
+        monkeypatch.setattr(_sys, "path", list(_sys.path))
+        ar3_deps.require_group("fakegroup", reason="testing")
+        assert str(group_dir) in _sys.path
+
+    def test_a_group_already_behind_site_packages_is_moved_ahead_of_it(
+        self, monkeypatch, tmp_path
+    ):
+        # The reviewer's control: pre-seeded on PYTHONPATH after
+        # site-packages, the fetched group must still come out ahead of it,
+        # or a stale global copy of the same package wins.
+        import sys as _sys
+
+        group_dir = tmp_path / "fetched-group"
+        group_dir.mkdir()
+        site = str(tmp_path / "stale" / "site-packages")
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: group_dir)
+        monkeypatch.setattr(_sys, "path", ["/stdlib", site, str(group_dir)])
+
+        ar3_deps.require_group("fakegroup", reason="testing")
+
+        assert _sys.path.count(str(group_dir)) == 1
+        assert _sys.path.index(str(group_dir)) < _sys.path.index(site)
+
+    def test_install_failure_propagates_uncaught(self, monkeypatch):
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda _g: None)
+
+        def fail(_g):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr(ar3_deps, "install_group", fail)
+        with pytest.raises(RuntimeError, match="no network"):
+            ar3_deps.require_group("fakegroup", reason="testing")
+
+
 class TestDepsVerb:
     def test_lists_known_groups_as_not_installed(self, capsys):
         assert ar3.main(["deps"]) == 0

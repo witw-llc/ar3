@@ -14,14 +14,17 @@ never runs another product's commands for you — when something is missing,
 `ar3` names the real command to fix it. What `ar3` writes is its own substrate
 and never a product's state: `ar3 deps` fetches on-demand heavy dependencies
 into `~/.local/share/ar3/deps`, and `ar3 update` maintains the suite install
-itself.
+itself. The verb that creates the need installs the dependency on its
+own — `a8s storage mybucket s3://my-bucket` fetches boto3 the moment that
+service is registered; `ar3 deps` is the explicit form, for scripts and for
+`ar3 doctor`.
 
 ```
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
 ar3 update     # pull this install forward to the latest release
 ar3 deps       # list on-demand heavy dependency groups and their status
-ar3 deps a8s-s3 # fetch one group (here, boto3 for a8s's S3 storage)
+ar3 deps a8s-s3 # fetch one group by hand (here, boto3 for a8s's S3 storage)
 ar3 --version  # the suite semver (every ar3 CLI answers this)
 ```
 

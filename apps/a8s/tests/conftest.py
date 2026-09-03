@@ -20,8 +20,11 @@ import pytest
 _PKG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG_DIR))
 # `ar3` sits in `<repo>/lib`, shared by every app. Put it on the path here
-# rather than relying on some a8s module having run first.
-sys.path.append(str(_PKG_DIR.parent.parent / "lib"))
+# rather than relying on some a8s module having run first, and at the front
+# rather than the end: appended, it loses to the site-packages of whatever
+# interpreter runs the suite, so an unrelated `ar3` distribution would be what
+# the tests exercise.
+sys.path.insert(0, str(_PKG_DIR.parent.parent / "lib"))
 
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
 

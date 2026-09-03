@@ -240,10 +240,46 @@ class TestRetrieve:
 
 
 class TestMissingBoto3:
-    def test_names_the_install_command(self, tmp_path, monkeypatch):
+    """#242: the client no longer tells the user to run `ar3 deps a8s-s3`
+    themselves — it installs the group right here, on first real use, via
+    `ar3.deps.require_group`. These tests never hit the network: they
+    monkeypatch `require_group` directly."""
+
+    def test_first_use_installs_the_group(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_require_group(group, *, reason):
+            calls.append((group, reason))
+            raise RuntimeError("simulated: still no boto3 after install")
+
+        monkeypatch.setattr("ar3.deps.require_group", fake_require_group)
+        svc = S3Service("x", url="s3://my-bucket")
+        src = tmp_path / "a.txt"
+        src.write_text("x", encoding="utf-8")
+        with pytest.raises(StorageError):
+            svc.store(src)
+        assert calls and calls[0][0] == "a8s-s3"
+
+    def test_install_failure_is_named_not_a_second_command(self, tmp_path, monkeypatch):
+        def fake_require_group(group, *, reason):
+            raise RuntimeError("no network")
+
+        monkeypatch.setattr("ar3.deps.require_group", fake_require_group)
+        svc = S3Service("x", url="s3://my-bucket")
+        src = tmp_path / "a.txt"
+        src.write_text("x", encoding="utf-8")
+        with pytest.raises(StorageError, match="no network") as excinfo:
+            svc.store(src)
+        assert "ar3 deps" not in str(excinfo.value)
+
+    def test_satisfied_group_but_still_no_boto3_names_that(self, tmp_path, monkeypatch):
+        # require_group succeeds (the group directory is fine) but the
+        # import still fails — a corrupted install, say. The message should
+        # say boto3 is missing, not repeat the install instructions.
+        monkeypatch.setattr("ar3.deps.require_group", lambda group, *, reason: Path("/tmp/fake"))
         monkeypatch.setitem(sys.modules, "boto3", None)
         svc = S3Service("x", url="s3://my-bucket")
         src = tmp_path / "a.txt"
         src.write_text("x", encoding="utf-8")
-        with pytest.raises(StorageError, match="ar3 deps a8s-s3"):
+        with pytest.raises(StorageError, match="still missing"):
             svc.store(src)

@@ -23,8 +23,11 @@ Nothing here deletes: a storage service that reaches back into a bucket to
 remove objects is a foot nuke, and S3 already has the feature.
 
 boto3 is imported lazily and is an on-demand dependency (`requirements/
-a8s-s3.txt`, fetched with `ar3 deps a8s-s3`), pulled in via `ar3.deps.
-use_group` rather than vendored. It carries the standard credential chain —
+a8s-s3.txt`) rather than vendored. `a8s storage` installs it the moment an
+`s3` service is registered; a service built by hand (or an old config from
+before that existed) installs it here instead, on first real use, via
+`ar3.deps.require_group` — the explicit form is still `ar3 deps a8s-s3`. It
+carries the standard credential chain —
 env vars, shared config, SSO, instance and container roles — which is the
 whole reason to depend on it rather than sign requests by hand: an operator
 who grants a machine an IAM role gets working uploads with no a8s-side
@@ -109,14 +112,20 @@ class S3Service(StorageService):
     def _client(self) -> Any:
         if self._client_cache is not None:
             return self._client_cache
-        from ar3.deps import use_group
-        use_group("a8s-s3")
+        from ar3.deps import require_group
+
+        try:
+            require_group("a8s-s3", reason=f"s3 storage {self._name!r}")
+        except Exception as e:
+            raise StorageError(
+                f"installing a8s-s3 (boto3) for s3 storage failed: {e}"
+            ) from e
         try:
             import boto3
             from botocore.config import Config
         except ImportError as e:
             raise StorageError(
-                "boto3 is required for s3 storage — run `ar3 deps a8s-s3`"
+                f"boto3 still missing after installing a8s-s3: {e}"
             ) from e
         session_args = {"profile_name": self._profile} if self._profile else {}
         try:

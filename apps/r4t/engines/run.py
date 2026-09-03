@@ -357,6 +357,11 @@ def _spawn(
     leak, and a grace period lets one that traps SIGTERM exit cleanly."""
     try:
         proc = _proc_spawn(resolve_argv0(argv), cwd=cwd, env=env)
+    except FileNotFoundError as exc:
+        path = (env or os.environ).get("PATH", "")
+        raise RunError(
+            f"failed to spawn {argv[0]!r}: not on PATH ({path})"
+        ) from exc
     except OSError as exc:
         raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
     try:

@@ -328,6 +328,20 @@ PAIRED_KEY = "paired"
 # consumes itself before forwarding the rest to the StorageService constructor.
 _RESERVED_SERVICE_SPEC_KEYS = {"service", "url", PAIRED_KEY}
 
+# Kind -> the tier-2 `ar3 deps` group its service module needs. A kind absent
+# here needs nothing beyond stdlib and the vendored tier — the one place a
+# new kind that imports a heavy package has to name its group, so `a8s
+# storage` can install it instead of failing at first real use.
+_KIND_DEPS_GROUP = {
+    "s3": "a8s-s3",
+}
+
+
+def deps_group_for(kind: str) -> str | None:
+    """The `ar3 deps` group `kind`'s service module needs, or `None` when it
+    needs nothing beyond stdlib/vendored deps."""
+    return _KIND_DEPS_GROUP.get(kind)
+
 
 def _normalize_opt_key(key: str) -> str:
     """`--base-url` and `--base_url` name the same option. Services declare

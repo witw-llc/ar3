@@ -27,6 +27,7 @@ from pathlib import Path
 
 from core import (
     ENTRYPOINT,
+    SCRIPT_DIR,
     _pid_alive,
     _preview,
     agent_dir,
@@ -74,6 +75,7 @@ from network import (
     configured_remote_ids,
     delete_remote_secrets,
     delete_spec_secrets,
+    deps_group_for,
     detect_service_kind,
     load_network_config,
     merge_remote_secrets,
@@ -101,6 +103,7 @@ from registry import (
 )
 from txlog import last_heard, read_events
 from ar3 import clock
+from ar3.deps import require_group
 from ar3.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
 
@@ -412,6 +415,10 @@ def cmd_define(args: list[str]) -> int:
     info["definition"] = str(path)
     save_registry(reg)
     print(f"{target_key}: definition set to {path}")
+    # The verb that creates the need does the check (#242): an engine
+    # definition whose engine binary is unreachable here says so now, not
+    # 900s later at the first idle wake (#243).
+    _warn_unresolvable_harnesses([target_key])
     return 0
 
 
@@ -1379,9 +1386,70 @@ def cmd_start(args: list[str]) -> int:
     return 0
 
 
+_ENGINE_CHECK_TIMEOUT_SECONDS = 40
+
+
+def _r4t_engine_id(argv: list[str]) -> str | None:
+    """The engine id when `argv` is an r4t engine invocation — some element
+    ending in `r4t.py` followed by `engine <id> run` — else None.
+
+    Matched on the raw, unexpanded argv: the bundled `engine-*.json`
+    definitions spell the script as the literal token
+    `$A8S_DIR/../r4t/r4t.py`, which already ends in `r4t.py` without
+    resolving `$A8S_DIR` first."""
+    for i, tok in enumerate(argv):
+        if tok.endswith("r4t.py") and i + 3 < len(argv) \
+                and argv[i + 1] == "engine" and argv[i + 3] == "run":
+            return argv[i + 2]
+    return None
+
+
+def _engine_check_probe(
+    engine: str, env: dict[str, str], cwd: Path | None
+) -> tuple[bool, str, str] | None:
+    """Ask `r4t engine <id> check --json` — the same probe `r4t engine <id>
+    check` runs by hand — whether the engine's own binary is installed,
+    under `env`/`cwd` exactly as a wake will see them. r4t is a sibling app,
+    resolved the same way the definitions themselves resolve it
+    (`$A8S_DIR/../r4t/r4t.py`), spawned rather than imported so a8s stays off
+    r4t's internals.
+
+    Returns `(installed, binary, detail)` from the first report, or None
+    when the probe itself could not be run or answered — a broken r4t
+    install has its own diagnostics; this warning only covers the PATH case
+    #243 exists for.
+    """
+    r4t_py = SCRIPT_DIR.parent / "r4t" / "r4t.py"
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(r4t_py), "engine", engine, "check", "--json"],
+            env=env,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=_ENGINE_CHECK_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    try:
+        reports = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(reports, list) or not reports:
+        return None
+    report = reports[0]
+    if not isinstance(report, dict):
+        return None
+    return (
+        bool(report.get("installed")),
+        str(report.get("binary") or engine),
+        str(report.get("detail") or ""),
+    )
+
+
 def _warn_unresolvable_harnesses(members: list[str]) -> None:
-    """Say so at `a8s start` when a node's harness is not on the PATH its wakes
-    will get.
+    """Say so at `a8s start` (and at `a8s define`, for an engine definition)
+    when a node's harness is not on the PATH its wakes will get.
 
     The probe runs against the spawn environment as a wake will see it —
     `definition.env` and the machine-wide `wake_path` already applied — so a
@@ -1393,6 +1461,12 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
 
     Probing here rather than at first wake is the point: this process can
     compute exactly the environment the node will get.
+
+    An `engine-*` definition's invoke is `$PYTHON r4t.py engine <id> run …`,
+    which resolves to the always-present interpreter — the engine binary r4t
+    execs one level down (`codex`, `claude`, …) is never named in argv, so
+    `harness_program` has nothing to check (#243). Such an invoke is instead
+    handed to `_engine_check_probe`, which asks r4t itself.
 
     A warning, never a refusal. The definition may name a harness this machine
     installs later, and a node that cannot wake is still worth having attached.
@@ -1418,7 +1492,28 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
         ):
             if not isinstance(argv, list) or not argv:
                 continue
-            program = harness_program([str(a) for a in argv])
+            str_argv = [str(a) for a in argv]
+            engine_id = _r4t_engine_id(str_argv)
+            if engine_id is not None:
+                probe = _engine_check_probe(engine_id, env, wake_cwd)
+                if probe is None:
+                    continue  # r4t's own diagnostics cover a broken probe
+                installed, binary, detail = probe
+                if installed:
+                    continue
+                path_value = env.get("PATH", "")
+                print(
+                    f"warning: {member}: engine {engine_id!r} ({label}) needs "
+                    f"{binary!r}, which is not on the PATH this node's wakes "
+                    f"will get: {detail or 'not found'}\n"
+                    f"         Searched PATH: {path_value}\n"
+                    f"         Set `definition.env` `{{\"PATH\": ...}}` for this node, "
+                    f"or `a8s config set wake_path \"$PATH\"` from a shell that "
+                    f"resolves it. `ar3 doctor` lists what it can find.",
+                    file=sys.stderr,
+                )
+                continue
+            program = harness_program(str_argv)
             if program is None or "$" in program:
                 continue  # a shell string, or a var that expands per wake
             if harness_is_resolvable(program, env, cwd=wake_cwd):
@@ -2937,8 +3032,8 @@ user it runs as, and only backends with a known direct-download URL are
 accepted — Drive today — because storing a backend's preview page as the
 attachment would be silent corruption.
 
-s3 needs boto3 (ar3 deps a8s-s3) on the uploader only; uploads return
-presigned GET URLs.
+s3 needs boto3 on the uploader only; `a8s storage` installs it the moment
+an s3 service is registered. Uploads return presigned GET URLs.
 
 --password is written to secrets.json (mode 0600), never network.json.
 Config is validated here — a bad option fails now, not at daemon start.
@@ -3050,6 +3145,16 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     except (ValueError, TypeError) as e:
         print(f"invalid storage config: {e}", file=sys.stderr)
         return 2
+    # The verb that creates the need installs the dependency: a kind whose
+    # group is not yet fetched gets it now, before the service is
+    # registered, rather than leaving a WARN for the next use to trip over.
+    group = deps_group_for(kind)
+    if group is not None:
+        try:
+            require_group(group, reason=f"{kind} storage")
+        except Exception as e:
+            print(f"installing {group} for {kind} storage failed: {e}", file=sys.stderr)
+            return 1
     public, secrets = split_secret_keys(spec)
     cfg = load_network_config()
     overwriting = name in cfg["services"]

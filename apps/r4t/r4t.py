@@ -20,12 +20,18 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# `ar3ver` sits at the repo root and carries the suite semver. A copy of this
-# tree relocated away from that root (the isolation container copies apps/r4t
-# alone to /opt/r4t) still has to run: the version is a nicety, never a
-# dependency, so a missing module degrades to "unknown" instead of killing
-# the CLI on import.
-sys.path.append(str(Path(__file__).resolve().parents[2] / "lib"))
+# `ar3ver` and the `ar3` foundation package sit in `<repo>/lib` and carry the
+# suite semver and the shared code. That directory goes to the FRONT of
+# sys.path, never the end: appended, it loses to site-packages, and any
+# unrelated distribution named `ar3` then answers these imports instead. A
+# copy of this tree relocated away from the repo root (the isolation container
+# copies apps/r4t alone to /opt/r4t) has no `lib` beside it; the version is a
+# nicety, never a dependency, so a missing module degrades to "unknown"
+# instead of killing the CLI on import.
+_AR3_LIB = str(Path(__file__).resolve().parents[2] / "lib")
+while _AR3_LIB in sys.path:
+    sys.path.remove(_AR3_LIB)
+sys.path.insert(0, _AR3_LIB)
 try:
     from ar3ver import version_line  # noqa: E402
 except ImportError:
@@ -3022,7 +3028,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Talk to an engine directly. Actions: quota — remaining "
         "subscription and reset time, without spending a turn; run — one "
         "headless turn as a bare stateless agent (claude, codex, agy, "
-        "copilot, cursor, opencode, and the ollama-* local variants), no "
+        "copilot, cursor, opencode, muse, and the ollama-* local variants), no "
         "roster or dispatcher involved; check — ask the installed CLI whether "
         "the argv r4t composes for it still parses, spending no turn. "
         "Accepts an engine id or any rig preset id; `list` shows both, and "

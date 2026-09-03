@@ -864,6 +864,13 @@ def run_harness(
             env=turn_env,
             start_new_session=True,
         )
+    except FileNotFoundError:
+        return (
+            127,
+            f"failed to spawn harness {argv[0]!r}: not on PATH ({turn_env.get('PATH', '')})",
+            0.0,
+            False,
+        )
     except OSError as e:
         return 127, f"failed to spawn harness {argv[0]!r}: {e}", 0.0, False
 
