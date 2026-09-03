@@ -14,6 +14,67 @@ version when the batch is ready to merge.
 
 ### Added
 
+- **GitHub Copilot CLI is an officially supported r4t engine.** It was a
+  preset, a run engine and a check probe with no model slot, no
+  continuation and no measurement; it now composes and reads six things on
+  every turn. `--model` passes through untouched — copilot has no list verb
+  to check a string against, and the ids in GitHub's documentation are
+  stale against a live seat, so a bad one fails at spawn with copilot's own
+  message ([#235](https://github.com/witw-llc/ar3-private/issues/235)). The
+  preset carries `-s`, so stdout is the reply and nothing else, and
+  `--no-auto-update`, because the binary upgraded itself mid-measurement on
+  2026-09-02 and changed its own flag surface. Every turn runs with
+  `--usage-output-file` and reports what it cost — credits, model, premium
+  requests, input/output/cache-read/cache-write tokens — as one stderr line
+  and as `spend` in `r4t rig run --json`. `--max-credits N` (and a rig's
+  `max_ai_credits`) composes copilot's soft spend fuse. Each turn is handed
+  its own `COPILOT_OTEL_FILE_EXPORTER_PATH`, and any exported spans are kept
+  under `~/.config/r4t/copilot/otel/`; an organisation telemetry policy can
+  redirect them to its own collector, so the absence is noted and never
+  fails the turn. See [docs/r4t-engine.md](docs/r4t-engine.md).
+- **copilot continues by pinning a session, per member and per run.**
+  `r4t engine copilot run --session <uuid>` founds a conversation under
+  exactly that id, or resumes it with the turn's own directory forced —
+  a resumed copilot session otherwise runs where it was founded, whatever
+  the invoking cwd. A roster member with `Continue:` on a copilot rig gets
+  the same pin without naming anything: r4t mints its UUID on the founding
+  turn, names it on every resume, and mints a fresh one on a refound. Two
+  members on one host can no longer reach each other's conversations
+  ([#17](https://github.com/witw-llc/ar3-private/issues/17)).
+
+### Fixed
+
+- **A roster turn on copilot is instrumented and fused like an engine run.**
+  `dispatch.run_harness` composes its own argv and launched it directly, so a
+  member on a copilot rig silently dropped its configured `max_ai_credits`,
+  its usage file and its exporter path — the "every turn" the docs promised
+  was one caller's every turn. Both callers now arm and read the same
+  instruments through one helper. A roster turn's files live in the member's
+  own working directory, the one path writable by the child under every
+  isolation mode, and `spend` and `otel` land under `last_spend` in the
+  member's meta with the line in the node's day log. A rig naming
+  `max_ai_credits` on a preset with no fuse now fails to load instead of
+  running turns whose budget does not apply.
+- **Bare `copilot --continue` is refused, and the message now says why.** It
+  resumes the machine's most recent session whatever the directory, and on
+  2026-09-02 it attached to a seat's own *live* session and injected the
+  prompt there as a new user turn, interrupting a tool call in flight. The
+  refusal now names that and points at `--session <uuid>`.
+- **`r4t engine copilot quota` no longer needs `gh`.** It refused on any
+  machine without it, including a seat that was authenticated to Copilot
+  throughout and holding a usable token. With `gh` absent the token comes
+  from `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` or from
+  copilot's own stored login, and the entitlement endpoint is called over
+  HTTPS directly. Each bucket also carries `credits_used` as a number beside
+  the note it already appeared in — on a token-based-billing seat the
+  percentage fields are degenerate whatever has been spent, so cumulative
+  credits and the reset date are the only signal, and a note cannot be
+  trended.
+
+## 0.1.81
+
+### Added
+
 - **`a8s storage <name> <s3-url>` installs `boto3` right then.** The verb
   that creates the need installs the dependency: registering an `s3`
   storage fetches the `a8s-s3` tier-2 group on the spot instead of leaving

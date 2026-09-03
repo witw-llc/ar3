@@ -71,16 +71,17 @@ class TestBuildArgv:
         assert "--model" in argv
         assert argv[argv.index("--model") + 1] == "opus"
 
-    def test_copilot_gets_no_ask_user_and_rejects_model(self, tmp_path):
+    def test_copilot_gets_no_ask_user_and_takes_a_model(self, tmp_path):
         argv = engine_run.build_argv(
             "copilot", "go", model=None, timeout=900, workdir=tmp_path
         )
         assert "--no-ask-user" in argv
+        assert "--model" not in argv
         assert argv[-1] == "go"
-        with pytest.raises(engine_run.RunError, match="--model"):
-            engine_run.build_argv(
-                "copilot", "go", model="anything", timeout=900, workdir=tmp_path
-            )
+        argv = engine_run.build_argv(
+            "copilot", "go", model="claude-sonnet-5", timeout=900, workdir=tmp_path
+        )
+        assert argv[argv.index("--model") + 1] == "claude-sonnet-5"
 
     def test_copilot_does_not_double_no_ask_user_if_preset_already_carries_it(
         self, monkeypatch, tmp_path
@@ -211,13 +212,14 @@ class TestContinueFlag:
         for able in ["claude", "codex", "cursor", "opencode"]:
             assert able in message
 
-    def test_copilot_refusal_says_why(self):
+    def test_copilot_refusal_says_why_and_names_the_alternative(self):
         # A user who sees `--continue` in `copilot --help` needs to know r4t
-        # refuses it on purpose, not that r4t is broken.
+        # refuses it on purpose, not that r4t is broken — and where to go
+        # instead, since copilot does continue, by session id.
         with pytest.raises(engine_run.RunError) as exc:
             argv_for("copilot", continue_conversation=True)
         assert "machine's most recent session" in str(exc.value)
-        assert "#17" in str(exc.value)
+        assert "--session <uuid>" in str(exc.value)
 
     def test_anchor_missing_from_a_handedited_invoke_fails_closed(self, monkeypatch):
         monkeypatch.setitem(
@@ -809,8 +811,14 @@ class TestEngineRunFlagsCli:
         assert not (tmp_path / ".engine-idle").exists()  # the latch never armed
 
     def test_continue_on_an_engine_that_cannot_exits_one(self, tmp_path, capsys):
-        assert engine_cli("copilot", "run", "--dir", str(tmp_path), "--continue", "go") == 1
-        assert "#17" in capsys.readouterr().err
+        assert engine_cli("muse", "run", "--dir", str(tmp_path), "--continue", "go") == 1
+        assert "session picker" in capsys.readouterr().err
+
+    def test_continue_on_copilot_points_at_the_session_pin(self, tmp_path, capsys):
+        assert engine_cli(
+            "copilot", "run", "--dir", str(tmp_path), "--continue", "go"
+        ) == 1
+        assert "--session <uuid>" in capsys.readouterr().err
 
     def test_permissions_below_the_floor_exits_one(self, tmp_path, capsys):
         assert engine_cli(

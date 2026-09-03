@@ -1674,6 +1674,8 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             continue_conversation=args.continue_conversation,
             permissions=args.permissions,
             allowed_tools=args.allowed_tools,
+            session=args.session,
+            max_credits=args.max_credits,
         )
     except engine_run.RunError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
@@ -1891,6 +1893,8 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             allowed_tools=resolve_override(args.allowed_tools, rig.allowed_tools),
             env={**os.environ, **rig.env} if rig.env else None,
             charge_hook=_charge if budgeted else None,
+            max_credits=resolve_override(args.max_credits, rig.max_ai_credits),
+            record=report,
         )
     except engine_run.RunError as exc:
         print(f"r4t rig run: {exc}", file=sys.stderr)
@@ -2853,6 +2857,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the composed argv and prompt to stderr before running.",
     )
     rig_run_p.add_argument(
+        "--max-credits",
+        type=_positive_int,
+        metavar="N",
+        dest="max_credits",
+        help="Cap this turn's AI credits, overriding the rig's "
+        "max_ai_credits (copilot only; minimum 30, and soft).",
+    )
+    rig_run_p.add_argument(
         "--continue",
         action="store_true",
         dest="continue_conversation",
@@ -3100,6 +3112,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--echo",
         action="store_true",
         help="run: print the composed argv and prompt to stderr before running.",
+    )
+    engine_p.add_argument(
+        "--session",
+        metavar="UUID",
+        help="run: pin this turn to one session id (copilot only). A session "
+        "that does not exist yet is founded under that id; one that does is "
+        "resumed, in the turn's own --dir. Unlike --continue, which resumes "
+        "the machine's most recent session, an id names exactly one "
+        "conversation.",
+    )
+    engine_p.add_argument(
+        "--max-credits",
+        type=_positive_int,
+        metavar="N",
+        dest="max_credits",
+        help="run: cap this turn's AI credits (copilot only; minimum 30). The "
+        "cap is soft — a response can overshoot it and the next model call is "
+        "what gets blocked.",
     )
     engine_p.add_argument(
         "--continue",

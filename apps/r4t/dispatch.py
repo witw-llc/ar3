@@ -121,6 +121,7 @@ import knowledge
 import schedule
 import state
 import transcript
+from engines import copilot as copilot_engine
 from rig import (
     AGY_HOME_IDIOM,
     ENV_MCP_HOME_PEERS,
@@ -724,6 +725,55 @@ def run_harness(
     env: dict | None = None,
     variant: int = 0,
 ) -> tuple[int, str, float, bool]:
+    """One member turn, instrumented. The turn itself is `_run_harness_turn`;
+    this is the measurement wrapped around it, and it is the same wrapper
+    `engine run` puts around its own turn — `engines.copilot.turn_instruments`,
+    called once here and once there, so a roster member and a bare engine node
+    on the same CLI are measured and fused alike.
+
+    The instruments live in the member's own working directory rather than in
+    process scratch, because that is the one path writable by the child under
+    every isolation mode: a container bind-mounts it rw at the same path, and
+    `run_as` probes it for write before the turn starts. Machine scratch would
+    reach the child in neither.
+    """
+    with copilot_engine.turn_instruments(
+        rig.instruments, scratch=cwd, max_credits=rig.max_ai_credits
+    ) as instruments:
+        result = _run_harness_turn(
+            rig, prompt, cwd, env=env, variant=variant, instruments=instruments
+        )
+        _record_measurement(env, instruments)
+    return result
+
+
+def _record_measurement(
+    env: dict | None, instruments: copilot_engine.TurnInstruments
+) -> None:
+    """What the turn measured, into the member's own record: one line each in
+    the node's day log, and `spend` / `otel` under `last_spend` in the
+    member's meta — the same objects `r4t rig run --json` prints. Written here
+    rather than by the caller so the `run_fn` contract stays four values, and
+    under its own key so the caller's `last_turn` write cannot race it."""
+    node = (env or {}).get("R4T_NODE", "")
+    member = (env or {}).get("R4T_MEMBER", "")
+    if not (instruments.armed and node and member):
+        return
+    measured, lines = instruments.measure()
+    for line in lines:
+        state.append_log(node, f"r4t: {line}")
+    state.update_meta(node, member, last_spend=measured)
+
+
+def _run_harness_turn(
+    rig: Rig,
+    prompt: str,
+    cwd: Path,
+    *,
+    env: dict | None = None,
+    variant: int = 0,
+    instruments: copilot_engine.TurnInstruments,
+) -> tuple[int, str, float, bool]:
     """Run the rig's argv (pool variant `variant`) with {prompt} substituted
     as a single argv element — never a shell — and {workdir} with `cwd`, for a
     harness that takes its working directory as an argument. Returns
@@ -744,13 +794,16 @@ def run_harness(
 
     `R4T_CONTINUE` in the env (set for a member with `Continue: on`) appends the
     rig's continue tokens so the CLI resumes the conversation it already has in
-    `cwd`. It rides the env for the same reason isolation does: the run_fn
-    contract stays narrow."""
+    `cwd`. `R4T_SESSION` carries the member's own session id for a rig that
+    continues by pinning one (copilot) — founding it when `R4T_CONTINUE` is
+    absent and resuming it when it is set. Both ride the env for the same
+    reason isolation does: the run_fn contract stays narrow."""
     argv = rig.argv(
         prompt,
         variant,
         continue_conversation=(env or {}).get("R4T_CONTINUE") == "1",
         workdir=cwd,
+        session=(env or {}).get("R4T_SESSION") or None,
     )
     if rig.model_resolver == "agy-live":
         # Resolve the friendly --model against the live `agy models` list before
@@ -762,6 +815,10 @@ def run_harness(
         except RigError as e:
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
+
+    # Next to the binary, the position `Rig.argv` splices its own translations
+    # at, and before any isolation wrapper takes the argv over.
+    argv = argv[:1] + instruments.flags() + argv[1:]
 
     # The rig's `env` map (docs/r4t-rigs.md): static harness knobs on every turn.
     # It goes on before r4t's own per-turn injections below (the mcp idiom's
@@ -804,7 +861,7 @@ def run_harness(
     # An `env_reset`/container keeps only what the wrapper is told to carry, so
     # the rig map has to be named to it the same way the mcp idiom's env is.
     # The idiom wins a collision — it is r4t's own per-turn injection.
-    boundary_env = {**rig.env, **mcp.env_pass}
+    boundary_env = {**rig.env, **mcp.env_pass, **instruments.pass_env()}
 
     kill_container_name: str | None = None
     if isolation.run_as:
@@ -851,7 +908,9 @@ def run_harness(
     # inherits the PWD of whoever started r4t however `cwd` is set. A harness
     # that resolves its own paths against it (opencode does, for --dir) would
     # anchor them outside the member's workdir.
-    turn_env = dict(env if env is not None else os.environ, PWD=str(cwd))
+    turn_env = instruments.env_for(
+        dict(env if env is not None else os.environ, PWD=str(cwd))
+    )
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -1804,6 +1863,19 @@ def _run_turn(
     # the prompt (which then omits the history the CLI is already carrying), so
     # it is decided once, here, before the prompt is built.
     continuing = member.continue_conversation and rig.supports_continue and not refound
+    # A pinned engine keys its conversation on a session id instead of on the
+    # CLI and directory, so the member carries one: minted on the turn that
+    # founds the conversation, named on every turn that resumes it. Refounding
+    # mints a fresh id rather than reusing the retired one — the whole point of
+    # a refound is not to walk back into the conversation r4t never saw finish.
+    # A member with `Continue: on` whose record predates the pin has nothing to
+    # resume, so it founds this turn rather than naming an id nothing holds.
+    session = None
+    if member.continue_conversation and rig.supports_session:
+        session = state.read_session_id(ctx.node, member.name) if continuing else None
+        if session is None:
+            continuing = False
+            session = state.mint_session_id(ctx.node, member.name)
 
     variant = state.take_rotation(ctx.node, rig.name, rig.pool_size)
     staging = state.prepare_staging(ctx.node, member.name)
@@ -1848,6 +1920,8 @@ def _run_turn(
     # than a fresh full prompt.
     if continuing:
         env["R4T_CONTINUE"] = "1"
+    if session:
+        env["R4T_SESSION"] = session
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
     env.update(ctx.isolation.to_env())

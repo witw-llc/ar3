@@ -24,7 +24,8 @@ A harness is a viable r4t rig only if it can do all of:
    session stores are fine. Machine-global or cloud-synced
    continuation that crosses directories is nuke-class: it disqualifies
    continue support until a session id (or equivalent) can be pinned
-   cleanly (the lesson from bin#256 / Copilot).
+   cleanly (the lesson from bin#256 / Copilot — whose pin has since been
+   built, and whose bare `--continue` stays refused).
 
 Judge a new harness against these four. Capability breadth alone is
 not enough.
@@ -48,8 +49,8 @@ cold behavior, cross-directory scope probe.
 | `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
 | `ollama-claude` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
 | `ollama-codex` | `ollama launch codex --model … -y -- exec --sandbox workspace-write` | no | `codex-config` | Requires `--model` |
-| `copilot` | `copilot --allow-all-tools -p {prompt}` | **no** | `copilot-flag` | `--continue` is machine-global; `--session-id <id>` at creation and `-r, --resume=<id>` under `-p` are the pin path (#17) |
-| `ollama-copilot` | `ollama launch copilot --model … -y -- … -p` | no | `copilot-flag` | Requires `--model` |
+| `copilot` | `copilot --allow-all-tools -s --no-auto-update -p {prompt}` | yes, **by session pin** | `copilot-flag` | `--model` passes through unchecked; per-turn `--usage-output-file` spend and best-effort OTEL export. Bare `--continue` is refused — it is machine-global and has attached to a live session |
+| `ollama-copilot` | `ollama launch copilot --model … -y -- -s --no-auto-update -p` | no | `copilot-flag` | Requires `--model`. Not instrumented: the launcher owns the head of the argv, so per-turn flags cannot reach the CLI behind it |
 | `agy` | `agy --dangerously-skip-permissions --mode accept-edits --print` | `--continue` | `agy-home` (opt-in, needs `run_as`) | MCP only from `$HOME/.gemini`; no `--sandbox` — see [r4t-harness-agy.md](r4t-harness-agy.md) |
 | `ollama` | `ollama run {model} {prompt}` | no | none | No tools; stdout-fallback replies |
 
@@ -117,7 +118,7 @@ the last column; see
 | opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
 | muse (preset) | `muse resume --last` exists | per-workspace, but the subcommand is **interactive** — it opens the session picker, and `muse exec` rejects `--last` | `muse exec --session-id <uuid>` (#17) | **no** — no headless resume exists |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
-| copilot (preset) | `--continue` exists | **machine-global** | `--session-id <id>` at creation, `-r, --resume=<id>` under `-p` (#17) | **no** until the pin path replaces `--continue` in the preset |
+| copilot (preset) | `--session-id <id>` to found, `--resume=<id>` + `-C` to drive | per **session id**, minted per member | the pin itself; bare `--continue` is machine-global and has injected a prompt into a live session | yes, graded **good** — two members pinned on one host each recalled only their own session |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
 | Cline | `--continue` | current directory’s latest task | `--taskId` (unverified) / workdirs | candidate |
 | Qwen Code | `--continue` / `--resume` | project hash under `~/.qwen/projects/` | session id | candidate (best contract) |

@@ -10,6 +10,14 @@ says an unattended, roster-less turn needs on top: agy silently defaults
 `--print-timeout` to 5 minutes (undercutting a longer `--timeout`), and an
 unattended copilot hangs on its `ask_user` tool without `--no-ask-user`.
 
+A copilot turn also carries per-turn INSTRUMENTS — a `--usage-output-file`
+path, an exporter path, and the rig's spend fuse. They are not preset
+constants: the paths change every turn, and the usage flag is 1.0.82+, so a
+preset that always carried it would make `engine check` reject the preset on
+an older seat. Arming and reading them is `engines.copilot.turn_instruments`,
+which the roster's own turn (`dispatch.run_harness`) calls too — one
+implementation, two callers, so the two paths cannot drift apart.
+
 RUN_ENGINES is narrower than `HARNESS_PRESETS`: the five originals plus
 opencode and three of the four `ollama-*` launchers have a verified headless,
 continue-free single-shot invocation (see the engine CLI fact sheet). The
@@ -30,8 +38,11 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from engines import copilot as copilot_engine
 from rig import (
     DEFAULT_TIMEOUT_SECONDS,
     HARNESS_PRESETS,
@@ -42,8 +53,12 @@ from rig import (
     build_preset_invoke,
     continue_presets,
     continue_unsupported_reason,
+    instrumented_presets,
     resolve_agy_model,
+    session_presets,
+    session_tokens,
     splice_continue,
+    splice_session,
 )
 
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
@@ -207,13 +222,29 @@ def rotate_lessons_if_oversized(dir_path: Path, cap: int = LESSONS_CAP_LINES) ->
 def _run_extras(engine: str, base_invoke: list[str], timeout: int) -> list[str]:
     """Per-engine flags a bare unattended turn needs beyond what the preset
     already carries — checked against the live preset, not assumed, so a
-    preset gaining the flag later does not double it."""
+    preset gaining the flag later does not double it. A turn's instruments are
+    NOT here: they are per-turn values both callers arm identically, and they
+    arrive already composed as `instruments.flags()`."""
     extras: list[str] = []
     if engine == "agy":
         extras += ["--print-timeout", f"{timeout}s"]
     if engine == "copilot" and "--no-ask-user" not in base_invoke:
         extras += ["--no-ask-user"]
     return extras
+
+
+def _reject_bad_max_credits(engine: str, max_credits: int) -> None:
+    """A spend fuse only an instrumented preset expresses, and only above its
+    engine's floor. Both refusals are composition errors rather than notes: a
+    cap the caller believes is in force and is not is worse than no cap."""
+    if not HARNESS_PRESETS[engine].get("instruments"):
+        raise RunError(
+            f"{engine} takes no --max-credits: it expresses no spend fuse "
+            f"(presets that do: {', '.join(instrumented_presets())})"
+        )
+    problem = copilot_engine.max_credits_problem(max_credits)
+    if problem:
+        raise RunError(problem)
 
 
 def _splice_continue(engine: str, argv: list[str]) -> list[str]:
@@ -230,13 +261,39 @@ def _splice_continue(engine: str, argv: list[str]) -> list[str]:
         raise RunError(
             f"{engine} cannot continue: {continue_unsupported_reason(engine)} "
             f"(engines that can: "
-            f"{', '.join(e for e in continue_presets() if e in RUN_ENGINES)})"
+            f"{', '.join(e for e in continue_presets() if e in RUN_ENGINES and e != engine)})"
         )
     return splice_continue(
         argv,
         tokens=tokens,
         anchor=anchor,
         drop_pair=preset.get("continue_drop_pair", ()),
+    )
+
+
+def _splice_session(engine: str, argv: list[str], session: str) -> list[str]:
+    """`argv` pinned to `session`. The founding turn names the id with
+    `--session-id`, every later one drives `--resume=<id>` with the workdir
+    forced — a resumed copilot session otherwise runs in the directory it was
+    founded in, whatever the invoking cwd. Which of the two applies is read off
+    the CLI's own session store rather than tracked here, so a run can be
+    resumed by any caller that knows the id.
+
+    copilot is the only preset with a pin, and the store it is looked up in is
+    copilot's. A second pinned engine would want that lookup on the preset;
+    with one, naming it here is the honest spelling.
+    """
+    if not session_tokens(engine, resume=True):
+        raise RunError(
+            f"{engine} takes no --session pin (engines that do: "
+            f"{', '.join(e for e in session_presets() if e in RUN_ENGINES)})"
+        )
+    return splice_session(
+        argv,
+        tokens=session_tokens(
+            engine, resume=copilot_engine.session_exists(session)
+        ),
+        session=session,
     )
 
 
@@ -249,6 +306,9 @@ def _build_argv_template(
     continue_conversation: bool = False,
     permissions: str | None = None,
     allowed_tools: str | None = None,
+    session: str | None = None,
+    instruments: copilot_engine.TurnInstruments | None = None,
+    max_credits: int | None = None,
 ) -> tuple[list[str], str | None]:
     """The final argv for one turn with `{prompt}` still unsubstituted, plus
     the one stderr note a requested permissions mode earns: the preset's own
@@ -265,6 +325,13 @@ def _build_argv_template(
             f"r4t engine run supports {', '.join(sorted(RUN_ENGINES))}, "
             f"not {engine!r}"
         )
+    if max_credits is not None:
+        _reject_bad_max_credits(engine, max_credits)
+    if session is not None and continue_conversation:
+        raise RunError(
+            f"--session and --continue contradict for {engine}: the session id "
+            "IS the continuation, and it says which conversation"
+        )
     try:
         argv = build_preset_invoke(engine, model=model)
         argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")
@@ -279,7 +346,11 @@ def _build_argv_template(
         argv = [resolved if a == "{model}" else a for a in argv]
     if continue_conversation:
         argv = _splice_continue(engine, argv)
+    if session is not None:
+        argv = _splice_session(engine, argv, session)
     extras = _run_extras(engine, argv, timeout)
+    if instruments is not None:
+        extras += instruments.flags()
     argv = argv[:1] + extras + argv[1:]
     return [str(workdir) if a == "{workdir}" else a for a in argv], note
 
@@ -294,6 +365,7 @@ def build_argv(
     continue_conversation: bool = False,
     permissions: str | None = None,
     allowed_tools: str | None = None,
+    session: str | None = None,
 ) -> list[str]:
     """The final, fully-substituted argv for one turn — `_build_argv_template`
     plus `{prompt}` substitution."""
@@ -305,6 +377,7 @@ def build_argv(
         continue_conversation=continue_conversation,
         permissions=permissions,
         allowed_tools=allowed_tools,
+        session=session,
     )
     return [prompt if a == "{prompt}" else a for a in template]
 
@@ -388,8 +461,11 @@ def execute(
     continue_conversation: bool = False,
     permissions: str | None = None,
     allowed_tools: str | None = None,
+    session: str | None = None,
     env: dict[str, str] | None = None,
     charge_hook: Callable[[], None] | None = None,
+    max_credits: int | None = None,
+    record: dict | None = None,
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
@@ -401,26 +477,55 @@ def execute(
     `charge_hook` runs after composition succeeds and immediately before the
     spawn: a turn refused at composition costs the caller nothing, while a
     harness that fails to start has already paid — the same boundary a
-    dispatched turn's budget draws."""
+    dispatched turn's budget draws. `record`, when given, collects what the
+    turn measured about itself (`spend`, `otel`) for a caller with a
+    machine-readable surface; the one-line human forms go to stderr either
+    way. A roster turn arms the same instruments through the same helper —
+    see `dispatch.run_harness`."""
     if scaffold:
         rotate_lessons_if_oversized(dir_path, lessons_cap)
         prompt = scaffold_prompt(dir_path, message, agent=agent)
     else:
         prompt = message
-    template, note = _build_argv_template(
-        engine,
-        model=model,
-        timeout=timeout,
-        workdir=dir_path,
-        continue_conversation=continue_conversation,
-        permissions=permissions,
-        allowed_tools=allowed_tools,
-    )
-    if note:
-        print(f"r4t engine: {note}", file=sys.stderr)
-    if echo:
-        _print_echo(template, prompt)
-    argv = [prompt if a == "{prompt}" else a for a in template]
-    if charge_hook is not None:
-        charge_hook()
-    return _spawn(argv, dir_path, timeout, env)
+    with ExitStack() as stack:
+        # A roster turn puts its instruments in the member's workdir, because
+        # that is the one directory writable across an isolation boundary.
+        # Nothing isolates a bare `engine run`, so it uses scratch of its own
+        # and leaves the caller's directory alone.
+        kind = HARNESS_PRESETS[engine].get("instruments")
+        scratch = (
+            Path(stack.enter_context(TemporaryDirectory(prefix="r4t-copilot-")))
+            if kind
+            else dir_path
+        )
+        instruments = stack.enter_context(
+            copilot_engine.turn_instruments(
+                kind, scratch=scratch, max_credits=max_credits
+            )
+        )
+        template, note = _build_argv_template(
+            engine,
+            model=model,
+            timeout=timeout,
+            workdir=dir_path,
+            continue_conversation=continue_conversation,
+            permissions=permissions,
+            allowed_tools=allowed_tools,
+            session=session,
+            instruments=instruments,
+            max_credits=max_credits,
+        )
+        if note:
+            print(f"r4t engine: {note}", file=sys.stderr)
+        if echo:
+            _print_echo(template, prompt)
+        argv = [prompt if a == "{prompt}" else a for a in template]
+        if charge_hook is not None:
+            charge_hook()
+        exit_code = _spawn(argv, dir_path, timeout, instruments.env_for(env))
+        measured, lines = instruments.measure()
+        for line in lines:
+            print(f"r4t engine: {line}", file=sys.stderr)
+        if record is not None:
+            record.update(measured)
+    return exit_code

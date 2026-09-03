@@ -29,6 +29,7 @@ from rig import (
     build_preset_invoke,
     continue_collisions,
     continue_presets,
+    session_presets,
     format_preset_invoke,
     fuzzy_match_model,
     is_below_knowledge_floor,
@@ -354,12 +355,14 @@ class TestWorkdirPlaceholder:
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
         # Each of these was verified against the installed CLI's own --help and
-        # then live. copilot is absent on purpose: it resumes the machine's most
-        # recent session whatever the directory, which no working directory can
-        # keep apart (#256).
+        # then live. copilot is here by the OTHER idiom: it declares no
+        # continue flag at all and continues by naming a session instead.
         assert continue_presets() == [
-            "agy", "claude", "codex", "cursor", "ollama-opencode", "opencode",
+            "agy", "claude", "codex", "copilot", "cursor", "ollama-opencode",
+            "opencode",
         ]
+        assert session_presets() == ["copilot"]
+        assert not HARNESS_PRESETS["copilot"].get("continue_argv")
 
     def test_continue_tokens_are_appended_to_the_argv(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
@@ -396,15 +399,24 @@ class TestContinue:
         # claude founds a conversation silently, so it declares no pattern.
         assert not config.rigs["k"].had_no_prior_conversation("No previous chats found.")
 
-    def test_copilot_is_unsupported_until_sessions_are_pinned(self, tmp_path):
+    def test_copilot_continues_by_session_and_never_by_the_flag(self, tmp_path):
         # Its --continue reaches the machine's most recent session whatever the
-        # directory, so no member can be kept apart from another (#256).
+        # directory — and has attached to a live one — so the pin is the only
+        # continuation r4t composes for it (#239).
         config = load_rig_config(write_config(tmp_path, {
             "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
         }))
         rig = config.rigs["t"]
-        assert rig.supports_continue is False
+        assert rig.supports_continue is True
+        assert rig.supports_session is True
+        # No session named: nothing is spliced, whatever the caller asked for.
         assert rig.argv("hi", continue_conversation=True) == ["copilot", "-p", "hi"]
+        assert rig.argv("hi", session="abc") == [
+            "copilot", "--session-id", "abc", "-p", "hi",
+        ]
+        assert rig.argv(
+            "hi", continue_conversation=True, session="abc", workdir="/w"
+        ) == ["copilot", "--resume=abc", "-C", "/w", "-p", "hi"]
 
     def test_cli_key_sees_through_ollama_launch(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
@@ -434,7 +446,7 @@ class TestContinue:
 
     def test_continue_on_unsupported_rig_fails_closed(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
-            "t": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]},
+            "t": {"preset": "muse", "invoke": ["muse", "exec", "{prompt}"]},
         }))
         asker = member(name="Ana", rig="t")
         asker.continue_conversation = True
@@ -1003,9 +1015,28 @@ class TestModelSplice:
         argv = build_preset_invoke("ollama", model="qwen2.5-coder:7b")
         assert argv == ["ollama", "run", "qwen2.5-coder:7b", "{prompt}"]
 
-    def test_preset_without_model_support_refuses_model(self):
-        with pytest.raises(RigError, match="does not support --model"):
-            build_preset_invoke("copilot", model="opus")
+    def test_copilot_splices_after_executable(self):
+        argv = build_preset_invoke("copilot", model="claude-sonnet-5")
+        assert argv[:3] == ["copilot", "--model", "claude-sonnet-5"]
+        assert argv[-2:] == ["-p", "{prompt}"]
+
+    def test_copilot_passes_an_unknown_model_string_through(self):
+        # No resolver: copilot has no list verb, and the documented ids are
+        # stale on live seats, so r4t never adjudicates the string. A bad one
+        # fails at spawn with copilot's own message.
+        argv = build_preset_invoke("copilot", model="not-a-real-model")
+        assert argv[:3] == ["copilot", "--model", "not-a-real-model"]
+
+    def test_copilot_without_model_names_none(self):
+        assert build_preset_invoke("copilot") == HARNESS_PRESETS["copilot"]["invoke"]
+        assert "--model" not in build_preset_invoke("copilot")
+
+    def test_every_preset_takes_a_model(self):
+        for preset in HARNESS_PRESETS:
+            entry = HARNESS_PRESETS[preset]
+            assert entry.get("model_argv") or any(
+                "{model}" in arg for arg in entry["invoke"]
+            ), f"{preset} names no model slot"
 
     def test_agy_add_persists_model_and_resolver(self, tmp_path):
         path = tmp_path / "rigs.json"
@@ -1501,11 +1532,12 @@ class TestRigModelSetting:
         with pytest.raises(RigError, match="no recorded preset"):
             set_rig_value(path, "raw", "model", "opus")
 
-    def test_set_model_unsupported_preset_errors(self, tmp_path):
+    def test_set_model_copilot_bakes_into_invoke(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "cop", "copilot")
-        with pytest.raises(RigError, match="does not support --model"):
-            set_rig_value(path, "cop", "model", "opus")
+        set_rig_value(path, "cop", "model", "claude-sonnet-5")
+        raw = json.loads(path.read_text(encoding="utf-8"))["cop"]
+        assert raw["invoke"][:3] == ["copilot", "--model", "claude-sonnet-5"]
 
     def test_unset_model_static_reverts_to_base(self, tmp_path):
         path = tmp_path / "rigs.json"

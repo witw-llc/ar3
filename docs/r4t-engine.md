@@ -18,7 +18,8 @@ echo "long prompt piped in" | r4t engine agy run -
 ```
 r4t engine <id> run [--dir DIR] [--model M] [--agent NAME] [--timeout S]
                      [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
-                     [--continue] [--permissions MODE] [--allowed-tools SPEC]
+                     [--continue] [--session UUID] [--max-credits N]
+                     [--permissions MODE] [--allowed-tools SPEC]
                      [--] PROMPT
 ```
 
@@ -39,14 +40,18 @@ add` reads — plus what an unattended, roster-less turn needs on top: agy gets
 an explicit `--print-timeout` matching `--timeout` (its own default silently
 undercuts a longer one), and copilot gets `--no-ask-user` if the preset does
 not already carry it (unattended, it otherwise hangs on its `ask_user`
-tool). Nothing else is added: an unset `--permissions` leaves the preset's own
-flags byte for byte.
+tool) plus this turn's own measurement flags (see
+[copilot](#copilot-officially-supported)). Nothing else is added: an unset
+`--permissions` leaves the preset's own flags byte for byte.
 
 - `PROMPT` is one positional string; `-` reads it from stdin.
 - `--dir DIR` — the turn's working directory (default: CWD).
-- `--model M` — appended in the preset's own flag pattern; a preset with no
-  model flag (copilot) or no live resolver (agy needs one — `agy models` is
-  queried fresh every run) errors the same way `r4t rig add --model` does.
+- `--model M` — appended in the preset's own flag pattern. Every preset takes
+  one; a preset that needs a live resolver (agy — `agy models` is queried fresh
+  every run) errors the same way `r4t rig add --model` does when the string
+  does not resolve. copilot's string is passed through untouched: it has no
+  list verb to check against, so a bad id fails at spawn with copilot's own
+  `Model "<id>" from --model flag is not available`.
 - `--timeout S` — default 900. On expiry the whole process group is killed
   (a harness CLI forks tool subprocesses `kill()` alone would leak) and the
   command exits 124, naming the timeout.
@@ -55,6 +60,10 @@ flags byte for byte.
   carries only the engine's own reply stream.
 - `--lessons-cap N` — the `LESSONS.md` rotation line cap for this turn
   (default 200); see below.
+- `--session UUID` — pin this turn to one named conversation (copilot only);
+  see [the copilot section](#copilot-officially-supported).
+- `--max-credits N` — cap this turn's AI credits (copilot only, minimum 30,
+  and soft); see the same section.
 - `--continue`, `--permissions MODE`, `--allowed-tools SPEC` — the three
   translated parameters; see below.
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
@@ -167,14 +176,130 @@ see [the three refound gates](r4t-rigs.md#the-three-refound-gates) and the
 per-engine grades.
 
 An engine with no verified continuation errors, naming the ones that have it.
-copilot is the notable refusal, and its message says why: `copilot --continue`
-resumes the machine's most recent session whatever the directory, so it crosses
-members and workdirs
-([#17](https://github.com/witw-llc/ar3-private/issues/17)) — the flag exists in
-`copilot --help`, and r4t declines to pass it.
+copilot is the notable refusal, and its message says why and where to go
+instead: `copilot --continue` resumes the machine's most recent session
+whatever the directory, and on 2026-09-02 it attached to a seat's own **live**
+session and injected the prompt there as a new user turn, interrupting a tool
+call in flight. The flag exists in `copilot --help`; r4t declines to pass it,
+and offers `--session` instead.
 
 Continuation also drops what the resume path cannot carry: `codex exec resume`
 is its own subcommand and takes no `--sandbox`, so the pair comes out.
+
+### copilot, officially supported
+
+GitHub Copilot CLI is a supported engine rather than one r4t merely knows the
+name of. That claim has six parts, and each one is a thing r4t composes or
+reads on every copilot turn.
+
+**A model slot.** `--model` passes through untouched. copilot has no list verb
+to enumerate against and the ids in GitHub's own documentation are stale
+against a live seat — `claude-sonnet-4.6` errors where `claude-sonnet-5` runs
+— so r4t never adjudicates the string, and a bad one fails at spawn with
+copilot's own message. r4t sets the **flag** only; `COPILOT_MODEL` and
+`~/.copilot/settings.json` stay the operator's, and the flag outranks both.
+`auto` resolves against the live catalogue, at the cost of being unpredictable
+across seats, which is the reason a rig that cares pins an id.
+
+**Clean stdout.** The preset carries `-s`, so stdout is the agent's reply and
+nothing else. The stats copilot would otherwise print as a footer are read from
+the usage file instead, in machine form.
+
+**A pinned binary.** The preset carries `--no-auto-update`. The CLI updates
+itself by default, and on 2026-09-02 it moved 1.0.80 to 1.0.82 between two
+turns of one session, changing the flag surface underneath the run in progress.
+
+**Per-turn spend.** Every turn runs with `--usage-output-file` on a path unique
+to it, and the JSON is read back into a `spend` object — AI credits, the model
+that served the turn, premium requests, input/output/cache-read/cache-write
+tokens and the cache expiry copilot reports. One line goes to stderr:
+
+```
+r4t engine: spend: 3.92 credits · gpt-5.6-terra · cache write 16019 / read 15947
+```
+
+`r4t rig run --json` carries the same object as `spend`. The flag is 1.0.82+,
+so it is feature-detected once per process rather than baked into the preset,
+which would make `check` reject the composition on an older seat. Nothing
+special-cases a timeout: r4t's teardown is SIGTERM, a 0.5 s grace, then
+SIGKILL, and copilot flushes the file inside that grace, so the turns most
+worth accounting for still produce a record.
+
+**"Every turn" means the roster's turns too.** A dispatched member composes its
+argv in `dispatch.run_harness` rather than here, so the two paths would drift
+if each armed its own instruments; they call one helper
+(`engines.copilot.turn_instruments`) instead. A member on a copilot rig carries
+its rig's `max_ai_credits` fuse, writes its usage file and its spans, and lands
+`spend` and `otel` under `last_spend` in the member's meta with the line in the
+node's day log. A roster turn puts those files in the **member's own working
+directory** — the one path writable by the child under every isolation mode,
+since a container bind-mounts it rw at the same path and `run_as` probes it for
+write before the turn starts; they are dot-named, cleared before the turn as
+well as after, and the spans are moved to the durable store on the way past.
+The one preset deliberately left out is `ollama-copilot`: its launcher owns the
+head of the argv, so flags spliced next to the binary would reach `ollama`
+rather than the CLI behind it. A rig that names `max_ai_credits` on a preset
+with no fuse fails to load rather than running turns whose budget quietly does
+not apply.
+
+**A spend fuse.** `--max-credits N` composes copilot's `--max-ai-credits`, and
+a rig can carry the same value as `max_ai_credits` for every one of its turns.
+Minimum 30, refused below that before a spawn is spent. It is a **soft** cap:
+copilot learns a response's usage only after that response returns, so a
+response can overshoot and the NEXT model call is what gets blocked. Hidden
+work such as compaction counts against it.
+
+**Best-effort OTEL.** Each turn is handed its own
+`COPILOT_OTEL_FILE_EXPORTER_PATH`, which both enables OpenTelemetry and selects
+the file exporter, on that turn's environment alone — nothing machine-wide, and
+the operator's own sessions are untouched. When the file arrives it is kept
+under `~/.config/r4t/copilot/otel/`; it carries `chat` and `invoke_agent` spans
+with per-model-call cache reads and writes, which no other surface on this
+engine reports. When it does not, the turn says so and carries on:
+
+```
+r4t engine: otel: not written (org telemetry policy or race)
+```
+
+That is a normal outcome, not an error. An organisation telemetry policy,
+fetched from the server after the variable is honoured, reconfigures the
+exporter to `otlp-http` before the SDK initialises; the spans go to the
+organisation's collector and no file appears. Accounting is built on the usage
+file, which is reliable; the exporter is a bonus that arrived.
+
+#### `--session UUID` — the pin
+
+```bash
+r4t engine copilot run --dir ~/work/proj --session 3f1c… "carry on with the migration"
+```
+
+A session id that does not exist yet is founded under exactly that id
+(`--session-id`); one that does is resumed (`--resume=<id>`), with the turn's
+own `--dir` forced through `-C`. The `-C` is not decoration: a resumed copilot
+session runs in the directory it was **founded** in whatever the invoking cwd,
+so pinning the session without pinning the directory moves the problem rather
+than fixing it. Which of the two applies is read off copilot's own session
+store under `COPILOT_HOME`, so any caller that knows the id can pick the
+conversation up.
+
+`--session` and `--continue` contradict and are refused together: the id is the
+continuation, and it says which one.
+
+**On a roster** a member with `Continue:` on a copilot rig gets the same pin
+without naming anything. r4t mints the member's UUID on the turn that founds
+its conversation, records it, and names it on every turn that resumes — and
+mints a fresh one on a refound, because the point of a refound is not to walk
+back into a conversation r4t never saw finish. Two members on one host never
+reach each other's sessions, which is the failure bare `--continue` makes
+unavoidable.
+
+**Quota without `gh`.** `r4t engine copilot quota` uses `gh` when it is there
+and a token when it is not — `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+`GITHUB_TOKEN`, then the login copilot stored for itself — calling the
+entitlement endpoint over HTTPS directly. On a token-based-billing seat the
+percentage fields are degenerate whatever has been spent, so the signal is
+each bucket's cumulative `credits_used` plus the reset date; `credits_used` is
+a number on the bucket as well as text in the note.
 
 ### Why bare agents need a scaffold
 

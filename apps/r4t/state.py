@@ -58,6 +58,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1305,6 +1306,26 @@ def record_conversation(node: str, name: str, cli: str) -> dict:
         node, name,
         conversation={"cli": cli, "retired": False, "recorded_at": utc_now()},
     )
+
+
+# A pinned engine (copilot) keys its conversation on a session id rather than
+# on the CLI and directory. The id is minted on the member's founding turn and
+# named on every turn after it, so a member never resumes another member's
+# session — the failure `--continue` makes unavoidable on that engine.
+
+def read_session_id(node: str, name: str) -> str | None:
+    value = read_meta(node, name).get("session_id")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def mint_session_id(node: str, name: str) -> str:
+    """A fresh session id for this member, recorded before the turn runs.
+    Recorded first, not after: the turn that founds the session is the one
+    that names it, so an id lost to a crash would strand the session it
+    created."""
+    session = str(uuid.uuid4())
+    update_meta(node, name, session_id=session)
+    return session
 
 
 def retire_conversation(node: str, name: str) -> None:

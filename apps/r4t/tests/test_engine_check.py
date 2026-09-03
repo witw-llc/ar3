@@ -128,7 +128,11 @@ class TestHelpScan:
 
     def test_flag_matching_respects_word_bounds(self, bin_dir):
         # `--allow-all` must not be satisfied by `--allow-all-tools`.
-        fake_binary(bin_dir, "copilot", flags=["--allow-all-tools", "--no-ask-user"])
+        fake_binary(
+            bin_dir,
+            "copilot",
+            flags=["--allow-all-tools", "--no-ask-user", "--no-auto-update"],
+        )
         assert engine_check.check_engine("copilot").verdict == engine_check.ACCEPTED
         report = engine_check.check_engine("copilot", permissions="bypass")
         assert report.verdict == engine_check.REJECTED

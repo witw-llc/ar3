@@ -124,6 +124,9 @@ from roster import (
 from state import atomic_write_json, r4t_home
 
 PROMPT_PLACEHOLDER = "{prompt}"
+# The session a pinned engine resumes. Minted per member (dispatch) or named
+# by the caller (`r4t engine <id> run --session`); see `session_tokens`.
+SESSION_PLACEHOLDER = "{session}"
 # The directory the turn runs from, for harnesses that take it as an argument
 # rather than reading their own cwd. dispatch.run_harness fills it with the
 # member's resolved `Workdir:`.
@@ -412,7 +415,12 @@ HARNESS_PRESETS: dict[str, dict] = {
             "{model}",
             "-y",
             "--",
+            # Kept in step with the `copilot` preset: the same binary runs
+            # behind the launcher, so it gets the same clean stdout and the
+            # same pinned build.
             "--allow-all-tools",
+            "-s",
+            "--no-auto-update",
             "-p",
             "{prompt}",
         ],
@@ -445,10 +453,12 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "copilot": {
-        # No continue_argv: `copilot --continue` resumes the machine's most
-        # recent session whatever the directory, so members cannot be kept
-        # apart. Clean support means pinning `--resume=<session-id>` per
-        # member; that is #17, not this preset.
+        # No continue_argv, deliberately, and it is not an omission — see
+        # `session_argv` below. `copilot --continue` resumes the machine's most
+        # recent session whatever the directory, and on 2026-09-02 it did worse
+        # than that: invoked from a scratch directory it attached to the seat's
+        # own LIVE session and injected the prompt there as a new user turn,
+        # interrupting a tool call in flight. r4t never passes it.
         "text_tier": "moderate",
         "description": "GitHub Copilot CLI — matches apps/a8s/definitions/copilot.json",
         "a8s_definition": "copilot.json",
@@ -457,9 +467,43 @@ HARNESS_PRESETS: dict[str, dict] = {
         "invoke": [
             "copilot",
             "--allow-all-tools",
+            # -s keeps stdout the agent's reply alone; without it the CLI
+            # appends a human stats footer that a harness reading the reply
+            # has to parse around. The numbers are not lost — they go to the
+            # usage file (engines/copilot.py) in machine form.
+            "-s",
+            # The binary auto-updates by default, and on 2026-09-02 it went
+            # 1.0.80 -> 1.0.82 between two turns of one session, changing the
+            # flag surface underneath a measurement in progress. A turn that
+            # cannot say which build ran it is not a measurement.
+            "--no-auto-update",
             "-p",
             "{prompt}",
         ],
+        # No resolver and no default. `copilot` has no list verb to enumerate
+        # against, and the ids GitHub documents are stale on a live seat
+        # (`claude-sonnet-4.6` errors where `claude-sonnet-5` runs), so a
+        # doc-sourced allowlist would refuse strings the account accepts. The
+        # string passes through and a bad one fails at spawn with copilot's
+        # own `Model "<id>" from --model flag is not available`.
+        "model_argv": ["--model", "{model}"],
+        # The pin, which is how copilot continues. `--session-id` accepts a
+        # caller-invented UUID and creates the session at exactly that id, so a
+        # member mints its own and never negotiates for one; `--resume=<id>`
+        # drives it afterwards. `-C` is not optional on the resume: a resumed
+        # session runs in the directory it was FOUNDED in, whatever the
+        # invoking cwd, so pinning the session without pinning the directory
+        # moves the problem rather than fixing it.
+        "session_argv": ["--session-id", "{session}"],
+        "session_resume_argv": ["--resume={session}", "-C", "{workdir}"],
+        # The engine module that measures and fuses a turn of this preset
+        # (engines/copilot.py: per-turn spend, exported spans, --max-ai-credits).
+        # Both callers that compose a turn read this key, so a roster turn and
+        # an `engine run` turn are instrumented alike. `ollama-copilot` names
+        # none on purpose: the launcher owns the head of its argv, so flags
+        # spliced next to the binary would reach `ollama`, not the CLI behind
+        # it.
+        "instruments": "copilot",
     },
 }
 
@@ -718,7 +762,9 @@ _CONTINUE_REASONS = {
     # the refusal has to say why r4t will not pass it.
     "copilot": (
         "copilot --continue resumes the machine's most recent session whatever "
-        "the directory, so it crosses members and workdirs (#17)"
+        "the directory — on 2026-09-02 it attached to a seat's own live "
+        "session and injected the prompt into it — so copilot continues by "
+        "session pin instead: pass --session <uuid>"
     ),
     "ollama-claude": "continuation through `ollama launch claude` is not verified",
     "ollama-codex": "continuation through `ollama launch codex` is not verified",
@@ -767,6 +813,16 @@ _CONTINUE_GRADES: dict[str, tuple[str, str]] = {
     # is indifferent to task shape, so no window or size heuristic prevents it,
     # and one miss costs on the order of a hundred warm hits. r4t only ever
     # resumes across a process boundary, so a roster must not.
+    # Engine-Copilot §2: four cases on 1.0.82, each a codeword planted in one
+    # session and asked for from another directory. An explicit id never leaked
+    # into another pinned session, and a resumed session ran in its founding
+    # directory — which is why the resume tokens force `-C`. The grade is about
+    # the PIN; bare `--continue` on this CLI is not graded, it is refused.
+    "copilot": (
+        CONTINUE_GOOD,
+        "session-id pinning, verified live — two members pinned on one host "
+        "each recalled only their own session",
+    ),
     "claude": (
         CONTINUE_POOR,
         "resuming `claude -p` across a process boundary re-wrote the whole "
@@ -1074,6 +1130,7 @@ class Rig:
     mcp: bool | None = None
     permissions: str | None = None
     allowed_tools: str | None = None
+    max_ai_credits: int | None = None
     env: dict[str, str] = field(default_factory=dict)
     framing: FramingSpec | None = None
     error: str | None = None
@@ -1113,10 +1170,36 @@ class Rig:
         )
 
     @property
+    def instruments(self) -> str | None:
+        """The engine module that instruments a turn of this rig, or None.
+        dispatch hands it to `engines.copilot.turn_instruments`, which is the
+        same call `engine run` makes."""
+        return HARNESS_PRESETS.get(self.preset or "", {}).get("instruments")
+
+    @property
+    def session_argv(self) -> list[str]:
+        """Tokens that FOUND this rig's pinned session, `{session}` unfilled.
+        Empty when the preset continues by a flag instead, or not at all."""
+        return session_tokens(self.preset or "", resume=False)
+
+    @property
+    def session_resume_argv(self) -> list[str]:
+        """Tokens that DRIVE an already-founded pinned session."""
+        return session_tokens(self.preset or "", resume=True)
+
+    @property
+    def supports_session(self) -> bool:
+        """Whether this rig continues by naming a session. A pin needs both
+        halves: an id it can create and the same id it can come back to."""
+        return bool(self.session_argv and self.session_resume_argv)
+
+    @property
     def supports_continue(self) -> bool:
         """False unless the tokens have somewhere to go. An anchored preset
         whose invoke was hand-edited past its anchor fails closed here rather
         than building an argv the CLI would read as something else."""
+        if self.supports_session:
+            return True
         if not self.continue_argv:
             return False
         anchor = self.continue_anchor
@@ -1159,6 +1242,7 @@ class Rig:
         *,
         continue_conversation: bool = False,
         workdir: str | Path | None = None,
+        session: str | None = None,
     ) -> list[str]:
         pool = self.pool()
         chosen = pool[index % len(pool)]
@@ -1169,6 +1253,19 @@ class Rig:
         # turn cannot raise here.
         chosen, _ = apply_permissions(chosen, self.preset, self.permissions)
         chosen = apply_allowed_tools(chosen, self.preset, self.allowed_tools)
+        # The pin, before {workdir} is substituted, because the resume tokens
+        # carry a `-C {workdir}` of their own. A member that has one is either
+        # founding its session this turn or coming back to it; nothing else.
+        if session and self.supports_session:
+            chosen = splice_session(
+                chosen,
+                tokens=(
+                    self.session_resume_argv
+                    if continue_conversation
+                    else self.session_argv
+                ),
+                session=session,
+            )
         # {workdir} goes in first: the prompt carries message text, so
         # substituting it last keeps a `{workdir}` a member typed from being
         # read as a placeholder.
@@ -1327,8 +1424,43 @@ def well_continuing_presets() -> list[str]:
 
 
 def continue_presets() -> list[str]:
-    """Presets whose CLI can resume its own conversation."""
-    return [n for n in preset_names() if HARNESS_PRESETS[n].get("continue_argv")]
+    """Presets whose CLI can resume its own conversation, by either idiom —
+    a continue flag, or a session pin."""
+    return [
+        n for n in preset_names()
+        if HARNESS_PRESETS[n].get("continue_argv")
+        or HARNESS_PRESETS[n].get("session_resume_argv")
+    ]
+
+
+def instrumented_presets() -> list[str]:
+    """Presets whose turns are measured and can carry a spend fuse."""
+    return [n for n in preset_names() if HARNESS_PRESETS[n].get("instruments")]
+
+
+def session_presets() -> list[str]:
+    """Presets that continue by naming a session rather than by a bare
+    continue flag."""
+    return [n for n in preset_names() if HARNESS_PRESETS[n].get("session_resume_argv")]
+
+
+def session_tokens(preset: str, *, resume: bool) -> list[str]:
+    """The tokens that found (`resume=False`) or drive (`resume=True`) a pinned
+    session, still carrying `{session}`. Empty when the preset has no pin."""
+    entry = HARNESS_PRESETS.get(preset or "", {})
+    key = "session_resume_argv" if resume else "session_argv"
+    return list(entry.get(key, ()))
+
+
+def splice_session(argv: list[str], *, tokens: list[str], session: str) -> list[str]:
+    """`argv` pinned to one session: the preset's tokens next to the binary,
+    with `{session}` filled in. `{workdir}` is left for the caller to
+    substitute, which both continuation paths already do."""
+    return (
+        argv[:1]
+        + [t.replace(SESSION_PLACEHOLDER, session) for t in tokens]
+        + argv[1:]
+    )
 
 
 # --- the `mcp` knob: one stdio server, six harness idioms --------------------
@@ -2196,6 +2328,7 @@ CONFIGURABLE_INT_KEYS = (
     "history_body_max",
     "prompt_body_max",
     "echo_max_chars",
+    "max_ai_credits",
 )
 CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
 CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
@@ -2215,6 +2348,7 @@ CONFIGURABLE_RIG_KEYS = (
     "mcp",
     "permissions",
     "allowed_tools",
+    "max_ai_credits",
 )
 
 
@@ -2356,6 +2490,11 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
         if "echo_max_chars" in entry:
             return RigSetting(key, int(entry["echo_max_chars"]), "explicit", True)
         return RigSetting(key, DEFAULT_ECHO_MAX_CHARS, "built-in default", False)
+    if key == "max_ai_credits":
+        if key in entry:
+            return RigSetting(key, int(entry[key]), "explicit", True)
+        # No default: unset means the engine's own accounting, uncapped.
+        return RigSetting(key, None, "built-in default", False)
     if key in CONFIGURABLE_FLOAT_KEYS:
         if key in entry:
             return RigSetting(key, float(entry[key]), "explicit", True)
@@ -2619,6 +2758,32 @@ def _parse_rig(name: str, raw: object) -> Rig:
         if err:
             problems.append(f"{knob}: {err}")
         setattr(rig, knob, int(value))
+
+    # The spend fuse. The engine module owns the floor; a rig asks it at
+    # load, so a roster never charges its own budget for a turn copilot
+    # would refuse at spawn.
+    raw_credits = raw.get("max_ai_credits")
+    if raw_credits is not None:
+        credits, err = _positive_number(raw_credits, 0)
+        if err:
+            problems.append(f"max_ai_credits: {err}")
+        elif not rig.instruments:
+            # Fails the rig closed rather than running turns whose budget
+            # quietly does not apply — the same rule `mcp: true` follows on a
+            # preset with no idiom.
+            problems.append(
+                f"max_ai_credits: preset {rig.preset or 'none'} expresses no "
+                f"spend fuse (presets that do: "
+                f"{', '.join(instrumented_presets())})"
+            )
+        else:
+            from engines import copilot as copilot_engine
+
+            floor = copilot_engine.max_credits_problem(int(credits))
+            if floor:
+                problems.append(f"max_ai_credits: {floor}")
+            else:
+                rig.max_ai_credits = int(credits)
 
     raw_echo = raw.get("echo")
     if raw_echo is not None:

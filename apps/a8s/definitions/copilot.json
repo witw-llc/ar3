@@ -1,8 +1,10 @@
 {
-  "description": "GitHub Copilot CLI default — --allow-all-tools (required for non-interactive --prompt mode). No --continue: it is machine-global, not per-agent (#17).",
+  "description": "GitHub Copilot CLI default — --allow-all-tools (required for non-interactive --prompt mode), -s so stdout carries the reply alone, and --no-auto-update so the binary cannot change under a run. No --continue: it resumes the machine's most recent session whatever the directory, and has been observed injecting a prompt into a live session (#239); pin a session with `r4t engine copilot run --session <uuid>` instead.",
   "invoke": [
     "copilot",
     "--allow-all-tools",
+    "-s",
+    "--no-auto-update",
     "-p", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
   ]
 }

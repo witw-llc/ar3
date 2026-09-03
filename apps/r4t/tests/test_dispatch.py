@@ -22,6 +22,7 @@ from dispatch import (
     drain_until_quiet,
     handle_batch,
     handle_message,
+    resolve_workdir,
     run_harness,
     run_idle,
     split_recipient,
@@ -695,6 +696,261 @@ def continue_ctx(r4t_home, tmp_path, tells):
 
 def continue_argvs(calls):
     return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(calls.iterdir())]
+
+
+PINNED_ROSTER = textwrap.dedent(
+    """\
+    # Pinned Roster
+
+    ### Ana
+    - **Rig:** pinned
+    - **Leader:** yes
+    - **Continue:** 1h
+    """
+)
+
+
+@pytest.fixture
+def pinned_ctx(r4t_home, tmp_path, tells):
+    """A roster on an engine that continues by naming a session (copilot's
+    preset shape) rather than by a bare continue flag."""
+    from dispatch import DispatchContext
+
+    calls = tmp_path / "pinned-calls"
+    calls.mkdir()
+    # Executable with its own shebang: the pin's tokens are spliced in
+    # immediately after argv[0], which under a `python script.py` invoke would
+    # hand them to the interpreter instead of to the harness.
+    script = tmp_path / "pinned-harness"
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json, os, sys
+            calls_dir = {str(calls)!r}
+            n = len(os.listdir(calls_dir))
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
+                json.dump(sys.argv[1:], f)
+            print("pinned harness ran")
+            """
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    config = {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "pinned": {
+            "preset": "copilot",
+            "invoke": [str(script), "{prompt}"],
+            "timeout_seconds": 30,
+            "budget_max": 100,
+            "budget_earn_per_hour": 50,
+        },
+    }
+    config_path = tmp_path / "pinned-rigs.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    root = tmp_path / "pinned-repo"
+    root.mkdir()
+    (root / "ROSTER.md").write_text(PINNED_ROSTER, encoding="utf-8")
+    _sent, capture = tells
+    ctx = DispatchContext(
+        root=root,
+        node=NODE,
+        roster_path=root / "ROSTER.md",
+        config_path=config_path,
+        tell_fn=capture,
+    )
+    return ctx, calls
+
+
+class TestSessionPinnedRoster:
+    """copilot's `--continue` resumes the machine's most recent session, and
+    has been seen injecting a prompt into a live one, so a pinned member never
+    gets it: it mints an id, founds under it, and comes back to it (#239)."""
+
+    def test_the_founding_turn_names_a_minted_id(self, pinned_ctx):
+        ctx, calls = pinned_ctx
+        assert run_one(ctx, "boss", "acme:ana", "first task") == 1
+        (argv,) = continue_argvs(calls)
+        session = state.read_session_id(NODE, "ana")
+        assert session and argv[argv.index("--session-id") + 1] == session
+        assert not any(a.startswith("--resume") for a in argv)
+
+    def test_a_later_turn_resumes_that_id_in_the_members_workdir(self, pinned_ctx):
+        ctx, calls = pinned_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        first, second = continue_argvs(calls)
+        session = state.read_session_id(NODE, "ana")
+        assert f"--resume={session}" in second
+        workdir = resolve_workdir(ctx, roster_member(ctx, "ana"))
+        assert second[second.index("-C") + 1] == str(workdir)
+        assert "--session-id" not in second
+        # The id never changes underneath a live conversation.
+        assert first[first.index("--session-id") + 1] == session
+
+    def test_no_turn_ever_passes_a_bare_continue(self, pinned_ctx):
+        ctx, calls = pinned_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        run_one(ctx, "boss", "acme:ana", "second task")
+        assert all("--continue" not in argv for argv in continue_argvs(calls))
+
+    def test_a_refound_mints_a_fresh_id(self, pinned_ctx):
+        ctx, calls = pinned_ctx
+        run_one(ctx, "boss", "acme:ana", "first task")
+        founded = state.read_session_id(NODE, "ana")
+        # A turn r4t never saw finish: the next one must not walk back into it.
+        state.update_meta(NODE, "ana", last_turn={"exit": 1, "timed_out": False})
+        assert run_one(ctx, "boss", "acme:ana", "second task") == 1
+        refounded = state.read_session_id(NODE, "ana")
+        assert refounded != founded
+        second = continue_argvs(calls)[1]
+        assert second[second.index("--session-id") + 1] == refounded
+
+
+INSTRUMENTED_ROSTER = textwrap.dedent(
+    """\
+    # Instrumented Roster
+
+    ### Ana
+    - **Rig:** measured
+    - **Leader:** yes
+    """
+)
+
+COPILOT_USAGE = {
+    "totalPremiumRequestCost": 1,
+    "totalNanoAiu": 5612490000,
+    "tokenDetails": {
+        "input": {"tokenCount": 3},
+        "cache_write": {"tokenCount": 24918},
+        "output": {"tokenCount": 5},
+    },
+    "currentModel": "gpt-5.6-terra",
+}
+
+
+@pytest.fixture
+def instrumented_ctx(r4t_home, tmp_path, tells, monkeypatch):
+    """A roster member on a copilot rig with a spend fuse set. The stub CLI
+    records the argv and the environment it was handed, and writes the usage
+    file where the real one would."""
+    from dispatch import DispatchContext
+    from engines import copilot as copilot_engine
+
+    monkeypatch.setattr(copilot_engine, "supports_usage_file", lambda *a: True)
+    calls = tmp_path / "measured-calls"
+    calls.mkdir()
+    # Executable with its own shebang: the instruments are spliced in
+    # immediately after argv[0], which under a `python script.py` invoke would
+    # hand them to the interpreter instead of to the harness.
+    script = tmp_path / "measured-harness"
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json, os, sys
+            calls_dir = {str(calls)!r}
+            n = len(os.listdir(calls_dir))
+            record = {{
+                "argv": sys.argv[1:],
+                "otel": os.environ.get("COPILOT_OTEL_FILE_EXPORTER_PATH"),
+            }}
+            with open(os.path.join(calls_dir, f"call-{{n:03d}}.json"), "w", encoding="utf-8", newline="") as f:
+                json.dump(record, f)
+            if "--usage-output-file" in sys.argv:
+                path = sys.argv[sys.argv.index("--usage-output-file") + 1]
+                with open(path, "w", encoding="utf-8", newline="") as f:
+                    json.dump({COPILOT_USAGE!r}, f)
+            print("measured harness ran")
+            """
+        ),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    config = {
+        "throttle": {"max_concurrent": 0, "min_seconds_between_turn_starts": 0},
+        "cell_budget_max": 200,
+        "cell_budget_earn_per_hour": 100,
+        "measured": {
+            "preset": "copilot",
+            "invoke": [str(script), "{prompt}"],
+            "max_ai_credits": 50,
+            "timeout_seconds": 30,
+            "budget_max": 100,
+            "budget_earn_per_hour": 50,
+        },
+    }
+    config_path = tmp_path / "measured-rigs.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    root = tmp_path / "measured-repo"
+    root.mkdir()
+    (root / "ROSTER.md").write_text(INSTRUMENTED_ROSTER, encoding="utf-8")
+    _sent, capture = tells
+    ctx = DispatchContext(
+        root=root,
+        node=NODE,
+        roster_path=root / "ROSTER.md",
+        config_path=config_path,
+        tell_fn=capture,
+    )
+    return ctx, calls
+
+
+class TestTurnInstruments:
+    """A roster turn is instrumented and fused the same as an `engine run`
+    turn. dispatch composes its own argv, so nothing about `engine run`'s
+    composition proves this — a member on a copilot rig once dropped its
+    configured fuse and both instruments in silence (#244)."""
+
+    def test_the_fuse_reaches_the_child(self, instrumented_ctx):
+        ctx, calls = instrumented_ctx
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        argv = json.loads(sorted(calls.iterdir())[0].read_text())["argv"]
+        assert argv[argv.index("--max-ai-credits") + 1] == "50"
+
+    def test_the_usage_file_reaches_the_child(self, instrumented_ctx):
+        ctx, calls = instrumented_ctx
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        argv = json.loads(sorted(calls.iterdir())[0].read_text())["argv"]
+        named = Path(argv[argv.index("--usage-output-file") + 1])
+        # In the member's own workdir, the one path writable by the child
+        # under every isolation mode.
+        assert named.parent == resolve_workdir(ctx, roster_member(ctx, "ana"))
+
+    def test_the_exporter_variable_reaches_the_child(self, instrumented_ctx):
+        ctx, calls = instrumented_ctx
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        handed = json.loads(sorted(calls.iterdir())[0].read_text())["otel"]
+        assert handed and handed.endswith(".jsonl")
+
+    def test_the_turn_record_carries_the_spend(self, instrumented_ctx):
+        ctx, calls = instrumented_ctx
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        measured = state.read_meta(NODE, "ana")["last_spend"]
+        assert measured["spend"]["credits"] == 5.6125
+        assert measured["spend"]["model"] == "gpt-5.6-terra"
+        assert measured["spend"]["cache_write_tokens"] == 24918
+        assert measured["otel"]["records"] is None  # the stub wrote none
+        assert "spend: 5.61 credits · gpt-5.6-terra" in read_log()
+
+    def test_nothing_is_left_in_the_members_workdir(self, instrumented_ctx):
+        ctx, _calls = instrumented_ctx
+        assert run_one(ctx, "boss", "acme:ana", "task") == 1
+        workdir = resolve_workdir(ctx, roster_member(ctx, "ana"))
+        assert not list(workdir.glob(".r4t-copilot-*"))
+
+    def test_an_uninstrumented_rig_measures_nothing(self, continue_ctx):
+        # cursor: the fixture beside this one, on a preset with no instruments.
+        ctx, _calls = continue_ctx
+        assert run_one(ctx, "acme:ana", "acme:bob", "task") == 1
+        assert "last_spend" not in state.read_meta(NODE, "bob")
+
+
+def roster_member(ctx, name):
+    return load_roster(ctx.roster_path).find(name)
 
 
 REFOUND_PREAMBLE = "Check your STATUS.md to refresh your memory."
@@ -3239,7 +3495,7 @@ class TestCli:
         )
         config = tmp_path / "nocontinue-rigs.json"
         config.write_text(
-            json.dumps({"solo": {"preset": "copilot", "invoke": ["copilot", "-p", "{prompt}"]}}),
+            json.dumps({"solo": {"preset": "muse", "invoke": ["muse", "exec", "{prompt}"]}}),
             encoding="utf-8",
         )
         rc = self.run("roster", "check", "--root", str(root), "--rig-config", str(config))
