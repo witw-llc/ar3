@@ -1,11 +1,11 @@
 ---
 name: "ar3"
-description: "Show whether ar3 is set up and working on this machine."
+description: "Show whether AR3 is set up and working on this machine."
 ---
 
-# ar3
+# AR3
 
-The front door to ar3: **a8s** (agent message router), **r4t**
+The front door to AR3: **a8s** (agent message router), **r4t**
 (the roster), **k7e** (knowledge engine).
 
 `ar3` never mutates product state; it owns and maintains the suite's own
@@ -121,7 +121,7 @@ it starts and says which it found. A detached HEAD does not: that is what an
 message is still `tell`, running a roster is still `r4t dispatch`, storing
 knowledge is still `k7e`. Those commands appear in `ar3` output only as hints
 pointing you at the tool that owns them. `ar3 deps` and `ar3 update` are the
-exceptions to "ar3 never mutates", and only in the same narrow way: they write
+exceptions to "AR3 never mutates", and only in the same narrow way: they write
 `ar3`'s own substrate — the dependency cache and the install tree — never a
 product's state. `ar3 update` runs the suite's own installer; it does not
 reimplement it, and it is not a wrapper around `a8s update`, which means

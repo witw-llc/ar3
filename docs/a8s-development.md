@@ -24,6 +24,14 @@ Read [a8s.md](a8s.md) first for concept and usage.
   envelopes every iteration, including while another handled agent's wake is
   in flight — the move spawns nothing, and `tells` watches that inbox. Only
   subprocess wakes queue behind the single in-flight slot.
+- **`tell` never blocks, and stays minimal.** `tell` is asynchronous by
+  nature; past a remote the envelope is gone the way a UDP packet is gone. No
+  flag makes it wait, retry, confirm, or declare a wire, because a script that
+  treats "no answer yet" as failure resends and doubles the message. A sender
+  that wants to know what became of a message reads the router's receipt
+  later, loosely, with `tells` (`-f`, `--sent`). `tell` is the one thing every
+  harness and every remote seat shares, so every convenience goes on `tells`
+  or on the roster, never on `tell`. Owner ruling, 2026-09-03.
 - **Agent-directory invariant — `.outbox/` is one-way.** a8s never reads or
   writes sidecars there. Ingest is atomic rename into `pending/`.
 - **Remote routing publishes to all configured remotes.** Receivers dedupe by ULID.

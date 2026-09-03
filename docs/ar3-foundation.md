@@ -1,7 +1,7 @@
-# ar3 doctrine
+# AR3 doctrine
 
-Every app in ar3 follows one doctrine. A user who has never opened a
-new ar3 app can navigate it because it feels like the ones already learned. The
+Every app in AR3 follows one doctrine. A user who has never opened a
+new AR3 app can navigate it because it feels like the ones already learned. The
 doctrine governs **how** apps do things, never **how much** they need: r4t taking
 a TUI dependency and k7e taking none are both compliant.
 
@@ -58,7 +58,7 @@ mechanism, which fetches on demand.
   the foundation before it is used, never invented locally.
 - **`--version` is answered by `ar3ver` everywhere.**
 
-The test to apply to any proposed CLI change: a user who learns one ar3 app has
+The test to apply to any proposed CLI change: a user who learns one AR3 app has
 learned the grammar of all of them, including the ones that do not exist yet.
 
 ## 4. Processes
@@ -99,4 +99,4 @@ learned the grammar of all of them, including the ones that do not exist yet.
 - [a8s](a8s.md) — the message router. [Development notes](a8s-development.md).
 - [r4t](r4t.md) — the roster. [Development notes](r4t-development.md).
 - [k7e](k7e.md) — the knowledge engine. [Architecture](k7e-architecture.md).
-- [ar3](ar3.md) — the front door.
+- [AR3](ar3.md) — the front door.

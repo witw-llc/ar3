@@ -123,8 +123,11 @@ tells: no message within 300s
 ```
 
 Not a typo. On the free path this is the *real* result, and it is worth more
-than a staged success. The work happened — read the thread's spine in the
-ticker:
+than a staged success. The last mile, a member messaging you back, is the one
+step that needs the model to follow an instruction, and small local models
+follow instructions intermittently. On the subscription path this reply lands.
+
+The work happened either way — read the thread's spine in the ticker:
 
 **Run**
 
@@ -176,9 +179,9 @@ they cost every turn whether he obeys them or not.
 
 When a thread goes sideways like that, you want to talk to Moss directly —
 and from your seat you cannot, because the roster has one door. `r4t tell --as`
-is the way in from the operator's side: it speaks into the roster *as* a
-member you name, which is how you jumpstart a stalled roster or reproduce
-what one member sends another.
+is the way in when you need to debug rather than direct: it speaks into the
+roster *as* a member you name, which is how you jumpstart a stalled roster or
+reproduce what one member sends another.
 
 **Run**
 

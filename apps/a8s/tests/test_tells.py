@@ -276,7 +276,11 @@ def test_tells_truncates_long_body_with_recovery_command(tmp_path, monkeypatch, 
     t.join()
     out = capsys.readouterr().out
     assert rc == 0
-    assert "BOB: HEAD" in out
+    # #245: a body over --body-max now carries the pointer in the header,
+    # ahead of the body, instead of only in the trailing footer.
+    lines = out.split("\n")
+    assert lines[0].startswith("BOB: full message: tells --recover ")
+    assert "HEAD" in out
     assert "xxxxx" in out
     assert "TAIL" not in out
     assert "truncated at 20 chars" in out
@@ -292,7 +296,10 @@ def test_tells_body_max_zero_prints_full_body(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
     long_body = "y" * 500
     t = _deliver_after(inbox, 0.2, [("BOB", long_body, "01FULLBODY000000000000000")])
-    rc = tells_main(["--body-max", "0"])
+    # --line-max 0 isolates body-max from the (default-on) line wrap: this
+    # test is about --body-max, and a 500-byte run with no spaces would
+    # otherwise get hard-broken by the default 400-byte wrap.
+    rc = tells_main(["--body-max", "0", "--line-max", "0"])
     t.join()
     out = capsys.readouterr().out
     assert rc == 0
@@ -310,6 +317,236 @@ def test_parse_tells_body_max_and_env(monkeypatch):
     assert parse_tells_argv(["--body-max", "0"]).body_max == 0
     with pytest.raises(TellsUsageError, match="body-max"):
         parse_tells_argv(["--body-max", "-1"])
+
+
+def test_parse_tells_line_max_and_env(monkeypatch):
+    from tells import DEFAULT_LINE_MAX_BYTES, TELLS_LINE_MAX_ENV
+
+    monkeypatch.delenv(TELLS_LINE_MAX_ENV, raising=False)
+    assert parse_tells_argv([]).line_max == DEFAULT_LINE_MAX_BYTES
+    monkeypatch.setenv(TELLS_LINE_MAX_ENV, "80")
+    assert parse_tells_argv([]).line_max == 80
+    assert parse_tells_argv(["--line-max", "0"]).line_max == 0
+    with pytest.raises(TellsUsageError, match="line-max"):
+        parse_tells_argv(["--line-max", "-1"])
+
+
+def test_wrap_body_text_wraps_1000_char_single_line_under_default_line_max(monkeypatch):
+    """#245 control: a paragraph-shaped body, as agents write them, must not
+    hand the host a line over the measured 500-byte clip. Also checks the
+    wrap is reversible: stripping the continuation indent and rejoining on
+    spaces recovers the original body exactly."""
+    from tells import CONTINUATION_INDENT, DEFAULT_LINE_MAX_BYTES, wrap_body_text
+
+    words = [f"word{i}" for i in range(180)]
+    body = " ".join(words)[:1000]
+    assert len(body) == 1000
+
+    wrapped, was_wrapped = wrap_body_text(body, DEFAULT_LINE_MAX_BYTES)
+
+    assert was_wrapped is True
+    lines = wrapped.split("\n")
+    assert len(lines) > 1
+    for line in lines:
+        assert len(line.encode("utf-8")) <= DEFAULT_LINE_MAX_BYTES
+    rejoined = " ".join(
+        line[len(CONTINUATION_INDENT):] if i else line for i, line in enumerate(lines)
+    )
+    assert rejoined == body
+
+
+def test_wrap_body_text_wraps_multibyte_by_bytes_not_chars():
+    """Em-dashes and accents are multibyte in UTF-8; the wrap must respect
+    the encoded byte length, not len(str), or a line under the char count
+    can still overflow the host's byte clip."""
+    from tells import wrap_body_text
+
+    word = "café—résumé naïve—garçon"
+    body = (word + " ") * 30
+    body = body.rstrip(" ")
+    assert len(body.encode("utf-8")) > len(body)  # genuinely multibyte
+
+    wrapped, was_wrapped = wrap_body_text(body, 60)
+
+    assert was_wrapped is True
+    lines = wrapped.split("\n")
+    for line in lines:
+        assert len(line.encode("utf-8")) <= 60
+    rejoined = " ".join(line[2:] if i else line for i, line in enumerate(lines))
+    assert rejoined == body
+
+
+def _rejoin(wrapped: str) -> str:
+    """Undo one wrapped line: strip the continuation indent, join on the single
+    space each break consumed. The wrap's reversibility claim in one helper."""
+    from tells import CONTINUATION_INDENT
+
+    lines = wrapped.split("\n")
+    return " ".join(
+        line[len(CONTINUATION_INDENT):] if i else line for i, line in enumerate(lines)
+    )
+
+
+def test_wrap_body_text_keeps_leading_and_repeated_spaces():
+    """A break must consume exactly one space. An empty token (from a run of
+    spaces, or a leading one) is not an empty output buffer, and conflating
+    the two silently ate indentation off the front of a wrapped line."""
+    from tells import wrap_body_text
+
+    body = "  abc def ghi"
+
+    wrapped, was_wrapped = wrap_body_text(body, 5)
+
+    assert was_wrapped is True
+    assert _rejoin(wrapped) == body
+
+
+def test_wrap_body_text_keeps_trailing_spaces_and_reports_the_wrap():
+    """A line that is only over the limit by its trailing spaces still changed,
+    so it must round-trip AND set was_wrapped — the caller prints the recovery
+    pointer off that flag, and a dropped space with was_wrapped=False showed
+    neither the original content nor the way back to it."""
+    from tells import wrap_body_text
+
+    body = "x" * 399 + "  "
+
+    wrapped, was_wrapped = wrap_body_text(body, 400)
+
+    assert was_wrapped is True
+    assert _rejoin(wrapped) == body
+
+
+def test_wrap_body_text_keeps_a_line_that_is_only_spaces():
+    """The degenerate run: 401 spaces used to collapse to an empty string."""
+    from tells import wrap_body_text
+
+    body = " " * 401
+
+    wrapped, was_wrapped = wrap_body_text(body, 400)
+
+    assert was_wrapped is True
+    assert _rejoin(wrapped) == body
+
+
+def test_wrap_body_text_keeps_spaces_across_a_range_of_limits():
+    """Sweep the boundary rather than trust one offset: whatever the limit, and
+    wherever the run of spaces falls against it, the pieces rejoin byte for
+    byte. Every space stays on one side of the break or the other."""
+    from tells import wrap_body_text
+
+    bodies = [
+        "  leading two",
+        "trailing two  ",
+        "a  b   c    d",
+        " ".join(["word"] * 12) + "   " + " ".join(["tail"] * 6),
+        "one" + " " * 30 + "two",
+    ]
+    for body in bodies:
+        for limit in range(16, 41):
+            wrapped, _ = wrap_body_text(body, limit)
+            assert _rejoin(wrapped) == body, (body, limit)
+
+
+def test_line_max_below_the_floor_is_refused(monkeypatch):
+    """Every accepted positive --line-max has to bound the lines it emits. The
+    wrap reserves a two-byte indent and never splits a character, so a limit
+    that small cannot be honored; refuse it by name instead of over-running."""
+    from tells import MIN_LINE_MAX_BYTES, TELLS_LINE_MAX_ENV, resolve_line_max
+
+    monkeypatch.delenv(TELLS_LINE_MAX_ENV, raising=False)
+    for value in ("1", "2", "4", str(MIN_LINE_MAX_BYTES - 1)):
+        with pytest.raises(TellsUsageError, match=str(MIN_LINE_MAX_BYTES)):
+            parse_tells_argv(["--line-max", value])
+    # 0 is still "no wrap", and the floor itself is accepted.
+    assert parse_tells_argv(["--line-max", "0"]).line_max == 0
+    assert parse_tells_argv(["--line-max", str(MIN_LINE_MAX_BYTES)]).line_max == MIN_LINE_MAX_BYTES
+    # The environment variable goes through the same gate as the flag.
+    monkeypatch.setenv(TELLS_LINE_MAX_ENV, "4")
+    with pytest.raises(TellsUsageError, match=str(MIN_LINE_MAX_BYTES)):
+        resolve_line_max()
+
+
+def test_wrap_body_text_at_the_floor_bounds_every_line():
+    """The positive control for the floor: at the smallest accepted --line-max,
+    ASCII and four-byte characters alike stay inside it, indent included."""
+    from tells import MIN_LINE_MAX_BYTES, wrap_body_text
+
+    for body in ("abcd" * 20, "\U0001f600" * 20, "\U0001f600 \U0001f600 " * 10, "word " * 20):
+        wrapped, _ = wrap_body_text(body, MIN_LINE_MAX_BYTES)
+        for line in wrapped.split("\n"):
+            assert len(line.encode("utf-8")) <= MIN_LINE_MAX_BYTES, (body, line)
+
+
+def test_tells_short_body_prints_byte_identical_to_pre_change_output(tmp_path, monkeypatch, capsys):
+    """A body under both --body-max and --line-max must print exactly what
+    `tells` printed before this change: ``"{sender}: {content}\\n"``, with no
+    header pointer and no wrap. Expected output is built from the pre-#245
+    format rule (`_print_plain` was `print(f"{sender}: {body}")` with `body ==
+    format_displayed_content(content, path, body_max)`, unchanged for content
+    under body_max) rather than captured via `git stash`, since the rule is a
+    one-line f-string and reproducing it here is exact."""
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    body = "x" * 300
+    msg_id = "01SHORTBODY0000000000000A"
+    t = _deliver_after(inbox, 0.2, [("BOB", body, msg_id)])
+    rc = tells_main([])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out == f"BOB: {body}\n"
+
+
+def test_tells_line_max_zero_disables_wrap(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    long_body = "z" * 1000
+    t = _deliver_after(inbox, 0.2, [("BOB", long_body, "01NOWRAP0000000000000000")])
+    rc = tells_main(["--line-max", "0"])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"BOB: {long_body}\n" == out
+    assert "recover" not in out
+
+
+def test_tells_line_max_env_respected(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    monkeypatch.setenv("TELLS_LINE_MAX", "50")
+    long_body = "word " * 40
+    t = _deliver_after(inbox, 0.2, [("BOB", long_body.strip(), "01ENVWRAP000000000000000")])
+    rc = tells_main([])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [l for l in out.split("\n") if l]
+    # The header line (sender + recovery command) is a fixed diagnostic line,
+    # not part of the wrapped body — --line-max bounds body lines, and 50
+    # bytes is too tight to also fit "BOB: full message: tells --recover
+    # <token>". Only the body lines (everything after the header) are held
+    # to the limit.
+    assert lines[0].startswith("BOB: full message: tells --recover ")
+    assert all(len(l.encode("utf-8")) <= 50 for l in lines[1:])
+    assert "tells --recover" in out
+
+
+def test_tells_pointer_appears_in_header_before_body(tmp_path, monkeypatch, capsys):
+    """The recovery command is printed before the body, not only trailing it
+    (deliverable 2: pointer-first)."""
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    long_body = "y" * 1000
+    t = _deliver_after(inbox, 0.2, [("BOB", long_body, "01POINTER000000000000000")])
+    rc = tells_main([])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.rstrip("\n").split("\n")
+    assert lines[0].startswith("BOB: full message: tells --recover ")
+    # The body's first wrapped chunk is a plain run of "y" with no header
+    # text mixed in — the header is its own line, strictly before it.
+    assert lines[1] == "y" * 400
 
 
 def test_tells_follow_prints_waves(tmp_path, monkeypatch, capsys):

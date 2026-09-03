@@ -64,7 +64,7 @@ Full flags and every command: **[k7e-cli.md](k7e-cli.md)**.
 
 ## Install
 
-`k7e` is on `PATH` with the rest of ar3 — see the
+`k7e` is on `PATH` with the rest of AR3 — see the
 [install section](../README.md#install). From a clone, without installing:
 
 ```bash

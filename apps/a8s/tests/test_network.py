@@ -574,7 +574,7 @@ class TestReceiveEnvelope:
                 {"id": new_ulid(), "from": "A"},
                 ["B"],
             )
-            envelope["a8s_control"]["version"] = 2
+            envelope["a8s_control"]["version"] = 3
             receive_envelope(
                 json.dumps(envelope).encode(),
                 two_local_agents,

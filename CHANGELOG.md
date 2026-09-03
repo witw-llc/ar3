@@ -14,6 +14,77 @@ version when the batch is ready to merge.
 
 ### Added
 
+- **A sender learns what became of its message.** Delivery receipts report
+  the whole life of a message — attachments fetched or failed per recipient,
+  deferrals, expiries, and nodes that own no such recipient — and the router
+  keeps one file per sent message at `.outbox/.receipts/<ULID>.json`.
+  `tells --sent [--since 2h]` lists a seat's own outbound messages and what
+  became of each, so a script can check a delivery without a person reading
+  a log; `tell` itself never blocks for an outcome; `tells -f` marks a message delivered more than ten
+  minutes after it was sent with `[late 32h]`, so a replay is
+  distinguishable from live traffic; `a8s trace` gains `ENQUEUED`,
+  `DEFERRED`, `ATTACHMENT_FAILED`, `EXPIRED` and `NO_LOCAL_RECIPIENT`, and an
+  unknown recipient on a network with remotes no longer vanishes without a
+  record. Closes the sender-side half of #93; the deferral's durability
+  across a restart stays #205.
+- **`r4t rig detect` — one command from a fresh machine to a working rig.**
+  It probes every run-capable preset against the CLI actually installed,
+  reports what each detected engine has left in the tank, and prints the
+  `r4t rig add` line for it; `--add` creates the rigs. No turn is spent, and
+  a re-run never overwrites a rig you have tuned. Closes #252.
+- **`tools/surface-audit.py` counts every surface as wired, deferred or
+  unaccounted.** CLI verbs, config keys and bundled runbooks are enumerated
+  by static parse and classified: wired means a test names it and a doc page
+  shows it, deferred means the surface where you meet it says so, unaccounted
+  means neither, and a command's words have to co-occur in one argv and in
+  one documented command line, so tokens from unrelated tests and pages
+  never combine into proof. `tools/surface-audit.allow` carries what is
+  neither today, one reason per line, and shrinks toward 1.0. The tool runs
+  in `release.yml`; its classifier tests run in the per-PR checks. Closes
+  #253.
+- **The guide opens and closes on the hand-off.** `guide/README.md` leads
+  with why a person wants a team rather than what gets built, chapter 6 ends
+  on the seat instead of a parts list, chapter 1's first instruction is the
+  install line and nothing else, and chapter 4's `no message within 300s`
+  receipt says why it happens, so it reads as a measurement rather than a
+  product that cannot reach you. Chapter zero follows the one-pager (#258).
+- **A claim sweep keeps public surfaces measured, not nominal.**
+  `tools/claim-sweep.py` fails the release if `README.md`, `docs/*.md` or
+  `guide/` states a configured number as a promise — a bare cadence or
+  latency figure with no measurement marker, a reliability absolute, or the
+  one-pager's banned register on the two READMEs; `tools/claim-sweep.allow`
+  records the lines a person has already cleared, and a pattern with no
+  reason written above it fails the run instead of suppressing anything.
+  Closes #250.
+- **The objection ledger is a page.** `docs/ar3-objections.md` holds nine
+  objections in the customer's own words, the story that answers each, the
+  mechanism and doc that proves it, and a status of answered, partial or open,
+  so a weak story is never told as a strong one. Closes #251.
+- **`tells` wraps its lines under the harness clip, and points at the full
+  message first.** Claude Code's Monitor notification clips each stdout
+  line at 500 bytes — measured against six real tells on 2026-09-02, all
+  cut at exactly 500 — and the next line arrives intact, so a paragraph
+  over that loses its tail with no sign anything was cut
+  ([#245](https://github.com/witw-llc/ar3-private/issues/245)). On the
+  plain path, a printed line over `--line-max` / `TELLS_LINE_MAX` bytes
+  (default 400, `0` = no wrap) is now soft-wrapped at the last space under
+  the limit, byte-safe against multibyte text, with a two-space indent on
+  continuation lines. Any message needing that wrap, or already over
+  `--body-max`, prints `tells --recover <token>` in the header, before the
+  body, instead of only in the trailing footer that a clipped line never
+  reached. A short body still prints exactly as before.
+
+### Changed
+
+- **The product is written AR3 in prose.** The command, paths and package
+  stay `ar3`, the way Claude Code is spelled out while its command is
+  `claude`; the four apps keep their lowercase names. Docs, guide and the
+  front door's own help text swept; the one-pager leads with it.
+
+## 0.1.82
+
+### Added
+
 - **GitHub Copilot CLI is an officially supported r4t engine.** It was a
   preset, a run engine and a check probe with no model slot, no
   continuation and no measurement; it now composes and reads six things on

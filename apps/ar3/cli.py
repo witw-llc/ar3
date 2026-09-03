@@ -607,8 +607,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="ar3",
         description=(
-            "Front door to the ar3 suite. Bare `ar3` reports where a8s, r4t and "
-            "k7e stand; `ar3 doctor` probes the tools they need. ar3 never runs "
+            "Front door to the AR3 suite. Bare `ar3` reports where a8s, r4t and "
+            "k7e stand; `ar3 doctor` probes the tools they need. AR3 never runs "
             "another product's commands for you."
         ),
     )
@@ -624,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
             "ar3 deps lists known dependency groups (requirements/*.txt) with "
             "installed/missing status for the running interpreter. ar3 deps "
             "<group> installs that group into ~/.local/share/ar3/deps — the "
-            "one thing ar3 ever writes."
+            "one thing AR3 ever writes."
         ),
     )
     deps.add_argument(
@@ -634,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
     deps.set_defaults(func=cmd_deps)
     update = sub.add_parser(
         "update",
-        help="Update this ar3 install in place",
+        help="Update this AR3 install in place",
         description=(
             "ar3 update runs the suite's own installer against the copy you "
             "invoked, which pulls it forward and restarts running a8s nodes so "

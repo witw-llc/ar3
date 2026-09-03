@@ -222,8 +222,8 @@ any prefixes pointing at it.
 |                                                                             |                                                                                                                                                                                                                                                                                                                           |
 | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `a8s tell <name> [<msg>\|-]`                                                | Routed message via `_write_outbox` into the sender's configured outbox. `-` reads the body from stdin (`- <<'EOF'` / `- < file.md`), which keeps shell expansion out of it, and waits on stdin for as long as it takes. Without a message and without `-`, a **terminal** reads a typed body until Ctrl-D and a **pipe** is read if a producer speaks within two seconds (`TELL_STDIN_WAIT_SEC` raises that for a slow producer); a pipe with nobody behind it exits 2 rather than waiting. `<name>` may be an agent or alias (fans out at routing time). Sender = agent whose root encloses CWD; router force-stamps `from` from outbox ownership.                                                                                           |
-| `tell <name> [<msg>\|-]` (top-level shim, `tell` at the repo root) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when the a8s state root is readable (see [filedrop.md](a8s-filedrop.md)). Drops a JSON envelope. When the registry is reachable, `from` stamping applies; recipient validation applies only when the resolved outbox is a registered one (a staging outbox belongs to another router — see [a8s-tell.md](a8s-tell.md#who-validates-the-recipient)). Windows: `tell.cmd`, whose argv is **not** native-equivalent — `cmd.exe` truncates any argument at its first newline, so a multi-line body and any `FILE:` line with it are lost silently; pass those on stdin or `--file` (#230). Operator internals: [a8s-tell.md](a8s-tell.md). |
-| `tells [-f] [--timeout SEC] [--body-max N] [--glow [theme]]` (shim `tells` at the repo root) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited) print a `tells --recover <token>` command for the inbox JSON — the token is an encoded path, so no shell rewrites it. `--glow` / headings share convo's markdown formatting. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
+| `tell <name> [<msg>\|-]` (top-level shim, `tell` at the repo root) | Delegates to `a8s tell` (`apps/a8s/tell.py`). Outbox: `TELL_OUTBOX_DIR` if set, else a unique configured outbox matched from CWD when the a8s state root is readable (see [filedrop.md](a8s-filedrop.md)). Drops a JSON envelope. When the registry is reachable, `from` stamping applies; recipient validation applies only when the resolved outbox is a registered one (a staging outbox belongs to another router — see [a8s-tell.md](a8s-tell.md#who-validates-the-recipient)). Windows: `tell.cmd`, whose argv is **not** native-equivalent — `cmd.exe` truncates any argument at its first newline, so a multi-line body and any `FILE:` line with it are lost silently; pass those on stdin or `--file` (#230). `tell` never blocks for an outcome — read what became of a send with `tells --sent`. Operator internals: [a8s-tell.md](a8s-tell.md). |
+| `tells [-f] [--timeout SEC] [--body-max N] [--line-max N] [--glow [theme]] [--sent [--since D]]` (shim `tells` at the repo root) | Receive-side complement of `tell` (`apps/a8s/tells.py`). Same outbox resolution as `tell`; watches `.inbox` beside it. Default: wait up to 5s for a burst. `-f` / `--timeout 0`: follow until Ctrl+C. On the plain (non-`--glow`, non-heading) path, a printed line over `--line-max` / `TELLS_LINE_MAX` bytes (default 400; `0` = no wrap; a positive value under **16** is refused, since the two-byte continuation indent plus one four-byte character could not fit inside it) is soft-wrapped at the last space under the limit, with a two-space indent on continuation lines. A break consumes exactly one space, so stripping the indent and rejoining the lines on a single space recovers the original body byte for byte — runs of spaces, leading and trailing whitespace included — unless a single word was too long for the limit and had to be hard-broken — Claude Code's Monitor notification clips each stdout line at 500 bytes, and a paragraph over that loses its tail with no sign anything was cut. Bodies over `--body-max` / `TELLS_BODY_MAX` (default 16000; `0` = unlimited), and any message a line of which needed wrapping, print a `tells --recover <token>` command in the header, before the body, so a host that clips mid-message still shows where the whole thing is — the token is an encoded path, so no shell rewrites it. `--glow` / headings share convo's markdown formatting, unwrapped. A message delivered more than 10 minutes after the sender queued it prints with a `[late 32h]` prefix, so replay is distinguishable from live traffic. `--sent [--since 2h]` lists this seat's own outbound ULIDs with their latest delivery state, age and recipient, read from the receipt files in its own outbox — no registry, no machine-wide log. Non-destructive. Prefer over `convo -f` for filedrop inbound-only loops. |
 | `a8s logs <name>... [--tail N] [-f]`                                        | Read per-agent log files; one agent in append order, multiple merge by ISO timestamp. `-f` follows.                                                                                                                                                                                                                       |
 | `a8s convo <name> [--limit N] [-f] [--from NAME] [--glow [theme]]`                        | Markdown history of messages to or from an agent. Default `--limit 10`; this controls display only. `-f` follows sequence-numbered rows in `conversations.sqlite3` (shows outbound too — use `tells -f` for filedrop inbound-only). `--from NAME` (repeatable, case-insensitive) keeps only that sender's messages, in the backlog and under `-f`; the limit counts matches, not rows scanned. `a8s update` retains `convo_max_rows` rows (default 50000). |
 | `a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID]` (alias `a8s tx`) | Recent routing events across every message, oldest first. `--event` (repeatable, checked against the known set), `--from`/`--to` and `--msg` narrow it; `-f` polls for new rows once a second. Use it when you do not have a ULID yet — `--event DISCARDED --event FILE_UPLOAD_FAILED` is the "did anything get lost" view. Same `transactions.sqlite3` and the same `txlog_max_rows` retention as `trace`. |
@@ -756,22 +756,40 @@ the same transport. This is an extension of the existing envelope shape:
   "files": [],
   "a8s_control": {
     "type": "delivery_receipt",
-    "version": 1,
+    "version": 2,
     "for_id": "<original envelope ULID>",
     "sender": "alice",
     "recipients": ["bob"],
-    "stage": "inbox_write"
+    "stage": "inbox_write",
+    "files": [],
+    "detail": ""
   }
 }
 ```
+
+`stage` is one of `inbox_write`, `attachment_fetched`, `attachment_failed`,
+`deferred`, `expired`, `no_local_recipient`. `files` names the files the stage
+is about and `detail` says why. The attachment stages are per recipient
+because the download is per recipient: on an alias fan-out one seat can hold
+the bytes while another holds the reason it does not.
+
+`no_local_recipient` is evidence, not a verdict. On a shared topic every node
+that owns none of the recipients reports one, so a sender reads it as
+"unconfirmed" until a delivery arrives — never as a failure on its own.
 
 The reserved target is not a participant. A8s consumes supported control
 envelopes before normal routing, so they never enter an agent inbox and never
 generate receipts themselves. Subscribers without receipt support treat the
 target as unknown and drop it. Only a cluster with the named original sender
-records the receipt. Receipt publication is best-effort; absence of a receipt
-does not prove non-delivery. Use `a8s trace <original ULID>` to distinguish the
-last locally confirmed boundary.
+records the receipt, and writes it to
+`<agent root>/.outbox/.receipts/<ULID>.json` — the router writes that file,
+never the sender. `tells --sent` reads it. Receipts are derived state: they
+are safe to delete, and nothing routes off them.
+
+Receipt publication is best-effort; absence of a receipt does not prove
+non-delivery. Use `a8s trace <original ULID>` to distinguish the last locally
+confirmed boundary — `ENQUEUED`, `PUBLISHED`, `DEFERRED`, `ATTACHMENT_FAILED`,
+`EXPIRED` and `NO_LOCAL_RECIPIENT` are rows there.
 
 ## Roadmap
 
@@ -780,7 +798,7 @@ Pre-v1 — the surface still moves. Tracked threads:
 - **bin#63 transport extensions** — MQTT (paho-mqtt impl) is the first transport (`a8s remote <name> <broker> <topic>`); follow-up PRs add a pure-stdlib mini-MQTT fallback that auto-activates when paho-mqtt isn't installed (same `mqtt` config kind), an HTTPS long-poll transport for self-hosted rendezvous, and a peer-to-peer TCP transport. App-level envelope encryption (per-network PSK, AES-GCM) lands as an implementation detail of specific remote types when wanted.
 - **#62 payload encryption** — cross-cluster file payloads ship (see [Storage services](#storage-services--attachments-across-clusters)); per-message symmetric encryption of the stored object does not. Today a payload's confidentiality is whatever the storage service provides: presigned S3 URLs and WebDAV credentials are private, `tempfile.org` is a public link to anyone holding it.
 
-Beyond what's filed: human participants via SMS/email connectors; synchronous `tell --wait <id>` via message-id completion polling on `trash/`; web/local UI; shared knowledge stores between rosters.
+Beyond what's filed: human participants via SMS/email connectors; web/local UI; shared knowledge stores between rosters.
 
 ## Pre-v1 / scorch-the-earth note
 

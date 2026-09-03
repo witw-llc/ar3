@@ -1,0 +1,23 @@
+# Lines `tools/claim-sweep.py` may stop reporting.
+#
+# One Python regex per line, `#` for comments, blank lines ignored. Each is
+# searched against `<path>: <the source line, stripped>`, so anchor with
+# `^docs/foo\.md: ` to scope an entry to one page and leave it bare to
+# suppress a phrase wherever it appears.
+#
+# An entry is a human saying "I looked, and this absolute is a code path, not
+# a rate". Write the reason directly above it. Consuming a pattern spends its
+# reason, so a second pattern stacked right under the first gets none of it
+# -- each entry needs its own comment immediately above. An entry with no
+# reason is a suppressed claim, which is the thing this tool exists to
+# prevent.
+
+# The doctrine rule states the code path itself: an unavailable optional
+# dependency warns at the point of use, so a command that never touches it has
+# nothing to fail on. There is no failure rate here to measure.
+^docs/ar3-foundation\.md: .*never fails a command that did not need it
+
+# The sentence carries its own proof in its own parentheses -- sqlite3 ships
+# in the standard library, so FTS5 availability is a property of the
+# interpreter rather than a claim about how often k7e works.
+^docs/k7e-retrieval\.md: .*Always available \(stdlib sqlite3\)

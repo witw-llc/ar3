@@ -6,14 +6,21 @@ A R K
 S T E
 ```
 
-You will raise a small roster of AI agents from nothing, chapter by chapter,
-on machinery you own. Each chapter builds one working thing — an agent that
-answers you, a governed roster, a memory that survives — on top of the
-previous chapter's state, and every chapter ends with something you can
-break, fix, and commit. The suite underneath is three tools:
+You already knew you could not do it alone. The list of things you meant to
+build has always been longer than one person, and what was missing was never
+the idea. It was a team, and the reason you never had one was capital.
+Technology is that capital now. Six chapters from now a small team works on
+your machine while you are not at it, you are the one it reports to, and the
+attention you were spending on the work comes back to you. This guide raises
+that team one chapter at a time, on machinery you own.
+
+Each chapter builds one working thing — an agent that answers you, a governed
+roster, a memory that survives — on top of the previous chapter's state, and
+every chapter ends with something you can break, fix, and commit. The suite
+underneath is three tools:
 [a8s](../docs/a8s.md) routes the messages, [r4t](../docs/r4t.md)
 governs the roster, [k7e](../docs/k7e.md) keeps what it learns —
-with [ar3](../docs/ar3.md), the front door, reading where they all stand.
+with [AR3](../docs/ar3.md), the front door, reading where they all stand.
 Every chapter opens by naming which of the three it teaches, so the guide's
 spine is the build order itself.
 
@@ -30,8 +37,8 @@ spine is the build order itself.
 | 07+ | *(coming)* | r4t | Cells and missions — the roster grows a tree, and a `MISSION.md` it reviews itself against. |
 
 Each chapter costs about twenty minutes of your attention and hands back
-something you keep using afterwards: immediate value, but it starts with you
-turning the crank.
+something you keep using afterwards. You turn the crank six times. After that
+the roster turns it, and you sit in the seat it reports to.
 
 ## Two blessed paths
 

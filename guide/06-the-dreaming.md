@@ -509,12 +509,13 @@ Copy-paste templates for this chapter's final state live in
 
 ## Where you stand
 
-Six chapters ago you had a shell prompt. You now have a roster on your own
-hardware that is governed, durable, and remembering: messages that survive a
-dead handler, budgets that queue instead of overspend, conversations that can
-be retired and refounded from disk, a second member to delegate to, and now a
-memory per member that fills itself from work already done and rides into
-every wake at a price you can read in the log.
+Six chapters ago you had a shell prompt. You now have a small team on your own
+hardware that works when you are not watching it, one name to talk to, and the
+seat it reports to is yours. What it is governed by and what it remembers is
+below: messages that survive a dead handler, budgets that queue instead of
+overspend, conversations that can be retired and refounded from disk, a second
+member to delegate to, and now a memory per member that fills itself from work
+already done and rides into every wake at a price you can read in the log.
 
 Every piece of it is a file you can open. The roster is one markdown file, the
 rigs are JSON outside the repo, the mailboxes are directories, the knowledge is

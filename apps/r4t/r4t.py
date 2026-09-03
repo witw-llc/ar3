@@ -1432,6 +1432,7 @@ def cmd_tell(args: argparse.Namespace) -> int:
 
 
 RIG_COMMAND_HELP = [
+    ("rig detect", "Find the harnesses already installed here (--add creates rigs)"),
     ("rig list", "Rigs, limits, and roster rig resolution (alias: ls; --wide)"),
     ("rig presets", "Named CLI presets aligned with a8s definitions"),
     ("rig run <rig> PROMPT", "One headless turn as this rig (--wait / --now on budget)"),
@@ -1464,6 +1465,7 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
     print()
     print("Next steps")
     if not config_path.is_file():
+        print("  - `r4t rig detect --add` — find the harnesses you already have")
         print("  - `r4t rig presets` — see the available CLI presets")
         print("  - `r4t rig add leader <preset>` — create the config with your first rig")
     else:
@@ -1968,6 +1970,61 @@ def cmd_rig_fuel(args: argparse.Namespace) -> int:
         print(f"r4t rig fuel: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2) if args.as_json else _format_fuel(report))
+    return 0
+
+
+def _detect_config_path(args: argparse.Namespace) -> Path:
+    """Where `--add` writes. `--dir` names a DIRECTORY holding a `rigs.json`;
+    with neither flag the write lands in the machine-global config, because a
+    rig config anywhere else is one no other r4t command reads."""
+    directory = getattr(args, "dir", None)
+    if directory:
+        return Path(directory).expanduser().resolve() / "rigs.json"
+    return resolve_config_path(getattr(args, "rig_config", None))
+
+
+def cmd_rig_detect(args: argparse.Namespace) -> int:
+    """What is installed on this machine, what is left in it, and the line
+    that turns it into a rig. Probes only: no turn runs, nothing is written
+    unless `--add` says so."""
+    import detect as detect_mod
+
+    rows = detect_mod.detect()
+    found = [r for r in rows if r.detected]
+    config_path = _detect_config_path(args)
+    added = detect_mod.add_detected(config_path, rows) if args.add and found else []
+
+    if args.as_json:
+        print(json.dumps(
+            {
+                "config": str(config_path),
+                "detected": len(found),
+                "engines": [r.as_dict() for r in rows],
+                "added": [
+                    {"preset": p, "outcome": o, "detail": d} for p, o, d in added
+                ],
+            },
+            indent=2,
+        ))
+        return 0 if found else 1
+
+    print("r4t rig detect — the harnesses this machine already has")
+    print()
+    print(detect_mod.format_text(rows))
+    if not found:
+        print()
+        print(detect_mod.install_hint(rows))
+        return 1
+    print()
+    if not args.add:
+        print(f"Add them all: r4t rig detect --add   (writes {config_path})")
+        return 0
+    print(f"Rigs in {config_path}")
+    for preset, outcome, detail in added:
+        print(f"  {outcome:<8} {preset}  {detail}")
+    if any(outcome == "added" for _p, outcome, _d in added):
+        print()
+        print("Reference one from your runbook: `- **Rig:** <name>`")
     return 0
 
 
@@ -2775,6 +2832,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Add each rig's full invoke line as a trailing column.",
     )
     rig_list_p.set_defaults(func=cmd_rig_list)
+
+    rig_detect_p = rig_sub.add_parser(
+        "detect",
+        help="Find the agent CLIs already installed here and offer them as rigs.",
+        description="Probe every run-capable preset against the CLI installed "
+        "on this machine, ask each detected engine what subscription it has "
+        "left, and print the `r4t rig add` line that turns it into a rig. "
+        "Nothing is spent: the probe reads `--help`/`--version` and the quota "
+        "surface, never a turn. With --add, every detected preset that needs "
+        "no further input becomes a rig named after it. Exit 1 when nothing "
+        "is detected.",
+    )
+    rig_detect_p.add_argument(
+        "--add",
+        action="store_true",
+        help="Create a rig per detected preset, named after the preset.",
+    )
+    rig_detect_p.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Machine-readable JSON instead of the table.",
+    )
+    rig_detect_p.add_argument(
+        "--dir",
+        metavar="DIR",
+        help="Write rigs.json into DIR instead of the machine-global config.",
+    )
+    rig_detect_p.add_argument(
+        "--rig-config",
+        help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_detect_p.set_defaults(func=cmd_rig_detect)
 
     rig_presets_p = rig_sub.add_parser(
         "presets",

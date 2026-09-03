@@ -1,0 +1,76 @@
+# Surfaces that are neither wired nor marked deferred, as of 0.1.83.
+#
+# This file is the 1.0 to-do list. A line here is a promise to do one of
+# two things: wire the item with a test that fails when the wiring is
+# removed, or say in its own surface that it waits. Deleting a line is
+# the win condition, and the audit says so when a line is no longer needed.
+#
+# Format: surface:app:name  # why it is allowed today
+
+cli:a8s:define  # documented, but no test names it — a rename would not fail
+cli:a8s:discover  # documented, but no test names it — a rename would not fail
+cli:a8s:drain  # documented, but no test names it — a rename would not fail
+cli:a8s:exit  # documented, but no test names it — a rename would not fail
+cli:a8s:logs  # documented, but no test names it — a rename would not fail
+cli:a8s:ps  # documented, but no test names it — a rename would not fail
+cli:a8s:start  # documented, but no test names it — a rename would not fail
+cli:a8s:step  # documented, but no test names it — a rename would not fail
+cli:a8s:transactions  # documented, but no test names it — a rename would not fail
+cli:a8s:tx  # documented, but no test names it — a rename would not fail
+cli:a8s:unalias  # documented, but no test names it — a rename would not fail
+cli:a8s:unnamespace  # documented, but no test names it — a rename would not fail
+cli:a8s:unremote  # documented, but no test names it — a rename would not fail
+cli:a8s:unstorage  # documented, but no test names it — a rename would not fail
+cli:ar3:update  # documented, but no test names it — a rename would not fail
+cli:k7e:asset  # documented, but no test names it — a rename would not fail
+cli:k7e:consolidate  # documented, but no test names it — a rename would not fail
+cli:k7e:rebuild-mocs  # documented, but no test names it — a rename would not fail
+cli:k7e:status  # documented, but no test names it — a rename would not fail
+cli:k7e:supersede  # documented, but no test names it — a rename would not fail
+cli:r4t:lab  # tested, but no docs page names it
+cli:r4t:lab ledger  # neither a test nor a docs page names it
+cli:r4t:lab list  # tested, but no docs page names it
+cli:r4t:lab report  # neither a test nor a docs page names it
+cli:r4t:lab run  # tested, but no docs page names it
+cli:r4t:runbook show  # documented, but no test names it — a rename would not fail
+
+# --- config ---
+config:a8s:namespace_options  # tested, but no docs page names it
+config:r4t:Cells  # documented, but no test names it — a rename would not fail
+config:r4t:Rituals  # documented, but no test names it — a rename would not fail
+config:r4t:allowedtools  # documented, but no test names it — a rename would not fail
+config:r4t:continue  # documented, but no test names it — a rename would not fail
+config:r4t:echomax  # neither a test nor a docs page names it
+config:r4t:extends  # documented, but no test names it — a rename would not fail
+config:r4t:history  # tested, but no docs page names it
+config:r4t:maxsends  # neither a test nor a docs page names it
+config:r4t:memberbudget  # neither a test nor a docs page names it
+config:r4t:prosereply  # tested, but no docs page names it
+config:r4t:reinforce  # tested, but no docs page names it
+config:r4t:rigbudget  # neither a test nor a docs page names it
+config:r4t:role  # tested, but no docs page names it
+config:r4t:throttle  # tested, but no docs page names it
+
+# --- runbook ---
+runbook:a8s:claude-proxy  # neither a test nor a docs page names it
+runbook:a8s:engine-agy  # neither a test nor a docs page names it
+runbook:a8s:engine-agy-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-claude  # tested, but no docs page names it
+runbook:a8s:engine-claude-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-codex  # neither a test nor a docs page names it
+runbook:a8s:engine-codex-unrestricted  # documented, but no test names it — a rename would not fail
+runbook:a8s:engine-copilot  # neither a test nor a docs page names it
+runbook:a8s:engine-copilot-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-cursor  # documented, but no test names it — a rename would not fail
+runbook:a8s:engine-cursor-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-muse  # neither a test nor a docs page names it
+runbook:a8s:engine-muse-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-claude  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-claude-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-codex  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-codex-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-opencode  # neither a test nor a docs page names it
+runbook:a8s:engine-ollama-opencode-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-opencode  # neither a test nor a docs page names it
+runbook:a8s:engine-opencode-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:muse  # documented, but no test names it — a rename would not fail

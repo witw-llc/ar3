@@ -20,6 +20,33 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 | Router | `apps/a8s/mailbox.py` (`route_outboxes`) |
 | Receive-side | `apps/a8s/tells.py` (`tells_main`) — see below |
 
+## What the sender learns
+
+A send is asynchronous, so the outcome comes back as a receipt the router
+writes at `<agent root>/.outbox/.receipts/<ULID>.json`, updated on every event
+the router sees for that ULID. **The router writes it; the sender only reads
+it** — a sender that writes its own receipt is asserting an outcome it cannot
+observe, the same reason the filesystem and not the envelope settles `from`.
+
+| State | Meaning |
+|-------|---------|
+| `enqueued` | the envelope is in the sender's own outbox |
+| `published` | it left this machine for a remote — not a delivery |
+| `deferred` | a receiver holds it while its attachments resolve |
+| `delivered` | a receiver wrote it to an inbox |
+| `unconfirmed` | some node reported it owns nobody by that name, and none has claimed it |
+| `failed` | an attachment will never arrive, or a retry window ran out |
+
+`tell` never blocks for one of these states — a send that flew off to a
+remote cluster has no "received" to wait for, the way a UDP packet does not.
+Nothing promotes `published` to `delivered`: a publish says the transport
+took the envelope, not that anything read it. Read the outcome later, and
+asynchronously, with `tells --sent`.
+
+`tells --sent [--since 2h]` lists the seat's recent outbound ULIDs with state,
+age and recipient from those same files. `a8s trace <ULID>` is the operator's
+machine-wide view of the same events.
+
 ## What argv guarantees, and where it does not
 
 **A `.cmd` shim does not forward arguments the way a native program does.**
@@ -155,7 +182,7 @@ when several registered agents share one physical outbox directory, a claimed
 
 ## `tells` (receive side)
 
-`tells [-f] [--timeout SEC] [--body-max N] [--glow [THEME]] [--heading-out|in …]` (`apps/a8s/tells.py`)
+`tells [-f] [--timeout SEC] [--body-max N] [--glow [THEME]] [--heading-out|in …] [--sent [--since D]]` (`apps/a8s/tells.py`)
 is the receive-side complement of `tell`. It resolves the node the same way
 `tell` does — the file-proxy inbox is `.inbox` beside the outbox
 (`<outbox-parent>/.inbox`).
@@ -174,6 +201,14 @@ is the receive-side complement of `tell`. It resolves the node the same way
    registry: a clipped message is recoverable from wherever the reader is. With `--glow` and/or `--heading-out` /
    `--heading-in`, print the same markdown as `a8s convo` (shared
    `format_entry` / GlowStream). Timeout prints one stderr line and exits 1.
+
+A message whose delivery is more than 10 minutes after the `date` its sender
+stamped prints with a `[late 32h]` prefix, computed from the envelope's own
+`date` and the `delivered_at` the receiving node stamps at the inbox write. A
+monitor can tell replay from live traffic without asking anyone.
+
+`--sent` does not watch the inbox at all: it lists what this seat sent and
+what became of it, from the receipt files in its own outbox.
 
 Non-destructive: it observes new arrivals without consuming them, so it never competes to remove `.inbox` files and each run waits from its own baseline. Partial writes (mid-delivery on a cross-mount move) are tolerated — an unreadable file is skipped and retried on the next poll. It only reports messages that land after it starts; anything already waiting is ignored.
 

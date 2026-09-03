@@ -70,6 +70,7 @@ from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
 from services.attachment_errors import ATTACHMENT_UNAVAILABLE
 from services.attachment_path import bundle_file_path
+import receipts
 import txlog
 from ar3.ulid import new as new_ulid
 
@@ -798,6 +799,30 @@ def _stamp_from(
     return prefix
 
 
+def _record_enqueued(sender: Participant, pending_file: Path) -> None:
+    """First sight of an outbound envelope: open its receipt.
+
+    The router opens it, not `tell` — a sender asserting its own delivery is
+    the thing the receipt exists to replace."""
+    try:
+        msg = json.loads(pending_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(msg, dict):
+        return
+    outbox = sender.outbox_path()
+    if receipts.read(outbox, str(msg.get("id") or "")) is not None:
+        return  # already opened; this is a retry pass, not a first sight
+    receipts.record_enqueued(outbox, msg)
+    txlog.log(
+        "ENQUEUED",
+        msg_id=str(msg.get("id") or pending_file.stem),
+        sender=sender.name,
+        recipient=str(msg.get("to") or ""),
+        detail=_preview(str(msg.get("content") or "")),
+    )
+
+
 def _process_pending(
     sender: Participant,
     by_name: dict[str, Participant],
@@ -827,6 +852,7 @@ def _process_pending(
     )
     for f in files:
         sidecar = _load_or_init_sidecar(f)
+        _record_enqueued(sender, f)
         # Backoff gate. A sidecar is operator-editable, so `next_attempt` is a
         # boundary: anything unparseable — wrong type included — means due now,
         # never an exception that would abort the whole pass and strand every
@@ -943,6 +969,15 @@ def _process_pending(
                                     if (inbox_dir(r.name) / f.name).is_file()
                                 ]
                                 convo.record(msg, recipients=delivered_names)
+                                for name in delivered_names:
+                                    receipts.record_event(
+                                        sender.outbox_path(),
+                                        msg_id,
+                                        "inbox_write",
+                                        recipient=name,
+                                        to=recipient_name,
+                                        queued_at=str(msg.get("date") or ""),
+                                    )
                         except OSError as e:
                             out_agent(sender.name, f"commit failed on {f.name}: {e}")
                             # leave for retry
@@ -985,6 +1020,9 @@ def _process_pending(
                     newly_published = [r for r in sidecar["succeeded_remotes"] if r not in prev_remotes]
                     for rid in newly_published:
                         txlog.log("PUBLISHED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files if has_files else None, detail=preview)
+                        receipts.record_published(
+                            sender.outbox_path(), msg.get("id", ""), recipient_name, rid,
+                        )
                 # else: leave succeeded_remotes alone; backoff retry will
                 # finish the uploads and try the publish next pass.
         # ----- OUTCOME -----
@@ -1000,6 +1038,14 @@ def _process_pending(
         if no_path_at_all:
             out_agent(sender.name, f"unknown recipient {recipient_name!r} in {f.name}; trashing")
             txlog.log("DROPPED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, detail="unknown recipient")
+            receipts.record_event(
+                sender.outbox_path(),
+                msg.get("id", ""),
+                "no_local_recipient",
+                recipient=recipient_name,
+                to=recipient_name,
+                detail="unknown recipient and no remote configured",
+            )
             _trash_pending(sender, f)
             _drop_sidecar(f)
             continue

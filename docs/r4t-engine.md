@@ -77,7 +77,7 @@ which composes through this very path and gates it on the rig's bucket.
 ### The three translated parameters
 
 Each engine spells "do not ask me" and "pick up where you left off" its own
-way. These three flags are ar3's words for those stances, translated per
+way. These three flags are AR3's words for those stances, translated per
 engine from one table (`PERMISSION_TRANSLATION` in `apps/r4t/rig.py`, beside
 the preset table). **Every one is unset by default, and unset means the
 preset's own flags** — naming none of them composes exactly the argv the preset
@@ -126,7 +126,7 @@ or `git`.
 into `--dangerously-bypass-approvals-and-sandbox`, so a user who learns
 `bypass` on claude — where it means "stop asking" inside whatever
 `settings.json` configures — gets something materially stronger on codex. This
-is the one place ar3 cannot keep permissions and isolation apart.
+is the one place AR3 cannot keep permissions and isolation apart.
 
 claude's `auto` is fail-closed and every other engine's is fail-open.
 `--permission-mode dontAsk` denies whatever the allowlist does not cover, while

@@ -16,6 +16,16 @@ combined with a positive `--timeout`.
 formatting (and optional GlowStream rendering). Plain `sender: body` remains
 the default when those options are omitted.
 
+On the plain path, a printed line over `--line-max` bytes (default 400 —
+Claude Code's Monitor notification clips each stdout line at 500) is
+soft-wrapped at the last space before the limit, with a two-space indent on
+continuation lines; `0` disables it, and a positive value under
+`MIN_LINE_MAX_BYTES` is refused because the indent could not fit inside it. Wrapping or a body over `--body-max`
+both put the `tells --recover <token>` recovery command in the header, ahead
+of the body, so a host that clips mid-message still shows where the whole
+thing is. `--glow` / `--heading-out` / `--heading-in` keep convo's own
+rendering unwrapped.
+
 Non-destructive: it observes new arrivals without consuming them, so it never
 races a competing reader for `.inbox` files and repeated runs each wait from
 their own baseline. Existing filenames are keyed by mtime/size so a handler
@@ -44,6 +54,20 @@ INBOX_DIRNAME = ".inbox"
 # TELLS_BODY_MAX or --body-max.
 DEFAULT_BODY_MAX_CHARS = 16_000
 TELLS_BODY_MAX_ENV = "TELLS_BODY_MAX"
+# Claude Code's Monitor notification clips each stdout LINE at 500 bytes and
+# appends "(truncated)" — measured against six real tells on 2026-09-02, all
+# cut at exactly 500 (#245). 400 leaves headroom for the "SENDER: " prefix
+# and whatever a different harness's own clip turns out to be. 0 = no wrap.
+# Override with TELLS_LINE_MAX or --line-max.
+DEFAULT_LINE_MAX_BYTES = 400
+TELLS_LINE_MAX_ENV = "TELLS_LINE_MAX"
+CONTINUATION_INDENT = "  "
+# Every accepted --line-max has to bound the lines it emits, and the wrap
+# reserves CONTINUATION_INDENT on continuation lines and never splits a
+# character. Two bytes of indent plus one four-byte character plus margin is
+# the smallest limit that can be honored, so smaller ones are refused rather
+# than over-run. 0 (no wrap) is unaffected.
+MIN_LINE_MAX_BYTES = 16
 
 
 class TellsUsageError(Exception):
@@ -59,8 +83,9 @@ class TellsVersion(Exception):
 
 
 _USAGE = (
-    "usage: tells [-f|--follow] [--timeout SEC] [--body-max N] [--glow [THEME]] "
-    "[--show PATH | --recover TOKEN] "
+    "usage: tells [-f|--follow] [--timeout SEC] [--body-max N] [--line-max N] "
+    "[--glow [THEME]] "
+    "[--show PATH | --recover TOKEN] [--sent [--since D]] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
 )
 
@@ -77,7 +102,14 @@ def _print_usage() -> None:
         f"(default {DEFAULT_BODY_MAX_CHARS}; 0 = unlimited; env {TELLS_BODY_MAX_ENV})",
         file=sys.stderr,
     )
+    print(
+        f"       --line-max N: soft-wrap printed lines at N bytes, under a host's own "
+        f"clip (default {DEFAULT_LINE_MAX_BYTES}; 0 = no wrap; minimum "
+        f"{MIN_LINE_MAX_BYTES}; env {TELLS_LINE_MAX_ENV})",
+        file=sys.stderr,
+    )
     print("       --glow [THEME]: render markdown via glow (default theme from A8S_GLOW)", file=sys.stderr)
+    print("       --sent [--since 2h]: this seat's outbound messages and their delivery state", file=sys.stderr)
     print(convo_help_epilog(), file=sys.stderr)
 
 
@@ -91,10 +123,13 @@ class TellsOptions:
     follow: bool = False
     timeout_explicit: bool = False
     body_max: int = DEFAULT_BODY_MAX_CHARS
+    line_max: int = DEFAULT_LINE_MAX_BYTES
     glow_theme: str | None = None
     heading_out: str | None = None
     heading_in: str | None = None
     show: str | None = None
+    sent: bool = False
+    since: float | None = None
 
     @property
     def follow_forever(self) -> bool:
@@ -120,6 +155,24 @@ def resolve_body_max(raw: str | None = None) -> int:
         raise TellsUsageError(f"--body-max: {e}") from e
     if n < 0:
         raise TellsUsageError("--body-max must be zero or positive")
+    return n
+
+
+def resolve_line_max(raw: str | None = None) -> int:
+    """Parse line-max bytes. Empty → default; 0 → no wrap."""
+    text = (raw if raw is not None else os.environ.get(TELLS_LINE_MAX_ENV, "")).strip()
+    if not text:
+        return DEFAULT_LINE_MAX_BYTES
+    try:
+        n = int(text, 10)
+    except ValueError as e:
+        raise TellsUsageError(f"--line-max: {e}") from e
+    if n < 0:
+        raise TellsUsageError("--line-max must be zero or positive")
+    if 0 < n < MIN_LINE_MAX_BYTES:
+        raise TellsUsageError(
+            f"--line-max must be 0 (no wrap) or at least {MIN_LINE_MAX_BYTES} bytes"
+        )
     return n
 
 
@@ -163,6 +216,94 @@ def decode_envelope_path(token: str) -> str:
     return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
 
 
+def _take_bytes(text: str, limit: int) -> str:
+    """Longest prefix of `text` whose UTF-8 encoding is at most `limit` bytes,
+    never splitting a multibyte character."""
+    end = len(text)
+    while end > 0 and len(text[:end].encode("utf-8")) > limit:
+        end -= 1
+    return text[: max(end, 1)]
+
+
+def _wrap_line_bytes(line: str, limit: int) -> list[str]:
+    """Soft-wrap one line at `limit` UTF-8 bytes, breaking at the last space
+    before the limit. A single token that alone exceeds the limit is
+    hard-broken at a byte-safe boundary. Continuation lines reserve room for
+    `CONTINUATION_INDENT`, which the caller prepends.
+
+    Splitting on plain " " (not general whitespace) keeps this reversible:
+    `" ".join(line.split(" "))` always reconstructs `line`, including runs of
+    repeated spaces, so joining the wrapped pieces the same way recovers the
+    original whenever no token was hard-broken. A break therefore consumes
+    exactly one space; a run of spaces straddling the limit keeps the rest of
+    the run on one side of the break or the other. `current` is None until the
+    piece is opened so that an empty token — what `split(" ")` yields for a
+    leading, trailing or repeated space — is distinguishable from an empty
+    buffer, which is what used to eat those spaces.
+    """
+    if len(line.encode("utf-8")) <= limit:
+        return [line]
+    indent_bytes = len(CONTINUATION_INDENT.encode("utf-8"))
+    out: list[str] = []
+    current: str | None = None
+    current_bytes = 0
+
+    def budget() -> int:
+        return limit if not out else max(limit - indent_bytes, 1)
+
+    def flush() -> None:
+        nonlocal current, current_bytes
+        out.append(current or "")
+        current = None
+        current_bytes = 0
+
+    for token in line.split(" "):
+        piece = token if current is None else " " + token
+        piece_bytes = len(piece.encode("utf-8"))
+        if current_bytes + piece_bytes <= budget():
+            current = (current or "") + piece
+            current_bytes += piece_bytes
+            continue
+        if current is not None:
+            flush()
+        remaining = token
+        while True:
+            b = budget()
+            if len(remaining.encode("utf-8")) <= b:
+                current = remaining
+                current_bytes = len(remaining.encode("utf-8"))
+                break
+            chunk = _take_bytes(remaining, b)
+            remaining = remaining[len(chunk):]
+            out.append(chunk)
+    if current is not None or not out:
+        flush()
+    return out
+
+
+def wrap_body_text(text: str, line_max: int) -> tuple[str, bool]:
+    """Soft-wrap every line of `text` under `line_max` UTF-8 bytes.
+
+    Blank lines and existing newlines pass through untouched; only a line
+    that itself exceeds the limit gets split, with continuation pieces
+    prefixed by `CONTINUATION_INDENT` so a reader can see the wrap. Returns
+    `(wrapped_text, any_line_was_wrapped)`; `line_max <= 0` disables wrapping.
+    """
+    if line_max <= 0 or not text:
+        return text, False
+    out_lines: list[str] = []
+    wrapped_any = False
+    for line in text.split("\n"):
+        pieces = _wrap_line_bytes(line, line_max)
+        if len(pieces) > 1:
+            wrapped_any = True
+            out_lines.append(pieces[0])
+            out_lines.extend(CONTINUATION_INDENT + p for p in pieces[1:])
+        else:
+            out_lines.append(pieces[0])
+    return "\n".join(out_lines), wrapped_any
+
+
 def show_envelope_body(path_str: str) -> int:
     """Print one stored envelope's `content` in full. The other half of the
     recovery hint: `tells` clipped it, so `tells` prints it back."""
@@ -182,6 +323,28 @@ def show_envelope_body(path_str: str) -> int:
     return 0
 
 
+def _print_sent(since_s: float | None) -> int:
+    """List this seat's own outbound ULIDs and their latest known state.
+
+    Reads the receipt files in the seat's own outbox — no registry, no
+    machine-wide transaction log. A seat has to be able to answer "did that
+    land?" from where it stands."""
+    import receipts
+
+    outbox = find_outbox()
+    if outbox is None:
+        print("tells: cannot find this agent's outbox", file=sys.stderr)
+        return 1
+    records = receipts.list_recent(outbox, since_s)
+    if not records:
+        print("tells: no sent messages on record", file=sys.stderr)
+        return 1
+    _configure_stdout()
+    for record in records:
+        print(receipts.summary_line(record), flush=True)
+    return 0
+
+
 def parse_tells_argv(argv: list[str]) -> TellsOptions:
     from convo import extract_heading_templates
 
@@ -194,7 +357,10 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     follow = False
     timeout_explicit = False
     body_max = resolve_body_max()
+    line_max = resolve_line_max()
     show: str | None = None
+    sent = False
+    since: float | None = None
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
     glow_theme = default_glow
     i = 0
@@ -202,6 +368,22 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         arg = rest[i]
         if arg in ("-f", "--follow"):
             follow = True
+            i += 1
+            continue
+        if arg == "--sent":
+            sent = True
+            i += 1
+            continue
+        if arg == "--since":
+            i += 1
+            if i >= len(rest):
+                raise TellsUsageError("--since requires a duration (30m, 2h, 7d)")
+            from receipts import parse_duration
+
+            try:
+                since = parse_duration(rest[i])
+            except ValueError as e:
+                raise TellsUsageError(f"--since: {e}") from e
             i += 1
             continue
         if arg == "--timeout":
@@ -220,6 +402,11 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             if i >= len(rest):
                 raise TellsUsageError("--body-max requires a character count")
             body_max = resolve_body_max(rest[i])
+        elif arg == "--line-max":
+            i += 1
+            if i >= len(rest):
+                raise TellsUsageError("--line-max requires a byte count")
+            line_max = resolve_line_max(rest[i])
         elif arg == "--show":
             i += 1
             if i >= len(rest):
@@ -251,13 +438,20 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         follow=follow,
         timeout_explicit=timeout_explicit,
         body_max=body_max,
+        line_max=line_max,
         glow_theme=glow_theme,
         heading_out=heading_out,
         heading_in=heading_in,
         show=show,
+        sent=sent,
+        since=since,
     )
     if follow and timeout_explicit and timeout != 0:
         raise TellsUsageError("cannot use -f/--follow with a positive --timeout")
+    if since is not None and not sent:
+        raise TellsUsageError("--since applies to --sent")
+    if sent and follow:
+        raise TellsUsageError("--sent lists what was sent; it does not follow")
     return opts
 
 
@@ -327,10 +521,45 @@ def _read_envelope(path: Path) -> dict | None:
     return msg if isinstance(msg, dict) else None
 
 
-def _print_plain(msg: dict, envelope_path: Path, body_max: int) -> None:
-    sender = msg.get("from") or "?"
-    body = format_displayed_content(msg.get("content", ""), envelope_path, body_max)
-    print(f"{sender}: {body}", flush=True)
+# A delivery this far behind its `date` is replay, not live traffic. The gap
+# is the envelope's own: `date` is when the sender queued it, `delivered_at`
+# is when the receiving node wrote it to the inbox.
+LATE_THRESHOLD_SEC = 600.0
+
+
+def late_prefix(msg: dict, threshold_s: float = LATE_THRESHOLD_SEC) -> str:
+    """`[late 32h] ` when this message sat somewhere on the way, else ``."""
+    from receipts import duration_text, parse_stamp
+
+    queued = parse_stamp(str(msg.get("date") or ""))
+    delivered = parse_stamp(str(msg.get("delivered_at") or ""))
+    if queued is None or delivered is None:
+        return ""
+    gap = (delivered - queued).total_seconds()
+    if gap <= threshold_s:
+        return ""
+    return f"[late {duration_text(gap)}] "
+
+
+def _print_plain(msg: dict, envelope_path: Path, body_max: int, line_max: int) -> None:
+    sender = f"{late_prefix(msg)}{msg.get('from') or '?'}"
+    raw_content = msg.get("content", "") or ""
+    displayed = format_displayed_content(raw_content, envelope_path, body_max)
+    wrapped, was_wrapped = wrap_body_text(displayed, line_max)
+    body_max_exceeded = body_max > 0 and len(raw_content) > body_max
+    if was_wrapped or body_max_exceeded:
+        # The pointer goes in the header, before the body, so a host that
+        # clips mid-body still lands the reader on the recovery command.
+        # The body-max footer keeps its own copy of the same command
+        # (below the clip point it exists to survive) — same token, so
+        # nothing about it can go stale on its own. The header line itself
+        # is not wrapped: it names a fixed command, and an --line-max small
+        # enough to force-wrap it would make the command unpasteable.
+        token = encode_envelope_path(str(envelope_path.resolve()))
+        print(f"{sender}: full message: tells --recover {token}", flush=True)
+        print(wrapped, flush=True)
+    else:
+        print(f"{sender}: {wrapped}", flush=True)
 
 
 def _print_markdown(
@@ -346,7 +575,7 @@ def _print_markdown(
     from convo import entry_from_message, print_entries
 
     entry = entry_from_message(msg, recipients=[agent])
-    entry["content"] = format_displayed_content(
+    entry["content"] = late_prefix(msg) + format_displayed_content(
         entry.get("content", ""), envelope_path, body_max
     )
     print_entries(
@@ -364,6 +593,7 @@ def _poll_new_messages(
     *,
     agent: str,
     body_max: int,
+    line_max: int,
     markdown: bool,
     glow_stream: object | None,
     heading_out: str,
@@ -392,7 +622,7 @@ def _poll_new_messages(
                 heading_in=heading_in,
             )
         else:
-            _print_plain(msg, path, body_max)
+            _print_plain(msg, path, body_max, line_max)
         seen[name] = fingerprint
         printed += 1
     # Drop fingerprints for names that disappeared so a later recreate is fresh.
@@ -431,6 +661,9 @@ def tells_main(argv: list[str]) -> int:
         _print_usage()
         return 2
 
+    if opts.sent:
+        return _print_sent(opts.since)
+
     if opts.show is not None:
         # Addressed by path, so it needs no outbox and no registry — a clipped
         # message has to be recoverable from wherever the reader is standing.
@@ -459,6 +692,7 @@ def tells_main(argv: list[str]) -> int:
     poll_kwargs = {
         "agent": agent or "",
         "body_max": opts.body_max,
+        "line_max": opts.line_max,
         "markdown": opts.markdown,
         "glow_stream": glow_stream,
         "heading_out": heading_out,

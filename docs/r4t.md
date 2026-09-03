@@ -36,6 +36,18 @@ r4t sandbox --fake
 Three scripted agents build and test a tiny game; a report lands on stdout
 (`Program runs and exits 0 | PASS`, dead letters 0, ...).
 
+Then connect the seat you already pay for. You do not configure it — r4t
+finds it:
+
+```bash
+r4t rig detect --add
+```
+
+Every agent CLI installed here is probed (no turn is spent), the table shows
+what each one has left in the tank, and `--add` turns each into a rig named
+after its preset. Details:
+[r4t-rigs.md](r4t-rigs.md#detect-what-you-already-have).
+
 Now a real roster on your repo. Three facts get you there — your directory,
 a runbook, and the engine each member names:
 

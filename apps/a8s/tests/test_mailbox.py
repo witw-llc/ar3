@@ -101,6 +101,18 @@ class TestPendingAttachmentStatus:
         assert "not found:" in failed[0]["detail"]
 
 
+
+def _outbox_leftovers(root: Path) -> list[Path]:
+    """Outbox entries an ingest pass should have cleared.
+
+    `.receipts/` is not one of them: the router keeps the delivery record for
+    each sent message there, and it outlives the envelope by design."""
+    return [
+        p for p in outbox_dir(root).iterdir()
+        if p.name != ".receipts"
+    ]
+
+
 def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:
     return _write_outbox(
         sender_name,
@@ -237,7 +249,7 @@ class TestRouteOutboxes:
         assert msg["to"] == "B"
         assert msg["content"] == "hi"
         # A's outbox is empty
-        assert list(outbox_dir(a.root).iterdir()) == []
+        assert _outbox_leftovers(a.root) == []
 
     def test_alias_fanout_excludes_sender(self, three_agents):
         a, b, c = three_agents
@@ -1203,8 +1215,8 @@ class TestIngestPhase:
         assert out_path.is_file()
         route_outboxes([a, b], all_agents=[a, b])
         # Post-pass: outbox dir is empty for both senders.
-        assert list(outbox_dir(a.root).iterdir()) == []
-        assert list(outbox_dir(b.root).iterdir()) == []
+        assert _outbox_leftovers(a.root) == []
+        assert _outbox_leftovers(b.root) == []
 
     def test_pending_dir_holds_messages_during_routing(self, fake_home, tmp_path):
         # Solo sender with no recipients in the registry — ingest still happens
@@ -1218,7 +1230,7 @@ class TestIngestPhase:
         _write_outbox("SOLO", a.root, "GHOST", "lost", [])
         route_outboxes([a], all_agents=[a])
         # Outbox empty.
-        assert list(outbox_dir(a.root).iterdir()) == []
+        assert _outbox_leftovers(a.root) == []
         # Pending also empty (no path forward → trashed in phase 2).
         assert list(pending_dir("SOLO").iterdir()) == []
         # Trashed.

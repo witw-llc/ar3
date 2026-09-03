@@ -26,11 +26,13 @@ def test_build_receipt_is_extension_only_and_contains_no_message_content():
     assert receipt["files"] == []
     assert receipt[CONTROL_FIELD] == {
         "type": "delivery_receipt",
-        "version": 1,
+        "version": 2,
         "for_id": original_id,
         "sender": "alice",
         "recipients": ["bob"],
         "stage": "inbox_write",
+        "files": [],
+        "detail": "",
     }
     assert "private message" not in repr(receipt)
 
@@ -51,7 +53,7 @@ def test_unknown_control_version_is_not_interpreted_as_receipt():
         {"id": new_ulid(), "from": "alice"},
         ["bob"],
     )
-    receipt[CONTROL_FIELD]["version"] = 2
+    receipt[CONTROL_FIELD]["version"] = 3
     assert parse_delivery_receipt(receipt) is None
 
 

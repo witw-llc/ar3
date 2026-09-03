@@ -28,6 +28,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +43,7 @@ from core import (
     secrets_config_path,
     seen_ids_path,
 )
+import receipts
 from delivery_receipt import (
     build_delivery_receipt,
     is_control_envelope,
@@ -102,13 +104,35 @@ def _remote_receive_diagnostic(
 
 
 def _remote_not_local(
-    msg_id: str, recipient: str, reason: str, remote_id: str = "remote",
+    msg_id: str,
+    recipient: str,
+    reason: str,
+    remote_id: str = "remote",
+    *,
+    original: dict | None = None,
+    publish_control: Callable[[bytes], None] | None = None,
 ) -> None:
     """Envelope observed on a shared remote that resolves to no local agent
-    here. Not a failure — some other node on the same topic owns delivery."""
+    here. Not a failure — some other node on the same topic owns delivery.
+
+    It is a failure when no node owns it, and the sender cannot tell the two
+    apart from silence. So say so out loud: publish a `no_local_recipient`
+    receipt naming this node. A sender that collects one from every node and a
+    delivery from none knows the message evaporated, which is the case
+    `DROPPED` never covered because a configured remote made the publish
+    succeed."""
     _remote_receive_diagnostic(
         msg_id, recipient, reason, remote_id, event="NOT_LOCAL", prefix="REMOTE_SKIP",
     )
+    if original is not None and publish_control is not None:
+        _publish_delivery_receipt(
+            original,
+            [recipient],
+            publish_control,
+            remote_id,
+            stage="no_local_recipient",
+            detail=reason,
+        )
 
 
 def _remote_discarded(
@@ -738,7 +762,10 @@ def _deliver_claimed_envelope(
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        _remote_not_local(msg_id, recipient_name, "not in local registry", remote_id)
+        _remote_not_local(
+            msg_id, recipient_name, "not in local registry", remote_id,
+            original=msg, publish_control=publish_control,
+        )
         release_claim(msg_id)
         return
     recipients: list[Participant] = []
@@ -755,6 +782,8 @@ def _deliver_claimed_envelope(
             recipient_name,
             f"{kind} resolved to zero local recipients",
             remote_id,
+            original=msg,
+            publish_control=publish_control,
         )
         release_claim(msg_id)
         return
@@ -820,6 +849,9 @@ def _deliver_claimed_envelope(
         ):
             delivered_names.append(recipient.name)
             delivered_envelopes.append(msg_for_recipient)
+            _report_attachment_outcome(
+                msg, msg_for_recipient, recipient, publish_control, remote_id
+            )
     if delivered_names:
         import convo
 
@@ -840,6 +872,66 @@ def _deliver_claimed_envelope(
         _submit_deferred_delivery(
             msg, recipient, services or [], msg_id, sender_label, preview,
             remote_id, publish_control,
+        )
+
+
+def _attachment_outcomes(delivered: dict) -> tuple[list[str], list[tuple[str, str]]]:
+    """Split a delivered envelope's files into fetched names and (name, reason)
+    failures. The download rewrites an entry it could not fetch with `error`,
+    so the envelope the recipient got is the record of what it got."""
+    fetched: list[str] = []
+    failed: list[tuple[str, str]] = []
+    for entry in delivered.get("files") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("filename") or "")
+        if not name:
+            continue
+        if entry.get("error"):
+            failed.append((name, str(entry.get("detail") or entry.get("error"))))
+        else:
+            fetched.append(name)
+    return fetched, failed
+
+
+def _report_attachment_outcome(
+    original: dict,
+    delivered: dict,
+    recipient: Participant,
+    publish_control: Callable[[bytes], None] | None,
+    remote_id: str,
+) -> None:
+    """Tell the sender which files this recipient holds and which it never will.
+
+    Per recipient, because the download is per recipient: on an alias fan-out
+    one seat can hold the bytes while another holds the reason it does not."""
+    if not (original.get("files") or []):
+        return
+    msg_id = str(original.get("id") or "")
+    fetched, failed = _attachment_outcomes(delivered)
+    for name, reason in failed:
+        txlog.log(
+            "ATTACHMENT_FAILED",
+            msg_id=msg_id,
+            sender=original.get("from") or "?",
+            recipient=recipient.name,
+            files=[name],
+            remote=remote_id,
+            detail=reason,
+        )
+    if publish_control is None:
+        return
+    if fetched:
+        _publish_delivery_receipt(
+            original, [recipient.name], publish_control, remote_id,
+            stage="attachment_fetched", files=fetched,
+        )
+    if failed:
+        _publish_delivery_receipt(
+            original, [recipient.name], publish_control, remote_id,
+            stage="attachment_failed",
+            files=[name for name, _ in failed],
+            detail="; ".join(reason for _, reason in failed),
         )
 
 
@@ -945,6 +1037,13 @@ def _write_to_inbox(
         )
         return True
     staging = inbox_tmp_dir(recipient.name) / f"{msg_id}.json"
+    # `date` is when the sender queued it; `delivered_at` is when it landed.
+    # Without both, a replayed message and live traffic look identical to
+    # anything reading the inbox.
+    msg_for_recipient = dict(msg_for_recipient)
+    msg_for_recipient["delivered_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     try:
         with staging.open("w", encoding="utf-8") as f:
             json.dump(msg_for_recipient, f, indent=2)
@@ -1031,6 +1130,29 @@ def _submit_deferred_delivery(
         recipient.name,
         f"attachment(s) for id={msg_id} not ready; retrying in the background",
     )
+    # Custody without delivery used to live only in this thread's stack, so a
+    # restart lost the fact that anyone was holding the message at all. The
+    # event and the receipt are the durable half: the sender sees `deferred`
+    # instead of nothing, and a window that runs out reports `expired`.
+    txlog.log(
+        "DEFERRED",
+        msg_id=msg_id,
+        sender=sender_label,
+        recipient=recipient.name,
+        remote=remote_id,
+        detail="attachments not ready; retrying off the subscriber worker",
+    )
+    if publish_control is not None:
+        _publish_delivery_receipt(
+            msg, [recipient.name], publish_control, remote_id,
+            stage="deferred",
+            files=[
+                str(e.get("filename") or "")
+                for e in (msg.get("files") or [])
+                if isinstance(e, dict) and e.get("filename")
+            ],
+            detail="attachment download deferred",
+        )
 
     def finish() -> None:
         from mailbox import _download_files_to_recipient
@@ -1050,6 +1172,20 @@ def _submit_deferred_delivery(
             if publish_control is not None:
                 _publish_delivery_receipt(
                     msg, [recipient.name], publish_control, remote_id
+                )
+            _report_attachment_outcome(
+                msg, resolved, recipient, publish_control, remote_id
+            )
+            _, failed = _attachment_outcomes(resolved)
+            if failed:
+                txlog.log(
+                    "EXPIRED",
+                    msg_id=msg_id,
+                    sender=sender_label,
+                    recipient=recipient.name,
+                    files=[name for name, _ in failed],
+                    remote=remote_id,
+                    detail="retry window exhausted",
                 )
         except Exception as e:
             out_agent(
@@ -1105,9 +1241,39 @@ def _receive_control_envelope(
         msg_id=receipt.for_id,
         sender=local_sender.name,
         recipient=recipients,
+        files=list(receipt.files) or None,
         remote=remote_id,
         detail=f"{receipt.stage}; receipt_id={receipt.receipt_id}",
     )
+    _EVENT_FOR_STAGE = {
+        "attachment_failed": "ATTACHMENT_FAILED",
+        "expired": "EXPIRED",
+        "no_local_recipient": "NO_LOCAL_RECIPIENT",
+        "deferred": "DEFERRED",
+    }
+    event = _EVENT_FOR_STAGE.get(receipt.stage)
+    if event is not None:
+        txlog.log(
+            event,
+            msg_id=receipt.for_id,
+            sender=local_sender.name,
+            recipient=recipients,
+            files=list(receipt.files) or None,
+            remote=remote_id,
+            detail=receipt.detail or receipt.stage,
+        )
+    # The receipt file is written here, on the router's side of the seam, for
+    # each recipient the receiving node reported on. `tell` and `tells` only
+    # ever read it.
+    for name in receipt.recipients:
+        receipts.record_event(
+            local_sender.outbox_path(),
+            receipt.for_id,
+            receipt.stage,
+            recipient=name,
+            files=list(receipt.files),
+            detail=receipt.detail,
+        )
 
 
 def _publish_delivery_receipt(
@@ -1115,8 +1281,14 @@ def _publish_delivery_receipt(
     delivered_names: list[str],
     publish_control: Callable[[bytes], None],
     remote_id: str,
+    *,
+    stage: str = "inbox_write",
+    files: list[str] | None = None,
+    detail: str = "",
 ) -> None:
-    receipt = build_delivery_receipt(original, delivered_names)
+    receipt = build_delivery_receipt(
+        original, delivered_names, stage, files=files, detail=detail
+    )
     if receipt is None:
         return
     try:
@@ -1127,7 +1299,8 @@ def _publish_delivery_receipt(
             sender=original.get("from") or "?",
             recipient=",".join(delivered_names),
             remote=remote_id,
-            detail=f"receipt_id={receipt['id']}",
+            files=files or None,
+            detail=f"{stage}; receipt_id={receipt['id']}",
         )
     except Exception as e:
         out(

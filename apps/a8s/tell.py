@@ -832,7 +832,10 @@ def tell_main(argv: list[str]) -> int:
 
     if check:
         if attachments or message_argv or split:
-            print("tell: --check does not accept a message, attachments, or --split", file=sys.stderr)
+            print(
+                "tell: --check does not accept a message, attachments, or --split",
+                file=sys.stderr,
+            )
             return 2
         return run_check(recipient)
 

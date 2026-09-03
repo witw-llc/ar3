@@ -5,7 +5,7 @@ code in this repository.
 
 ## Repo shape
 
-This repo is **ar3** — four apps that ship together, plus the guide that
+This repo is **AR3** — four apps that ship together, plus the guide that
 teaches them.
 
 - **Top level** — polyglot CLI shims (`ar3`, `a8s`, `tell`, `tells`, `r4t`,
@@ -80,9 +80,15 @@ Pre-1.0, the usual semver freedoms apply — 0.x minor bumps may break.
 
 ## Conventions
 
-Every app in ar3 shares one doctrine — dependencies, filesystem, CLI feel,
+Every app in AR3 shares one doctrine — dependencies, filesystem, CLI feel,
 processes, integration, docs and release. It is stated as rules in
 [`docs/ar3-foundation.md`](docs/ar3-foundation.md); read it before adding a convention here.
+
+Some choices are ruled, not open. Each app's `docs/<app>-development.md` lists
+its hard constraints in imperative form, and the private wiki's Decisions
+ledger holds every ruling with its reasons and what it cost. Read both before
+changing a verb's contract, a wire format, or a public surface, and write the
+row the same hour a new ruling lands, so no decision is made twice.
 
 ### Shebangs
 

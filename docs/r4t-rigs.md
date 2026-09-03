@@ -6,6 +6,56 @@ selection, the settings surface, and the governance knob table. For the
 roster side see the [tutorial](r4t-tutorial.md); for why each governance layer
 exists see [r4t-governance.md](r4t-governance.md).
 
+## Detect what you already have
+
+The first rig should not be configured. `r4t rig detect` probes every
+run-capable preset against the CLI actually installed on this machine, asks
+each one what subscription is left, and prints the line that turns it into a
+rig:
+
+```bash
+r4t rig detect          # the table; writes nothing
+r4t rig detect --add    # create a rig per detected preset, named after it
+r4t rig detect --json   # every probed preset, machine-readable
+```
+
+```
+  PRESET   ENGINE   INSTALLED              FUEL  GRADE        ADD IT WITH
+  codex    codex    codex-cli 0.147.0      44%   run-capable  r4t rig add codex codex
+  copilot  copilot  GitHub Copilot CLI 1.  n/a   official     r4t rig add copilot copilot
+
+  not detected: agy (agy is not on PATH), muse (muse is not on PATH)
+```
+
+**Nothing is spent.** Installation is `r4t engine <id> check` — the composed
+argv handed to the CLI's own `--help`, never a turn — and the fuel column is
+`r4t rig fuel`'s reading asked with no model pinned. A quota surface that
+cannot answer costs the row its number and nothing else.
+
+Three grades:
+
+| Grade | Means |
+| --- | --- |
+| `official` | a supported engine: model slot, quota surface, verified argv ([copilot](r4t-engine.md#copilot-officially-supported)) |
+| `run-capable` | a verified headless invocation, and no more |
+| `needs --model` | an `ollama-*` launcher, which has no bare form |
+
+A preset whose binary is present but whose composed argv is **rejected** is
+not detected — adding a rig that cannot run its first turn is worse than
+saying nothing — and the reason is printed so `r4t engine <id> check` has
+somewhere to start.
+
+`--add` creates one rig per detected preset, named after the preset, and
+skips the `needs --model` ones with the flag they wanted. It is idempotent: a
+rig already in the config is reported, never replaced, so a re-run cannot
+overwrite settings you have since tuned. The write lands in the machine-global
+config (`~/.config/r4t/rigs.json`), which is the file every other r4t command
+reads; `--dir DIR` puts `rigs.json` somewhere else, and `--rig-config PATH`
+names the file outright.
+
+Exit code is 0 with at least one engine detected, 1 with none — and with none,
+the last line names the binaries to install.
+
 ## Presets
 
 Rig **names** are yours (`leader`, `member`, `reviewer`, …); **presets** are
@@ -432,7 +482,7 @@ r4t rig set ar3-eng permissions bypass
 r4t rig set ar3-eng allowed_tools "Bash(git:*) Bash(gh:*) Read Edit Write"
 ```
 
-`permissions` takes `ask`, `auto` or `bypass` — ar3's three words for a
+`permissions` takes `ask`, `auto` or `bypass` — AR3's three words for a
 stance each CLI spells its own way. r4t translates the word into the harness's
 own flags for every turn on the rig; the table, the asymmetry rule (a mode
 below the engine's floor errors, one above its ceiling proceeds with a note),

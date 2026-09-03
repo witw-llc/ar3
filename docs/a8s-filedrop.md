@@ -40,6 +40,13 @@ tells -f
 tell alice "sounds good"
 ```
 
+**Long messages:** an agent host's own notification path can clip a printed
+line well short of what `tells` prints — Claude Code's Monitor cuts each
+stdout line at 500 bytes. `tells` soft-wraps lines over `--line-max` bytes
+(default 400) and puts `tells --recover <token>` in the header, ahead of the
+body, so a clipped notification still shows where to read the rest. Match a
+different host's clip with `--line-max` / `TELLS_LINE_MAX` — `0` turns the wrap off, and a positive value under 16 bytes is refused.
+
 Desktop IDE agents should set `TELL_OUTBOX_DIR` on **every** shell that runs
 `tell` / `tells`, pointing at *their* filedrop outbox — not a shared human
 default. Otherwise outbound mail is stamped from the wrong seat (classic

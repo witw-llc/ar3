@@ -26,17 +26,7 @@ wait in the chapter.
 
 ## 3. Starting state
 
-- No leftover `TELL_OUTBOX_DIR` from an earlier a8s seat on this machine —
-  `tell` checks it before anything else, so a stale value silently sends
-  your mail to that other seat's outbox instead of the one you build below:
-
-**Run**
-
-```bash
-unset TELL_OUTBOX_DIR
-```
-
-- ar3 installed and on your PATH:
+- AR3 installed and on your PATH:
 
 **Run**
 
@@ -46,6 +36,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc
 
   That clones the suite into `~/.ar3` and adds one `source` line to your
   shell rc. Open a new shell (or re-source the rc) so `PATH` picks it up.
+
+- If you have run a8s before on this machine, `unset TELL_OUTBOX_DIR` so your
+  mail goes to the seat you build below. `tell` reads that variable before
+  anything else, and a stale value sends your mail to the other seat's outbox.
 
 - Python 3 installed. On Windows the python.org installers give you
   `python.exe` and no `python3.exe`, so `python3 --version` fails there even
@@ -504,7 +498,7 @@ Three more substitutions appear there. `$PYTHON` is the interpreter already
 running the router, so a definition never has to guess between `python3` and
 `python`; `$A8S_DIR` is a8s's own directory inside the suite, which is how the
 definition reaches `r4t.py` without a path that depends on where you installed
-ar3; and `$AGE` is how long the message sat before this wake, in words
+AR3; and `$AGE` is how long the message sat before this wake, in words
 (`3 minutes ago`), so the turn can tell fresh mail from a backlog it is only
 now getting to.
 

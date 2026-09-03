@@ -237,8 +237,12 @@ class TestCheckCli:
         assert code == 0  # nothing installed: unverifiable, not failure
 
     def test_one_engine_can_be_named(self, bin_dir, capsys):
+        # The argv is spelled out rather than routed through `engine_cli`, so
+        # the whole command a user types appears in one call. `tools/
+        # surface-audit.py` reads that as the wiring evidence for `engine
+        # check`, and a helper that assembles the argv hides it.
         fake_binary(bin_dir, "claude", flags=CLAUDE_FLAGS)
-        assert engine_cli("claude", "check") == 0
+        assert r4t_main(["engine", "claude", "check"]) == 0
         out = capsys.readouterr().out
         assert "claude" in out and "accepted" in out
         assert "codex" not in out

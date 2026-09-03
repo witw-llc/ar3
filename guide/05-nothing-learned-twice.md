@@ -20,7 +20,7 @@ thinking.
 
 ## 3. Starting state
 
-- Chapter 4 complete, or at least ar3 installed with `k7e` on your PATH,
+- Chapter 4 complete, or at least AR3 installed with `k7e` on your PATH,
   and Python 3 (`python3 --version` answers) for the one script you write here.
 - **Free path** — `ollama` serving with `qwen3.6` pulled (`ar3 doctor` lists
   your models on its `ollama serve` line). **Subscription path** — the Cursor
