@@ -100,9 +100,7 @@ the agent be free inside the cell; let the cell be the wall.
    invisible to `run_as` users — install the suite machine-wide instead:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh \
-  | sudo AR3_SYSTEM=1 sh
+curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sudo AR3_SYSTEM=1 sh
 ```
 
    That clones into `/usr/local/lib/ar3` and symlinks `tell` (and the other

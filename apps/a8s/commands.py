@@ -2071,9 +2071,9 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [-f|--follow] [--from NAME] [--glow [theme]]
-    [--heading-out T] [--heading-in T]` — markdown history of messages to or from
-    an agent."""
+    """`a8s convo <name> [--limit N] [-f|--follow] [--from NAME] [--since CURSOR]
+    [--json] [--glow [theme]] [--heading-out T] [--heading-in T]` — markdown
+    history of messages to or from an agent."""
     import argparse
 
     from convo import (
@@ -2083,8 +2083,9 @@ def cmd_convo(args: list[str]) -> int:
         convo_help_epilog,
         decode_template,
         follow_conversation,
-        format_conversation,
+        format_entry,
         load_agent_entries,
+        load_agent_records,
         open_glow_stdout,
         print_entries,
     )
@@ -2106,9 +2107,10 @@ def cmd_convo(args: list[str]) -> int:
     parser.add_argument(
         "--limit",
         type=int,
-        default=10,
+        default=None,
         metavar="N",
-        help="number of recent messages to show (default: 10)",
+        help="number of recent messages to show (default: 10; with --since, "
+        "the oldest N after the cursor, and unset drains every one of them)",
     )
     parser.add_argument(
         "--from",
@@ -2116,6 +2118,18 @@ def cmd_convo(args: list[str]) -> int:
         action="append",
         metavar="NAME",
         help="only messages sent by NAME (repeat for several senders)",
+    )
+    parser.add_argument(
+        "--since",
+        metavar="CURSOR",
+        help="only rows after CURSOR: a ulid, an ISO timestamp/date, or a "
+        "duration like 2h/30m/3d",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="one JSON object per row (ulid, seq, from, to, utc, content, "
+        "files, files_unavailable) instead of markdown",
     )
     parser.add_argument(
         "--glow",
@@ -2141,9 +2155,23 @@ def cmd_convo(args: list[str]) -> int:
         parsed = parser.parse_args(args)
     except SystemExit as e:
         return int(e.code if e.code is not None else 0)
-    if parsed.limit < 1:
+    if parsed.limit is not None and parsed.limit < 1:
         print("a8s convo: --limit must be a positive integer", file=sys.stderr)
         return 2
+    if parsed.follow and (parsed.since is not None or parsed.json):
+        print(
+            "a8s convo: --follow is not compatible with --since or --json",
+            file=sys.stderr,
+        )
+        return 2
+
+    # A tail view has to stop somewhere, so an unset --limit means ten. A
+    # cursor already says where to stop, and capping it at ten would leave
+    # the oldest unseen messages of a burst behind a window the poller has
+    # no way to know it missed: unset means drain.
+    limit = parsed.limit
+    if limit is None and parsed.since is None:
+        limit = 10
 
     heading_out = (
         decode_template("\n".join(parsed.heading_out))
@@ -2171,7 +2199,7 @@ def cmd_convo(args: list[str]) -> int:
         try:
             follow_conversation(
                 agent_name,
-                limit=parsed.limit,
+                limit=limit,
                 heading_out=heading_out,
                 heading_in=heading_in,
                 glow_theme=glow_theme,
@@ -2184,10 +2212,69 @@ def cmd_convo(args: list[str]) -> int:
             return 1
         return 0
 
+    if parsed.json:
+        try:
+            records = load_agent_records(
+                agent_name,
+                limit=limit,
+                senders=parsed.senders,
+                since=parsed.since,
+            )
+        except ValueError as e:
+            print(f"a8s convo: {e}", file=sys.stderr)
+            return 2
+        except ConversationArchiveError as e:
+            print(f"a8s: {e}", file=sys.stderr)
+            return 1
+        # `files` names every attachment the message declared, delivered or
+        # not, so a consumer reading it alone reads a lost file as an
+        # arrived one — the exact confusion the archive keeps
+        # `files_unavailable` to prevent (see `entry_from_message`). The key
+        # is always present, empty list and all, so its absence never has to
+        # be told apart from a clean transfer.
+        for seq, entry in records:
+            print(
+                json.dumps(
+                    {
+                        "ulid": entry.get("id", ""),
+                        "seq": seq,
+                        "from": entry.get("from", ""),
+                        "to": entry.get("to", ""),
+                        "utc": entry.get("date", ""),
+                        "content": entry.get("content", ""),
+                        "files": entry.get("files", []),
+                        "files_unavailable": [
+                            {
+                                "filename": str(lost.get("filename") or ""),
+                                "error": str(lost.get("error") or ""),
+                                "detail": str(lost.get("detail") or ""),
+                            }
+                            for lost in (entry.get("files_unavailable") or [])
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return 0
+
     try:
-        rows = load_agent_entries(
-            agent_name, limit=parsed.limit, senders=parsed.senders
-        )
+        if parsed.since is not None:
+            rows = [
+                entry
+                for _, entry in load_agent_records(
+                    agent_name,
+                    limit=limit,
+                    senders=parsed.senders,
+                    since=parsed.since,
+                )
+            ]
+        else:
+            rows = load_agent_entries(
+                agent_name, limit=limit, senders=parsed.senders
+            )
+    except ValueError as e:
+        print(f"a8s convo: {e}", file=sys.stderr)
+        return 2
     except ConversationArchiveError as e:
         print(f"a8s: {e}", file=sys.stderr)
         return 1
@@ -2210,12 +2297,9 @@ def cmd_convo(args: list[str]) -> int:
                 glow_stream.close()
         return 0
 
-    text = format_conversation(
-        agent_name,
-        limit=parsed.limit,
-        heading_out=heading_out,
-        heading_in=heading_in,
-        senders=parsed.senders,
+    text = "\n\n".join(
+        format_entry(agent_name, entry, heading_out=heading_out, heading_in=heading_in)
+        for entry in rows
     )
     if text:
         print(text)

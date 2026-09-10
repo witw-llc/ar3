@@ -143,8 +143,9 @@ class TestAr3sOwnRoster:
         assert [r.name for r in book.rituals.values() if r.errors] == []
         assert book.warnings == [
             "rituals (mission-review, weekly-review) are declared and "
-            "validated; this release does not run them — the idle mission "
-            "review is built-in behavior, not a ritual block"
+            "validated; this release does not run them — what runs on its own "
+            "is the built-in idle mission review, which hands the leader one "
+            "turn after 30 minutes with no turn anywhere on the roster"
         ]
 
     def test_it_stands_alone(self, book):

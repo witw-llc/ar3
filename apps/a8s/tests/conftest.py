@@ -216,6 +216,37 @@ def unreadable_file():
 
 
 @pytest.fixture
+def unwritable_dir():
+    """Take write permission off a directory for one test, and give it back.
+
+    The stand-in for the sandboxed seat's ACL: read and execute on the a8s
+    home, no write. Like `unreadable_file` the denial is verified rather than
+    assumed — root ignores the mode bits, Windows has none, and a filesystem
+    may too, and a test that silently exercised nothing would be worse than
+    no test at all.
+    """
+    restored: list[tuple[Path, int]] = []
+
+    def deny(path: Path) -> Path:
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("a read-only mode denies nothing to this process")
+        mode = path.stat().st_mode
+        path.chmod(0o555)
+        restored.append((path, mode))
+        probe = path / ".write-probe"
+        try:
+            probe.touch()
+        except OSError:
+            return path
+        probe.unlink()
+        pytest.skip(f"this filesystem ignores the read-only mode on {path}")
+
+    yield deny
+    for path, mode in restored:
+        path.chmod(mode)
+
+
+@pytest.fixture
 def agents_root() -> Path:
     """Existing per-tool agent fixture directories under apps/a8s/tests/agents/."""
     return _PKG_DIR / "tests" / "agents"

@@ -174,8 +174,11 @@ in `rigs.json` (see [Rig configuration](r4t-rigs.md)).
 
 `## Rituals`, one `###` per ritual. The block's prose is the ritual's prompt
 payload. This release parses and validates rituals and does not run them —
-`r4t runbook check` says so per file — and the idle mission review is
-scheduler behavior with a built-in prompt, not a ritual block. Firing is #137.
+`r4t runbook check` says so per file, and names the one thing that does run
+unasked: the idle mission review, scheduler behavior with a built-in prompt
+rather than a ritual block, which hands the leader a turn once the whole roster
+has been quiet for half an hour (see [idle](r4t-idle.md#3-heartbeat-mission-review)).
+Firing is #137.
 
 | Key | Values | Default | Sample | What it sets |
 |---|---|---|---|---|

@@ -10,7 +10,110 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## Unreleased
+## 0.1.85
+
+### Added
+
+- **`a8s convo --since <cursor>` reads what a heartbeat missed, in delivery
+  order.** A desktop seat with no persistent monitor polls on a timer, and a
+  bounded `--limit` window can miss a burst; `--since` takes a message ulid
+  (rows with a greater `seq`), an ISO timestamp (rows after the last-inserted
+  row dated at or before it), a bare date (the whole local day, its midnight
+  row included), or a duration like `2h`/`30m`/`3d`
+  (rows dated within that span of now), and composes with `--from`. On its own
+  it returns **every** row after the cursor, oldest first — a burst of any
+  size comes back whole. Add `--limit N` for the oldest N of them and continue
+  from the newest `ulid` returned, and the next run resumes exactly where this
+  one stopped, so neither shape of poll can leave a message behind. A ulid
+  cursor reads in insertion order, so a message that arrives late is never
+  dropped the way a timestamp cursor can drop one — the gap is documented on
+  `_since_floor`. Dates are compared as parsed instants rather than as stored
+  text, and a cursor with no offset (a bare date included) is read in the
+  machine's local zone, so `--since 2026-09-10` means local midnight. Heading
+  templates gain a `{ulid}` placeholder (the row's own `message_id`, empty
+  when it has none) so a heartbeat skill can record the cursor without parsing
+  headings, and `--json` prints one newline-delimited object per row (`ulid`,
+  `seq`, `from`, `to`, `utc`, `content`, `files`, `files_unavailable`) for the
+  same reason — `files_unavailable` carries the `{filename, error, detail}` of
+  every attachment the transfer could not deliver, which the markdown view
+  already showed, so a JSON consumer cannot read a lost file as an arrived
+  one. Closes #265.
+
+- **A re-armed `tells -f` no longer reads old mail as live.** Everything
+  already in the inbox at arm time prints first, under a `--- N message(s)
+  already in the inbox when tells started at HH:MM; live from here ---`
+  boundary, each line carrying a `[backlog]` prefix (`[backlog] [late 32h]`
+  when a message is both); the boundary is skipped when the inbox is empty
+  at arm time. `--live` drops the backlog entirely and prints only what
+  arrives after the arm. Default (non-follow) `tells` is unchanged. Closes
+  #266.
+
+- **The one-pager is written to the research.** `README.md` opens on a plain
+  definition sentence and the install line, so the first command lands inside
+  the first screen instead of 900 words down. The quickstart states the
+  three-line target, install then `ar3 init ~/my-repo` then one `tell`, and
+  says line 2 ships next. One dated transcript from the 2026-09-03 run stands
+  as the proof, the reader biography becomes the problem in a paragraph, and
+  the page claims macOS with Windows named as next. Reach is claimed only where
+  it is true: the outcome waits in a local inbox read with one command, and
+  mail or phone is named as recipe territory rather than a product claim.
+  `docs/ar3-1.0.md` follows: 1.0 is declared by one walk a stranger completes
+  unaided, when it is done rather than on a date.
+- **`tools/wiki-gardener.py` holds the decision ledger to a size and a shape.**
+  The wiki's `Decisions` page states that a new ruling covering a live row's
+  ground merges into that row rather than appending, that the absorbed rows
+  move verbatim to `Decisions-Archive`, and that the live table stays under 120
+  rows; three new defect classes check it. `ledger-oversize` fires past the
+  ceiling, `unarchived-row` names a superseded row still in the live table, and
+  `unconsolidated-pair` names two live rows on one surface in one domain — the
+  surface being the title's words before the first dash or colon, or its first
+  three words where the titles carry no separator, which the report says. Every
+  run prints the live row count against the ceiling, and `--json` carries it as
+  a `ledger` object. The tool and its test are routed into the per-PR `a8s` job,
+  which is the only way a repo-wide checker's tests actually run. Closes #270.
+
+### Fixed
+
+- **A running node keeps its stores readable to a read-only reader.** Both
+  SQLite stores are WAL, whose `-wal` / `-shm` side files exist only while
+  some connection is open, so a seat that may read the a8s home but not write
+  it was told "unable to open database file" by `a8s convo` and `a8s tx`
+  whenever no write happened to be in flight. `a8s run` now holds one idle
+  connection to each store for as long as it runs, and when an open fails with
+  neither side file present the reader keeps SQLite's own words and adds the
+  condition they can hide — a possibility to check, not a diagnosis, since the
+  same codes come from an unreadable database file too.
+
+- **The quota cache relocates with `R4T_HOME` like every other r4t state.**
+  `r4t rig detect` (with or without `--add`) and any other run of `quota`
+  wrote its snapshot into the machine-global `~/.config/r4t/quota/`
+  regardless of `R4T_HOME`, so a stranger's first isolated run left numbers
+  behind in state it did not create — and `r4t sandbox`, which advertises a
+  throwaway `R4T_HOME` for its own process, leaked the same way. The snapshot
+  path now resolves from the same home as rigs and rosters. Closes #262.
+
+- **A roster that just answered you does not pay for a silent leader turn.**
+  The idle mission review fired two quiet passes after the first reply landed,
+  because two passes with nothing in the queues read as a stall — so a roster
+  that answered in 82 seconds spent another 27 on a leader turn that produced
+  nothing the person could see. A stall now also requires that the newest turn
+  anywhere on the roster is at least half an hour old: an org between messages
+  is not asleep, and no review fires and no stall counts until it truly goes
+  quiet. `r4t status` gains a `mission review` row in Activity, so what the
+  heartbeat has spent — when it last fired, how many silent reviews, how many
+  stalled ticks, whether it has gone dormant — is visible where a person
+  already looks, and `r4t runbook check` now names the built-in review as the
+  one thing that runs unasked instead of leaving "this release does not run
+  rituals" to read as a promise of silence. Closes #263.
+
+### Changed
+
+- **The install line is `curl -fsSL <url> | sh`.** `--proto '=https'` only
+  refuses a redirect to plain http, which GitHub never sends, and `--tlsv1.2`
+  only matters against a server that still offers TLS 1.0 or 1.1, which GitHub
+  does not; both flags cost the reader a second line for no protection.
+
+## 0.1.84
 
 ### Added
 

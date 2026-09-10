@@ -19,7 +19,7 @@ tools/wiki-gardener.py /tmp/wiki           # one line per defect, then a count
 tools/wiki-gardener.py /tmp/wiki --json    # the same report, machine-readable
 ```
 
-Exit 0 means clean, 1 means defects. Six classes:
+Exit 0 means clean, 1 means defects. Nine classes:
 
 | Defect | What it means |
 |---|---|
@@ -29,6 +29,9 @@ Exit 0 means clean, 1 means defects. Six classes:
 | `orphan` | unreachable from `_Sidebar.md` within two link hops |
 | `sidebar-leaf` | a `_Sidebar.md` entry that is not an index page |
 | `dead-link` | a `[[wiki]]` or relative link to a page that does not exist |
+| `ledger-oversize` | the decision ledger's live table is over its row ceiling |
+| `unarchived-row` | a superseded ledger row still sitting in the live table |
+| `unconsolidated-pair` | two live ledger rows on one surface in one domain |
 
 The header forms it reads, both on the page's first line:
 
@@ -49,12 +52,28 @@ the two cross-cutting indexes the charter names, `Attention` and `Charters`. A
 new index of any other name goes in `CROSS_CUTTING_INDEXES` at the top of the
 tool.
 
+The last three classes read the wiki's `Decisions` page, whose own preamble
+carries the rule they check: a new ruling that covers a live row's ground merges
+into that row rather than appending, the absorbed rows move verbatim to
+`Decisions-Archive`, and the live table stays under 120 rows. Every run prints
+the live row count against that ceiling, clean or not.
+
+Which two rows cover the same ground is a judgement, so the tool compares only
+the **surface name** — the row title's words before the first dash or colon, or
+its first three words where fewer than half the titles carry such a separator.
+The report says which of the two it used, because the answer changes as titles
+are rewritten. Rows in different domain sections never pair, and a row whose
+Status names a successor is reported as belonging in the archive instead.
+
 The checks are deterministic and read no meaning: whether a reason is a good
-reason, and whether a category is the right one, stay with the gardener.
+reason, whether a category is the right one, and whether two rows on one surface
+should actually merge, stay with the gardener.
 Renames are not checked at all — the tool's docstring says why.
 
 `release.yml` runs the tool over the wiki on every release, non-blocking until
-the wiki reports clean.
+the wiki reports clean. `tests/test_wiki_gardener.py` drives every check over
+miniature wikis built in `tmp_path`, and the tool and that test are routed into
+the per-PR `a8s` job so a change to either runs it.
 
 ## `claim-sweep.py`
 

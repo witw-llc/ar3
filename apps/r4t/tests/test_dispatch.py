@@ -8,7 +8,7 @@ import sys
 import textwrap
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2390,6 +2390,21 @@ class TestExternalClassIngress:
         assert state.read_queue(NODE, "phil")[0]["thread"] == thread_id
 
 
+def quiet_since(node, name, seconds_ago):
+    """A roster whose newest turn finished that many seconds ago, with the
+    stall bookkeeping already holding that stamp — the shape every idle pass
+    after the first one sees."""
+    when = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    stamp = when.isoformat().replace("+00:00", "Z")
+    state.update_meta(node, name, last_completed_at=stamp)
+    state.write_mission_review(
+        node,
+        {"stalls": 0, "silent_reviews": 0, "dormant": False,
+         "mission_mtime": 0.0, "last_turn_seen": stamp},
+    )
+    return stamp
+
+
 class TestMissionReview:
     def _review(self, ctx):
         # These exercise the STALL LADDER. The wall-clock floor below is a
@@ -2401,6 +2416,24 @@ class TestMissionReview:
             state.write_mission_review(NODE, st)
         return run_idle(ctx)["mission_review"]
 
+    def test_an_org_that_just_answered_is_not_stalled(self, ctx, fake_harness):
+        # The measured defect: a roster answered its first message and two
+        # quiet idle passes later the leader was handed a review turn that
+        # produced nothing the person sees. A minute of quiet between messages
+        # is a lull, not a stall, however many wakes fall inside it.
+        quiet_since(NODE, "Gerry", 60)
+        for _ in range(10):
+            assert self._review(ctx)["fired"] is False
+        assert state.read_mission_review(NODE)["stalls"] == 0
+        assert not harness_calls(fake_harness)
+
+    def test_a_quiet_stretch_fires_on_the_usual_ladder(self, ctx, fake_harness):
+        # Past the floor the ladder is unchanged: one tick climbs, the next
+        # fires.
+        quiet_since(NODE, "Gerry", dispatch.MISSION_REVIEW_MIN_INTERVAL_SECONDS + 60)
+        assert self._review(ctx)["fired"] is False
+        assert self._review(ctx)["fired"] is True
+
     def test_two_reviews_are_never_closer_than_the_floor(self, ctx, fake_harness):
         # The ladder counts idle WAKES, so a shorter wake interval would
         # multiply the review rate without anyone editing a policy. A review
@@ -2408,9 +2441,14 @@ class TestMissionReview:
         self._review(ctx)
         assert self._review(ctx)["fired"] is True
         calls = len(harness_calls(fake_harness))
+        # The review's own leader turn is the newest turn on the roster; age it
+        # past the quiet gate so the floor between reviews is the only one left
+        # standing.
+        stamp = quiet_since(NODE, "Gerry", dispatch.MISSION_REVIEW_MIN_INTERVAL_SECONDS + 60)
         state.write_mission_review(
             NODE, {"stalls": 99, "silent_reviews": 0, "dormant": False,
-                   "mission_mtime": 0.0, "last_review_at": time.time()},
+                   "mission_mtime": 0.0, "last_turn_seen": stamp,
+                   "last_review_at": time.time()},
         )
         assert run_idle(ctx)["mission_review"]["fired"] is False
         assert len(harness_calls(fake_harness)) == calls  # nothing was spent
@@ -2466,10 +2504,56 @@ class TestMissionReview:
         )
         review = self._review(ctx)  # stalls -> 8 == threshold (2<<2); fires, third silent
         assert review["fired"] is True and review["dormant"] is True
-        assert state.read_mission_review(NODE)["dormant"] is True
+        st = state.read_mission_review(NODE)
+        assert st["dormant"] is True
         harness_before = len(harness_calls(fake_harness))
+        # The review's own leader turn is the newest stamp and it is young:
+        # the next wake is a cooling one and dormancy survives it.
+        assert self._review(ctx)["fired"] is False
+        assert state.read_mission_review(NODE)["dormant"] is True
+        # Past the floor the org is quiet again and dormancy is the only thing
+        # left to hold the heartbeat back.
+        st = state.read_mission_review(NODE)
+        st["last_turn_seen"] = quiet_since(
+            NODE, "Gerry", dispatch.MISSION_REVIEW_MIN_INTERVAL_SECONDS + 60
+        )
+        st["dormant"] = True
+        st["silent_reviews"] = 3
+        state.write_mission_review(NODE, st)
         assert self._review(ctx)["fired"] is False  # dormant: no more nudges
         assert len(harness_calls(fake_harness)) == harness_before
+
+    def test_a_silent_review_keeps_its_backoff_through_the_next_quiet_wake(
+        self, ctx, fake_harness
+    ):
+        # A review is itself a leader turn, so after it fires the newest stamp
+        # on the roster is the review's own and it is seconds old. That is not
+        # work arriving: the wake inside the floor holds the ladder where it is
+        # instead of resetting the silent count the review just earned.
+        assert self._review(ctx)["fired"] is False
+        assert self._review(ctx)["fired"] is True
+        assert state.read_mission_review(NODE)["silent_reviews"] == 1
+        review = self._review(ctx)
+        assert review["fired"] is False and review.get("cooling") is True
+        st = state.read_mission_review(NODE)
+        assert st["silent_reviews"] == 1 and st["dormant"] is False
+
+    def test_a_cooling_wake_counts_no_stall(self, ctx, fake_harness):
+        quiet_since(NODE, "Gerry", 60)
+        for _ in range(5):
+            assert self._review(ctx).get("cooling") is True
+        assert state.read_mission_review(NODE)["stalls"] == 0
+
+    def test_real_work_inside_the_floor_still_resets(self, ctx, fake_harness):
+        # The reset keys on a NEW stamp, not on a young one: a turn that flows
+        # a minute after a silent review is work, and the backoff starts over.
+        assert self._review(ctx)["fired"] is False
+        assert self._review(ctx)["fired"] is True
+        assert state.read_mission_review(NODE)["silent_reviews"] == 1
+        handle_message(ctx, "acme:gerry", "acme:phil", "real work")
+        assert self._review(ctx).get("cooling") is None
+        st = state.read_mission_review(NODE)
+        assert st["silent_reviews"] == 0 and st["stalls"] == 0
 
     def test_dormant_rearms_on_mission_change(self, ctx, fake_harness):
         (ctx.root / "MISSION.md").write_text("the mission", encoding="utf-8")
@@ -3183,7 +3267,44 @@ class TestCli:
         assert "✓ Phil" in out and "rig=junior-dev" in out
         assert "✗ Broken" in out and "disabled:" in out
         assert "(try: fix ROSTER.md)" in out
-        assert "dead letters  0" in out
+        assert re.search(r"dead letters\s+0", out)
+        assert "mission review" in out
+
+    def test_status_names_the_heartbeat_that_has_not_fired(
+        self, r4t_home, repo, rig_config, capsys
+    ):
+        state.roster_dir(NODE).mkdir(parents=True, exist_ok=True)
+        self.run(
+            "status", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(rig_config), "--no-notify",
+        )
+        out = capsys.readouterr().out
+        assert "mission review  not yet fired (fires after 30 min quiet)" in out
+
+    def test_status_accounts_for_what_the_heartbeat_spent(
+        self, r4t_home, repo, rig_config, capsys
+    ):
+        # A review is a paid leader turn nobody asked for. Activity is where a
+        # person looks for what the org is doing, so it says what the heartbeat
+        # has cost and whether it has gone dormant.
+        state.roster_dir(NODE).mkdir(parents=True, exist_ok=True)
+        state.write_mission_review(
+            NODE,
+            {"stalls": 4, "silent_reviews": 3, "dormant": True,
+             "mission_mtime": 0.0, "last_review_at": 1757520000.0},
+        )
+        self.run(
+            "status", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(rig_config), "--no-notify",
+        )
+        out = capsys.readouterr().out
+        stamp = dispatch.local_stamp(
+            datetime.fromtimestamp(1757520000.0, timezone.utc)
+        )
+        assert (
+            f"mission review  last fired {stamp} · 3 silent of 3 · 4 stalled ticks"
+            " · dormant until MISSION changes"
+        ) in out
 
     def test_rig_list(self, r4t_home, repo, rig_config, capsys):
         rc = self.run("rig", "list", "--root", str(repo), "--rig-config", str(rig_config))

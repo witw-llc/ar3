@@ -10,7 +10,10 @@ one line to stderr and exits 1.
 With `-f` / `--follow` or `--timeout 0`, poll the inbox continuously and print
 each new message as it arrives until interrupted (Ctrl+C). An explicit
 `--timeout` greater than zero follows for that many seconds; `-f` cannot be
-combined with a positive `--timeout`.
+combined with a positive `--timeout`. Follow mode prints whatever is already
+in the inbox first, under a boundary line, each carrying a `[backlog]`
+prefix, so a re-armed monitor never reads old mail as live; `--live` skips
+that backlog and starts from the arm.
 
 `--glow [theme]` and `--heading-out` / `--heading-in` reuse convo's markdown
 formatting (and optional GlowStream rendering). Plain `sender: body` remains
@@ -83,7 +86,7 @@ class TellsVersion(Exception):
 
 
 _USAGE = (
-    "usage: tells [-f|--follow] [--timeout SEC] [--body-max N] [--line-max N] "
+    "usage: tells [-f|--follow] [--timeout SEC] [--live] [--body-max N] [--line-max N] "
     "[--glow [THEME]] "
     "[--show PATH | --recover TOKEN] [--sent [--since D]] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
@@ -97,6 +100,7 @@ def _print_usage() -> None:
     print("       default: wait up to 5s for the next message burst, then exit", file=sys.stderr)
     print("       --timeout SEC: follow the inbox for SEC seconds (0 = until Ctrl+C)", file=sys.stderr)
     print("       -f: same as --timeout 0 (cannot combine with positive --timeout)", file=sys.stderr)
+    print("       --live: with -f, skip the inbox backlog and print only messages that arrive after the arm", file=sys.stderr)
     print(
         f"       --body-max N: truncate printed body at N chars "
         f"(default {DEFAULT_BODY_MAX_CHARS}; 0 = unlimited; env {TELLS_BODY_MAX_ENV})",
@@ -122,6 +126,7 @@ class TellsOptions:
     timeout: float
     follow: bool = False
     timeout_explicit: bool = False
+    live: bool = False
     body_max: int = DEFAULT_BODY_MAX_CHARS
     line_max: int = DEFAULT_LINE_MAX_BYTES
     glow_theme: str | None = None
@@ -356,6 +361,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     timeout = DEFAULT_TIMEOUT_SEC
     follow = False
     timeout_explicit = False
+    live = False
     body_max = resolve_body_max()
     line_max = resolve_line_max()
     show: str | None = None
@@ -368,6 +374,10 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         arg = rest[i]
         if arg in ("-f", "--follow"):
             follow = True
+            i += 1
+            continue
+        if arg == "--live":
+            live = True
             i += 1
             continue
         if arg == "--sent":
@@ -437,6 +447,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         timeout=timeout,
         follow=follow,
         timeout_explicit=timeout_explicit,
+        live=live,
         body_max=body_max,
         line_max=line_max,
         glow_theme=glow_theme,
@@ -448,6 +459,8 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     )
     if follow and timeout_explicit and timeout != 0:
         raise TellsUsageError("cannot use -f/--follow with a positive --timeout")
+    if live and not opts.follow_forever:
+        raise TellsUsageError("--live requires -f/--follow or --timeout 0")
     if since is not None and not sent:
         raise TellsUsageError("--since applies to --sent")
     if sent and follow:
@@ -541,8 +554,24 @@ def late_prefix(msg: dict, threshold_s: float = LATE_THRESHOLD_SEC) -> str:
     return f"[late {duration_text(gap)}] "
 
 
-def _print_plain(msg: dict, envelope_path: Path, body_max: int, line_max: int) -> None:
-    sender = f"{late_prefix(msg)}{msg.get('from') or '?'}"
+def backlog_prefix(backlog: bool) -> str:
+    """`[backlog] ` for a message that was already in the inbox when `tells
+    -f` started, else ``. Same seam as `late_prefix`; the two compose as
+    `[backlog] [late 32h] `."""
+    return "[backlog] " if backlog else ""
+
+
+def _backlog_boundary_line(count: int) -> str:
+    from datetime import datetime
+
+    now = datetime.now().strftime("%H:%M")
+    return f"--- {count} message(s) already in the inbox when tells started at {now}; live from here ---"
+
+
+def _print_plain(
+    msg: dict, envelope_path: Path, body_max: int, line_max: int, *, backlog: bool = False
+) -> None:
+    sender = f"{backlog_prefix(backlog)}{late_prefix(msg)}{msg.get('from') or '?'}"
     raw_content = msg.get("content", "") or ""
     displayed = format_displayed_content(raw_content, envelope_path, body_max)
     wrapped, was_wrapped = wrap_body_text(displayed, line_max)
@@ -571,11 +600,12 @@ def _print_markdown(
     glow_stream: object | None,
     heading_out: str,
     heading_in: str,
+    backlog: bool = False,
 ) -> None:
     from convo import entry_from_message, print_entries
 
     entry = entry_from_message(msg, recipients=[agent])
-    entry["content"] = late_prefix(msg) + format_displayed_content(
+    entry["content"] = backlog_prefix(backlog) + late_prefix(msg) + format_displayed_content(
         entry.get("content", ""), envelope_path, body_max
     )
     print_entries(
@@ -598,6 +628,7 @@ def _poll_new_messages(
     glow_stream: object | None,
     heading_out: str,
     heading_in: str,
+    backlog: bool = False,
 ) -> int:
     printed = 0
     current = _inbox_fingerprints(inbox)
@@ -620,9 +651,10 @@ def _poll_new_messages(
                 glow_stream=glow_stream,
                 heading_out=heading_out,
                 heading_in=heading_in,
+                backlog=backlog,
             )
         else:
-            _print_plain(msg, path, body_max, line_max)
+            _print_plain(msg, path, body_max, line_max, backlog=backlog)
         seen[name] = fingerprint
         printed += 1
     # Drop fingerprints for names that disappeared so a later recreate is fresh.
@@ -708,6 +740,11 @@ def tells_main(argv: list[str]) -> int:
             pass
         seen = _inbox_fingerprints(inbox)
         if opts.follow_forever:
+            if not opts.live and seen:
+                print(_backlog_boundary_line(len(seen)), flush=True)
+                backlog_seen: dict[str, tuple[int, int]] = {}
+                _poll_new_messages(inbox, backlog_seen, backlog=True, **poll_kwargs)
+                seen = backlog_seen
             try:
                 while True:
                     _poll_new_messages(inbox, seen, **poll_kwargs)

@@ -31,7 +31,7 @@ wait in the chapter.
 **Run**
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
+curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 ```
 
   That clones the suite into `~/.ar3` and adds one `source` line to your

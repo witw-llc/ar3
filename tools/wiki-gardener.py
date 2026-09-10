@@ -10,14 +10,25 @@ left unreachable. This tool checks the mechanical half of that charter — the
 part a script settles without reading for meaning. Judgement calls (is the
 reason a good reason, is the category the right one) stay with the gardener.
 
-Six defect classes:
+Nine defect classes:
 
-    uncategorized     no charter category declared in the page header
-    stateless         no charter state declared in the page header
-    unexplained-flag  a banner without a reason, a date, or both
-    orphan            unreachable from `_Sidebar.md` within two link hops
-    sidebar-leaf      a `_Sidebar.md` entry that is not an index page
-    dead-link         an internal link to a page that does not exist
+    uncategorized        no charter category declared in the page header
+    stateless            no charter state declared in the page header
+    unexplained-flag     a banner without a reason, a date, or both
+    orphan               unreachable from `_Sidebar.md` within two link hops
+    sidebar-leaf         a `_Sidebar.md` entry that is not an index page
+    dead-link            an internal link to a page that does not exist
+    ledger-oversize      the decision ledger is over its row ceiling
+    unarchived-row       a superseded ledger row still in the live table
+    unconsolidated-pair  two live ledger rows on one surface in one domain
+
+The last three read `Decisions.md`, whose own preamble carries the rule they
+check: a new ruling that covers a live row's ground merges into it rather than
+appending, the absorbed rows move verbatim to the archive page, and the live
+table stays under its ceiling. Which rows cover the same ground is a judgement,
+so the tool reads only the surface name — the title's words before the first
+dash or colon, or its first three words where the titles carry no separator,
+which is what the report says they do.
 
 Renamed pages are deliberately not checked. A rename leaves no trace in the
 working tree — the old name is simply absent, indistinguishable from a page
@@ -65,6 +76,13 @@ CROSS_CUTTING_INDEXES = ("Attention", "Charters")
 
 SIDEBAR = "_Sidebar.md"
 MAX_HOPS = 2
+
+LEDGER = "Decisions"
+LEDGER_ARCHIVE = "Decisions-Archive"
+LEDGER_CEILING = 120
+SURFACE_WORDS = 3
+SURFACE_END = re.compile(r" — | - | – |:")
+ROW_SPLIT = re.compile(r"(?<!\\)\|")
 
 DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 FENCE = re.compile(r"^\s*(```|~~~)", re.MULTILINE)
@@ -302,7 +320,72 @@ def check_orphans(pages: dict[str, str], sidebar_text: str, files: dict[str, str
     ]
 
 
-def garden(wiki: Path) -> tuple[list[Defect], int]:
+def ledger_rows(text: str) -> list[tuple[str, str, str]]:
+    """The decision ledger's table rows, as (domain section, title, status)."""
+    rows, section, fenced = [], "", False
+    for line in text.splitlines():
+        if FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
+        if line.startswith("## "):
+            section = line[3:].strip()
+            continue
+        if not section or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in ROW_SPLIT.split(line.strip())[1:-1]]
+        if len(cells) < 2 or cells[0] == "Decision" or set(cells[0]) <= set("-: "):
+            continue
+        rows.append((section, cells[0], cells[-1]))
+    return rows
+
+
+def surface_name(title: str, by_separator: bool) -> str:
+    """The part of a row title that names the surface the ruling governs."""
+    plain = re.sub(r"[`*_]", "", title).strip()
+    if by_separator:
+        return SURFACE_END.split(plain)[0].strip().lower()
+    return " ".join(plain.lower().split()[:SURFACE_WORDS])
+
+
+def check_ledger(text: str) -> tuple[list[Defect], dict[str, object]]:
+    """The ledger's own rules: a row ceiling, no superseded rows, no duplicate surfaces."""
+    rows = ledger_rows(text)
+    live = [row for row in rows if "superseded" not in row[2].lower()]
+    separated = sum(1 for _, title, _ in rows if SURFACE_END.search(title))
+    by_separator = bool(rows) and separated * 2 >= len(rows)
+    rule = (
+        "the words before the first dash or colon"
+        if by_separator
+        else f"the first {SURFACE_WORDS} words, because the titles carry no separator"
+    )
+
+    defects = []
+    if len(live) > LEDGER_CEILING:
+        defects.append(Defect(
+            LEDGER, "ledger-oversize",
+            f"{len(live)} live rows, over the {LEDGER_CEILING}-row ceiling",
+        ))
+    for _, title, status in rows:
+        if "superseded" in status.lower():
+            defects.append(Defect(
+                LEDGER, "unarchived-row",
+                f'"{title}" is superseded and belongs in {LEDGER_ARCHIVE}',
+            ))
+    on_surface: dict[tuple[str, str], list[str]] = {}
+    for section, title, _ in live:
+        on_surface.setdefault((section, surface_name(title, by_separator)), []).append(title)
+    for (section, surface), titles in on_surface.items():
+        for later in titles[1:]:
+            defects.append(Defect(
+                LEDGER, "unconsolidated-pair",
+                f'"{titles[0]}" and "{later}" both stand on "{surface}" under {section}',
+            ))
+    return defects, {"rows": len(live), "ceiling": LEDGER_CEILING, "surface": rule}
+
+
+def garden(wiki: Path) -> tuple[list[Defect], int, dict[str, object] | None]:
     files: dict[str, str] = {}
     pages: dict[str, str] = {}
     for path in sorted(wiki.iterdir()):
@@ -336,8 +419,13 @@ def garden(wiki: Path) -> tuple[list[Defect], int]:
             Defect("_Sidebar", "orphan", "no _Sidebar.md: reachability cannot be checked")
         )
 
+    ledger = None
+    if LEDGER in pages:
+        found, ledger = check_ledger(pages[LEDGER])
+        defects += found
+
     defects.sort(key=Defect.key)
-    return defects, len(pages)
+    return defects, len(pages), ledger
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -351,22 +439,25 @@ def main(argv: list[str] | None = None) -> int:
     if not args.wiki.is_dir():
         parser.error(f"not a directory: {args.wiki}")
 
-    defects, page_count = garden(args.wiki)
+    defects, page_count, ledger = garden(args.wiki)
 
     if args.json:
-        print(
-            json.dumps(
-                {
-                    "wiki": str(args.wiki),
-                    "pages": page_count,
-                    "defects": [d.as_dict() for d in defects],
-                },
-                indent=2,
-            )
-        )
+        report: dict[str, object] = {
+            "wiki": str(args.wiki),
+            "pages": page_count,
+            "defects": [d.as_dict() for d in defects],
+        }
+        if ledger is not None:
+            report["ledger"] = ledger
+        print(json.dumps(report, indent=2))
     else:
         for defect in defects:
             print(defect.line())
+        if ledger is not None:
+            print(
+                f"{LEDGER}: {ledger['rows']} live rows against a ceiling of "
+                f"{ledger['ceiling']}; surface names read as {ledger['surface']}"
+            )
         if defects:
             flagged = len({d.page for d in defects})
             print(f"\n{len(defects)} defects on {flagged} of {page_count} pages")

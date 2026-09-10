@@ -1208,11 +1208,17 @@ def _cross_check(book: Runbook) -> None:
             )
     declared = sorted(r.name for r in book.rituals.values() if not r.errors)
     if declared:
-        # Firing is #137; until it lands the declaration says so out loud.
+        # Firing is #137; until it lands the declaration says so out loud. It
+        # also has to say what DOES run on its own, or a reader takes the
+        # sentence for a promise that the roster spends nothing unasked.
+        from dispatch import MISSION_REVIEW_MIN_INTERVAL_SECONDS
+
+        minutes = int(MISSION_REVIEW_MIN_INTERVAL_SECONDS // 60)
         book.warnings.append(
             "rituals (" + ", ".join(declared) + ") are declared and "
-            "validated; this release does not run them — the idle mission "
-            "review is built-in behavior, not a ritual block"
+            "validated; this release does not run them — what runs on its own "
+            "is the built-in idle mission review, which hands the leader one "
+            f"turn after {minutes} minutes with no turn anywhere on the roster"
         )
 
 

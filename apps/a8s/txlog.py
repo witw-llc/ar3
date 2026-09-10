@@ -27,6 +27,7 @@ from settings import DEFAULTS, get_int, get_setting
 __all__ = [
     "EVENTS",
     "TransactionLogError",
+    "hold_open",
     "log",
     "prune_transactions",
     "read_events",
@@ -127,6 +128,16 @@ class TransactionLogError(RuntimeError):
 
 def _connect() -> sqlite3.Connection:
     return sqlite_store.connect(transactions_path(), _SCHEMA, table="transactions")
+
+
+def hold_open() -> sqlite3.Connection:
+    """The connection a running node keeps on this store for its lifetime.
+
+    Same reason as the conversation archive's, and the same shape: an idle
+    connection of its own, so that `-wal` and `-shm` exist for a read-only
+    reader the whole time a node runs. See `convo.hold_open`.
+    """
+    return sqlite_store.hold(_connect())
 
 
 def open_for_read() -> sqlite3.Connection:

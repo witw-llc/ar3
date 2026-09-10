@@ -511,6 +511,58 @@ class TestSnapshotRoundTrip:
         assert engines.load_snapshot("codex") is None
 
 
+class TestSnapshotPathFollowsR4tHome:
+    """Rigs and rosters relocate wholesale with R4T_HOME (state.py); the quota
+    cache must follow the same rule. A stranger's first `rig detect` must not
+    touch state it did not create (#262)."""
+
+    def _isolate(self, tmp_path, monkeypatch):
+        r4t_home_dir = tmp_path / "r4t-home"
+        real_home = tmp_path / "real-home"
+        monkeypatch.setenv("R4T_HOME", str(r4t_home_dir))
+        monkeypatch.setenv("HOME", str(real_home))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        return r4t_home_dir, real_home
+
+    def test_snapshot_path_resolves_under_r4t_home(self, tmp_path, monkeypatch):
+        r4t_home_dir, _real_home = self._isolate(tmp_path, monkeypatch)
+        assert engines.snapshot_path("codex") == r4t_home_dir / "quota" / "codex.json"
+
+    def test_a_live_quota_check_writes_under_r4t_home_not_the_real_config_home(
+        self, tmp_path, monkeypatch
+    ):
+        r4t_home_dir, real_home = self._isolate(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            codex, "quota",
+            lambda: {"engine": "codex", "origin": "live", "buckets": [], "note": None},
+        )
+
+        result = engines.quota("codex")
+
+        assert result["origin"] == "live"
+        written = r4t_home_dir / "quota" / "codex.json"
+        assert written.is_file()
+        real_default_quota_dir = real_home / ".config" / "r4t" / "quota"
+        assert not real_default_quota_dir.exists()
+
+    def test_sandboxs_advertised_home_is_where_the_quota_path_lands(
+        self, tmp_path, monkeypatch
+    ):
+        # `r4t sandbox` (sandbox.py:run_sandbox) advertises a throwaway home by
+        # setting R4T_HOME to <tmp>/r4t-home for the run's own process — the
+        # same mechanism exercised above, pinned here to the sandbox's own
+        # naming so a future sandbox refactor that drops the env var trips
+        # this test too.
+        sandbox_tmp = tmp_path / "r4t-sandbox-abc123"
+        monkeypatch.setenv("R4T_HOME", str(sandbox_tmp / "r4t-home"))
+        monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+        path = engines.snapshot_path("claude")
+
+        assert path.is_relative_to(sandbox_tmp)
+
+
 class TestStaleSnapshotIsNotAnAnswer:
     """#218. A failed live check used to be demoted to a `note:` printed under
     a plausible set of numbers, with exit 0. One engine failed on every

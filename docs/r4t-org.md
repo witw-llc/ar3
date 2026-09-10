@@ -75,8 +75,9 @@ intent that no longer fits a page has usually gone stale into planning.
 
 This is the **heartbeat** on an [idle pass](r4t-idle.md), and it is the one
 mechanism that re-engages a stalled org. When an org goes fully quiet — the
-drain ran nothing, every queue empty, no live turn, and no member has finished
-a turn since the last tick — but the mission may not be met, the idle pass
+drain ran nothing, every queue empty, no live turn, no member has finished a
+turn since the last tick, and the newest turn on the roster is at least half an
+hour old — but the mission may not be met, the idle pass
 hands the topmost leader a budget-gated **mission-review** turn to reweigh the
 mission and delegate the next step if there is one (cadence is the a8s
 `idle.timeout` with a widening backoff; three silent reviews go dormant until a

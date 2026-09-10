@@ -6,13 +6,14 @@ setup and busy-retry policy live here instead of drifting apart in two copies.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Callable, Sequence, TypeVar
 
-__all__ = ["BUSY_TIMEOUT_MS", "connect", "connect_read_only", "retry_busy"]
+__all__ = ["BUSY_TIMEOUT_MS", "connect", "connect_read_only", "hold", "retry_busy"]
 
 BUSY_TIMEOUT_MS = 5000
 _BUSY_RETRIES = 6
@@ -102,6 +103,63 @@ def connect(
     return conn
 
 
+def hold(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Make `conn` a connection that keeps the WAL side files present.
+
+    SQLite creates `<store>-wal` and `<store>-shm` on the first statement
+    that touches the database, and deletes them when the last connection
+    closes. A `mode=ro` reader can create neither, so it can read a WAL store
+    only while some other connection holds that pair open or the directory is
+    writable. Reading the schema is what brings them into being; whoever
+    keeps the connection keeps them there.
+    """
+    conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
+    return conn
+
+
+_SIDE_FILE_SUFFIXES = ("-wal", "-shm")
+
+
+def _side_files_are_the_obstacle(path: Path, err: sqlite3.Error) -> bool:
+    """True when the missing WAL side files could explain a read-only failure.
+
+    `mode=ro` cannot create `<store>-wal` and `<store>-shm`, so a WAL store
+    with neither present opens only if the directory is writable enough for
+    SQLite to make them. When it is not, the open fails on a store that is
+    otherwise perfectly readable — SQLITE_CANTOPEN on some builds,
+    SQLITE_READONLY_DIRECTORY on others, and the raw text of either
+    ("unable to open database file") sends the reader after the wrong file.
+    A `-wal` present without its `-shm` is a different fault and stays with
+    the message SQLite gave it.
+
+    This is a **could**, not a proof. Whether the directory is writable is
+    not tested: `os.access` answers true for any existing directory on
+    Windows without reading its ACLs, and no production reader should be
+    writing a probe file to find out. So the same codes are raised by faults
+    that have nothing to do with the side files — an unreadable main file,
+    for one — and the caller adds its sentence to SQLite's words rather than
+    replacing them, phrased as the condition it cannot rule out.
+    """
+    if (err.sqlite_errorcode & 0xFF) not in (
+        sqlite3.SQLITE_CANTOPEN,
+        sqlite3.SQLITE_READONLY,
+    ):
+        return False
+    if not path.is_file():
+        return False
+    return not any(path.with_name(path.name + s).exists() for s in _SIDE_FILE_SUFFIXES)
+
+
+def _read_only_failure(path: Path, err: sqlite3.Error) -> sqlite3.Error:
+    if not _side_files_are_the_obstacle(path, err):
+        return err
+    return sqlite3.OperationalError(
+        f"{err}; no WAL side files sit beside the store, and a reader that "
+        "cannot create them cannot open it until a node holds the store "
+        "open; is a node running on this machine?"
+    )
+
+
 def connect_read_only(path: Path, *, table: str) -> sqlite3.Connection | None:
     """Open `path` for reading, or None when it is not the store `table` names.
 
@@ -115,22 +173,29 @@ def connect_read_only(path: Path, *, table: str) -> sqlite3.Connection | None:
     A WAL store whose `-wal` file outlived its `-shm` cannot be opened this
     way at all; SQLite raises, and the caller says which file and why. That is
     the answer this reader owes either way — the one thing it must not do is
-    return an empty result it did not read.
+    return an empty result it did not read. When neither side file is there,
+    "unable to open database file" points the reader at a file that is
+    probably fine, so SQLite's words keep their place and a sentence naming
+    the condition they can hide is added after them
+    (`_side_files_are_the_obstacle`).
     """
     # A8S_HOME (lib/ar3/home.py) is deliberately allowed to stay relative, but
     # as_uri() refuses a relative path outright — absolute() (not resolve(),
     # which would follow symlinks and rename the path in error messages) is
     # enough to make it URI-eligible without changing what the user sees.
     uri_path = path.absolute()
-    conn = sqlite3.connect(
-        f"{uri_path.as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
-    )
+    try:
+        conn = sqlite3.connect(
+            f"{uri_path.as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+        )
+    except sqlite3.Error as e:
+        raise _read_only_failure(path, e) from e
     try:
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         missing = _needs_schema(conn, table)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
         conn.close()
-        raise
+        raise _read_only_failure(path, e) from e
     if missing:
         conn.close()
         return None

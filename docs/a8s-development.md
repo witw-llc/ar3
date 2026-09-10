@@ -206,6 +206,20 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `txlog.last_heard`,
   whose caller answers from the registry and treats the heard remotes as a
   supplement.
+- **A running node holds one connection to each store for its lifetime; a
+  read-only reader is only as available as that.** Both stores are WAL, and a
+  `mode=ro` open needs `-wal` and `-shm` to exist or the directory to be
+  writable, so a reader with read+execute on the a8s home can read only while
+  something holds the pair open. `attached_loop` opens `convo.hold_open()` and
+  `txlog.hold_open()` at start and closes them at shutdown — idle connections
+  of their own, taking no lock and blocking no `wal_checkpoint(TRUNCATE)`.
+  When the open fails with neither side file present, the reader keeps
+  SQLite's own words and adds the condition they can hide (`no WAL side files
+  sit beside the store, and a reader that cannot create them cannot open it
+  until a node holds the store open; is a node running on this machine?`).
+  The sentence is a possibility, not a diagnosis: the same codes are raised
+  by an unreadable main file, and no production reader writes a probe to tell
+  the two apart.
 - **A wake's stdout is read by a dedicated reader thread, never the main
   loop.** The main loop only ever drains that thread's queue with a bounded
   deadline (`wake_drain_grace_seconds`) — never an unbounded `for line in

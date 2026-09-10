@@ -1,15 +1,20 @@
 """Tests for convo.py — conversation archive and `a8s convo` formatting."""
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from convo import (
+    ConversationArchiveError,
     decode_template,
     extract_heading_templates,
     follow_conversation,
     format_conversation,
     format_entry,
     involves_agent,
+    load_agent_records,
     load_entries,
     open_glow_stdout,
     print_entries,
@@ -20,6 +25,32 @@ from convo import (
 from core import conversations_path
 from commands import cmd_convo
 from settings import DEFAULTS
+
+needs_tzset = pytest.mark.skipif(
+    not hasattr(time, "tzset"), reason="the process timezone is not settable here"
+)
+
+
+@pytest.fixture
+def machine_timezone(monkeypatch):
+    """Run a test in a named zone and put the real one back afterwards.
+
+    `TZ` reaches the C library only through `tzset`, and `monkeypatch`'s undo
+    restores the variable without calling it, so teardown calls it itself.
+    """
+
+    def use(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield use
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.fixture
+def in_los_angeles(machine_timezone):
+    machine_timezone("America/Los_Angeles")
 
 
 class TestInvolvesAgent:
@@ -555,6 +586,30 @@ class TestHeadingTemplates:
             "Bob", limit=1, heading_in="{timestamp} == {utc}"
         )
         assert "2026-06-18 07:00:00 PDT == 2026-06-18T14:00:00.000000Z" in text
+
+    def test_ulid_placeholder_renders_the_message_id(self, fake_home):
+        """The row's own `message_id`, stable and time-ordered, is the cursor
+        a no-monitor heartbeat records (#265)."""
+        record(
+            {
+                "id": "01JSNC00000000000000000042",
+                "date": "2026-06-18T14:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "body",
+            },
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1, heading_in="id={ulid}")
+        assert "id=01JSNC00000000000000000042" in text
+
+    def test_ulid_placeholder_is_empty_when_the_row_has_none(self, fake_home):
+        record(
+            {"date": "2026-06-18T14:00:00.000000Z", "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        text = format_conversation("Bob", limit=1, heading_in="id=[{ulid}]")
+        assert "id=[]" in text
 
 
 class TestCmdConvo:
@@ -1131,3 +1186,822 @@ class TestSenderFilter:
         assert "live-alice" in out
         assert "live-carol" not in out
         assert "backlog-noise" not in out
+
+
+class TestSinceCursor:
+    """`load_agent_records(..., since=...)` — the three cursor forms #265 adds."""
+
+    CURSOR_ID = "01JSNC00000000000000000002"
+
+    def _seed(self):
+        record(
+            {
+                "id": "01JSNC00000000000000000001",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "before-cursor",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": self.CURSOR_ID,
+                "date": "2026-06-18T11:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "at-cursor",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000003",
+                "date": "2026-06-18T12:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "after-1",
+            },
+            recipients=["Bob"],
+        )
+        # Inserted last (highest seq) but dated BEFORE the cursor row — the
+        # late-delivery case a ulid cursor must not drop.
+        record(
+            {
+                "id": "01JSNC00000000000000000004",
+                "date": "2026-06-18T09:30:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "late-delivery",
+            },
+            recipients=["Bob"],
+        )
+
+    @staticmethod
+    def _seed_burst(count: int) -> str:
+        """Record a cursor row and `count` messages after it; return the
+        cursor's ulid."""
+        cursor = "01JSNC00000000000000000100"
+        record(
+            {
+                "id": cursor,
+                "date": "2026-09-10T14:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "cursor-row",
+            },
+            recipients=["Bob"],
+        )
+        for i in range(1, count + 1):
+            record(
+                {
+                    "id": f"01JSNC000000000000000001{i:02d}",
+                    "date": "2026-09-10T14:00:00.000000Z",
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": f"burst-{i}",
+                },
+                recipients=["Bob"],
+            )
+        return cursor
+
+    def test_ulid_cursor_returns_rows_after_it_in_insertion_order(self, fake_home):
+        self._seed()
+        records = load_agent_records("Bob", limit=10, since=self.CURSOR_ID)
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["after-1", "late-delivery"]
+
+    def test_ulid_cursor_includes_a_row_dated_before_the_cursor(self, fake_home):
+        """The acceptance case: `late-delivery` is dated earlier than the
+        cursor row but was inserted after it, so its seq is greater. A
+        timestamp cursor would drop it; a ulid cursor cannot."""
+        self._seed()
+        records = load_agent_records("Bob", limit=10, since=self.CURSOR_ID)
+        assert "late-delivery" in [entry["content"] for _, entry in records]
+
+    def test_unknown_ulid_raises_naming_it(self, fake_home):
+        self._seed()
+        unknown = "01JSNC00000000000000099999"
+        with pytest.raises(ConversationArchiveError, match=unknown):
+            load_agent_records("Bob", limit=10, since=unknown)
+
+    def test_timestamp_cursor_returns_rows_after_the_last_one_at_or_before_it(
+        self, fake_home
+    ):
+        record(
+            {
+                "id": "01JSNC00000000000000000021",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "before",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000022",
+                "date": "2026-06-18T11:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "at-cursor",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000023",
+                "date": "2026-06-18T12:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "after",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records(
+            "Bob", limit=10, since="2026-06-18T11:30:00.000000Z"
+        )
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["after"]
+
+    def test_timestamp_cursor_can_miss_a_late_delivery_dated_at_or_before_it(
+        self, fake_home
+    ):
+        """The documented gap `_since_floor` explains: `late-delivery` (dated
+        9:30, before the 11:30 cursor) arrives after `after-1` and becomes the
+        newest row with `date <= cursor`, so it is the floor rather than
+        something found past it — and `after-1`, inserted before it, is
+        swallowed along with it. A `--since <ulid>` cursor has no such gap
+        (see `test_ulid_cursor_includes_a_row_dated_before_the_cursor`)."""
+        self._seed()
+        records = load_agent_records(
+            "Bob", limit=10, since="2026-06-18T11:30:00.000000Z"
+        )
+        assert records == []
+
+    @needs_tzset
+    def test_bare_date_cursor_starts_at_local_midnight(self, fake_home, in_los_angeles):
+        """A bare date names a calendar day, and a delegator asking for today
+        means their own today. `2026-09-10` in America/Los_Angeles starts at
+        07:00Z; the 01:00Z row is still September 9 there."""
+        record(
+            {
+                "id": "01JSNC00000000000000000051",
+                "date": "2026-09-10T01:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "late-on-september-9-pdt",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000052",
+                "date": "2026-09-10T15:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "september-10-pdt",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records("Bob", limit=10, since="2026-09-10")
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["september-10-pdt"]
+
+    @needs_tzset
+    def test_bare_date_cursor_includes_the_row_on_its_own_midnight(
+        self, fake_home, in_los_angeles
+    ):
+        """A bare date asks for the whole day. The row stamped exactly on its
+        local midnight (07:00:00Z in America/Los_Angeles) belongs to that day
+        and is returned; the row one second before it is not."""
+        for n, stamp, content in (
+            (61, "2026-09-10T06:59:59.000000Z", "before-midnight"),
+            (62, "2026-09-10T07:00:00.000000Z", "on-midnight"),
+            (63, "2026-09-10T07:00:01.000000Z", "after-midnight"),
+        ):
+            record(
+                {
+                    "id": f"01JSNC000000000000000000{n}",
+                    "date": stamp,
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": content,
+                },
+                recipients=["Bob"],
+            )
+        records = load_agent_records("Bob", limit=10, since="2026-09-10")
+        assert [e["content"] for _, e in records] == ["on-midnight", "after-midnight"]
+
+    def test_timestamp_cursor_excludes_the_row_on_its_own_instant(self, fake_home):
+        """A timestamp is a point already seen through: the row stamped exactly
+        on it is the floor, not a result."""
+        for n, stamp, content in (
+            (64, "2026-09-10T14:00:00.000000Z", "on-the-instant"),
+            (65, "2026-09-10T14:00:01.000000Z", "after-the-instant"),
+        ):
+            record(
+                {
+                    "id": f"01JSNC000000000000000000{n}",
+                    "date": stamp,
+                    "from": "Alice",
+                    "to": "Bob",
+                    "content": content,
+                },
+                recipients=["Bob"],
+            )
+        records = load_agent_records("Bob", limit=10, since="2026-09-10T14:00:00Z")
+        assert [e["content"] for _, e in records] == ["after-the-instant"]
+
+    @needs_tzset
+    def test_cursor_with_an_explicit_offset_is_an_absolute_instant(
+        self, fake_home, machine_timezone
+    ):
+        """An offset in the cursor settles the instant on its own, so the
+        machine's own zone (UTC here) must not move it. Read as naive-local
+        this cursor would be 00:00Z and select both rows."""
+        machine_timezone("UTC")
+        record(
+            {
+                "id": "01JSNC00000000000000000053",
+                "date": "2026-09-10T01:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "before-the-offset-cursor",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000054",
+                "date": "2026-09-10T15:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "after-the-offset-cursor",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records(
+            "Bob", limit=10, since="2026-09-10T00:00:00-07:00"
+        )
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["after-the-offset-cursor"]
+
+    def test_timestamp_cursor_compares_instants_not_stored_spellings(self, fake_home):
+        """`14:00:00Z` and `14:00:00.000000Z` are the same instant and sort
+        the other way round as text. The cursor row establishes the floor, so
+        only the row a second later comes back."""
+        record(
+            {
+                "id": "01JSNC00000000000000000055",
+                "date": "2026-09-10T14:00:00Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "at-the-cursor-instant",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000056",
+                "date": "2026-09-10T14:00:01Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "one-second-later",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records(
+            "Bob", limit=10, since="2026-09-10T14:00:00Z"
+        )
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["one-second-later"]
+
+    def test_duration_cursor_reads_a_date_without_fractional_seconds(self, fake_home):
+        """The window's own floor is formatted with six fractional digits. A
+        stored date spelled without any is inside or outside that window by
+        the instant it names, not by how it sorts against that spelling."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+
+        def whole_second(seconds_ago: float) -> str:
+            return (now - timedelta(seconds=seconds_ago)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        record(
+            {
+                "id": "01JSNC00000000000000000057",
+                "date": whole_second(3 * 3600),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "three-hours-ago",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000058",
+                "date": whole_second(10 * 60),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "ten-minutes-ago",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records("Bob", limit=10, since="1h")
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["ten-minutes-ago"]
+
+    def test_an_unparsable_date_is_neither_a_floor_nor_a_duration_match(
+        self, fake_home
+    ):
+        """A date nothing can parse cannot be compared, so it never becomes
+        the timestamp floor and no date window selects it. It is still a row,
+        and a seq floor found past it still returns it."""
+        from datetime import datetime, timedelta, timezone
+
+        record(
+            {
+                "id": "01JSNC00000000000000000059",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "parsable-old",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000060",
+                "date": "whenever",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "unparsable",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000061",
+                "date": (
+                    datetime.now(timezone.utc) - timedelta(minutes=10)
+                ).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "recent",
+            },
+            recipients=["Bob"],
+        )
+        by_stamp = load_agent_records(
+            "Bob", limit=10, since="2026-06-18T11:00:00.000000Z"
+        )
+        assert [entry["content"] for _, entry in by_stamp] == ["unparsable", "recent"]
+        by_window = load_agent_records("Bob", limit=10, since="1h")
+        assert [entry["content"] for _, entry in by_window] == ["recent"]
+
+    def test_since_without_a_limit_drains_every_row_after_the_cursor(self, fake_home):
+        """The burst case: a poller that woke late must not have to guess how
+        big the backlog was. No `--limit` means every row past the cursor."""
+        cursor = self._seed_burst(12)
+        records = load_agent_records("Bob", limit=None, since=cursor)
+        contents = [entry["content"] for _, entry in records]
+        assert contents == [f"burst-{i}" for i in range(1, 13)]
+
+    def test_since_with_a_limit_pages_the_oldest_rows_first(self, fake_home):
+        """Twelve unseen rows read five at a time, each page continuing from
+        the newest ulid the last one returned, arrive in order with none
+        skipped — the guarantee the documented polling procedure rests on."""
+        cursor = self._seed_burst(12)
+        pages = []
+        while True:
+            page = load_agent_records("Bob", limit=5, since=cursor)
+            if not page:
+                break
+            pages.append([entry["content"] for _, entry in page])
+            cursor = page[-1][1]["id"]
+        assert pages == [
+            [f"burst-{i}" for i in range(1, 6)],
+            [f"burst-{i}" for i in range(6, 11)],
+            ["burst-11", "burst-12"],
+        ]
+
+    def test_duration_cursor_selects_rows_dated_within_the_window(self, fake_home):
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+
+        def stamp(seconds_ago: float) -> str:
+            return (now - timedelta(seconds=seconds_ago)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+
+        record(
+            {
+                "id": "01JSNC00000000000000000005",
+                "date": stamp(3 * 3600),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "three-hours-ago",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000006",
+                "date": stamp(10 * 60),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "ten-minutes-ago",
+            },
+            recipients=["Bob"],
+        )
+        records = load_agent_records("Bob", limit=10, since="1h")
+        contents = [entry["content"] for _, entry in records]
+        assert contents == ["ten-minutes-ago"]
+
+    def test_malformed_cursor_raises_value_error(self, fake_home):
+        self._seed()
+        with pytest.raises(ValueError, match="banana"):
+            load_agent_records("Bob", limit=10, since="banana")
+
+    def test_since_composes_with_from_and_limit(self, fake_home):
+        self._seed()
+        record(
+            {
+                "id": "01JSNC00000000000000000007",
+                "date": "2026-06-18T13:00:00.000000Z",
+                "from": "Carol",
+                "to": "Bob",
+                "content": "carol-after",
+            },
+            recipients=["Bob"],
+        )
+        cursor = "01JSNC00000000000000000001"
+        page = load_agent_records("Bob", limit=1, senders=["alice"], since=cursor)
+        assert [entry["content"] for _, entry in page] == ["at-cursor"]
+        # The page is the OLDEST match past the cursor, so continuing from
+        # the ulid it returned reaches every later one in turn. Carol's row
+        # sits between two of them and is never counted against the limit.
+        seen = []
+        while page:
+            seen.extend(entry["content"] for _, entry in page)
+            cursor = page[-1][1]["id"]
+            page = load_agent_records("Bob", limit=1, senders=["alice"], since=cursor)
+        assert seen == ["at-cursor", "after-1", "late-delivery"]
+
+    def test_since_with_nothing_new_returns_empty(self, fake_home):
+        self._seed()
+        newest = "01JSNC00000000000000000004"
+        assert load_agent_records("Bob", limit=10, since=newest) == []
+
+
+class TestCmdConvoSince:
+    @staticmethod
+    def _register(tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+
+    def test_since_ulid_shows_rows_after_it(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000011",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "cursor-row",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000012",
+                "date": "2026-06-18T11:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "new-row",
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--since", "01JSNC00000000000000000011"]) == 0
+        out = capsys.readouterr().out
+        assert "new-row" in out
+        assert "cursor-row" not in out
+
+    def test_since_unknown_ulid_exits_one_naming_it(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {"id": "01JSNC00000000000000000013", "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        unknown = "01JSNC00000000000000099998"
+        assert cmd_convo(["bob", "--since", unknown]) == 1
+        err = capsys.readouterr().err
+        assert unknown in err
+        assert err.startswith("a8s:")
+
+    def test_since_malformed_value_exits_two(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {"id": "01JSNC00000000000000000041", "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--since", "banana"]) == 2
+        err = capsys.readouterr().err
+        assert "--since" in err
+        assert "banana" in err
+
+    def test_since_timestamp(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000014",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "old",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000015",
+                "date": "2026-06-18T12:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "new",
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--since", "2026-06-18T11:00:00Z"]) == 0
+        out = capsys.readouterr().out
+        assert "new" in out
+        assert "old" not in out
+
+    def test_since_duration(self, fake_home, tmp_path, capsys):
+        from datetime import datetime, timedelta, timezone
+
+        self._register(tmp_path)
+        now = datetime.now(timezone.utc)
+        record(
+            {
+                "id": "01JSNC00000000000000000016",
+                "date": (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "three-hours-ago",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000017",
+                "date": (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "from": "Alice",
+                "to": "Bob",
+                "content": "ten-minutes-ago",
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--since", "1h"]) == 0
+        out = capsys.readouterr().out
+        assert "ten-minutes-ago" in out
+        assert "three-hours-ago" not in out
+
+    def test_since_composes_with_from_and_limit(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000018",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "cursor-row",
+            },
+            recipients=["Bob"],
+        )
+        for i, (sender, minute) in enumerate(
+            [("Carol", 11), ("Alice", 12), ("Alice", 13)]
+        ):
+            record(
+                {
+                    "id": f"01JSNC0000000000000000002{i}",
+                    "date": f"2026-06-18T{minute}:00:00.000000Z",
+                    "from": sender,
+                    "to": "Bob",
+                    "content": f"{sender.lower()}-{minute}",
+                },
+                recipients=["Bob"],
+            )
+        assert (
+            cmd_convo(
+                [
+                    "bob",
+                    "--since",
+                    "01JSNC00000000000000000018",
+                    "--from",
+                    "alice",
+                    "--limit",
+                    "1",
+                ]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "alice-12" in out
+        assert "alice-13" not in out
+        assert "carol-11" not in out
+
+    def test_since_with_nothing_new_prints_nothing_and_exits_zero(
+        self, fake_home, tmp_path, capsys
+    ):
+        """A readable store with no rows past the cursor is not an error (#276)."""
+        self._register(tmp_path)
+        newest = "01JSNC00000000000000000019"
+        record(
+            {"id": newest, "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--since", newest]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_without_since_the_default_window_is_still_the_newest_ten(
+        self, fake_home, tmp_path, capsys
+    ):
+        """`--limit` defaults to nothing so a cursor can drain; a tail view
+        with no cursor still stops at ten, and still at the newest ten."""
+        self._register(tmp_path)
+        TestSinceCursor._seed_burst(12)
+        assert cmd_convo(["bob"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("### ") == 10
+        assert "burst-12" in out
+        assert "burst-3" in out
+        assert "burst-2" not in out
+        assert "cursor-row" not in out
+
+    def test_since_rejects_follow(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        assert cmd_convo(["bob", "-f", "--since", "1h"]) == 2
+        err = capsys.readouterr().err
+        assert "--follow" in err
+        assert "--since" in err
+
+
+class TestJsonOutput:
+    @staticmethod
+    def _register(tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+
+    def test_json_carries_ulid_and_seq(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000031",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "hello",
+                "files": [{"filename": "x.txt"}],
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--json"]) == 0
+        lines = [
+            line for line in capsys.readouterr().out.splitlines() if line.strip()
+        ]
+        assert len(lines) == 1
+        row = json.loads(lines[0])
+        assert row["ulid"] == "01JSNC00000000000000000031"
+        assert row["seq"] == 1
+        assert row["from"] == "Alice"
+        assert row["to"] == "Bob"
+        assert row["utc"] == "2026-06-18T10:00:00.000000Z"
+        assert row["content"] == "hello"
+        assert row["files"] == ["x.txt"]
+        assert row["files_unavailable"] == []
+
+    def test_json_composes_with_since(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000032",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "cursor-row",
+            },
+            recipients=["Bob"],
+        )
+        record(
+            {
+                "id": "01JSNC00000000000000000033",
+                "date": "2026-06-18T11:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "new-row",
+            },
+            recipients=["Bob"],
+        )
+        assert (
+            cmd_convo(["bob", "--json", "--since", "01JSNC00000000000000000032"])
+            == 0
+        )
+        lines = [
+            line for line in capsys.readouterr().out.splitlines() if line.strip()
+        ]
+        assert len(lines) == 1
+        row = json.loads(lines[0])
+        assert row["ulid"] == "01JSNC00000000000000000033"
+        assert row["seq"] == 2
+
+    def test_json_carries_attachment_failures(self, fake_home, tmp_path, capsys):
+        """The markdown view says an attachment never arrived; JSON has to
+        say it too, or a heartbeat reading JSON acts on evidence it never
+        received."""
+        self._register(tmp_path)
+        record(
+            {
+                "id": "01JSNC00000000000000000035",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "review this",
+                "files": [
+                    {
+                        "filename": "proof.txt",
+                        "error": "download failed",
+                        "detail": "HTTP 404",
+                    }
+                ],
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["bob", "--json"]) == 0
+        row = json.loads(capsys.readouterr().out.strip())
+        assert row["files"] == ["proof.txt"]
+        assert row["files_unavailable"] == [
+            {"filename": "proof.txt", "error": "", "detail": "HTTP 404"}
+        ]
+
+        assert cmd_convo(["bob"]) == 0
+        markdown = capsys.readouterr().out
+        assert "ATTACHMENT UNAVAILABLE: proof.txt: HTTP 404" in markdown
+
+    def test_json_drains_a_burst_and_pages_it_without_skipping(
+        self, fake_home, tmp_path, capsys
+    ):
+        """The same burst through the CLI. Twelve messages after the cursor:
+        no `--limit` hands back all twelve oldest-first, and `--limit 5`
+        walks the same twelve in three pages, each continuing from the
+        newest ulid the last one printed."""
+        self._register(tmp_path)
+        cursor = TestSinceCursor._seed_burst(12)
+
+        def poll(*extra):
+            assert cmd_convo(["bob", "--json", "--since", cursor, *extra]) == 0
+            return [
+                json.loads(line)
+                for line in capsys.readouterr().out.splitlines()
+                if line.strip()
+            ]
+
+        drained = poll()
+        assert [row["content"] for row in drained] == [
+            f"burst-{i}" for i in range(1, 13)
+        ]
+
+        pages = []
+        while True:
+            page = poll("--limit", "5")
+            if not page:
+                break
+            pages.append([row["content"] for row in page])
+            cursor = page[-1]["ulid"]
+        assert pages == [
+            [f"burst-{i}" for i in range(1, 6)],
+            [f"burst-{i}" for i in range(6, 11)],
+            ["burst-11", "burst-12"],
+        ]
+
+    def test_json_with_no_rows_prints_nothing(self, fake_home, tmp_path, capsys):
+        self._register(tmp_path)
+        record(
+            {"id": "01JSNC00000000000000000034", "from": "Alice", "to": "Carol", "content": "x"},
+            recipients=["Carol"],
+        )
+        assert cmd_convo(["bob", "--json"]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""

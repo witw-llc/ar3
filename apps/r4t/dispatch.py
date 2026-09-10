@@ -2852,8 +2852,20 @@ MISSION_REVIEW_SILENT_CAP = 3
 # The backoff ladder above counts IDLE WAKES, so shortening the wake interval
 # would multiply the review rate without anyone editing a policy. A review is a
 # real, paid leader turn, so the ladder is floored by wall time as well: however
-# fast the wakes come, two reviews are never closer together than this.
+# fast the wakes come, two reviews are never closer together than this, and an
+# org whose newest turn is younger than this is not asleep yet.
 MISSION_REVIEW_MIN_INTERVAL_SECONDS = 1800.0
+# `r4t sandbox` runs the product on a compressed clock — a ten-second idle
+# cadence, no turn throttle — so one run can watch a stalled org get re-engaged
+# in minutes. The floor is wall time, so it compresses with the rest of that
+# clock or a sandbox run could never reach the heartbeat it exists to check.
+SANDBOX_MISSION_REVIEW_MIN_INTERVAL_SECONDS = 5.0
+
+
+def _review_floor() -> float:
+    if os.environ.get("R4T_SANDBOX") == "1":
+        return SANDBOX_MISSION_REVIEW_MIN_INTERVAL_SECONDS
+    return MISSION_REVIEW_MIN_INTERVAL_SECONDS
 
 
 def _newest_turn(ctx: DispatchContext, roster: Roster) -> str:
@@ -2867,6 +2879,15 @@ def _newest_turn(ctx: DispatchContext, roster: Roster) -> str:
         ),
         default="",
     )
+
+
+def _turn_epoch(stamp: str) -> float:
+    """A turn-completion stamp as epoch seconds. An absent or unreadable stamp
+    reads as 0.0 — nobody has run, which is as quiet as a roster gets."""
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _mission_mtime(ctx: DispatchContext) -> float:
@@ -2889,22 +2910,30 @@ def _mission_review(
     run_fn,
 ) -> dict:
     """When the org is structurally stalled — every queue empty, the drain ran
-    nothing, no live turn, and no member has finished a turn since the last
-    tick — hand the top leader a budget-gated mission-review turn so a
+    nothing, no live turn, no member has finished a turn since the last tick,
+    and the newest turn on the roster is itself older than the review floor —
+    hand the top leader a budget-gated mission-review turn so a
     done-looking-but-unmet mission does not sleep forever. r4t detects the
     STALL; the leader judges whether the mission is met (§5.3). A backoff
     widens the cadence (2->4->8... stalled ticks); K silent reviews (the leader
     stages nothing) go dormant until a real message or a MISSION.md change
     re-arms it (§5.6).
 
-    The turn-completion stamp is what makes a stall durable rather than a
-    property of one pass: work that flowed between two idle passes (a turn
-    driven straight through `handle_message`, say) leaves no queue and no lock
-    behind, and without a memory of it every quiet moment would read as a
-    stall."""
+    The turn-completion stamp does two jobs. Compared between passes it makes a
+    stall durable rather than a property of one pass: work that flowed between
+    two idle passes (a turn driven straight through `handle_message`, say)
+    leaves no queue and no lock behind, and without a memory of it every quiet
+    moment would read as a stall. Compared against the clock it says the org
+    has actually gone quiet: a roster that answered a minute ago is between
+    messages, not asleep, and two idle passes over that lull must not cost the
+    person a silent leader turn. Only a NEW stamp is work, though: a wake that
+    finds the same stamp still young holds the ladder and dormancy where they
+    are, since the review's own turn is the newest stamp after every review.
+    Nobody having run at all is as quiet as it gets, so an empty stamp counts
+    as old."""
     st = state.read_mission_review(ctx.node)
     newest_turn = _newest_turn(ctx, roster)
-    stalled = (
+    quiet = (
         drained == 0
         and not state.members_with_queue(ctx.node)
         and not state.live_locks(ctx.node)
@@ -2912,7 +2941,7 @@ def _mission_review(
     )
     mtime = _mission_mtime(ctx)
     last_review = float(st.get("last_review_at", 0.0) or 0.0)
-    if not stalled:
+    if not quiet:
         # Real work is flowing — the furnace does not need a nudge; reset.
         state.write_mission_review(
             ctx.node,
@@ -2921,6 +2950,11 @@ def _mission_review(
              "last_review_at": last_review},
         )
         return {"fired": False}
+    if time.time() - _turn_epoch(newest_turn) < _review_floor():
+        # Nothing new happened, but the newest turn is too young to call the
+        # org asleep. The review's own leader turn is the usual case here, and
+        # it is not work: the ladder and dormancy hold exactly where they are.
+        return {"fired": False, "cooling": True}
 
     if st.get("dormant"):
         if mtime == st.get("mission_mtime"):
@@ -2930,7 +2964,7 @@ def _mission_review(
     stalls = int(st.get("stalls", 0)) + 1
     silent = int(st.get("silent_reviews", 0))
     threshold = min(MISSION_REVIEW_BACKOFF_BASE << silent, MISSION_REVIEW_BACKOFF_CAP)
-    too_soon = time.time() - last_review < MISSION_REVIEW_MIN_INTERVAL_SECONDS
+    too_soon = time.time() - last_review < _review_floor()
     if stalls < threshold or too_soon:
         state.write_mission_review(
             ctx.node,

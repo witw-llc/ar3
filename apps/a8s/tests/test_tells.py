@@ -768,5 +768,147 @@ def test_tells_follow_prints_overwrite_of_seen_filename(tmp_path, monkeypatch, c
     rc = tells_main(["-f"])
     out = capsys.readouterr().out
     assert rc == 0
+    # OLD/stale was in the inbox at arm time, so it prints once as backlog;
+    # the proxy's overwrite under the same ULID is a distinct, later arrival.
+    assert "[backlog] OLD: stale" in out
     assert "BOB: fresh-delivery" in out
-    assert "stale" not in out
+    assert "[backlog] BOB: fresh-delivery" not in out
+
+
+def test_tells_follow_prints_backlog_then_live(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    _drop_inbox(inbox, "ALICE", "one", "01BACKLOG00000000000000A")
+    _drop_inbox(inbox, "BOB", "two", "01BACKLOG00000000000000B")
+    _drop_inbox(inbox, "CAROL", "three", "01BACKLOG00000000000000C")
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            _drop_inbox(inbox, "DAVE", "four", "01BACKLOG00000000000000D")
+            return
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = out.rstrip("\n").split("\n")
+    assert re.match(r"^--- 3 message\(s\) already in the inbox when tells started at \d\d:\d\d; live from here ---$", lines[0])
+    assert "[backlog] ALICE: one" in out
+    assert "[backlog] BOB: two" in out
+    assert "[backlog] CAROL: three" in out
+    assert "DAVE: four" in out
+    assert "[backlog] DAVE: four" not in out
+
+
+def test_tells_follow_empty_inbox_prints_no_boundary(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            _drop_inbox(inbox, "BOB", "fresh", "01NOBACKLOG000000000000")
+            return
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "---" not in out
+    assert "already in the inbox" not in out
+    assert "BOB: fresh" in out
+
+
+def test_tells_follow_live_skips_backlog(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    _drop_inbox(inbox, "ALICE", "old instructions", "01LIVESKIP00000000000A")
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        if sleeps["n"] == 1:
+            _drop_inbox(inbox, "BOB", "new instructions", "01LIVESKIP00000000000B")
+            return
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f", "--live"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already in the inbox" not in out
+    assert "ALICE" not in out
+    assert "old instructions" not in out
+    assert "BOB: new instructions" in out
+
+
+def test_tells_live_without_follow_exits_2(capsys):
+    rc = tells_main(["--live"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "--live requires -f/--follow or --timeout 0" in err
+
+
+def test_parse_tells_live_without_follow_rejected():
+    with pytest.raises(TellsUsageError, match="--live requires -f/--follow or --timeout 0"):
+        parse_tells_argv(["--live"])
+
+
+def test_tells_backlog_message_also_late_carries_both_prefixes(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    queued = (datetime.now(timezone.utc) - timedelta(hours=32)).isoformat().replace("+00:00", "Z")
+    delivered = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    msg = {
+        "id": "01BACKLATE0000000000000",
+        "from": "ALICE",
+        "to": "NODE",
+        "content": "slow and stale",
+        "files": [],
+        "date": queued,
+        "delivered_at": delivered,
+    }
+    tmp = inbox / ".01BACKLATE0000000000000.tmp"
+    tmp.write_text(json.dumps(msg), encoding="utf-8")
+    os.replace(tmp, inbox / "01BACKLATE0000000000000.json")
+    sleeps = {"n": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        sleeps["n"] += 1
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    rc = tells_main(["-f"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[backlog] [late 32h] ALICE: slow and stale" in out
+
+
+def test_tells_non_follow_prints_no_boundary_or_backlog_prefix(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    _drop_inbox(inbox, "OLD", "preexisting", "01NONFOLLOW0000000000000")
+    t = _deliver_after(inbox, 0.2, [("BOB", "arriving", "01NONFOLLOW0000000000001")])
+    rc = tells_main([])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "backlog" not in out
+    assert "already in the inbox" not in out
+    assert "BOB: arriving" in out
+    assert "OLD" not in out

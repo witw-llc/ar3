@@ -39,6 +39,7 @@ from pathlib import Path
 
 from engines import agy, claude, codex, copilot, cursor, muse, ollama, opencode, run
 from engines.base import QuotaError
+from state import r4t_home
 
 __all__ = [
     "QuotaError",
@@ -135,7 +136,7 @@ SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 60
 
 
 def snapshot_path(engine: str) -> Path:
-    return Path.home() / ".config" / "r4t" / "quota" / f"{engine}.json"
+    return r4t_home() / "quota" / f"{engine}.json"
 
 
 def save_snapshot(engine: str, payload: dict) -> None:

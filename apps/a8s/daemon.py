@@ -41,6 +41,7 @@ import queue
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -111,6 +112,7 @@ from network import (
     stop_remotes,
 )
 from registry import participants_from_registry, unresolved_mailboxes
+import convo
 import txlog
 
 
@@ -1424,6 +1426,31 @@ def _dispatch_agent(p: Participant, definition: dict, *, async_wake: bool) -> bo
     return wake_once(p, msg, async_wake=async_wake)
 
 
+def _hold_stores(label: str) -> list[sqlite3.Connection]:
+    """One idle connection to each store, held for as long as this node runs.
+
+    Both stores are WAL, and a `mode=ro` reader can only open a WAL store
+    while `-wal` and `-shm` exist or the directory is writable enough for it
+    to create them. The writers open per write, so the side files come and go
+    and a reader that cannot write the a8s home — a sandboxed seat with
+    read+execute — gets "unable to open database file" for whatever fraction
+    of the time nothing else is connected. A node running is what makes those
+    files exist; when none runs, the reader's error is the truth.
+
+    A failed hold is not a reason to refuse to run: the router already logs
+    into a store it may not be able to write (`txlog.log` swallows its own
+    errors), and a node that routes messages is worth more than a reader's
+    convenience.
+    """
+    held: list[sqlite3.Connection] = []
+    for open_hold in (convo.hold_open, txlog.hold_open):
+        try:
+            held.append(open_hold())
+        except (OSError, sqlite3.Error) as e:
+            out_agent(label, f"[a8s] {label}: cannot hold a store open: {e}")
+    return held
+
+
 def attached_loop(names: list[str], interval: float, *, single_pass: bool = False, drain_seconds: float = 0) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
@@ -1514,6 +1541,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         )
         watchdog_thread.start()
     last_heartbeat_mono = _time.monotonic()
+    held_stores = _hold_stores(label)
     try:
         txlog.log(
             "RUN_START",
@@ -1701,6 +1729,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
             _service_in_flight_wake()
             _time.sleep(0.05)
         txlog.log("RUN_STOP", sender=label, detail=stop_reason or "loop exited")
+        # After the last write, so the closing row goes into a store this
+        # process is still holding.
+        for conn in held_stores:
+            conn.close()
         if watchdog_thread is not None:
             watchdog_thread.join(timeout=1.0)
         # Release every pid file we still hold.

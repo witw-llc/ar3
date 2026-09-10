@@ -228,9 +228,7 @@ a8s verb. `AR3_SYSTEM=1` on `get.sh` clones into `AR3_DIR` (default
 `/usr/local/bin`) instead of editing a shell rc:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh \
-  | sudo AR3_SYSTEM=1 sh
+curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sudo AR3_SYSTEM=1 sh
 ```
 
 That puts `tell` on the shared PATH so `run_as` agent users resolve it without

@@ -47,6 +47,8 @@ import schedule
 import state
 import verdict
 from dispatch import (
+    MISSION_REVIEW_MIN_INTERVAL_SECONDS,
+    MISSION_REVIEW_SILENT_CAP,
     DispatchContext,
     class_from_meta,
     handle_batch,
@@ -988,7 +990,27 @@ def _activity_rows(node: str) -> list[tuple[bool | None, str, str, str | None]]:
             f"{verdict.REASON_GLOSS.get(reason, reason)}",
             f"ls {state.dead_letter_dir(node)}",
         ))
+    rows.append((None, "mission review", _mission_review_state(node), None))
     return rows
+
+
+def _mission_review_state(node: str) -> str:
+    """What the idle heartbeat has spent on this roster. A review is a paid
+    leader turn nobody asked for, so the one place a person looks for what the
+    org is doing has to account for it."""
+    st = state.read_mission_review(node)
+    fired_at = float(st.get("last_review_at", 0.0) or 0.0)
+    if not fired_at:
+        minutes = int(MISSION_REVIEW_MIN_INTERVAL_SECONDS // 60)
+        return f"not yet fired (fires after {minutes} min quiet)"
+    text = (
+        f"last fired {local_stamp(datetime.fromtimestamp(fired_at, timezone.utc))}"
+        f" · {int(st.get('silent_reviews', 0))} silent of {MISSION_REVIEW_SILENT_CAP}"
+        f" · {int(st.get('stalls', 0))} stalled ticks"
+    )
+    if st.get("dormant"):
+        text += " · dormant until MISSION changes"
+    return text
 
 
 def _last_finished(node: str, roster) -> tuple[str, str, dict] | None:

@@ -29,7 +29,7 @@ dreaming in [r4t-knowledge.md](r4t-knowledge.md#distill-on-the-way-out--dreaming
 | 3 | **probe** | `RESUME` | Check each parked member's command with `shutil.which`; one that resolves rejoins the rotation with its whole queue |
 | 4 | **drain** | (ordinary turn logs) | Run every runnable queued turn until a pass runs nothing |
 | 5 | **dream** | `DREAM` | Distill fresh turn captures into each knowledge-carrying member's k7e store |
-| 6 | **heartbeat** | `MISSION-REVIEW` | If the org is structurally stalled, ask the top leader whether the mission is met |
+| 6 | **heartbeat** | `MISSION-REVIEW` | If the org is structurally stalled — quiet for half an hour, not merely between messages — ask the top leader whether the mission is met |
 | 7 | **flush** | `FLUSH` | Retire continuing conversations idle past their `Continue: <duration>` window |
 
 Recovery is first because everything after it reads the queue and has to read a
@@ -65,11 +65,21 @@ Default off: no `Knowledge:` line means no dream work for that member.
 
 Nobody is waiting — nobody ever is, because a message demands no answer. The
 org is **structurally stalled** when this pass's drain ran nothing, every queue
-is empty, no turn is live, and no member has finished a turn since the last
-tick. That last clause is what makes a stall durable rather than a property of
-one pass: work driven straight through `handle_message` between two idle passes
-leaves no queue and no lock behind, so without a memory of the newest turn
-stamp every quiet moment would read as a stall.
+is empty, no turn is live, no member has finished a turn since the last tick,
+and the newest turn on the roster is itself older than
+`MISSION_REVIEW_MIN_INTERVAL_SECONDS` (30 minutes).
+
+The turn-completion stamp does two jobs. Compared between passes it makes a
+stall durable rather than a property of one pass: work driven straight through
+`handle_message` between two idle passes leaves no queue and no lock behind, so
+without a memory of the newest turn stamp every quiet moment would read as a
+stall. Compared against the clock it says the org has actually gone to sleep: a
+roster that answered a minute ago is between messages, and two idle passes over
+that lull must not cost the person a silent leader turn. Only a new stamp is
+work: a wake that finds the same stamp still young neither counts a stall nor
+resets the ladder, so a silent review's own turn (the newest stamp after every
+review) cannot undo the backoff or dormancy it just earned. A roster where
+nobody has run at all is as quiet as it gets, so an empty stamp counts as old.
 
 Then the top leader gets a budget-gated review turn to reweigh the mission and
 delegate the next step. This is the single mechanism that re-engages a stalled
@@ -96,6 +106,9 @@ outbound mail answers the messages named in the same header.
 
 **Backoff and dormancy** (from `dispatch._mission_review`):
 
+- A pass whose newest roster turn is younger than 30 minutes is not a stalled
+  pass: nothing fires, and the counters reset as after any other non-stalled
+  pass.
 - Each stalled idle pass increments a stall counter.
 - A review fires only when stalls reach
   `min(2 << silent_reviews, 32)` — so with no prior silent reviews the first
@@ -148,7 +161,7 @@ member / cell / (optional) rig budget like any other turn.
 | Knob | Where | Default | Effect |
 |---|---|---|---|
 | `idle.timeout` | a8s node definition (`apps/a8s/definitions/r4t.json`) | `60` | Seconds of quiet before a8s invokes `r4t idle` |
-| `MISSION_REVIEW_MIN_INTERVAL_SECONDS` | `dispatch.py` | `1800` | Wall-clock floor between two heartbeat reviews. The backoff ladder counts idle WAKES, so without this a shorter wake interval would multiply the spend without anyone editing a policy |
+| `MISSION_REVIEW_MIN_INTERVAL_SECONDS` | `dispatch.py` | `1800` | Wall-clock floor under the heartbeat, in two places: between two reviews, and between the roster's newest turn and any review at all. The backoff ladder counts idle WAKES, so without this a shorter wake interval would multiply the spend without anyone editing a policy. `r4t sandbox` compresses it with the rest of its clock |
 | `Continue: <duration>` | roster, per member | off (no continue); `on` continues with **no** flush window | Duration (`15m`, `4h`, bare seconds, …) arms flush; `on` never flushes |
 | `Knowledge:` | roster, per member | off | Any non-off form enables the store and the dream sweep for that member |
 | `People:` | roster, roster-level | none | The senders whose messages in a capture may retire the entries they contradict; absent, the dream pass retires nothing |

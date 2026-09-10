@@ -1,8 +1,7 @@
 #!/bin/sh
 # ar3 one-line installer:
 #
-#   curl --proto '=https' --tlsv1.2 -fsSL \
-#     https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 #
 # Installs the suite into $AR3_DIR (default ~/.ar3) and adds one source line
 # to your shell rc. Re-running updates in place. With git on PATH the install

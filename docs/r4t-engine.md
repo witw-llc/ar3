@@ -499,7 +499,9 @@ r4t engine claude quota --json
 ```
 
 One component per engine under `apps/r4t/engines/`; live answers persist as
-snapshots that still answer when the live check cannot.
+snapshots that still answer when the live check cannot. A snapshot lives at
+`<r4t home>/quota/<engine>.json` — the same home as rigs and rosters,
+relocatable with `R4T_HOME`.
 
 **Not every engine answers.** `muse` is the first that cannot: Muse Code
 exposes no usage, limits or balance surface, and nothing on disk carries an

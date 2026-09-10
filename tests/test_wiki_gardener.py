@@ -45,8 +45,25 @@ def write(wiki):
     return _write
 
 
+LEDGER_COLUMNS = (
+    "| Decision | Date | Ruling | Consequences | Evidence | Status |\n"
+    "|---|---|---|---|---|---|\n"
+)
+
+
+def ledger_page(sections):
+    """A decision ledger from [(domain, [(title, status), ...]), ...]."""
+    body = []
+    for domain, rows in sections:
+        body.append(f"## {domain}\n\n" + LEDGER_COLUMNS)
+        for title, status in rows:
+            body.append(f"| {title} | 2026-09-10 | A ruling. | not recorded | #1 | {status} |\n")
+        body.append("\n")
+    return page(category="Decisions", title="Decisions", body="".join(body))
+
+
 def kinds(root):
-    defects, _ = gardener.garden(root)
+    defects, _, _ = gardener.garden(root)
     return [(d.page, d.kind) for d in defects]
 
 
@@ -68,7 +85,7 @@ def test_page_without_a_category_is_uncategorized(wiki, write):
 def test_a_category_outside_the_closed_set_is_a_defect(wiki, write):
     write("Reference-Loose", page(category="Miscellany", title="Loose"))
     write("Reference", page(title="Reference", body="- [Loose](Reference-Loose)"))
-    defects, _ = gardener.garden(wiki)
+    defects, _, _ = gardener.garden(wiki)
     detail = next(d.detail for d in defects if d.page == "Reference-Loose")
     assert "Miscellany" in detail
 
@@ -101,14 +118,14 @@ def test_a_banner_without_a_date_is_unexplained(wiki, write):
         "Reference-Positioning",
         page(title="Positioning", body="> **Accuracy** — the throughput number was never taken"),
     )
-    defects, _ = gardener.garden(wiki)
+    defects, _, _ = gardener.garden(wiki)
     detail = next(d.detail for d in defects if d.kind == "unexplained-flag")
     assert "no date" == detail.split("carries ")[1]
 
 
 def test_a_bare_banner_has_neither_reason_nor_date(wiki, write):
     write("Reference-Positioning", page(title="Positioning", body="**Archive**"))
-    defects, _ = gardener.garden(wiki)
+    defects, _, _ = gardener.garden(wiki)
     detail = next(d.detail for d in defects if d.kind == "unexplained-flag")
     assert detail.endswith("no reason and no date")
 
@@ -244,3 +261,159 @@ def test_a_path_that_is_not_a_directory_is_a_usage_error(tmp_path):
     with pytest.raises(SystemExit) as exit_info:
         gardener.main([str(tmp_path / "absent")])
     assert exit_info.value.code == 2
+
+
+@pytest.fixture
+def ledger(wiki, write):
+    """Put a decision ledger in the fixture wiki and reach it from the sidebar."""
+    write("_Sidebar", "**[Reference](Reference)**\n**[Decisions](Decisions)**\n")
+
+    def _ledger(sections):
+        write("Decisions", ledger_page(sections))
+        return wiki
+    return _ledger
+
+
+def test_a_consolidated_ledger_reports_nothing(ledger):
+    root = ledger([
+        ("Comms & protocol", [("tell is the only verb", "standing")]),
+        ("Process & lab", [("Trust but grep", "standing")]),
+    ])
+    assert kinds(root) == []
+
+
+def test_the_row_count_is_reported_even_when_the_ledger_is_clean(ledger, capsys):
+    root = ledger([("Process & lab", [("Trust but grep", "standing")])])
+    assert gardener.main([str(root)]) == 0
+    assert "Decisions: 1 live rows against a ceiling of 120" in capsys.readouterr().out
+
+
+def test_a_ledger_over_the_ceiling_is_a_defect(ledger):
+    rows = [(f"Ruling number {n}", "standing") for n in range(gardener.LEDGER_CEILING + 1)]
+    root = ledger([("Process & lab", rows)])
+    assert ("Decisions", "ledger-oversize") in kinds(root)
+
+
+def test_the_ceiling_counts_live_rows_only(ledger):
+    rows = [(f"Ruling number {n}", "standing") for n in range(gardener.LEDGER_CEILING)]
+    rows.append(("One row too many", "superseded by *Ruling number 1*"))
+    root = ledger([("Process & lab", rows)])
+    assert ("Decisions", "ledger-oversize") not in kinds(root)
+
+
+def test_a_superseded_row_belongs_in_the_archive(ledger):
+    root = ledger([("Process & lab", [
+        ("Issues plus feature branches", "superseded by *Batch to a version branch*"),
+        ("Batch to a version branch", "standing"),
+    ])])
+    defects, _, _ = gardener.garden(root)
+    unarchived = [d for d in defects if d.kind == "unarchived-row"]
+    assert len(unarchived) == 1
+    assert "Issues plus feature branches" in unarchived[0].detail
+    assert gardener.LEDGER_ARCHIVE in unarchived[0].detail
+
+
+def test_two_live_rows_on_one_surface_are_an_unconsolidated_pair(ledger):
+    root = ledger([("Product & positioning", [
+        ("The product is ar3", "standing"),
+        ("The product is written AR3 in prose", "standing"),
+    ])])
+    defects, _, _ = gardener.garden(root)
+    pair = next(d for d in defects if d.kind == "unconsolidated-pair")
+    assert "The product is ar3" in pair.detail
+    assert "The product is written AR3 in prose" in pair.detail
+    assert "Product & positioning" in pair.detail
+
+
+def test_a_repeated_title_is_a_pair_with_itself(ledger):
+    root = ledger([("Memory & knowledge", [
+        ("Rank-proportional packing", "standing"),
+        ("Rank-proportional packing", "standing"),
+    ])])
+    assert [k for k in kinds(root) if k[1] == "unconsolidated-pair"] == [
+        ("Decisions", "unconsolidated-pair")
+    ]
+
+
+def test_three_rows_on_one_surface_pair_against_the_first(ledger):
+    root = ledger([("Memory & knowledge", [
+        ("The priming query is bare", "standing"),
+        ("The priming query is short", "standing"),
+        ("The priming query is newest", "standing"),
+    ])])
+    pairs = [d for d in kinds(root) if d[1] == "unconsolidated-pair"]
+    assert len(pairs) == 2
+
+
+def test_markup_in_a_title_does_not_hide_a_surface(ledger):
+    root = ledger([("Comms & protocol", [
+        ("`tell` is the only verb", "standing"),
+        ("tell is the verb that never blocks", "standing"),
+    ])])
+    assert [k for k in kinds(root) if k[1] == "unconsolidated-pair"] == [
+        ("Decisions", "unconsolidated-pair")
+    ]
+
+
+def test_titles_that_agree_on_fewer_words_are_different_surfaces(ledger):
+    root = ledger([("Product & positioning", [
+        ("The product is ar3", "standing"),
+        ("The product ships from one URL", "standing"),
+        ("The reader is the audience", "standing"),
+    ])])
+    assert kinds(root) == []
+
+
+def test_one_surface_in_two_domains_is_not_a_pair(ledger):
+    root = ledger([
+        ("Memory & knowledge", [("Members write only private memory", "standing")]),
+        ("Architecture & isolation", [("Members write only private stores", "standing")]),
+    ])
+    assert kinds(root) == []
+
+
+def test_a_superseded_row_never_pairs_with_its_successor(ledger):
+    root = ledger([("Product & positioning", [
+        ("The product is The Ark", "superseded by *The product is ar3*"),
+        ("The product is ar3", "standing"),
+    ])])
+    assert [k for k in kinds(root) if k[1] == "unconsolidated-pair"] == []
+
+
+def test_titles_that_carry_separators_are_read_up_to_the_separator():
+    text = ledger_page([("Comms & protocol", [
+        ("tell — the only verb", "standing"),
+        ("tell — never blocks", "standing"),
+        ("Obligation: stops at the wall", "standing"),
+    ])])
+    defects, summary = gardener.check_ledger(text)
+    assert summary["surface"] == "the words before the first dash or colon"
+    pair = next(d for d in defects if d.kind == "unconsolidated-pair")
+    assert '"tell"' in pair.detail
+
+
+def test_titles_without_separators_are_read_as_their_first_words():
+    text = ledger_page([("Comms & protocol", [
+        ("tell is the only verb", "standing"),
+        ("tell is the one that never blocks", "standing"),
+    ])])
+    defects, summary = gardener.check_ledger(text)
+    assert summary["surface"].startswith(f"the first {gardener.SURFACE_WORDS} words")
+    assert [d.kind for d in defects] == ["unconsolidated-pair"]
+
+
+def test_the_json_report_carries_the_ledger_summary(ledger, capsys):
+    import json
+
+    root = ledger([("Process & lab", [("Trust but grep", "standing")])])
+    assert gardener.main([str(root), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["ledger"]["rows"] == 1
+    assert report["ledger"]["ceiling"] == gardener.LEDGER_CEILING
+
+
+def test_a_wiki_without_a_ledger_reports_no_summary(wiki, capsys):
+    assert gardener.main([str(wiki), "--json"]) == 0
+    import json
+
+    assert "ledger" not in json.loads(capsys.readouterr().out)

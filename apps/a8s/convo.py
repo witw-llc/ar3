@@ -11,15 +11,17 @@ import sqlite3
 import sys
 import time
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import sqlite_store
 from core import conversations_path, inbound_bundle_dir, out
+from receipts import parse_duration, parse_stamp
 from settings import get_int
 
 from ar3 import clock
+from ar3.ulid import is_ulid
 
 __all__ = [
     "ConversationArchiveError",
@@ -33,8 +35,10 @@ __all__ = [
     "format_conversation",
     "format_entry",
     "follow_conversation",
+    "hold_open",
     "involves_agent",
     "load_agent_entries",
+    "load_agent_records",
     "load_entries",
     "open_for_read",
     "open_glow_stdout",
@@ -49,7 +53,7 @@ __all__ = [
 DEFAULT_HEADING_OUT = "## from {from} to {to} at {timestamp}"
 DEFAULT_HEADING_IN = "### from {from} to {to} at {timestamp}"
 
-HEADING_PLACEHOLDERS = ("from", "to", "timestamp", "date", "utc")
+HEADING_PLACEHOLDERS = ("from", "to", "timestamp", "date", "utc", "ulid")
 
 
 def decode_template(text: str) -> str:
@@ -100,6 +104,24 @@ def convo_help_epilog() -> str:
                  senders). The limit counts matching messages, so --from bob --limit 10
                  shows bob's last ten however much other traffic sits between them.
 
+  --since CURSOR show only rows after CURSOR, one of:
+                   a message ulid   rows with a greater seq than that row -- delivery
+                                    order, so a late arrival dated before that row is
+                                    never dropped
+                   an ISO timestamp rows after the last-inserted row dated at or before
+                   or bare date     it (before it for a bare date, so the whole day is
+                                    in, midnight included) -- can still miss a message that itself arrives
+                                    late dated at or before the cursor; a ulid cursor
+                                    cannot have that failure. A value with no offset,
+                                    a bare date included, is read in this machine's
+                                    local zone
+                   a duration       rows dated within that span of now, e.g. 2h, 30m, 3d
+                 On its own --since drains: every row after the cursor, oldest first.
+                 Add --limit N for the oldest N of them and continue from the newest
+                 ulid you were handed -- either way nothing between the cursor and the
+                 window is skipped. Composes with --from. Nothing new prints nothing
+                 and exits 0.
+
 heading templates:
   Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
     {{from}}       sender name
@@ -107,6 +129,7 @@ heading templates:
     {{timestamp}}  the message's time in this machine's zone, e.g. 2026-08-16 13:22:04 PDT
     {{date}}       alias for {{timestamp}}
     {{utc}}        the same instant as stored: ISO 8601 UTC
+    {{ulid}}       the message's own id, empty string when the row has none
 
   Defaults:
     outbound: {DEFAULT_HEADING_OUT}
@@ -119,11 +142,20 @@ heading templates:
 
   Message body and attachment lines are appended after the heading block.
 
+output:
+  --json         one JSON object per row (ulid, seq, from, to, utc, content, files,
+                 files_unavailable), newline-delimited, in the same seq order as the
+                 markdown view -- pairs with --since: record the newest ulid, ask
+                 --since <it> next time. files_unavailable carries one
+                 {{filename, error, detail}} object per attachment the transfer could
+                 not deliver, so a lost file is never read as a delivered one.
+
 examples:
   a8s convo my-desktop -f --limit 10 --glow
   a8s convo my-desktop -f --from ares
   a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
   a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
+  a8s convo my-desktop --since 01J8X9K2QZ5VJ0G3R7T6M4N8FP --json
 
 environment:
   A8S_GLOW=<theme>    default glow theme (auto, dark, light, dracula, …); --glow overrides
@@ -169,6 +201,26 @@ def _connect() -> sqlite3.Connection:
     return sqlite_store.connect(
         conversations_path(), _SCHEMA, table="messages", foreign_keys=True
     )
+
+
+def hold_open() -> sqlite3.Connection:
+    """The connection a running node keeps on this store for its lifetime.
+
+    A `mode=ro` reader cannot create `-wal` / `-shm`, so it can read the
+    archive only while some connection holds that pair open. The writers open
+    per write and close again, so between two deliveries the side files are
+    simply gone and a seat with read+execute on the a8s home is told "unable
+    to open database file" about a store that is fine — intermittent, and
+    nothing the reader can fix. A node holds this open instead.
+
+    It is a connection of its own rather than the writers' reused: writes come
+    from the router, the wake handlers and the receive loops on whatever
+    thread reaches them first, and one shared connection would trade a
+    per-write open for a lock on every write across all of them. Idle and
+    outside any transaction, this one takes no lock and does not stop a
+    writer's `wal_checkpoint(TRUNCATE)`.
+    """
+    return sqlite_store.hold(_connect())
 
 
 def open_for_read() -> sqlite3.Connection:
@@ -303,40 +355,63 @@ def _rows_to_entries(rows: list[tuple[int, str]]) -> list[tuple[int, dict[str, A
 def _latest_agent_entries(
     conn: sqlite3.Connection,
     agent: str,
-    limit: int,
+    limit: int | None,
     *,
     through_seq: int | None = None,
+    seq_floor: int | None = None,
+    date_floor: datetime | None = None,
     senders: list[str] | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
-    if limit < 1:
+    """Rows involving `agent`, oldest-first, capped at `limit` (None = no cap).
+
+    A floor turns the walk around. Without one this is a tail view and the
+    cap has to keep the *newest* `limit` rows, so the scan runs newest-first
+    and the result is reversed at the end. With a floor the caller is reading
+    forward from a cursor, and the cap has to keep the *oldest* `limit` rows
+    past it — anything else drops the messages between the cursor and the
+    window, which is the one thing a cursor exists to prevent.
+    """
+    if limit is not None and limit < 1:
         return []
     params: list[Any] = [_name_key(agent)]
-    through = ""
+    clauses: list[str] = []
     if through_seq is not None:
-        through = "AND m.seq <= ?"
+        clauses.append("m.seq <= ?")
         params.append(through_seq)
+    if seq_floor is not None:
+        clauses.append("m.seq > ?")
+        params.append(seq_floor)
+    extra = (" AND " + " AND ".join(clauses)) if clauses else ""
+    forward = seq_floor is not None or date_floor is not None
     sql = f"""
         SELECT m.seq, m.entry_json
         FROM messages AS m
         JOIN message_agents AS a ON a.seq = m.seq
-        WHERE a.agent_key = ? {through}
-        ORDER BY m.seq DESC
+        WHERE a.agent_key = ?{extra}
+        ORDER BY m.seq {"ASC" if forward else "DESC"}
     """
     keys = sender_keys(senders)
-    if not keys:
+    # A sender filter, or a date floor decided row by row after decoding,
+    # walks the cursor lazily instead: the limit must count matches, not
+    # rows scanned, so a SQL LIMIT here would cut the scan before either
+    # filter had a chance to reject anything.
+    if limit is not None and not keys and date_floor is None:
         sql += " LIMIT ?"
         params.append(limit)
-    # A sender filter walks the cursor lazily instead: the limit must count
-    # matches, not rows scanned.
     found: list[tuple[int, dict[str, Any]]] = []
     for seq, raw in conn.execute(sql, params):
         entry = _decode_entry(raw)
         if entry is None or not sent_by(entry, keys):
             continue
+        if date_floor is not None:
+            stamp = parse_stamp(entry.get("date") or "")
+            if stamp is None or stamp < date_floor:
+                continue
         found.append((int(seq), entry))
-        if len(found) >= limit:
+        if limit is not None and len(found) >= limit:
             break
-    found.reverse()
+    if not forward:
+        found.reverse()
     return found
 
 
@@ -353,6 +428,134 @@ def load_agent_entries(
                     conn, agent, limit, senders=senders
                 )
             ]
+    except (OSError, sqlite3.Error) as e:
+        raise ConversationArchiveError(f"cannot read {conversations_path()}: {e}") from e
+
+
+def _since_floor(
+    conn: sqlite3.Connection, since: str
+) -> tuple[int | None, datetime | None]:
+    """Resolve a `--since` cursor into `(seq_floor, date_floor)`; exactly one is set.
+
+    A **ulid** cursor resolves to `seq_floor`: the seq of the row that ulid
+    names. Every row inserted after it has a strictly greater seq no matter
+    how out of order its own `date` reads — the late-delivery case — so a
+    ulid cursor can never drop one.
+
+    A **timestamp or bare date** cursor also resolves to `seq_floor`, computed
+    as the seq of the *last-inserted* row (across the whole store, not just
+    this agent's) whose stored `date` is at or before it — strictly before it
+    for a bare date, which names a whole day and so includes the row on its
+    local midnight. That is an
+    approximation, not an identity, and it has exactly the failure mode a
+    ulid cursor does not: a message dated at or before the cursor that has
+    not arrived yet when this call runs — the late-delivery case again — will
+    itself become tomorrow's floor instead of a row found after it, because
+    it is then the newest row with `date <= cursor`. It is swallowed, not
+    surfaced. Record `{ulid}` as the cursor, not a timestamp, to close this.
+
+    A **duration** cursor (`2h`, `30m`, `3d`, or bare seconds) resolves to
+    `date_floor`: `now` minus the duration, compared as an instant against
+    each row's own parsed `date`. No seq is involved, so the late-delivery
+    question does not arise — a message dated inside the window is included
+    whenever this runs, whatever its insertion order.
+
+    Both date forms compare **instants**, never the spellings. A stored date
+    may be written with any fractional precision and any offset, so `14:00Z`
+    sorts after `14:00:00.000000Z` as text while naming the earlier moment;
+    every comparison here parses both sides first, and a row whose date does
+    not parse at all takes part in no date comparison.
+
+    A cursor that carries no offset — a bare date included — is read in this
+    machine's local zone, so `--since 2026-09-10` starts at local midnight,
+    the day the delegator means. `receipts.parse_stamp` keeps presuming UTC:
+    its other callers read *stored* stamps, which are written in UTC.
+    """
+    cursor = since.strip()
+    if is_ulid(cursor):
+        row = conn.execute(
+            "SELECT seq FROM messages WHERE message_id = ?", (cursor.upper(),)
+        ).fetchone()
+        if row is None:
+            raise ConversationArchiveError(f"--since: no message with id {cursor}")
+        return int(row[0]), None
+    try:
+        seconds = parse_duration(cursor)
+    except ValueError:
+        seconds = None
+    if seconds is not None:
+        return None, datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    try:
+        dt = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"--since: cannot parse {since!r} as a ulid, timestamp, or duration"
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    # A timestamp is a point the reader has already seen through, so the
+    # floor is the last row at or before it. A bare date names a day the
+    # reader wants whole, midnight included, so its floor is the last row
+    # strictly before that midnight.
+    inclusive = _is_bare_date(cursor)
+    floor_seq = 0
+    for seq, raw in conn.execute("SELECT seq, entry_json FROM messages ORDER BY seq DESC"):
+        entry = _decode_entry(raw)
+        if entry is None:
+            continue
+        stamp = parse_stamp(entry.get("date") or "")
+        if stamp is None:
+            continue
+        if stamp < dt or (stamp == dt and not inclusive):
+            floor_seq = int(seq)
+            break
+    return floor_seq, None
+
+
+def _is_bare_date(cursor: str) -> bool:
+    try:
+        date.fromisoformat(cursor)
+    except ValueError:
+        return False
+    return len(cursor) == 10
+
+
+def load_agent_records(
+    agent: str,
+    *,
+    limit: int | None,
+    senders: list[str] | None = None,
+    since: str | None = None,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Entries for `agent` in display (seq) order, each paired with its own
+    `seq` — what a `--json` row needs alongside the rendered fields, and what
+    a `--since <ulid>` cursor is resolved against.
+
+    `since=None` behaves like `load_agent_entries` — the newest `limit` rows,
+    just with `seq` kept on each row. With a cursor the rows come from the
+    other end: the **oldest** `limit` rows past it, and `limit=None` drains
+    every one of them. A poller that saves the newest ulid it was handed and
+    asks for `--since <that>` next time therefore loses nothing, whether it
+    drains or pages.
+
+    See `_since_floor` for what the three cursor forms mean and for the
+    timestamp cursor's late-delivery gap that a ulid cursor closes.
+    """
+    if limit is not None and limit < 1:
+        return []
+    try:
+        with closing(open_for_read()) as conn:
+            seq_floor = date_floor = None
+            if since is not None:
+                seq_floor, date_floor = _since_floor(conn, since)
+            return _latest_agent_entries(
+                conn,
+                agent,
+                limit,
+                senders=senders,
+                seq_floor=seq_floor,
+                date_floor=date_floor,
+            )
     except (OSError, sqlite3.Error) as e:
         raise ConversationArchiveError(f"cannot read {conversations_path()}: {e}") from e
 
@@ -489,6 +692,7 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
             "timestamp": clock.stamp(ts, seconds=True),
             "date": clock.stamp(ts, seconds=True),
             "utc": ts,
+            "ulid": (entry.get("id") or "").strip(),
         }
     )
 
