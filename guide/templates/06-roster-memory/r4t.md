@@ -11,6 +11,8 @@ Keep one small project moving, and answer the owner when he asks.
 
 ## Roster
 
+People: me
+
 ### Wren
 - **Rig:** silo
 - **Leader:** yes

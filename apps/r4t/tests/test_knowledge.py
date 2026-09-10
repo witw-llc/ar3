@@ -246,7 +246,8 @@ class TestKnowledgeSection:
         text = "\n".join(p for _l, parts in sections for p in parts)
         assert knowledge.KNOWLEDGE_HEADER in text
         assert knowledge.KNOWLEDGE_FRAMING in text
-        assert "(K7E-" in text  # provenance id on the snippet
+        assert "### Deploy key limits (today)" in text
+        assert "K7E-" not in text
         assert "cannot push workflow files" in text
 
     def test_budget_truncates_deterministically(self, ctx):
@@ -414,8 +415,7 @@ class TestUsageTracking:
         phil.knowledge_bytes = 1024  # starves the low-weight tail of the pool
         batch = [{"body": "content note word"}]
         parts = knowledge.knowledge_section(ctx, phil, batch)
-        text = "\n".join(parts)
-        injected = {m for m in ids if f"({m}" in text}
+        injected = set(knowledge.packed_ids(parts))
         skipped = set(ids) - injected
         assert injected and skipped  # the budget must actually starve someone
         for node_id in injected:
@@ -453,7 +453,7 @@ class TestFramingInSection:
         assert parts[0] == knowledge.KNOWLEDGE_HEADER
         assert parts[1] == ""
         assert knowledge.KNOWLEDGE_FRAMING not in parts
-        assert "(K7E-" in "\n".join(parts)
+        assert any(p.startswith("### Deploy key limits (") for p in parts)
         assert any("cannot push workflow files" in p for p in parts)
 
     def test_member_custom_text_replaces_the_built_in_line(self, ctx):
@@ -504,7 +504,7 @@ class TestAgeStamp:
         text = "\n".join(
             knowledge.knowledge_section(ctx, phil, [{"body": "deploy key problem"}])
         )
-        assert ", today)" in text
+        assert "### Deploy key limits (today)" in text
         assert knowledge.KNOWLEDGE_STATUS_LINE not in text
 
     def test_stale_entry_stamps_days_old_with_status_line(self, ctx):
@@ -517,7 +517,8 @@ class TestAgeStamp:
         text = "\n".join(
             knowledge.knowledge_section(ctx, phil, [{"body": "deploy runbook schedule"}])
         )
-        assert f"({node_id}, 36d old)" in text
+        assert "### Old deploy runbook (36d old)" in text
+        assert node_id not in text
         assert knowledge.KNOWLEDGE_STATUS_LINE in text
         assert text.index(knowledge.KNOWLEDGE_STATUS_LINE) < text.index(
             "Deploys go out weekly"
@@ -535,7 +536,21 @@ class TestAgeStamp:
         assert f"{days_old}d old)" in text
         assert (knowledge.KNOWLEDGE_STATUS_LINE in text) is expect_line
 
-    def test_undated_entry_keeps_bare_id_stamp(self, ctx):
+    def test_packed_ids_name_what_the_prompt_carried(self, ctx):
+        """The turn capture writes these into a line of its own so the later
+        distill can ask whether the turn's people contradicted them. The
+        member's own copy of the section names no id, so the pack is the only
+        record — an undated entry, whose header carries no age either, counts
+        the same as a dated one."""
+        dated = seed_dated_store("phil", "Old deploy runbook", "Deploys go out Fridays.", 36)
+        undated = seed_undated_store("phil", "Undated deploy note", "Deploys need the key.")
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.knowledge_on = True
+        section = knowledge.knowledge_section(ctx, phil, [{"body": "deploy"}])
+        assert sorted(knowledge.packed_ids(section)) == sorted([dated, undated])
+
+    def test_undated_entry_carries_a_bare_title(self, ctx):
         node_id = seed_undated_store("phil", "Undated note", "Content with no date at all.")
         roster = load_roster(ctx.roster_path)
         phil = roster.find("phil")
@@ -543,8 +558,8 @@ class TestAgeStamp:
         text = "\n".join(
             knowledge.knowledge_section(ctx, phil, [{"body": "undated note content"}])
         )
-        assert f"({node_id})" in text
-        assert f"{node_id}," not in text
+        assert "### Undated note\n" in text
+        assert node_id not in text
         assert knowledge.KNOWLEDGE_STATUS_LINE not in text
 
     def test_status_line_bytes_count_against_the_budget(self, ctx):
@@ -583,6 +598,63 @@ class TestAgeStamp:
         truncated_bytes = sum(len(p.encode("utf-8")) for p in truncated[3:] if p)
         assert truncated_bytes <= stale_bytes - 1
         assert "\n".join(truncated) != "\n".join(stale_parts)
+
+
+class TestTheMemberNeverReadsAStore:
+    """#268: the member is given its own recollection, never a description of
+    the machinery holding it. The owner corrected a fact by phone and got node
+    ids and "read-only" back; the correction is what he wanted taken."""
+
+    def test_header_carries_the_age_and_no_id(self, ctx):
+        node_id = seed_dated_store(
+            "phil", "Old deploy runbook", "Deploys go out weekly on Fridays.", 12
+        )
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.knowledge_on = True
+        section = knowledge.knowledge_section(ctx, phil, [{"body": "deploy runbook"}])
+        text = "\n".join(section)
+        assert "### Old deploy runbook (12d old)" in text
+        assert node_id not in text
+        assert knowledge.packed_ids(section) == [node_id]
+
+    def test_framing_forbids_describing_the_memory(self, ctx):
+        assert "Never describe your memory" in knowledge.KNOWLEDGE_FRAMING
+        assert "take a correction and act on it" in knowledge.KNOWLEDGE_FRAMING
+
+    @pytest.mark.parametrize("word", ["store", "node", "k7e-", "entry", "entries"])
+    def test_the_rendered_section_carries_no_machinery_vocabulary(self, ctx, word):
+        seed_store("phil", "Deploy key limits", "The deploy key cannot push workflow files.")
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.knowledge_on = True
+        text = "\n".join(
+            knowledge.knowledge_section(ctx, phil, [{"body": "deploy key problem"}])
+        )
+        assert "cannot push workflow files" in text
+        assert word not in text.lower()
+
+    def test_a_retired_entry_named_in_a_message_is_not_packed(self, ctx):
+        """`k7e search` answers an id lookup superseded or not — right for the
+        operator, wrong for the member: naming a retired id in a message would
+        otherwise put the claim that was retired back in the prompt."""
+        home = knowledge.store_home(NODE, "phil")
+        seed_store("phil", "Old release rule", "Releases go out on Fridays.")
+        seed_store("phil", "Current release rule", "Releases go out on Tuesdays.")
+        listed = knowledge._run_k7e(home, "list", "--ids")
+        old_id, new_id = listed.stdout.split()
+        res = knowledge._run_k7e(home, "supersede", old_id, new_id)
+        assert res.returncode == 0, res.stderr
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.knowledge_on = True
+        section = knowledge.knowledge_section(
+            ctx, phil, [{"body": f"is {old_id} still right, or {new_id}?"}]
+        )
+        text = "\n".join(section)
+        assert "Tuesdays" in text
+        assert "Fridays" not in text
+        assert knowledge.packed_ids(section) == [new_id]
 
 
 class TestDreamSweep:
@@ -666,6 +738,22 @@ class TestDreamSweep:
         roster = self.dreaming_roster(ctx)
         assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
         assert "DREAM phil distilled 1 capture(s) — 1 appended, 2 stored" in read_log()
+
+    def test_a_supersede_is_a_dream_that_did_something(self, ctx, monkeypatch):
+        """A turn where the roster's human corrected a stale note retires an
+        entry and may store nothing else. "no new knowledge" would read as a
+        wasted pass over the one outcome the store most needed."""
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(
+                stdout="  [superseded] K7E-000-00001 -> K7E-000-00002: "
+                       "Widget crash closed\n"
+            ),
+        )
+        state.write_turn_capture(NODE, "phil", "20260909T000000000001Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        assert "DREAM phil distilled 1 capture(s) — 1 superseded" in read_log()
 
     def test_a_dream_that_stored_nothing_says_so(self, ctx, monkeypatch):
         """The line used to claim captures went "into the knowledge store" on

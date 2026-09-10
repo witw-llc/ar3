@@ -152,7 +152,8 @@ hard error naming the set.
 The bold is optional and keys ignore case, spaces and underscores, so
 `- Allowed tools: Read`, `- **allowed_tools:** Read` and `- allowedtools: Read`
 are one key. Prose *before* the first `###` in a collection section is the
-reader's orientation text and is ignored.
+reader's orientation text; only `## Roster` reads a key out of it, the
+`People:` line below.
 
 ```markdown
 ### Lead
@@ -179,6 +180,11 @@ the other is cut, paste, name it. A member carrying both is refused.
 | `Cell:` · `Lead:` · `Role:` | a cell name · a member name · one line of prose | — |
 | `Workdir:` | a path, relative to **the node dir** | frontmatter `workdir:` |
 | `Continue:` · `Knowledge:` · `ProseReply:` · `Framing:` · `Reinforce:` | as in [Rigs](r4t-rigs.md) and [Knowledge](r4t-knowledge.md) | |
+
+**`People:` is roster-level, not a member field.** One line in the prose under
+`## Roster` — `People: neil-phone, neil-email` — names the a8s addresses whose
+word may retire what a member's store holds, and without it nothing corrects a
+store ([Knowledge](r4t-knowledge.md)).
 
 Rig blocks take `Engine:`, `Allowed tools:`, `Rig budget:`/`Member budget:`
 (`12 per hour, max 12`), `Env:` (the one repeatable key), `MCP:`, `Echo:`,
@@ -343,7 +349,9 @@ Full flow: [r4t-message-flow.md](r4t-message-flow.md).
 - [Operations](r4t-operations.md) — `status`, `logs`, and speaking in with `tell --as`
 - [Org design](r4t-org.md) — cells and leads, `MISSION.md`, portable orgs
 - [Idle pass](r4t-idle.md) — drain, dream, heartbeat, flush
-- [Knowledge](r4t-knowledge.md) — a member's private k7e memory (experimental)
+- [Knowledge](r4t-knowledge.md) — a member's private k7e memory (experimental);
+  correct a member in conversation and the idle pass retires the notes you
+  contradicted, without an operator command
 - [Verification](r4t-verification.md) — `r4t check`, checklists, the post-hoc judge, reading a run back
 - [Governance](r4t-governance.md) — why each layer exists, with prior art
 - [Security model](r4t-security.md) — what a repo edit can never change

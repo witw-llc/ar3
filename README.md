@@ -1,5 +1,3 @@
-<!-- one-pager: ratified rulings 2026-09-03, the hand-off 2026-09-30; edit history in PR #247 -->
-
 # AR3
 
 **You already knew you could not do it alone. This is the how.**
@@ -75,7 +73,7 @@ to babysit, and no subscription you do not already hold.
   and a failed wake backs off instead of wedging the inbox.
 - **A roster on your repo, from one command.** `r4t add ~/your-repo triforce`
   registers a lead, a builder and a critic from a shipped runbook.
-- Eight engines and thirteen presets, found on your machine instead of typed
+- Eight engines and twelve presets, found on your machine instead of typed
   into a config. `r4t rig swap leader claude` changes what a name runs, and a
   preset that grades poorly says so with its number.
 - **What is left before you spend it.** `r4t engine <id> quota` returns the
@@ -150,8 +148,8 @@ that arrives or says it did not.
 
 **1.0 is the version a person who has never met us can install from one public
 URL, describe a week of work to, walk away from, and be reached by on a channel
-they already own, with a story on file for what it is and why.** It ships
-2026-09-30, through three gates.
+they already own, with a story on file for what it is and why.** It ships when
+the hand-off is real, through three gates.
 
 - **The story.** A stranger reads this page and can say who AR3 is for and what
   it gives back, without opening a second page.

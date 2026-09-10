@@ -81,6 +81,14 @@ not exposed — but *which* file a bare `tell` resolves to depends on command
 precedence and `PATHEXT`, which is environment-specific rather than guaranteed.
 A caller that needs certainty names the file.
 
+The `.ps1` launchers forward pipeline input, so `$body | tell.ps1 <name> -` and
+a here-string piped the same way reach the message whole. PowerShell hands a
+script its pipeline input as `$input` and attaches none of it to a native
+command the script starts, which is why the launcher does it rather than the
+shell. The forward is written in UTF-8 regardless of the caller's
+`$OutputEncoding`, whose default on Windows PowerShell 5.1 is ASCII and would
+replace an em dash or a CJK run with `?` before python started.
+
 The lossless fix for argv is a native `.exe` entry point, which is what pip,
 Scoop and Bun ship and what npm does not. It is deferred past 1.0 — the
 reasoning, the measured launcher sizes and the costs nobody has priced are in

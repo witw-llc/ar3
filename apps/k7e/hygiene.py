@@ -69,15 +69,33 @@ def run_audit(fix=False):
 
 
 def index_disagreement():
-    """Compare on-disk node count to the SQLite-indexed count. Markdown files
-    are the store's source of truth; the index is a derived, rebuildable
-    cache that can go stale or missing without touching a single node file.
+    """Compare the store's files to the SQLite index — how many, and what each
+    one's status is. Markdown files are the store's source of truth; the index
+    is a derived, rebuildable cache that can go stale or missing without
+    touching a single node file.
+
+    Status is worth its own comparison because search reads only the index. A
+    file that says superseded and a row that says active is a retired claim
+    that still ranks, and nothing in a count catches it.
+
     Returns a message describing the gap, or None when they agree."""
     engine.init()
-    store_count = sum(1 for _ in engine._all_node_files())
     conn = engine._connect()
-    indexed_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    indexed = dict(conn.execute("SELECT id, status FROM nodes").fetchall())
     conn.close()
-    if store_count == indexed_count:
+    store_count = 0
+    disagreed = []
+    for path in engine._all_node_files():
+        store_count += 1
+        meta = engine._parse_frontmatter(path.read_text(encoding="utf-8"))
+        node_id = meta.get("id", path.stem)
+        on_disk = meta.get("status", "active")
+        if node_id in indexed and indexed[node_id] != on_disk:
+            disagreed.append(f"{node_id} is {on_disk} but indexed {indexed[node_id]}")
+    if store_count == len(indexed) and not disagreed:
         return None
-    return f"{store_count} entr(ies), {indexed_count} indexed — run k7e reindex"
+    gaps = []
+    if store_count != len(indexed):
+        gaps.append(f"{store_count} entr(ies), {len(indexed)} indexed")
+    gaps.extend(disagreed)
+    return "; ".join(gaps) + " — run k7e reindex"

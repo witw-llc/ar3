@@ -60,8 +60,11 @@ class TestRecord:
         assert rows[0]["recipients"] == ["Bob"]
 
     def test_skips_empty_recipients(self, fake_home):
+        """Nothing recorded, and no store created to say so in — a reader now
+        distinguishes an archive with no rows from one that is not there, and
+        a write that stored nothing must leave the second."""
         record({"id": "01JTEST000000000000000001", "from": "A", "to": "B", "content": "x"}, recipients=[])
-        assert load_entries() == []
+        assert not conversations_path().exists()
 
     def test_dedupes_by_msg_id(self, fake_home):
         msg = {
@@ -424,6 +427,10 @@ class TestGlowOutput:
             def close(self) -> None:
                 pass
 
+        record(
+            {"id": "01JGLOW000000000000000001", "from": "Bob", "to": "Alice", "content": "hi"},
+            recipients=["Alice"],
+        )
         monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (opened.append(theme) or FakeGlow()))
         assert cmd_convo(["bob", "--limit", "1", "--glow", "dracula"]) == 0
         assert opened == ["dracula"]
@@ -447,6 +454,10 @@ class TestGlowOutput:
             def close(self) -> None:
                 pass
 
+        record(
+            {"id": "01JGLOW000000000000000002", "from": "Bob", "to": "Alice", "content": "hi"},
+            recipients=["Alice"],
+        )
         monkeypatch.setattr("convo.open_glow_stdout", lambda theme: (opened.append(theme) or FakeGlow()))
         assert cmd_convo(["bob", "--limit", "1"]) == 0
         assert opened == ["tokyo-night"]
@@ -639,6 +650,131 @@ class TestCmdConvo:
         out = capsys.readouterr().out
         assert "for harness" in out
         assert "Alice" in out
+
+
+class TestCmdConvoOnAnUnreadableArchive:
+    """Exit 0 with nothing printed has to keep meaning "no messages" (#276).
+
+    A desktop seat whose harness sandbox could read the registry but not the
+    archive ran `a8s convo` on its heartbeat, got an empty result and exit 0,
+    and read it as no mail. The same command with wider filesystem access
+    showed two delivered messages. The registry being readable is what made
+    the failure partial and therefore silent: an unreadable config home as a
+    whole already failed correctly with `no agent named ...`.
+    """
+
+    @staticmethod
+    def _register(tmp_path):
+        from registry import save_registry
+
+        root = tmp_path / "bob"
+        root.mkdir()
+        save_registry({"Bob": {"root": str(root)}})
+
+    def test_a_missing_archive_names_the_file_and_exits_one(
+        self, fake_home, tmp_path, capsys
+    ):
+        self._register(tmp_path)
+        assert cmd_convo(["bob", "--limit", "3"]) == 1
+        err = capsys.readouterr().err
+        assert f"a8s: no conversation store at {conversations_path()}" in err
+
+    def test_reading_does_not_create_the_archive(self, fake_home, tmp_path):
+        """A read that creates the store makes the next read a truthful "no
+        rows" about a history it just replaced, so the evidence disappears on
+        the second look."""
+        self._register(tmp_path)
+        cmd_convo(["bob", "--limit", "3"])
+        assert not conversations_path().exists()
+
+    def test_an_unreadable_archive_names_the_file_and_exits_one(
+        self, fake_home, tmp_path, capsys, unreadable_file
+    ):
+        self._register(tmp_path)
+        record(
+            {"id": "01JLOCKED0000000000000001", "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        unreadable_file(conversations_path())
+        assert cmd_convo(["bob", "--limit", "3"]) == 1
+        err = capsys.readouterr().err
+        assert f"a8s: cannot read {conversations_path()}" in err
+
+    @staticmethod
+    def _not_the_archive(path, shape):
+        """A file `is_file()` accepts and `record` never wrote.
+
+        Zero bytes is what a truncated write or a half-finished copy leaves,
+        and SQLite opens it as an empty database. The unrelated table is the
+        same class one step on: a real database belonging to something else.
+        """
+        import sqlite3
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        if shape == "unrelated-schema":
+            with sqlite3.connect(path) as conn:
+                conn.execute("CREATE TABLE somebody_elses (id INTEGER)")
+
+    @pytest.mark.parametrize("shape", ["zero-byte", "unrelated-schema"])
+    def test_a_file_that_is_not_the_archive_names_it_and_changes_nothing(
+        self, fake_home, tmp_path, capsys, shape
+    ):
+        """The file being there is not evidence the history is empty.
+
+        Reading through the writable connect initialized whatever it opened,
+        so a zero-byte store came back a 24 KiB archive with the schema in it
+        and every read after that was a truthful "no messages" about a file
+        the seat had just overwritten. Asserted on the bytes, because an
+        initialized store and an untouched one both exit 1 once the schema is
+        checked, and only the bytes say which happened.
+        """
+        self._register(tmp_path)
+        path = conversations_path()
+        self._not_the_archive(path, shape)
+        before = path.read_bytes()
+        assert cmd_convo(["bob", "--limit", "3"]) == 1
+        assert f"a8s: cannot read {path}" in capsys.readouterr().err
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("shape", ["zero-byte", "unrelated-schema"])
+    def test_follow_leaves_it_alone_too(self, fake_home, tmp_path, capsys, shape):
+        """`-f` opens the store on its own path, and its poll reopens it once
+        a second — an initializing read there rewrites the file repeatedly."""
+        self._register(tmp_path)
+        path = conversations_path()
+        self._not_the_archive(path, shape)
+        before = path.read_bytes()
+        assert cmd_convo(["bob", "-f"]) == 1
+        assert f"a8s: cannot read {path}" in capsys.readouterr().err
+        assert path.read_bytes() == before
+
+    def test_a_readable_archive_with_no_rows_prints_nothing_and_exits_zero(
+        self, fake_home, tmp_path, capsys
+    ):
+        """The positive control, and the reason the two cases above cannot be
+        satisfied by refusing everything."""
+        self._register(tmp_path)
+        record(
+            {"id": "01JEMPTY00000000000000001", "from": "Alice", "to": "Bob", "content": "x"},
+            recipients=["Bob"],
+        )
+        import sqlite3
+
+        with sqlite3.connect(conversations_path()) as conn:
+            conn.execute("DELETE FROM messages")
+        assert cmd_convo(["bob", "--limit", "3"]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_follow_reports_the_same_way(self, fake_home, tmp_path, capsys):
+        """`-f` opens the store on its own path and would otherwise traceback
+        — and, going through `_connect`, create the file it could not find."""
+        self._register(tmp_path)
+        assert cmd_convo(["bob", "-f"]) == 1
+        assert "no conversation store at" in capsys.readouterr().err
+        assert not conversations_path().exists()
 
 
 class TestConversationsPath:

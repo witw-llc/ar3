@@ -31,6 +31,22 @@ from ar3.ulid import new as new_ulid
 import daemon as daemon_mod
 
 
+def _wedge_rows(limit: int) -> list[tuple[int, dict]]:
+    """WEDGE rows so far, counting a log that does not exist yet as none.
+
+    The watchdog creates the transaction log on its first write, so a poller
+    waiting for a row is waiting for the file too. The reader says which of
+    the two it found rather than answering "no rows" about a store it never
+    opened; here both are simply "not yet".
+    """
+    import txlog
+
+    try:
+        return txlog.read_recent(events=["WEDGE"], limit=limit)
+    except txlog.TransactionLogError:
+        return []
+
+
 def _read_log(name: str) -> str:
     p = agent_log_path(name)
     return p.read_text() if p.is_file() else ""
@@ -350,7 +366,7 @@ class TestWatchdog:
             deadline = time.monotonic() + 3.0
             rows: list[tuple[int, dict]] = []
             while time.monotonic() < deadline:
-                rows = txlog.read_recent(events=["WEDGE"], limit=10)
+                rows = _wedge_rows(10)
                 if rows:
                     break
                 time.sleep(0.05)
@@ -406,7 +422,7 @@ class TestWatchdog:
             deadline = time.monotonic() + 3.0
             rows: list[tuple[int, dict]] = []
             while time.monotonic() < deadline:
-                rows = txlog.read_recent(events=["WEDGE"], limit=10)
+                rows = _wedge_rows(10)
                 if rows:
                     break
                 time.sleep(0.05)
@@ -416,9 +432,9 @@ class TestWatchdog:
             # A fresh beat means the loop isn't stale any more — no further
             # detection fires even though the (now-stale) inbox file is
             # still sitting there.
-            before = len(txlog.read_recent(events=["WEDGE"], limit=50))
+            before = len(_wedge_rows(50))
             time.sleep(0.5)
-            after = len(txlog.read_recent(events=["WEDGE"], limit=50))
+            after = len(_wedge_rows(50))
             assert after == before
         finally:
             daemon_mod._STOP_EVENT.set()

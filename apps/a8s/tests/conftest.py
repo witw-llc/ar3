@@ -187,6 +187,35 @@ def write_path_executable(directory: Path, name: str, source: str) -> Path:
 
 
 @pytest.fixture
+def unreadable_file():
+    """Take read permission off a file for one test, and give it back.
+
+    The denial is verified rather than assumed. A 000 mode means nothing to
+    root, Windows has no POSIX mode bits, and some filesystems ignore them —
+    on any of those a test built on this fixture would pass without ever
+    exercising the failure it names, which is worse than not having it.
+    """
+    restored: list[tuple[Path, int]] = []
+
+    def deny(path: Path) -> Path:
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("a 000 mode denies nothing to this process")
+        mode = path.stat().st_mode
+        path.chmod(0)
+        restored.append((path, mode))
+        try:
+            with path.open("rb"):
+                pass
+        except OSError:
+            return path
+        pytest.skip(f"this filesystem ignores the 000 mode on {path}")
+
+    yield deny
+    for path, mode in restored:
+        path.chmod(mode)
+
+
+@pytest.fixture
 def agents_root() -> Path:
     """Existing per-tool agent fixture directories under apps/a8s/tests/agents/."""
     return _PKG_DIR / "tests" / "agents"

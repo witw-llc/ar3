@@ -237,9 +237,13 @@ def _all_node_files():
             yield f
 
 
-def store_entry(title, content, tags=None, aliases=None, importance=5):
+def store_entry(title, content, tags=None, aliases=None, importance=5,
+                source=None, sources=None):
     """Store a new knowledge entry. Deduplicates by content hash at storage layer.
-    For semantic dedup-aware ingestion, use distill."""
+    For semantic dedup-aware ingestion, use distill.
+
+    `source` names the experience this came from and `sources` the files that
+    experience read — see `_with_provenance`."""
     tags = tags or []
     aliases = aliases or []
     init()
@@ -281,6 +285,8 @@ tags: [{', '.join(tags)}]
 * {now}: Initial entry.
 """
 
+    body = _with_provenance(body, source, sources)
+
     node_path = _node_path(node_id)
     node_path.parent.mkdir(parents=True, exist_ok=True)
     node_path.write_text(body, encoding="utf-8")
@@ -291,12 +297,25 @@ tags: [{', '.join(tags)}]
     return node_id
 
 
-def append_entry(node_id, section, content):
+def append_entry(node_id, section, content, source=None, sources=None):
+    """Grow an existing entry, and refuse one that is not active.
+
+    Appending to a retired entry is how a retired claim comes back: the append
+    re-indexes the node and stamps it with today's date, so the claim the store
+    already replaced ranks again under its own id, in front of the correction
+    that replaced it. The file is what decides — a hit that named this node
+    carries the index's opinion, and the index can be behind."""
     node_path = _node_path(node_id)
     if not node_path.exists():
         raise FileNotFoundError(f"Node {node_id} not found")
 
     text = node_path.read_text(encoding="utf-8")
+    status = _parse_frontmatter(text).get("status", "active")
+    if status != "active":
+        raise ValueError(
+            f"Node {node_id} is {status}; appending to it would put a retired "
+            "claim back in front of what replaced it"
+        )
     now = time.strftime("%Y-%m-%d")
 
     section_header = f"## {section}"
@@ -325,6 +344,10 @@ def append_entry(node_id, section, content):
         count = int(match.group(1)) + 1
         text = re.sub(r"verification_count: \d+", f"verification_count: {count}", text)
 
+    # The newest turn that wrote here, matching `last_updated` — an entry an
+    # operator is tracing was resurrected by the turn that touched it last.
+    text = _with_provenance(text, source, sources)
+
     node_path.write_text(text, encoding="utf-8")
 
     meta = _parse_frontmatter(text)
@@ -332,7 +355,7 @@ def append_entry(node_id, section, content):
     _index_node(
         node_id, meta.get("title", ""),
         meta.get("aliases", []), meta.get("tags", []),
-        full_content, now
+        full_content, now, status=meta.get("status", "active")
     )
 
     return node_id
@@ -355,10 +378,55 @@ def supersede(old_id, new_id):
     return True
 
 
-def search(query, limit=5, json_output=False, include_superseded=False, rerank=None):
+def _hit_is_active(hit):
+    """Whether a search hit names an active node.
+
+    An exact-id hit carries the status it was looked up with; a ranked hit
+    carries none and is only as current as the index. The file decides, so a
+    hit without a status is resolved against the node's own frontmatter."""
+    status = hit.get("status")
+    if status is None:
+        try:
+            status = _parse_frontmatter(get(hit["id"])).get("status", "active")
+        except FileNotFoundError:
+            return False
+    return status == "active"
+
+
+def search(query, limit=5, json_output=False, include_superseded=False, rerank=None,
+           active_only=False):
+    """Rank the store against `query`. A node id in the query is an exact
+    lookup returned first, superseded or not.
+
+    `active_only` drops every hit whose node is retired, for the callers that
+    are choosing a node to write to rather than showing an operator what the
+    store holds. Nothing may append to or dedupe against a retired entry."""
     init()
     if rerank is None:
         rerank = _rerank_enabled()
+
+    # A node id named in the query is a lookup, not a search: nodes_fts never
+    # indexes the id, so ranking can only find the id by accident (a node
+    # whose title happens to mention it) and never the node it names. Return
+    # every named id first, in query order, ahead of the ranked pool — and
+    # superseded or not, since a lookup names the node regardless of status.
+    exact_ids = []
+    for found_id in _ID_RE.findall(query):
+        if found_id not in exact_ids:
+            exact_ids.append(found_id)
+    exact_hits = []
+    if exact_ids:
+        conn = _connect()
+        for node_id in exact_ids:
+            row = conn.execute(
+                "SELECT title, status FROM nodes WHERE id = ?", (node_id,)
+            ).fetchone()
+            if row:
+                exact_hits.append(
+                    {"id": node_id, "title": row[0], "score": "exact",
+                     "match": "id", "status": row[1]}
+                )
+        conn.close()
 
     # Over-fetch a wider candidate pool when reranking so the reranker has
     # something to reorder; otherwise keep the historical limit-sized pool.
@@ -400,12 +468,21 @@ def search(query, limit=5, json_output=False, include_superseded=False, rerank=N
         conn2.close()
         fused.sort(key=lambda x: -x["score"])
 
+    # An exact hit above is not repeated in the ranked tail.
+    if exact_hits:
+        exact_id_set = {h["id"] for h in exact_hits}
+        fused = [r for r in fused if r["id"] not in exact_id_set]
+
+    if active_only:
+        exact_hits = [h for h in exact_hits if _hit_is_active(h)]
+        fused = [r for r in fused if _hit_is_active(r)]
+
     if rerank and fused:
         fused = _rerank(query, fused, limit)
     else:
         fused = fused[:limit]
 
-    return fused
+    return exact_hits + fused
 
 
 def get(node_id, track_usage=False):
@@ -1063,7 +1140,8 @@ tags: [{', '.join(tags_list)}]
     node_path.parent.mkdir(parents=True, exist_ok=True)
     node_path.write_text(body, encoding="utf-8")
 
-    _index_node(node_id, f"{tag} — Compiled Reference", [], tags_list, content_with_sources, now)
+    _index_node(node_id, f"{tag} — Compiled Reference", [], tags_list,
+                content_with_sources, now, status="compiled")
     _update_mocs(node_id, f"{tag} — Compiled Reference", tags_list)
 
     return node_id
@@ -1197,7 +1275,11 @@ def _connect():
     return conn
 
 
-def _index_node(node_id, title, aliases, tags, content, now, content_hash=None, confidence=0.5):
+def _index_node(node_id, title, aliases, tags, content, now, content_hash=None,
+                confidence=0.5, status="active"):
+    """Write one node's row and its FTS text. `status` is the file's own —
+    a literal here would say active about a node whose frontmatter says
+    superseded or compiled, and search reads the index, not the file."""
     conn = _connect()
     alias_str = ", ".join(aliases) if isinstance(aliases, list) else aliases
     tag_str = ", ".join(tags) if isinstance(tags, list) else tags
@@ -1205,8 +1287,9 @@ def _index_node(node_id, title, aliases, tags, content, now, content_hash=None, 
     conn.execute(
         "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
         "verification_count, last_updated, tags, created_at, updated_at, content_hash) "
-        "VALUES (?, ?, ?, 'active', ?, 0, ?, ?, ?, ?, ?)",
-        (node_id, title, alias_str, confidence, now, tag_str, now, now, content_hash)
+        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        (node_id, title, alias_str, status, confidence, now, tag_str, now, now,
+         content_hash)
     )
 
     conn.execute("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)", (node_id,))
@@ -1429,6 +1512,37 @@ def _update_mocs(node_id, title, tags):
                 moc_path.write_text(f"# {tag}\n\n## Active\n{entry}", encoding="utf-8")
         except OSError as e:
             print(f"Warning: failed to update MOC for tag {tag!r}: {e}", file=sys.stderr)
+
+
+def _set_frontmatter_key(text, key, value):
+    """`text` with frontmatter `key` set to `value` — replaced in place when
+    the key is already there, added above the closing fence when it is not."""
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    if not match:
+        return text
+    front = match.group(1)
+    line = f"{key}: {value}"
+    if re.search(rf"(?m)^{re.escape(key)}:", front):
+        # A path is not a replacement template: `\g` in one would otherwise be
+        # read as a group reference.
+        front = re.sub(rf"(?m)^{re.escape(key)}:.*$", lambda _m: line, front, count=1)
+    else:
+        front = f"{front}\n{line}"
+    return f"---\n{front}\n---\n{text[match.end():]}"
+
+
+def _with_provenance(text, source, sources):
+    """`text` stamped with where the knowledge in it came from.
+
+    `source` is the experience distilled — `turn <stamp>` for an r4t turn
+    capture. `sources` are the files that turn read, so a claim resurrected
+    out of a months-old README names the README on the node's own face and an
+    operator answers "where did that come from?" from one `k7e get`."""
+    if source:
+        text = _set_frontmatter_key(text, "source", source)
+    if sources:
+        text = _set_frontmatter_key(text, "sources", f"[{', '.join(sources)}]")
+    return text
 
 
 def _parse_frontmatter(text):

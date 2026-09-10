@@ -13,6 +13,23 @@ rem every read on its own line, which is why there are no blocks here.
 set "BIN_DIR=%~dp0"
 set "AR3=%BIN_DIR%apps\ar3\cli.py"
 
+rem A stock Windows console is cp1252 and the suite's own output --
+rem arrows, em dashes, agent names -- dies on encode there. UTF-8 mode
+rem fixes it in the child rather than asking every user to change a code
+rem page. A caller that set either variable has already chosen.
+if not defined PYTHONUTF8 if not defined PYTHONIOENCODING set "PYTHONUTF8=1"
+
+rem AR3_PYTHON names an interpreter outright and is tried first, so a
+rem harness that bundles its own python can be pointed at without editing
+rem PATH. It is probed like every other candidate: a path that does not
+rem run is a typo, and obeying one silently would trade a working PATH
+rem for nothing.
+if not defined AR3_PYTHON goto :probe_path
+"%AR3_PYTHON%" -c "pass" >nul 2>&1
+if not errorlevel 1 goto :use_ar3_python
+echo ar3: AR3_PYTHON=%AR3_PYTHON% does not run; falling back to PATH >&2
+
+:probe_path
 rem Each candidate has to RUN before it is believed. On Windows the first
 rem `python` on PATH is often the Microsoft Store alias, which resolves
 rem and then exits without running anything, so `where` is not acceptance.
@@ -24,6 +41,10 @@ py -3 -c "pass" >nul 2>&1
 if not errorlevel 1 goto :use_py
 echo ar3: no working python3, python, or py -3 on PATH >&2
 exit /b 127
+
+:use_ar3_python
+"%AR3_PYTHON%" "%AR3%" %*
+exit /b %ERRORLEVEL%
 
 :use_python3
 python3 "%AR3%" %*

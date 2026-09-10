@@ -1,11 +1,12 @@
 {
-  "description": "OpenCode as a bare stateless engine node — `r4t engine opencode run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Tune it with --permissions on the invoke lines below; `r4t engine opencode check` proves the argv still parses.",
+  "description": "OpenCode as a bare stateless engine node — `r4t engine opencode run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. Tune it with --permissions on the invoke lines below; `r4t engine opencode check` proves the argv still parses.",
   "invoke": [
     "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
     "engine",
     "opencode",
     "run",
+    "--model=$MODEL?",
     "--agent",
     "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
@@ -18,6 +19,7 @@
       "engine",
       "opencode",
       "run",
+      "--model=$MODEL?",
       "--agent",
       "$RECIPIENT"
     ]
@@ -30,6 +32,7 @@
       "engine",
       "opencode",
       "run",
+      "--model=$MODEL?",
       "--idle",
       "--agent",
       "$RECIPIENT"

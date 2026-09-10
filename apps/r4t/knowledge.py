@@ -23,15 +23,20 @@ member whose own rig writes smoothed-over notes. Either way it bridges to k7e
 as `K7E_DISTILL_COMMAND` in the subprocess env — `Rig.distill_command` turns
 the rig's own invoke into the stdin->stdout shell command k7e expects.
 
-The `## Knowledge` section is packed rank-proportionally, not greedily
+The recollection section is packed rank-proportionally, not greedily
 (k-budget-packing): the budget splits across the top search hits by
 a 1/(rank+1) weight with unspent slack swept back down the ranks, so a
 budget too small for the top hit's whole snippet still surfaces evidence
 from ranks 2 and 3 instead of spending everything on rank 1. Each entry's
-preamble — the provenance header plus the staleness status line when present
-— is atomic and never truncated; only the snippet backs off to a line or
-sentence boundary. An entry whose share can't cover preamble + a minimum
+preamble — the title-and-age header plus the staleness status line when
+present — is atomic and never truncated; only the snippet backs off to a line
+or sentence boundary. An entry whose share can't cover preamble + a minimum
 snippet is skipped outright, never emitted as a content-free stub.
+
+What the member reads and what the operator reads part company here. The
+member gets notes with titles and ages and nothing else; the ids ride out of
+`knowledge_section` on the pack and into the turn capture, which is where a
+resurrected claim is traced back to the note that carried it.
 """
 from __future__ import annotations
 
@@ -92,15 +97,22 @@ EMBED_TIMEOUT = 300  # dreaming embeds a whole backlog; nobody is waiting
 
 _EMBED_MS_RE = re.compile(r"^embed (\d+)ms( \(semantic track unavailable\))?$", re.MULTILINE)
 
-KNOWLEDGE_HEADER = "## Knowledge (recalled from your private store)"
+KNOWLEDGE_HEADER = "## What you remember"
 # The built-in framing line — `resolve_framing`'s fallback when neither the
 # member's `Framing:` roster line nor the rig's own default says
 # otherwise. A member/rig `Framing: off` drops this line but never the
-# header: the entries still need SOME introduction.
+# header: the notes still need SOME introduction.
+#
+# It speaks of recollection and never of a store, because a member that can
+# name its memory's machinery describes it to the person correcting it — the
+# owner heard node ids and "read-only" where he wanted the correction taken.
+# The last sentence is the doctrine that closes that off.
 KNOWLEDGE_FRAMING = (
-    "Notes your past turns distilled — background that may be stale or "
+    "Notes from your own past turns — background that may be stale or "
     "wrong. When they disagree with the messages above or your own files, "
-    "the messages and files win."
+    "the messages and files win. Never describe your memory, what it holds, "
+    "or what you can or cannot change about it: take a correction and act "
+    "on it."
 )
 # k-age-presentation: on the 4B floor the absolute-date stamp measured
 # worse than no date at all (official-looking dates read as authority, not
@@ -111,6 +123,21 @@ KNOWLEDGE_STALE_DAYS = 30
 KNOWLEDGE_STATUS_LINE = (
     "Status: possibly superseded -- do not treat as current unless corroborated."
 )
+UNTITLED = "Untitled note"
+
+
+class KnowledgePack(list):
+    """The `## Knowledge` section's lines, carrying the store ids that survived
+    packing into them.
+
+    A list, because every consumer joins it into the prompt the way it joins
+    any other section. The ids ride alongside rather than inside because the
+    member's own copy no longer names them and the turn capture still must:
+    the operator traces a resurrected claim by id, the member never sees one."""
+
+    def __init__(self, parts=(), ids=()):
+        super().__init__(parts)
+        self.ids: list[str] = list(ids)
 
 
 def store_home(node: str, name: str) -> Path:
@@ -332,21 +359,25 @@ def _touch_injected(home: Path, ids: list[str]) -> None:
         pass
 
 
-def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
-    """The `## Knowledge` prompt section for a member whose flag is on, or []
-    — on any failure, empty store included. `rig` is the member's own turn
-    rig, which tiers the inject budget when the roster line named no explicit
-    size (`resolve_knowledge_bytes`) and supplies the rig-level `Framing:`
-    default when the member names none (`resolve_framing`). Injection,
-    not fetch, is what counts as a recall: sizing reads every pool entry with
-    `get --no-track`, and one `touch` afterward bumps the k7e usage counter
-    only for entries that survived packing into the prompt."""
+def knowledge_section(ctx, member, batch: list[dict], rig=None) -> KnowledgePack:
+    """The member's recollection section for a member whose flag is on, or an
+    empty pack — on any failure, empty store included. `rig` is the member's
+    own turn rig, which tiers the inject budget when the roster line named no
+    explicit size (`resolve_knowledge_bytes`) and supplies the rig-level
+    `Framing:` default when the member names none (`resolve_framing`).
+    Injection, not fetch, is what counts as a recall: sizing reads every pool
+    entry with `get --no-track`, and one `touch` afterward bumps the k7e usage
+    counter only for entries that survived packing into the prompt.
+
+    The lines are the member's; the pack's `ids` are the operator's. A member
+    reads titles and ages and no id at all, so nothing it can parrot names the
+    machinery behind its memory."""
     budget = resolve_knowledge_bytes(member, rig)
     if budget <= 0:
-        return []
+        return KnowledgePack()
     home = store_home(ctx.node, member.name)
     if not (home / "nodes").is_dir():
-        return []
+        return KnowledgePack()
     query = _seed_query(ctx, member, batch)
     started = time.perf_counter()
     try:
@@ -362,9 +393,14 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
             ctx.node,
             f"r4t: KNOWLEDGE-SKIP {member.name.lower()} search failed: {e}",
         )
-        return []
+        return KnowledgePack()
     search_ms = round((time.perf_counter() - started) * 1000)
     embed_note = _embed_note(res.stderr or "")
+    # An exact id lookup answers whatever the node's status, superseded
+    # included — right for an operator asking how old a node is, wrong here.
+    # A message that merely names a retired id would otherwise put the claim
+    # that was retired back in front of the member.
+    hits = [h for h in hits if h.get("status") in (None, "active")]
     # Fetch before packing: the rank-proportional split needs every pool
     # entry's snippet size to weigh and redistribute, so — unlike the old
     # greedy loop — fetching does not stop early just because the entries
@@ -393,11 +429,11 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
         if not snippet:
             continue
         age_days = _age_days(date)
-        provenance = (
-            f"({hit['id']}, {_age_label(age_days)})" if age_days is not None
-            else f"({hit['id']})"
+        title = str(hit.get("title") or UNTITLED)
+        header = (
+            f"### {title} ({_age_label(age_days)})" if age_days is not None
+            else f"### {title}"
         )
-        header = f"### {hit.get('title', hit['id'])} {provenance}"
         preamble = (
             f"{header}\n\n{KNOWLEDGE_STATUS_LINE}"
             if age_days is not None and age_days > KNOWLEDGE_STALE_DAYS
@@ -416,7 +452,7 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
         f"(search {search_ms}ms, {embed_note})",
     )
     if not blocks:
-        return []
+        return KnowledgePack()
     spec = resolve_framing(member, rig)
     parts = [KNOWLEDGE_HEADER]
     if not spec.off:
@@ -424,7 +460,16 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> list[str]:
     parts.append("")
     for block in blocks:
         parts += [block, ""]
-    return parts
+    return KnowledgePack(parts, [entries[i]["id"] for i, _ in packed])
+
+
+def packed_ids(section) -> list[str]:
+    """The store entries that survived packing into this prompt. The turn
+    capture writes them as a line of its own: the later distill has to know
+    which notes this turn could have contradicted, and the member's copy of
+    the section names none of them. A section that never got built carries no
+    ids."""
+    return list(getattr(section, "ids", []))
 
 
 def _embed_backlog(

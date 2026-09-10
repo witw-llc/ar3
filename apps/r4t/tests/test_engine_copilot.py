@@ -88,8 +88,8 @@ class TestA8sDefinitions:
         )
         for block in (data, data["batch"], data["idle"]):
             argv = block["invoke"]
-            i = argv.index("run")
-            assert argv[i + 1:i + 3] == ["--permissions", "bypass"]
+            i = argv.index("--permissions", argv.index("run"))
+            assert argv[i + 1] == "bypass"
 
 
 USAGE_SAMPLE = {

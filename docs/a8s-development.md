@@ -191,8 +191,21 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **`transactions.sqlite3` holds routing breadcrumbs, not bodies.** Several rows
   per message, written concurrently by the router, wake handlers, and receive
   loops. `txlog.log` never raises; `a8s trace <ULID>` and `a8s transactions`
-  are the only readers, and `a8s update` retains `txlog_max_rows`. Both
-  stores share the WAL/busy-retry discipline in `sqlite_store.py`.
+  read it, `a8s ls` reads the remote names heard through it, and `a8s update`
+  retains `txlog_max_rows`. Both stores share the WAL/busy-retry discipline in
+  `sqlite_store.py`.
+- **A reader never reports "no rows" for a store it could not open, and never
+  creates one.** Missing and unreadable are both errors naming the path
+  (`a8s: cannot read <path>: <reason>`, `no conversation store at <path>`),
+  exit 1; a readable store with no rows prints nothing and exits 0. Go through
+  `convo.open_for_read` / `txlog.open_for_read`, never `_connect`, which
+  creates the file and the schema. Those helpers open through
+  `sqlite_store.connect_read_only`, which cannot write and refuses a file
+  lacking the store's own table, so a zero-byte or unrelated database is an
+  error rather than a store the reader just initialized. The one exception is
+  `txlog.last_heard`,
+  whose caller answers from the registry and treats the heard remotes as a
+  supplement.
 - **A wake's stdout is read by a dedicated reader thread, never the main
   loop.** The main loop only ever drains that thread's queue with a bounded
   deadline (`wake_drain_grace_seconds`) — never an unbounded `for line in

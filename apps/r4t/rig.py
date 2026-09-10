@@ -80,7 +80,7 @@ preset, or one whose preset has no `continue_argv`, cannot continue; a roster
 member asking for it fails closed (see `RigConfig.rig_for`).
 
 `framing` — this rig's default for the cautionary line under a member's
-`## Knowledge` section: `"default"` (or absent) is the built-in wording,
+recollection section: `"default"` (or absent) is the built-in wording,
 `"off"` drops the line, any other string is custom wording taken verbatim (no
 quote marks needed — the JSON string already delimits it). A member's own
 `Framing:` roster line always wins over this default; see

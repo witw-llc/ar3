@@ -201,7 +201,49 @@ def test_registry_carries_a_hint_and_probe_for_every_check():
 def test_registry_covers_the_known_harnesses_and_tools():
     names = {check.name for check in ar3.CHECKS}
     assert {"claude", "agent", "codex", "copilot", "opencode", "agy", "ollama"} <= names
-    assert {"ollama serve", "docker", "git"} <= names
+    assert {"ollama serve", "docker", "git", "utf-8 output"} <= names
+
+
+# ---------- the child's encoding (#275) ----------
+
+def test_the_utf8_probe_says_nothing_is_wrong_off_windows():
+    """The launchers set no encoding on POSIX, because a locale is the
+    operator's own setting. A probe that reported a finding here would be
+    reporting on a choice nobody made."""
+    probe = ar3._utf8_report("posix", False, "", "utf-8")
+    assert probe.ok
+    assert "not applicable" in probe.detail
+
+
+def test_the_utf8_probe_reads_the_console_the_child_actually_got():
+    """A stock Windows console is cp1252, and the suite's own output — arrows,
+    em dashes, agent names — raises UnicodeEncodeError on it. Naming the
+    stream encoding is what turns that crash into something an operator can
+    act on before it happens."""
+    probe = ar3._utf8_report("nt", False, "", "cp1252")
+    assert not probe.ok
+    assert "cp1252" in probe.detail
+
+
+def test_utf8_mode_satisfies_the_probe():
+    probe = ar3._utf8_report("nt", True, "", "utf-8")
+    assert probe.ok
+    assert "UTF-8 mode on" in probe.detail
+
+
+def test_a_callers_own_io_encoding_satisfies_the_probe_too():
+    """The launchers stand aside for `PYTHONIOENCODING`, so the probe has to
+    as well — reporting a fault the caller deliberately configured around
+    would send them to change something that is already right."""
+    probe = ar3._utf8_report("nt", False, "utf-8", "utf-8")
+    assert probe.ok
+    assert "PYTHONIOENCODING=utf-8" in probe.detail
+
+
+def test_an_unknown_stream_encoding_is_named_rather_than_blank():
+    probe = ar3._utf8_report("nt", False, "", "")
+    assert not probe.ok
+    assert "unknown" in probe.detail
 
 
 def _fake(name, group, ok, core=False):

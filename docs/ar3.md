@@ -76,10 +76,23 @@ configures anything.
   `agy`, `ollama`: on PATH, and does a version probe actually answer?
 - **Services** — the ollama server (reachable? which models are pulled?) and
   docker (binary present *and* daemon reachable — they fail differently).
-- **Tooling** — git present with `user.name` and `user.email` configured.
+- **Tooling** — git present with `user.name` and `user.email` configured, and
+  `utf-8 output`: on Windows, whether this child runs in UTF-8 mode or carries
+  a `PYTHONIOENCODING`, and what its stdout encoding actually is — a cp1252
+  console is what makes the suite's arrows and em dashes crash a command that
+  was only printing. On macOS and Linux the line reads *not applicable*.
 
 Exit code is 0 when the core prerequisites hold (git configured, and at least
 one agent harness answering), 1 otherwise — so it can gate a setup script.
+
+## `AR3_PYTHON`
+
+Every launcher — `ar3`, `a8s`, `tell`, `tells`, `r4t`, `k7e`, and their `.cmd`
+and `.ps1` siblings — tries `AR3_PYTHON` before `python3`, `python` and
+`py -3`. Set it to the full path of an interpreter when a harness bundles its
+own and will not put it on `PATH`. It is probed like any other candidate: a
+path that does not run is named on stderr and the launcher carries on down
+`PATH`, so a stale variable never takes the suite down.
 
 ## `ar3 deps`
 

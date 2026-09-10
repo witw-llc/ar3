@@ -129,6 +129,29 @@ def _connect() -> sqlite3.Connection:
     return sqlite_store.connect(transactions_path(), _SCHEMA, table="transactions")
 
 
+def open_for_read() -> sqlite3.Connection:
+    """The log, or a `TransactionLogError` naming why it is not there.
+
+    Same rule as the conversation archive: a reader that answers "no events"
+    when it means "I could not look" sends an operator hunting a routing fault
+    that is really a permission on one file. Reading never creates the log and
+    never initializes one — `_connect` would, and an empty database left by a
+    failed read makes the next read truthfully report nothing. A zero-byte
+    file and a database holding unrelated tables are the same case: the log
+    was never written here.
+    """
+    path = transactions_path()
+    if not path.is_file():
+        raise TransactionLogError(f"no transaction log at {path}")
+    try:
+        conn = sqlite_store.connect_read_only(path, table="transactions")
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {path}: {e}") from e
+    if conn is None:
+        raise TransactionLogError(f"cannot read {path}: not a transaction log")
+    return conn
+
+
 def _ts() -> str:
     now = datetime.now(timezone.utc)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
@@ -189,16 +212,14 @@ def log(
 
 def read_events(msg_id: str) -> list[dict[str, str]]:
     """Return transaction events correlated to one message ULID."""
-    if not transactions_path().is_file():
-        return []
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             rows = conn.execute(
                 f"SELECT {_COLUMNS} FROM transactions WHERE msg_id = ? ORDER BY seq",
                 (msg_id,),
             ).fetchall()
-    except (OSError, sqlite3.Error):
-        return []
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
     return [dict(zip(FIELDS, row)) for row in rows]
 
 
@@ -216,8 +237,6 @@ def read_recent(
     With `after_seq` the limit does not apply: every matching row after that
     cursor comes back, which is what `a8s transactions -f` polls for.
     """
-    if not transactions_path().is_file():
-        return []
     where: list[str] = []
     params: list[object] = []
     for column, values in (
@@ -242,10 +261,10 @@ def read_recent(
     else:
         sql = f"SELECT seq, {_COLUMNS} FROM transactions {clause} ORDER BY seq"
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             rows = conn.execute(sql, params).fetchall()
-    except (OSError, sqlite3.Error):
-        return []
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
     if after_seq is None:
         rows.reverse()
     return [(int(row[0]), dict(zip(FIELDS, row[1:]))) for row in rows]
@@ -267,17 +286,23 @@ def last_heard() -> dict[str, str]:
     This reads the transaction log, so it sees only what retention has kept.
     A remote whose rows have aged out of `txlog_max_rows` drops off the list
     until it speaks again — the log is an event record, not a roster.
+
+    Alone among the readers here, this one still answers `{}` for a log it
+    cannot open. Its caller is `a8s ls`, whose answer is the registry; the
+    heard remotes are a supplement to it. Failing that command over a
+    supplement, or printing a warning on every `ls` of a fresh install where
+    the log legitimately does not exist yet, both cost more than they buy.
+    A reader whose whole output is the log — `transactions`, `trace` — says so
+    instead.
     """
-    if not transactions_path().is_file():
-        return {}
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             rows = conn.execute(
                 "SELECT sender, MAX(timestamp) FROM transactions "
                 "WHERE event = 'RECEIVED_REMOTE' AND sender != '' "
                 "GROUP BY sender"
             ).fetchall()
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, TransactionLogError):
         return {}
     heard: dict[str, tuple[str, str]] = {}
     for sender, ts in rows:

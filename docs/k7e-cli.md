@@ -20,6 +20,9 @@ query-embedding cost alone, so a caller on a latency budget can price it. The
 line gains `(semantic track unavailable)` when ollama did not answer in time and
 FTS5 carried the search by itself. stdout is untouched either way.
 
+A node id (`K7E-BBB-NNNNN`) named in the query is a lookup, not a search: that
+node comes first, superseded or not, ahead of the ranked results.
+
 ### `get <id> [<id> ...] [--no-track] [--json]`
 Print full entries. Counts as a "use" (bumps ranking signals) unless
 `--no-track` is given — for a caller that reads an entry only to size it
@@ -73,7 +76,9 @@ old entry from default search.
 Store a binary content-addressed (SHA256, deduped). Prints the stored path.
 
 ### `distill <file|dir> [--dry-run]`
-Extract knowledge from raw files. See [k7e-distillation.md](k7e-distillation.md).
+Extract knowledge from raw files, and over an r4t turn capture supersede the
+entries that turn's people contradicted. See
+[k7e-distillation.md](k7e-distillation.md).
 
 ### `consolidate [--dry-run]`
 Find and merge duplicate nodes by title similarity.
@@ -98,7 +103,12 @@ on a path someone is waiting on.
 Regenerate all Maps of Content from entry tags.
 
 ### `check [--fix]`
-Audit structural integrity; `--fix` repairs what it safely can.
+Audit structural integrity; `--fix` repairs what it safely can. The `Index:`
+line names any gap between the files and the SQLite index — how many entries
+each holds, and every entry whose file status and indexed status disagree.
+Search reads only the index, so a file that says `superseded` against a row
+that says `active` is a retired claim still ranking. `k7e reindex` resolves
+both.
 
 ## System
 

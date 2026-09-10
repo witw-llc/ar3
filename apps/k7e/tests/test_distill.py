@@ -6,6 +6,7 @@ yields nothing. Real extraction behavior is covered in test_llm_distill.py (@llm
 
 Stub-LLM cases exercise response-shape handling without a live model."""
 import json
+import re
 
 import pytest
 
@@ -750,3 +751,473 @@ class TestDistillSlashTags:
         assert exit_code == 0
         assert (engine.MOCS_DIR / f"{tag.replace('/', '_')}.md").exists()
         assert hygiene.run_audit() == []
+
+
+class TestConversationCorrectsTheStore:
+    """Ruled 2026-09-09: when the roster's human corrects a seat, the
+    correction supersedes the entries it contradicts.
+
+    The field incident it comes from: a months-closed bug was packed into a
+    turn, the owner said by phone that it was closed, and the distill wrote his
+    words as three fresh nodes while the stale one kept `status: active` and
+    kept ranking."""
+
+    STALE = (
+        "The widget renderer crashes on an empty payload. The bug is open and "
+        "nobody has been assigned to it. Reproduce it by posting an empty "
+        "body to the widget endpoint and watching the renderer thread die."
+    )
+    SAID = (
+        "That widget renderer crash is months old and no longer relevant. We "
+        "closed it in June. Stop bringing it up."
+    )
+
+    def _stale_node(self):
+        return engine.store_entry(
+            title="Widget renderer crash",
+            content=self.STALE,
+            tags=["bugs"],
+        )
+
+    def _capture(self, tmp_path, old_id, *, human=True):
+        """A turn capture shaped the way r4t writes one."""
+        said = (
+            "## Human messages\n\n"
+            f"### From: neil (thread 01X)\n\n{self.SAID}\n\n"
+            if human else ""
+        )
+        path = tmp_path / "turn.md"
+        path.write_text(
+            "# turn 20260909T162251000000Z (Phil)\n\n"
+            "- stamp: 20260909T162251000000Z\n"
+            "- local: 2026-09-09 09:22:51 PDT (UTC-07:00)\n"
+            "- threads: 01X\n"
+            "- exit: 0\n"
+            "- duration_seconds: 12.00\n"
+            "- timed_out: false\n"
+            "- rig: junior-dev\n"
+            f"- knowledge: {old_id}\n\n"
+            f"{said}"
+            "## Prompt\n\n"
+            "## Knowledge (recalled from your private store)\n\n"
+            f"### Widget renderer crash ({old_id}, 74d old)\n\n"
+            f"{self.STALE}\n\n"
+            "## Messages since your last turn\n\n"
+            f"From: neil (thread 01X)\n\n{self.SAID}\n\n"
+            "## Output\n\n"
+            "Understood. I will stop raising the widget renderer crash.\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _llm(self, tmp_path, monkeypatch, old_id):
+        """A bridge that answers both distill passes and records which it saw.
+
+        Extraction returns the incident's own shape: the resurrected bug said
+        again under a title of its own — close enough to the stale entry that
+        the ordinary pipeline would hang it off that entry as an edge case —
+        plus one unrelated fact that has nothing to do with the correction."""
+        correction = [{
+            "id": old_id,
+            "title": "Widget renderer crash closed",
+            "content": (
+                "Neil said on 2026-09-09 that the widget renderer crash was "
+                "closed in June and is no longer relevant. This replaces the "
+                "note that recorded it as an open bug."
+            ),
+            "quote": "We closed it in June.",
+        }]
+        extraction = [
+            {
+                "title": "Customer screenshot from Tuesday",
+                "content": (
+                    "A customer screenshot shows the widget renderer crashing "
+                    "on an empty payload."
+                ),
+                "tags": ["bugs"],
+            },
+            {
+                "title": "Widget endpoint owner",
+                "content": (
+                    "The widget endpoint is owned by the platform group, whose "
+                    "on-call rotation answers its pages every weekday morning."
+                ),
+                "tags": ["ownership"],
+            },
+        ]
+        seen = tmp_path / "passes.txt"
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
+            "import sys\n"
+            "prompt = sys.stdin.read()\n"
+            "correction = '## The recalled notes' in prompt\n"
+            f"open({str(seen)!r}, 'a').write("
+            "('correction' if correction else 'extract') + '\\n')\n"
+            "if correction:\n"
+            f"    print({json.dumps(correction)!r})\n"
+            "else:\n"
+            f"    print({json.dumps(extraction)!r})\n"
+        ))
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
+        return seen
+
+    def test_a_correction_supersedes_the_entry_it_closes(
+        self, store, tmp_path, monkeypatch
+    ):
+        old_id = self._stale_node()
+        seen = self._llm(tmp_path, monkeypatch, old_id)
+        capture = self._capture(tmp_path, old_id)
+
+        import cli
+        assert cli.main(["distill", str(capture)]) == 0
+        assert "correction" in seen.read_text()
+
+        stale = engine.get(old_id)
+        assert "status: superseded" in stale
+        new_id = re.search(r"superseded_by: (K7E-\d{3}-\d{5})", stale).group(1)
+        replacement = engine.get(new_id)
+        assert "closed in June" in replacement
+        # Provenance: the capture that caused it and the words that decided it.
+        assert (
+            f"corrects {old_id}, from turn capture 20260909T162251000000Z"
+            in replacement
+        )
+        assert "We closed it in June." in replacement
+
+        # The closure is what recall reaches now, and the bug is out of it.
+        hits = [h["id"] for h in engine.search("widget renderer crash", limit=8)]
+        assert new_id in hits
+        assert old_id not in hits
+        # Never a sibling: the turn's own restatement of the retired claim is
+        # dropped rather than stored beside the closure — or, as the ordinary
+        # pipeline would have it, appended to the entry being retired.
+        assert "customer screenshot" not in stale.lower()
+        active = [engine.get(n["id"]) for n in engine.list_nodes(status="active")]
+        assert not any("customer screenshot" in text.lower() for text in active)
+        assert not any("The bug is open" in text for text in active)
+
+    def test_the_same_words_from_a_machine_supersede_nothing(
+        self, store, tmp_path, monkeypatch
+    ):
+        """A peer seat's word does not outrank a stored note. r4t writes the
+        human-messages section from the envelope's `class`, so the same
+        sentence relayed by machinery reaches the capture with no section, and
+        the question is never asked."""
+        old_id = self._stale_node()
+        seen = self._llm(tmp_path, monkeypatch, old_id)
+        capture = self._capture(tmp_path, old_id, human=False)
+
+        import cli
+        assert cli.main(["distill", str(capture)]) == 0
+        assert "correction" not in seen.read_text()
+        assert "status: active" in engine.get(old_id)
+
+    def test_dry_run_names_the_supersede_and_writes_nothing(
+        self, store, tmp_path, monkeypatch, capsys
+    ):
+        old_id = self._stale_node()
+        self._llm(tmp_path, monkeypatch, old_id)
+        capture = self._capture(tmp_path, old_id)
+
+        import cli
+        assert cli.main(["distill", str(capture), "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert f"[would_supersede] {old_id}" in out
+        assert "Widget renderer crash closed" in out
+        assert "status: active" in engine.get(old_id)
+        assert [n["id"] for n in engine.list_nodes(status="active")] == [old_id]
+
+
+class TestANodeNamesItsSource:
+    """#267: a member resurrected a months-old line out of its own README,
+    delegated it, and the operator could not see where it came from — the
+    node the distill wrote was one day old and named nothing.
+
+    Every node distilled from a turn capture now names the turn, and one born
+    from files that turn read names the files."""
+
+    STAMP = "20260909T162251000000Z"
+    ROOT = "/srv/roster/wren"
+
+    CANDIDATES = [{
+        "title": "Coordination README status",
+        "content": (
+            "The coordination README records a tester waiting on a "
+            "prioritized plan for a likely interface defect."
+        ),
+        "tags": ["ops"],
+    }]
+
+    def _llm(self, tmp_path, monkeypatch):
+        wrapper = write_path_executable(tmp_path, "fake-llm", (
+            "import sys\n"
+            "sys.stdin.read()\n"
+            f"print({json.dumps(self.CANDIDATES)!r})\n"
+        ))
+        monkeypatch.setenv("K7E_LLM_COMMAND", str(wrapper))
+
+    def _capture(self, tmp_path, *, root=True, output=None):
+        path = tmp_path / "turn.md"
+        path.write_text(
+            f"# turn {self.STAMP} (Wren)\n\n"
+            f"- stamp: {self.STAMP}\n"
+            "- threads: 01X\n"
+            "- exit: 0\n"
+            "- rig: junior-dev\n"
+            + (f"- root: {self.ROOT}\n" if root else "")
+            + "\n## Prompt\n\n"
+            "Review the mission against where things stand.\n\n"
+            "## Output\n\n"
+            + (output if output is not None else (
+                f"I read {self.ROOT}/Documents/coordination-README.md and "
+                f"{self.ROOT}/STATUS.md, then messaged the platform seat.\n"
+            )),
+            encoding="utf-8",
+        )
+        return path
+
+    def _stored(self, results):
+        assert [r["action"] for r in results] == ["stored"], results
+        return engine.get(results[0]["id"])
+
+    def test_a_node_from_a_capture_names_the_turn_and_the_files(
+        self, store, tmp_path, monkeypatch
+    ):
+        self._llm(tmp_path, monkeypatch)
+        node = self._stored(distill.distill([str(self._capture(tmp_path))]))
+        meta = engine._parse_frontmatter(node)
+        assert meta["source"] == f"turn {self.STAMP}"
+        assert meta["sources"] == [
+            f"{self.ROOT}/Documents/coordination-README.md",
+            f"{self.ROOT}/STATUS.md",
+        ]
+
+    def test_paths_outside_the_members_root_are_not_its_sources(
+        self, store, tmp_path, monkeypatch
+    ):
+        self._llm(tmp_path, monkeypatch)
+        capture = self._capture(
+            tmp_path,
+            output=f"Compared /etc/hosts with {self.ROOT}/STATUS.md.\n",
+        )
+        meta = engine._parse_frontmatter(self._stored(distill.distill([str(capture)])))
+        assert meta["sources"] == [f"{self.ROOT}/STATUS.md"]
+
+    def test_a_capture_with_no_root_keeps_every_absolute_path(
+        self, store, tmp_path, monkeypatch
+    ):
+        self._llm(tmp_path, monkeypatch)
+        capture = self._capture(tmp_path, root=False)
+        meta = engine._parse_frontmatter(self._stored(distill.distill([str(capture)])))
+        assert meta["sources"] == [
+            f"{self.ROOT}/Documents/coordination-README.md",
+            f"{self.ROOT}/STATUS.md",
+        ]
+
+    def test_an_output_naming_no_files_stores_the_turn_alone(
+        self, store, tmp_path, monkeypatch
+    ):
+        self._llm(tmp_path, monkeypatch)
+        capture = self._capture(tmp_path, output="Nothing to delegate.\n")
+        meta = engine._parse_frontmatter(self._stored(distill.distill([str(capture)])))
+        assert meta["source"] == f"turn {self.STAMP}"
+        assert "sources" not in meta
+
+    def test_an_ordinary_file_is_not_a_turn_and_names_none(
+        self, store, tmp_path, monkeypatch
+    ):
+        self._llm(tmp_path, monkeypatch)
+        journal = tmp_path / "journal.md"
+        journal.write_text(
+            "Notes from the week, written by hand and distilled the ordinary "
+            "way — no stamp above them, no output section under them, and so "
+            f"no turn to name. See {self.ROOT}/STATUS.md for the rest, which "
+            "is a path in prose and not a file this member read.\n",
+            encoding="utf-8",
+        )
+        meta = engine._parse_frontmatter(self._stored(distill.distill([str(journal)])))
+        assert "source" not in meta
+        assert "sources" not in meta
+
+    def test_an_appended_node_names_the_turn_that_appended_to_it(
+        self, store, tmp_path, monkeypatch
+    ):
+        node_id = engine.store_entry(
+            title="Coordination README status",
+            content=self.CANDIDATES[0]["content"],
+            tags=["ops"],
+        )
+        self._llm(tmp_path, monkeypatch)
+        # The overlap bands that route a candidate to an append are
+        # `diff_against_store`'s own subject; what is under test here is that
+        # the branch stamps the turn on the entry it grew.
+        monkeypatch.setattr(
+            distill, "diff_against_store",
+            lambda candidates: [dict(c, _append_to=node_id) for c in candidates],
+        )
+        results = distill.distill([str(self._capture(tmp_path))])
+        assert [r["action"] for r in results] == ["appended"], results
+        meta = engine._parse_frontmatter(engine.get(results[0]["id"]))
+        assert meta["source"] == f"turn {self.STAMP}"
+        assert f"{self.ROOT}/STATUS.md" in meta["sources"]
+
+    def test_the_capture_and_k7e_get_answer_where_it_came_from(
+        self, store, tmp_path, monkeypatch, capsys
+    ):
+        """The acceptance from the issue: one capture file and one `k7e get`
+        say which turn resurrected the item and which file it read, with no
+        journal and no second store opened."""
+        self._llm(tmp_path, monkeypatch)
+        capture = self._capture(tmp_path)
+        results = distill.distill([str(capture)])
+        capsys.readouterr()
+
+        import cli
+        assert cli.main(["get", results[0]["id"]]) == 0
+        printed = capsys.readouterr().out
+        assert f"source: turn {self.STAMP}" in printed
+        assert f"{self.ROOT}/Documents/coordination-README.md" in printed
+        assert f"- stamp: {self.STAMP}" in capture.read_text(encoding="utf-8")
+
+    def test_the_audit_accepts_the_new_keys(self, store, tmp_path, monkeypatch):
+        self._llm(tmp_path, monkeypatch)
+        distill.distill([str(self._capture(tmp_path))])
+        assert hygiene.run_audit() == []
+
+
+class TestProvenancePathsKeepTheirShape:
+    """A path is read to its boundary, not to the first space.
+
+    `- root: /srv/Project With Spaces` parsed as a whitespace token became
+    `/srv/Project`, and every path under the real root then failed the
+    under-the-root test and was dropped — a member whose root has a space in
+    its name recorded no sources at all. Windows paths were not recognised
+    either, so the same member on Windows recorded none for another reason.
+    """
+
+    STAMP = "20260909T162251000000Z"
+    ROOT = "/srv/roster/Project With Spaces"
+    FILE = "/srv/roster/Project With Spaces/docs/incident.md"
+
+    def _capture(self, tmp_path, root, output):
+        path = tmp_path / "turn.md"
+        path.write_text(
+            f"# turn {self.STAMP} (Wren)\n\n"
+            f"- stamp: {self.STAMP}\n"
+            "- exit: 0\n"
+            f"- root: {root}\n\n"
+            "## Prompt\n\nInspect the incident.\n\n"
+            f"## Output\n\n{output}\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _sources(self, tmp_path, root, output):
+        source, sources = distill.capture_provenance(
+            self._capture(tmp_path, root, output)
+        )
+        assert source == f"turn {self.STAMP}"
+        return sources
+
+    @pytest.mark.parametrize("form", [
+        "Read [incident.md]({path}) before replying.",
+        "Read `{path}` before replying.",
+        "Read {path} before replying.",
+        'Read "{path}" before replying.',
+    ])
+    def test_a_root_with_spaces_keeps_the_whole_path(self, tmp_path, form):
+        assert self._sources(
+            tmp_path, self.ROOT, form.format(path=self.FILE)
+        ) == [self.FILE]
+
+    def test_a_windows_drive_path_is_an_absolute_path(self, tmp_path):
+        root = r"C:\Users\wren"
+        assert self._sources(
+            tmp_path, root, rf"I read {root}\STATUS.md and stopped."
+        ) == [rf"{root}\STATUS.md"]
+
+    def test_a_windows_root_with_spaces_keeps_the_whole_path(self, tmp_path):
+        root = r"C:\Users\wren\Project With Spaces"
+        assert self._sources(
+            tmp_path, root, rf"I read {root}\docs\incident.md and stopped."
+        ) == [rf"{root}\docs\incident.md"]
+
+    def test_a_forward_slash_windows_path_sits_under_a_backslash_root(self, tmp_path):
+        """One harness prints `C:\\x` and another `C:/x` for the same file. The
+        root is stated once, so the comparison normalizes separators."""
+        assert self._sources(
+            tmp_path, r"C:\Users\wren", "I read C:/Users/wren/STATUS.md and stopped."
+        ) == ["C:/Users/wren/STATUS.md"]
+
+    def test_a_unc_share_is_an_absolute_path(self, tmp_path):
+        root = r"\\storage\roster\wren"
+        assert self._sources(
+            tmp_path, root, rf"I read {root}\STATUS.md and stopped."
+        ) == [rf"{root}\STATUS.md"]
+
+    def test_two_paths_on_one_line_are_both_kept_in_order(self, tmp_path):
+        second = f"{self.ROOT}/STATUS.md"
+        assert self._sources(
+            tmp_path, self.ROOT,
+            f"I read [incident]({self.FILE}) and then `{second}`, in that order.",
+        ) == [self.FILE, second]
+
+    def test_a_bare_path_stops_before_the_next_sentence(self, tmp_path):
+        assert self._sources(
+            tmp_path, self.ROOT, f"I read {self.FILE}. Then I stopped reading.",
+        ) == [self.FILE]
+
+    def test_a_url_is_not_a_path(self, tmp_path):
+        assert self._sources(
+            tmp_path, self.ROOT,
+            f"See https://example.com/docs/incident.md, and {self.FILE} too.",
+        ) == [self.FILE]
+
+    def test_a_path_outside_the_spaced_root_is_not_a_source(self, tmp_path):
+        assert self._sources(
+            tmp_path, self.ROOT, f"Compared /etc/hosts with {self.FILE}.",
+        ) == [self.FILE]
+
+    def test_two_adjacent_posix_paths_stay_separate(self, tmp_path):
+        root = "/srv/project"
+        assert self._sources(
+            tmp_path, root, "Changed /srv/project/a.py /srv/project/b.py",
+        ) == ["/srv/project/a.py", "/srv/project/b.py"]
+
+    def test_three_adjacent_posix_paths_stay_separate(self, tmp_path):
+        root = "/srv/project"
+        assert self._sources(
+            tmp_path, root,
+            "Changed /srv/project/a.py /srv/project/b.py /srv/project/c.py",
+        ) == ["/srv/project/a.py", "/srv/project/b.py", "/srv/project/c.py"]
+
+    def test_adjacent_windows_drive_paths_stay_separate(self, tmp_path):
+        root = r"C:\Users\wren"
+        assert self._sources(
+            tmp_path, root, rf"Changed {root}\a.py {root}\b.py",
+        ) == [rf"{root}\a.py", rf"{root}\b.py"]
+
+    def test_adjacent_unc_paths_stay_separate(self, tmp_path):
+        root = r"\\storage\roster\wren"
+        assert self._sources(
+            tmp_path, root, rf"Changed {root}\a.py {root}\b.py",
+        ) == [rf"{root}\a.py", rf"{root}\b.py"]
+
+    def test_a_spaced_directory_path_followed_by_a_second_absolute_path(
+        self, tmp_path
+    ):
+        second = f"{self.ROOT}/STATUS.md"
+        assert self._sources(
+            tmp_path, self.ROOT, f"Changed {self.FILE} {second}",
+        ) == [self.FILE, second]
+
+    def test_a_bare_path_before_a_delimited_one_keeps_line_order(self, tmp_path):
+        second = f"{self.ROOT}/STATUS.md"
+        assert self._sources(
+            tmp_path, self.ROOT, f"Read {self.FILE} then `{second}`.",
+        ) == [self.FILE, second]
+
+    def test_a_delimited_path_before_a_bare_one_keeps_line_order(self, tmp_path):
+        second = f"{self.ROOT}/STATUS.md"
+        assert self._sources(
+            tmp_path, self.ROOT, f"Read `{second}` and then {self.FILE}.",
+        ) == [second, self.FILE]

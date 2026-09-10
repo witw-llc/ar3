@@ -96,8 +96,9 @@ naming the set. Heading text is matched case-insensitively.
   and `allowedtools` are one key.
 - Values are stripped of surrounding backticks and asterisks.
 - A key set twice is an error. `Env:` is the one key that repeats.
-- Prose before the first `###` in a collection section is orientation text and
-  is ignored.
+- Prose before the first `###` in a collection section is orientation text.
+  `## Roster` reads one key out of it, `People:` below; every other section
+  ignores it.
 - A member block's whole text — its bullets and its prose together — becomes
   that member's persona in the turn prompt.
 - Block names take letters, digits, underscore and hyphen, and must start with
@@ -126,6 +127,15 @@ naming the set. Heading text is matched case-insensitively.
 | `Reinforce:` | one line of prose | empty | `- **Reinforce:** Never push to main.` | A standing instruction repeated late in every prompt. Over 200 characters warns. |
 
 A member takes no `Env:` line — environment rides the rig.
+
+## Roster-level fields
+
+`People:` is the one line the `## Roster` section carries outside a block,
+written in the prose above the first `###`:
+
+| Key | Values | Default | Sample | What it sets |
+|---|---|---|---|---|
+| `People:` | comma-separated a8s addresses, matched case-insensitively | none | `People: neil-phone, neil-email` | The senders whose messages may retire what a member's store holds ([knowledge](r4t-knowledge.md)). It makes nobody a member; absent, nothing corrects a store. A member block carrying it is a field error. |
 
 ## Cell fields
 
@@ -280,6 +290,7 @@ it should have come from. `r4t runbook check` prints them all at once.
 | `must be yes/no/true/false/y/n/1/0/on/off (got` | a bad `Leader:`, `Ingress:` (member or cell), `ProseReply:`, `MCP:` or `Echo:` value | pick one of the accepted words — the message opens with the field name |
 | `Env: must read like NAME=value` | an `Env:` line with no `=` | add the name |
 | `Rig must be a symbolic rig name, not a command` | a command line written after `Rig:` | move it to `Engine:` |
+| `People: is a roster-level line, not a member field` | `People:` written inside a member block | move it to the prose under `## Roster` |
 | `Continue must be on, off, or an idle window like 15m` | a bad `Continue:` value | `on`, `off`, or `15m` |
 | `Knowledge must be on, off, a T-shirt size` … | a bad `Knowledge:` value | see the knowledge grammar above |
 | `Framing must be default, off, or a double-quoted custom string` | unquoted custom framing | wrap it in double quotes |
@@ -335,6 +346,7 @@ Printed by `r4t runbook check`; none of them block a turn.
 | `Reinforce is N characters` | over 200 — a paragraph is a mission, not a reinforcement |
 | `is the roster;` … `are ignored` | `ROSTER.md`, `MISSION.md`, `CHARTER.md` or `r4t-org.json` sitting beside the runbook |
 | `Knowledge is on with rig` … | a small-model class distilling notes |
+| `corrections from conversation are off: no People: line` | a member carries `Knowledge:` and the roster names nobody whose word corrects the store |
 | `frontmatter key 'x' is not recognized — accepted:` … | a misspelled or unknown frontmatter key — the message lists the whole accepted set |
 
 A malformed `comms:` / `egress:` / other org setting also warns wherever a

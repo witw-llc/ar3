@@ -2944,8 +2944,23 @@ class TestCmdTrace:
         assert "usage: a8s trace <ULID>" in capsys.readouterr().err
 
     def test_reports_no_events(self, fake_home, capsys):
+        """A log that exists and holds nothing for this ULID. The store has to
+        be there for the answer to be about the ULID at all."""
         from ar3.ulid import new as new_ulid
+        from txlog import log
 
+        log("ROUTED", msg_id="01OTHER", sender="A", recipient="B")
         msg_id = new_ulid()
         assert cmd_trace([msg_id]) == 1
         assert f"no transaction events for {msg_id}" in capsys.readouterr().err
+
+    def test_a_missing_log_names_the_file_rather_than_the_ulid(self, fake_home, capsys):
+        """Nothing was looked at, so nothing can be said about the ULID."""
+        from ar3.ulid import new as new_ulid
+
+        from txlog import transactions_path
+
+        assert cmd_trace([new_ulid()]) == 1
+        err = capsys.readouterr().err
+        assert "no transaction log at" in err
+        assert str(transactions_path()) in err

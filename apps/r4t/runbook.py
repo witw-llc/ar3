@@ -86,7 +86,14 @@ from rig import (
     preset_names,
     rig_from_spec,
 )
-from roster import Member, Roster, clean_field, member_from_fields, parse_bool_field
+from roster import (
+    Member,
+    Roster,
+    clean_field,
+    member_from_fields,
+    parse_bool_field,
+    parse_people,
+)
 
 RUNBOOK_NAME = "r4t.md"
 BUILTIN_DIR = Path(__file__).resolve().parent / "runbooks"
@@ -1128,6 +1135,11 @@ def load_runbook(
         path=path,
         members=members,
         cells=[cell.name for cell in book.cells.values()],
+        # `People:` is roster-level in both formats: the prose under
+        # `## Roster` here, above the first member block in a ROSTER.md.
+        people=(
+            parse_people(roster_section.prose.splitlines()) if roster_section else []
+        ),
     )
 
     rituals_section = sections.get("Rituals")

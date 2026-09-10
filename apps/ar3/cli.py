@@ -363,6 +363,42 @@ def _git_probe() -> Probe:
     return Probe(True, version)
 
 
+def _utf8_report(os_name: str, utf8_mode: bool, io_encoding: str, stream: str) -> Probe:
+    if os_name != "nt":
+        return Probe(True, "not applicable — POSIX leaves the locale alone")
+    stream = stream or "unknown"
+    if utf8_mode:
+        return Probe(True, f"UTF-8 mode on, stdout {stream}")
+    if io_encoding:
+        return Probe(True, f"PYTHONIOENCODING={io_encoding}, stdout {stream}")
+    return Probe(False, f"UTF-8 mode off, stdout {stream}")
+
+
+def _utf8_probe() -> Probe:
+    """Whether the interpreter a launcher started runs in UTF-8 mode.
+
+    This process is that child — `ar3` reached here through the same launcher
+    every other verb does — so its own flags are the answer rather than a
+    guess about one. A stock Windows console is cp1252, and the suite's output
+    carries arrows, em dashes and agent names, so a child left on the console
+    code page raises `UnicodeEncodeError` on a line it was only printing.
+
+    POSIX has no equivalent failure to report: the launchers set nothing
+    there, because a locale is the operator's own setting.
+
+    The reading is split from the reporting because `sys.flags` cannot be
+    assigned and `os.name` cannot be changed without lying to every other
+    module in the process, so the branch table has no other way to be tested
+    from the platform that does not have the problem.
+    """
+    return _utf8_report(
+        os.name,
+        bool(sys.flags.utf8_mode),
+        os.environ.get("PYTHONIOENCODING", ""),
+        getattr(sys.stdout, "encoding", ""),
+    )
+
+
 CHECKS: tuple[Check, ...] = (
     Check("claude", HARNESS, _version_probe("claude"), "install Claude Code"),
     Check("agent", HARNESS, _version_probe("agent"), "install the Cursor agent CLI"),
@@ -374,6 +410,12 @@ CHECKS: tuple[Check, ...] = (
     Check("ollama serve", SERVICES, _ollama_probe, "ollama serve, then ollama pull <model>"),
     Check("docker", SERVICES, _docker_probe, "start Docker Desktop or the docker daemon"),
     Check("git", TOOLING, _git_probe, "git config --global user.name / user.email", core=True),
+    Check(
+        "utf-8 output",
+        TOOLING,
+        _utf8_probe,
+        "set PYTHONUTF8=1, or run the suite through its own launchers, which set it",
+    ),
 )
 
 

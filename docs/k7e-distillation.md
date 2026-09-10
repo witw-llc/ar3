@@ -53,6 +53,71 @@ The rule is prompt-level, executed by whatever rig backs `distill_command`. A
 model that ignores it stores what it returned: nothing downstream rewrites the
 response. Media extraction is transcription and stays verbatim.
 
+### Provenance — a node says which turn wrote it, and what that turn read
+
+Distilling an r4t turn capture stamps two frontmatter keys on every node the
+capture stores or appends to:
+
+```yaml
+source: turn 20260909T162251000000Z
+sources: [/srv/roster/wren/Documents/coordination-README.md]
+```
+
+`source` is the turn, taken from the capture's own `- stamp:` line. `sources`
+are the absolute paths that turn's `## Output` names under the member's root,
+which the capture states as `- root:`. A path is read to its boundary rather
+than to its first space — a Markdown link target, a backticked or quoted span,
+or a bare run under the stated root — so a member whose root is
+`/srv/Project With Spaces` records its files, and Windows drive paths
+(`C:\...`, `C:/...`) and UNC shares (`\\server\share\...`) count as absolute
+the same way. A capture without a `- root:` line keeps every
+absolute path its output names rather than none, and the list stops at ten —
+past a handful it has stopped answering a question and started being the
+output again. A file that is not a turn capture is distilled with no
+provenance rather than a guessed one, and an appended node names the turn that
+touched it last, matching `last_updated`.
+
+This is what makes a resurrected item traceable. A member re-read a
+coordination README last written months earlier, took its closing line for an
+open task, and delegated it; the node the next dream wrote was one day old and
+named nothing, so the store read as the source when the source was a stale
+file (#267). Now the capture and one `k7e get` answer *where did that come
+from* between them, with no journals opened.
+
+### A correction supersedes what it contradicts
+
+**A correction from a person supersedes the entries it contradicts; the
+distill never writes it as a sibling.** An r4t turn capture names, above its
+prompt, the entries that prompt recalled (`- knowledge:`) and what the turn's
+people said (`## Human messages`) — a section r4t writes only for the senders
+its roster names ([r4t-knowledge.md](r4t-knowledge.md)), so who counts is
+settled before k7e reads a byte. Distilling one costs a second bounded
+model call: each recalled entry goes in with those messages, and every entry
+they contradict or close comes back as the correction to store. The correction
+is stored and `supersede` points the stale entry at it, so the closure ranks
+and the retired claim leaves recall. Its `## History` line records the capture
+stamp and the sentence that decided it.
+
+A candidate extracted from the same turn that restates a claim the turn
+retired is dropped, including the near-copy the ordinary pipeline would append
+to the stale entry.
+
+**A retired entry is never an append target, in any turn.** Distillation
+chooses among active entries only — dedup targets and append targets alike —
+so a later capture that names a retired id, or a peer repeating a claim that
+was closed weeks ago, reaches the correction that replaced it and never the
+entry it replaced. `k7e append` and `engine.append_entry` refuse a node whose
+status is not `active` and write nothing, and the index stores the status the
+file states rather than assuming `active`. Appending re-indexes an entry under
+today's date; done to a retired one it puts the stale claim back in front of
+its own correction, and a ranked hit carries no status for a reader to catch
+it by.
+
+`--dry-run` prints `[would_supersede] <old id> -> a new entry: <title>` and
+writes nothing. A capture with no recalled ids, or none the people could have
+contradicted, costs no extra call, and a file that is not a turn capture never
+enters this pass at all.
+
 ### Media extraction
 
 Media goes through the same `distill_command`. The prompt includes the absolute

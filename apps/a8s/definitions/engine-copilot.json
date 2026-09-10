@@ -1,11 +1,12 @@
 {
-  "description": "GitHub Copilot CLI as a bare stateless engine node — `r4t engine copilot run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Every turn runs silent on a pinned binary and reports what it cost. Tune it with --permissions, --model and --max-credits on the invoke lines below; pin one conversation with --session <uuid> (never --continue, which resumes the machine's most recent session and has injected a prompt into a live one). `r4t engine copilot check` proves the argv still parses.",
+  "description": "GitHub Copilot CLI as a bare stateless engine node — `r4t engine copilot run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md in the node's own root are its only memory. Every turn runs silent on a pinned binary and reports what it cost. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. Tune it with --permissions and --max-credits on the invoke lines below; pin one conversation with --session <uuid> (never --continue, which resumes the machine's most recent session and has injected a prompt into a live one). `r4t engine copilot check` proves the argv still parses.",
   "invoke": [
     "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
     "engine",
     "copilot",
     "run",
+    "--model=$MODEL?",
     "--agent",
     "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
@@ -18,6 +19,7 @@
       "engine",
       "copilot",
       "run",
+      "--model=$MODEL?",
       "--agent",
       "$RECIPIENT"
     ]
@@ -30,6 +32,7 @@
       "engine",
       "copilot",
       "run",
+      "--model=$MODEL?",
       "--idle",
       "--agent",
       "$RECIPIENT"

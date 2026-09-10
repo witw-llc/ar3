@@ -457,3 +457,39 @@ class TestNoHumanVocabulary:
             "### Ana\n- **Rig:** t\n- **Leader:** yes\n", encoding="utf-8"
         )
         assert load_roster(path).leader().name == "Ana"
+
+
+class TestPeople:
+    """`People:` is roster-level: it names the a8s addresses whose word may
+    retire what a member's store holds, and it makes nobody a member (#269)."""
+
+    def test_absent_names_nobody(self):
+        r = parse("### Ana\n- **Rig:** t\n- **Leader:** yes\n")
+        assert r.people == []
+        assert not r.is_person("neil-phone")
+
+    def test_named_above_the_first_member(self):
+        r = parse(
+            "# Roster\n\nPeople: neil-phone, neil-email\n\n"
+            "### Ana\n- **Rig:** t\n- **Leader:** yes\n"
+        )
+        assert r.people == ["neil-phone", "neil-email"]
+        assert r.is_person("neil-phone")
+        assert not r.is_person("peer-bot")
+
+    def test_matching_is_case_insensitive_and_whitespace_tolerant(self):
+        r = parse("- **People:**  Neil-Phone ,  neil-email \n\n### A\n- **Rig:** t\n")
+        assert r.people == ["neil-phone", "neil-email"]
+        assert r.is_person("  NEIL-PHONE  ")
+        # a8s writes a bare node address with and without the trailing colon.
+        assert r.is_person("neil-phone:")
+
+    def test_a_namespaced_sender_is_not_the_node_it_came_from(self):
+        # `acme:gerry` is one sub-sender of `acme`, not `acme` itself: naming
+        # the node must not make its whole roster people.
+        r = parse("People: acme\n\n### A\n- **Rig:** t\n")
+        assert not r.is_person("acme:gerry")
+
+    def test_a_member_block_refuses_the_line(self):
+        member = parse("### Ana\n- **Rig:** t\n- **People:** neil-phone\n").find("ana")
+        assert "People: is a roster-level line" in member.error

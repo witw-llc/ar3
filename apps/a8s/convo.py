@@ -22,6 +22,7 @@ from settings import get_int
 from ar3 import clock
 
 __all__ = [
+    "ConversationArchiveError",
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
     "HEADING_PLACEHOLDERS",
@@ -35,6 +36,7 @@ __all__ = [
     "involves_agent",
     "load_agent_entries",
     "load_entries",
+    "open_for_read",
     "open_glow_stdout",
     "print_entries",
     "prune_conversations",
@@ -169,6 +171,35 @@ def _connect() -> sqlite3.Connection:
     )
 
 
+def open_for_read() -> sqlite3.Connection:
+    """The archive, or a `ConversationArchiveError` naming why it is not there.
+
+    A reader that answers "no rows" when it means "I could not look" is the
+    one failure mode this store must not have: a seat whose sandbox could read
+    the registry but not the archive ran `a8s convo` on its heartbeat, got
+    nothing and exit 0, and read it as no mail. Two delivered messages were
+    sitting in the file it could not open.
+
+    Reading never creates the store and never initializes one. `_connect`
+    would — `sqlite_store.connect` makes the file and the schema — and an
+    empty database left behind by a failed read turns the next read into a
+    truthful "no rows" about a store that never held anything. The file being
+    present is not enough to make that claim either: a zero-byte file and a
+    database holding somebody else's tables both open, and both mean nothing
+    was archived here.
+    """
+    path = conversations_path()
+    if not path.is_file():
+        raise ConversationArchiveError(f"no conversation store at {path}")
+    try:
+        conn = sqlite_store.connect_read_only(path, table="messages")
+    except (OSError, sqlite3.Error) as e:
+        raise ConversationArchiveError(f"cannot read {path}: {e}") from e
+    if conn is None:
+        raise ConversationArchiveError(f"cannot read {path}: not a conversation store")
+    return conn
+
+
 def sender_keys(senders: list[str] | None) -> set[str]:
     return {key for name in (senders or []) if (key := _name_key(str(name)))}
 
@@ -245,21 +276,18 @@ def _now_iso() -> str:
 
 
 def load_entries() -> list[dict[str, Any]]:
-    path = conversations_path()
-    if not path.is_file():
-        return []
-    entries: list[dict[str, Any]] = []
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             rows = conn.execute(
                 "SELECT entry_json FROM messages ORDER BY seq"
             ).fetchall()
-        for (raw,) in rows:
-            entry = _decode_entry(raw)
-            if entry is not None:
-                entries.append(entry)
-    except (OSError, sqlite3.Error):
-        return []
+    except (OSError, sqlite3.Error) as e:
+        raise ConversationArchiveError(f"cannot read {conversations_path()}: {e}") from e
+    entries: list[dict[str, Any]] = []
+    for (raw,) in rows:
+        entry = _decode_entry(raw)
+        if entry is not None:
+            entries.append(entry)
     return entries
 
 
@@ -315,18 +343,18 @@ def _latest_agent_entries(
 def load_agent_entries(
     agent: str, *, limit: int, senders: list[str] | None = None
 ) -> list[dict[str, Any]]:
-    if limit < 1 or not conversations_path().is_file():
+    if limit < 1:
         return []
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             return [
                 entry
                 for _, entry in _latest_agent_entries(
                     conn, agent, limit, senders=senders
                 )
             ]
-    except (OSError, sqlite3.Error):
-        return []
+    except (OSError, sqlite3.Error) as e:
+        raise ConversationArchiveError(f"cannot read {conversations_path()}: {e}") from e
 
 
 def _merge_into_stored(stored_json: str, entry: dict[str, Any]) -> str | None:
@@ -601,7 +629,7 @@ def follow_conversation(
             print("a8s convo: glow not found on PATH", file=sys.stderr)
 
     try:
-        with closing(_connect()) as conn:
+        with closing(open_for_read()) as conn:
             conn.execute("BEGIN")
             cursor = int(
                 conn.execute("SELECT COALESCE(MAX(seq), 0) FROM messages").fetchone()[0]
@@ -620,7 +648,7 @@ def follow_conversation(
 
         while True:
             time.sleep(poll_interval)
-            with closing(_connect()) as conn:
+            with closing(open_for_read()) as conn:
                 conn.execute("BEGIN")
                 bounds = conn.execute(
                     "SELECT MIN(seq), COALESCE(MAX(seq), 0) FROM messages"

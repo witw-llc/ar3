@@ -2079,6 +2079,7 @@ def cmd_convo(args: list[str]) -> int:
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
+        ConversationArchiveError,
         convo_help_epilog,
         decode_template,
         follow_conversation,
@@ -2162,6 +2163,10 @@ def cmd_convo(args: list[str]) -> int:
         return 1
     agent_name = match[0]
 
+    # An unreadable archive is not an empty one. Exit 0 with nothing printed
+    # has to keep meaning "no messages", so a sandbox that can read the
+    # registry and not the store says which file it could not open and exits
+    # 1 — the heartbeat that reads silence as "no mail" then reads an error.
     if parsed.follow:
         try:
             follow_conversation(
@@ -2174,9 +2179,18 @@ def cmd_convo(args: list[str]) -> int:
             )
         except KeyboardInterrupt:
             pass
+        except ConversationArchiveError as e:
+            print(f"a8s: {e}", file=sys.stderr)
+            return 1
         return 0
 
-    rows = load_agent_entries(agent_name, limit=parsed.limit, senders=parsed.senders)
+    try:
+        rows = load_agent_entries(
+            agent_name, limit=parsed.limit, senders=parsed.senders
+        )
+    except ConversationArchiveError as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
     if glow_theme is not None:
         glow_stream = None
         try:
@@ -2226,7 +2240,7 @@ def cmd_transactions(args: list[str]) -> int:
     import argparse
     import time
 
-    from txlog import EVENTS, read_recent
+    from txlog import EVENTS, TransactionLogError, read_recent
 
     parser = argparse.ArgumentParser(
         prog="a8s transactions",
@@ -2285,7 +2299,14 @@ def cmd_transactions(args: list[str]) -> int:
         "recipients": parsed.recipients,
         "msg_id": msg_id,
     }
-    rows = read_recent(limit=parsed.limit, **filters)
+    # "no matching transaction events" is a claim about the log's contents.
+    # A log that could not be opened supports no such claim, so it says which
+    # file and why instead.
+    try:
+        rows = read_recent(limit=parsed.limit, **filters)
+    except TransactionLogError as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
     for _seq, event in rows:
         print(_format_tx(event), flush=True)
     if not parsed.follow:
@@ -2300,12 +2321,12 @@ def cmd_transactions(args: list[str]) -> int:
 
     # An empty filtered backlog must still start from the table's high-water
     # mark, or the first poll replays every row that predates the command.
-    if rows:
-        cursor = rows[-1][0]
-    else:
-        newest = read_recent(limit=1)
-        cursor = newest[-1][0] if newest else 0
     try:
+        if rows:
+            cursor = rows[-1][0]
+        else:
+            newest = read_recent(limit=1)
+            cursor = newest[-1][0] if newest else 0
         while True:
             time.sleep(1.0)
             fresh = read_recent(after_seq=cursor, **filters)
@@ -2314,6 +2335,9 @@ def cmd_transactions(args: list[str]) -> int:
                 cursor = seq
     except KeyboardInterrupt:
         pass
+    except TransactionLogError as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2322,7 +2346,13 @@ def cmd_trace(args: list[str]) -> int:
         print("usage: a8s trace <ULID>", file=sys.stderr)
         return 2
     msg_id = args[0].upper()
-    events = read_events(msg_id)
+    from txlog import TransactionLogError
+
+    try:
+        events = read_events(msg_id)
+    except TransactionLogError as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
     if not events:
         print(f"no transaction events for {msg_id}", file=sys.stderr)
         return 1

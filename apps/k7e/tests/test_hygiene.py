@@ -31,6 +31,21 @@ class TestIndexDisagreement:
         message = hygiene.index_disagreement()
         assert message == "1 entr(ies), 2 indexed — run k7e reindex"
 
+    def test_flags_an_index_that_calls_a_retired_entry_active(self, store):
+        """A count cannot see this one, and search reads only the index: a
+        file that says superseded against a row that says active is a retired
+        claim still ranking under its own id."""
+        old = engine.store_entry("Redis Port", "Redis default port is 6379", tags=["redis"])
+        new = engine.store_entry("Redis Port moved", "Redis now answers on 6380", tags=["redis"])
+        engine.supersede(old, new)
+        conn = engine._connect()
+        conn.execute("UPDATE nodes SET status = 'active' WHERE id = ?", (old,))
+        conn.commit()
+        conn.close()
+
+        message = hygiene.index_disagreement()
+        assert message == f"{old} is superseded but indexed active — run k7e reindex"
+
     def test_reindex_resolves_the_disagreement(self, store):
         engine.store_entry("Redis Port", "Redis default port is 6379", tags=["redis"])
         engine.INDEX_DB.unlink()

@@ -314,6 +314,46 @@ def test_roster_check_does_not_warn_above_the_floor(r4t_home, tmp_path, fake_har
     assert "Knowledge" not in out
 
 
+def test_roster_check_warns_when_no_people_line_names_anyone(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    """A store nobody may correct is worth a line: without `People:` the
+    dream pass retires nothing, whatever a person says in a turn (#269)."""
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(KNOWLEDGE_ROSTER, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "claude")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "corrections from conversation are off: no People: line" in out
+
+
+def test_roster_check_reports_the_people_it_read(r4t_home, tmp_path, fake_harness, capsys):
+    roster_text = KNOWLEDGE_ROSTER.replace(
+        "# Roster\n", "# Roster\n\nPeople: neil-phone, neil-email\n"
+    )
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(roster_text, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "claude")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "people neil-phone, neil-email" in out
+    assert "corrections from conversation are off" not in out
+
+
+def test_roster_check_is_quiet_about_people_with_no_stores(
+    r4t_home, tmp_path, fake_harness, capsys
+):
+    org_dir, _workplace = _portable_org(tmp_path, mission=None)
+    (org_dir / "ROSTER.md").write_text(CLEAN_ROSTER, encoding="utf-8")
+    cfg = _rig_config_with_preset(tmp_path, fake_harness, "claude")
+    rc = r4t_main(["roster", "check", "--root", str(org_dir), "--rig-config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "People" not in out
+
+
 def test_roster_check_flags_an_unresolvable_distill_rig(r4t_home, tmp_path, fake_harness, capsys):
     roster_text = KNOWLEDGE_ROSTER.replace("- **Knowledge:** on", "- **Knowledge:** ghost")
     org_dir, _workplace = _portable_org(tmp_path, mission=None)

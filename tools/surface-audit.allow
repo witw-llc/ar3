@@ -16,7 +16,6 @@ cli:a8s:ps  # documented, but no test names it — a rename would not fail
 cli:a8s:start  # documented, but no test names it — a rename would not fail
 cli:a8s:step  # documented, but no test names it — a rename would not fail
 cli:a8s:transactions  # documented, but no test names it — a rename would not fail
-cli:a8s:tx  # documented, but no test names it — a rename would not fail
 cli:a8s:unalias  # documented, but no test names it — a rename would not fail
 cli:a8s:unnamespace  # documented, but no test names it — a rename would not fail
 cli:a8s:unremote  # documented, but no test names it — a rename would not fail
@@ -25,7 +24,6 @@ cli:ar3:update  # documented, but no test names it — a rename would not fail
 cli:k7e:asset  # documented, but no test names it — a rename would not fail
 cli:k7e:consolidate  # documented, but no test names it — a rename would not fail
 cli:k7e:rebuild-mocs  # documented, but no test names it — a rename would not fail
-cli:k7e:status  # documented, but no test names it — a rename would not fail
 cli:k7e:supersede  # documented, but no test names it — a rename would not fail
 cli:r4t:lab  # tested, but no docs page names it
 cli:r4t:lab ledger  # neither a test nor a docs page names it

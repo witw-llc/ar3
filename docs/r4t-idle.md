@@ -75,6 +75,25 @@ Then the top leader gets a budget-gated review turn to reweigh the mission and
 delegate the next step. This is the single mechanism that re-engages a stalled
 org. See [org](r4t-org.md#the-mission-review-idle-pass).
 
+**What the review asks for.** Three sentences do the work, and each answers a
+way a leader turned an empty queue into invented work (#267):
+
+- **"Nothing to delegate" is a complete answer.** A leader that reads
+  *delegate the next step* as an order goes and finds a step, and old files are
+  where steps are found.
+- **A dated item in the member's own records with no activity after it is
+  history, not a task** — unless a message in this turn reopens it. Age is
+  part of a note's meaning, and nothing else in the prompt says so.
+- **A delegation names what it acted on and that source's date**, in the
+  message itself, so the seat receiving it can weigh the source before it
+  works.
+
+A review that does delegate writes one more line into its turn capture,
+`- delegated: <recipients>`, read off the drafts the turn staged. An operator
+scanning a day's captures sees which idle wake handed work out, and to whom,
+without opening a transcript. An ordinary turn never carries the line: its
+outbound mail answers the messages named in the same header.
+
 **Backoff and dormancy** (from `dispatch._mission_review`):
 
 - Each stalled idle pass increments a stall counter.
@@ -132,3 +151,4 @@ member / cell / (optional) rig budget like any other turn.
 | `MISSION_REVIEW_MIN_INTERVAL_SECONDS` | `dispatch.py` | `1800` | Wall-clock floor between two heartbeat reviews. The backoff ladder counts idle WAKES, so without this a shorter wake interval would multiply the spend without anyone editing a policy |
 | `Continue: <duration>` | roster, per member | off (no continue); `on` continues with **no** flush window | Duration (`15m`, `4h`, bare seconds, …) arms flush; `on` never flushes |
 | `Knowledge:` | roster, per member | off | Any non-off form enables the store and the dream sweep for that member |
+| `People:` | roster, roster-level | none | The senders whose messages in a capture may retire the entries they contradict; absent, the dream pass retires nothing |

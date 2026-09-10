@@ -1,4 +1,17 @@
-# Development: testing and layout
+# Development: constraints, testing, layout
+
+## Hard constraints
+
+- **Every node distilled from a turn names the turn; a node born from a file
+  the member read names the file.** An operator answers "where did that come
+  from" from the capture and the node, never from journals.
+- **The member's knowledge pack carries no node ids and no store vocabulary;
+  ids live in the turn capture.** A member that can name its memory's
+  machinery narrates it to the person correcting it.
+- **The correction pass reads only messages from senders the roster's
+  `People:` line names; absent, it is off.** The envelope's `class` never
+  decides it alone — a8s stamps none, so an unnamed seat's mail is `human` on
+  the wire's silence.
 
 ## Testing
 

@@ -51,6 +51,10 @@ The operator is not a member. They speak into the roster with
 `r4t tell --as <member>` and read it with `r4t logs` — a roster is a set of
 agents that take turns, and someone who never takes one has no row in it.
 
+A roster-level `People:` line names the a8s addresses whose word corrects a
+member's store (`parse_people`). It sits above the first `### <Name>` block in
+`ROSTER.md`, or in the prose under `## Roster` in a runbook.
+
 Exactly one member carries `- **Leader:** yes`, and `load_roster` refuses
 a roster that does not have one. The leader is the apex: mail addressed to
 the node with nothing past the colon lands on its queue, so a roster with no
@@ -86,7 +90,7 @@ no rig config to check against; `r4t roster check` and dream-time resolution
 own that validation. The inject budget itself is always BYTES, never tokens.
 
 An optional `- **Framing:** ...` (default absent) overrides the cautionary
-line under the `## Knowledge` header for this member — `default` (or absent)
+line under the recollection header for this member — `default` (or absent)
 keeps the built-in wording, `off` drops the line entirely (the header and
 entries still render), and a double-quoted string is custom wording taken
 verbatim (docs/r4t-knowledge.md). Quotes are mandatory for custom text:
@@ -110,6 +114,11 @@ DEFAULT_ROSTER_NAME = "ROSTER.md"
 HEADING_RE = re.compile(r"^###\s+(.+?)\s*$")
 STOP_RE = re.compile(r"^#{1,3}\s")
 FIELD_RE = re.compile(r"^-\s+\*\*([A-Za-z]+):\*\*\s*(.*?)\s*$")
+# A roster-level line, which a person writes as prose rather than as a bullet
+# in a block: the leading `- ` and the bold markers are optional.
+ROSTER_FIELD_RE = re.compile(
+    r"^\s*(?:[-*]\s+)?\*{0,2}([A-Za-z][A-Za-z0-9_-]*)\*{0,2}\s*:\s*(.*?)\s*$"
+)
 RIG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 FLUSH_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd]?)$", re.IGNORECASE)
 
@@ -222,7 +231,7 @@ def parse_knowledge(value: str) -> KnowledgeSpec | None:
 class FramingSpec:
     """One resolved `Framing:` choice — a member's roster line or a rig's
     config default. `off` drops the framing line entirely under the
-    `## Knowledge` header (the header and entries still render); `text=None`
+    recollection header (the header and notes still render); `text=None`
     with `off=False` picks the built-in line; `text` set is custom wording
     taken verbatim."""
 
@@ -253,6 +262,36 @@ def parse_framing(value: str, *, quoted: bool = True) -> FramingSpec:
     if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
         return FramingSpec(text=v[1:-1])
     raise ValueError(f"{_FRAMING_GRAMMAR_HINT} (got {value!r})")
+
+
+def person_key(address: str) -> str:
+    """The form an a8s address is compared in — trimmed, lowercase, and
+    without the trailing colon a bare node address is sometimes written
+    with."""
+    return address.strip().rstrip(":").strip().lower()
+
+
+def parse_people(lines: list[str]) -> list[str]:
+    """The addresses a roster's `People:` line names, in comparison form.
+
+    `People: neil-phone, neil-email` says whose word on the wire is a
+    person's. It makes nobody a member — the roster is still the agents that
+    take turns — and it exists because a member's store must be correctable
+    in conversation and only by the people who own it: the dreaming distill
+    may retire a stored entry a named sender contradicted, and may retire
+    nothing on anyone else's word. The envelope's `class` cannot answer that
+    alone. a8s stamps no class, and an absent one reads as deliberate
+    attention, so every seat beyond the wall would otherwise be heard as a
+    person. Absent, the roster names no one and the correction pass is off.
+
+    First line wins, as everywhere else in this format."""
+    for line in lines:
+        match = ROSTER_FIELD_RE.match(line)
+        if match is None or match.group(1).lower() != "people":
+            continue
+        named = [person_key(part) for part in clean_field(match.group(2)).split(",")]
+        return [name for name in named if name]
+    return []
 
 
 class RosterError(Exception):
@@ -302,6 +341,14 @@ class Roster:
     # cell apart from `node:eng` naming nothing at all. A ROSTER.md declares
     # none; only a runbook's `## Cells` fills this in.
     cells: list[str] = field(default_factory=list)
+    # The `People:` line, in comparison form (`parse_people`). Empty means the
+    # roster names nobody whose word corrects a member's store.
+    people: list[str] = field(default_factory=list)
+
+    def is_person(self, sender: str) -> bool:
+        """Whether `sender` — an address already stripped of this node's own
+        prefix — is one the `People:` line names."""
+        return person_key(sender) in self.people
 
     def find(self, name: str) -> Member | None:
         key = name.strip().lower()
@@ -528,6 +575,11 @@ def member_from_fields(
             "Address: is gone with the seat doorbell — mail crossing the "
             "wall is a8s's job, not a member field"
         )
+    if "people" in fields:
+        m.errors.append(
+            "People: is a roster-level line, not a member field — write it "
+            "above the first member block, or under `## Roster` in a runbook"
+        )
 
     m.role = fields.get("role", fields.get("mandate", ""))
     m.leader, leader_err = parse_bool_field(fields.get("leader", ""), "Leader")
@@ -623,6 +675,7 @@ def _member_from_block(name: str, lines: list[str]) -> Member:
 
 def parse_roster(text: str, path: Path) -> Roster:
     members: list[Member] = []
+    roster_lines: list[str] = []
     current_name: str | None = None
     current_lines: list[str] = []
 
@@ -644,6 +697,8 @@ def parse_roster(text: str, path: Path) -> Roster:
             continue
         if current_name is not None:
             current_lines.append(line)
+        else:
+            roster_lines.append(line)
     flush()
 
     by_key: dict[str, list[Member]] = {}
@@ -654,7 +709,7 @@ def parse_roster(text: str, path: Path) -> Roster:
             for m in dupes:
                 m.errors.append("duplicate roster entry")
 
-    return Roster(path=path, members=members)
+    return Roster(path=path, members=members, people=parse_people(roster_lines))
 
 
 def load_roster(path: Path, *, validate: bool = True, node: str | None = None) -> Roster:

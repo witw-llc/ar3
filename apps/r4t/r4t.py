@@ -2372,6 +2372,14 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
                     "(see docs/r4t-knowledge.md)"
                 )
                 warnings += 1
+    stores = [m for m in roster.members if m.knowledge_on and not m.errors]
+    if stores and not roster.people:
+        print(
+            "warning: corrections from conversation are off: no People: line, "
+            "so no sender's word may retire what a member's store holds "
+            "(see docs/r4t-knowledge.md)"
+        )
+        warnings += 1
     for m in roster.members:
         if len(m.reinforce) > 200:
             print(
@@ -2411,9 +2419,10 @@ def cmd_roster_check(args: argparse.Namespace) -> int:
         print(f"{problems} problem(s)")
         return 1
     tail = f", {warnings} warning(s)" if warnings else ""
+    people = f", people {', '.join(roster.people)}" if roster.people else ""
     print(
         f"{roster_path}: OK ({len(roster.members)} member(s), "
-        f"leader {roster.leader().name}{tail})"
+        f"leader {roster.leader().name}{people}{tail})"
     )
     return 0
 

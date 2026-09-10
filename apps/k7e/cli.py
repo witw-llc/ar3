@@ -211,7 +211,10 @@ def main(argv=None):
             print("No results.")
         else:
             for r in results:
-                print(f"  {r['id']}  {r['title']}  (score: {r['score']})")
+                if r.get("match") == "id" and r.get("status") != "active":
+                    print(f"  {r['id']}  {r['title']}  (score: {r['score']}, {r['status']})")
+                else:
+                    print(f"  {r['id']}  {r['title']}  (score: {r['score']})")
 
     elif args.command == "get":
         # A batch is one interpreter startup instead of N. The sizing pass in
@@ -234,6 +237,9 @@ def main(argv=None):
                 if n:
                     print(f"--- k7e:{node_id} ---")
                 print(text)
+                age = engine._days_since(engine._parse_frontmatter(text).get("last_updated"))
+                if age is not None:
+                    print(f"age: {int(age)} days")
         if not found:
             return 1
 
@@ -262,7 +268,11 @@ def main(argv=None):
 
     elif args.command == "append":
         content = args.content or sys.stdin.read()
-        append_entry(args.id, args.section, content)
+        try:
+            append_entry(args.id, args.section, content)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)
+            return 1
         print(f"Appended to {args.id} [{args.section}]")
 
     elif args.command == "asset":
@@ -307,7 +317,11 @@ def main(argv=None):
                 continue
             title = r["title"]
             entry_id = r.get("id", "")
-            print(f"  [{action}] {entry_id} {title}")
+            old_id = r.get("old_id", "")
+            if old_id:
+                print(f"  [{action}] {old_id} -> {entry_id or 'a new entry'}: {title}")
+            else:
+                print(f"  [{action}] {entry_id} {title}")
         # Scoped to distill: the ledger is global, and `diff_against_store`
         # searches, which may rerank. A dead reranker is not a dead distill
         # bridge, and reading it as one retries a capture that was distilled

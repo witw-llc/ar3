@@ -14,6 +14,103 @@ version when the batch is ready to merge.
 
 ### Added
 
+- **Every bundled engine definition takes a model.** `claude`, `codex`,
+  `agy`, `copilot`, `cursor`, `opencode`, `muse` and their `-unrestricted`
+  variants carry an optional `MODEL` a8s var (`--model=$MODEL?`) beside the
+  three `ollama-*` definitions that require one: `a8s vars <name> set MODEL
+  <id>` (or `a8s add ... --model=<id>`) picks a model, and unset keeps the
+  engine's own default. Argv interpolation gains the `$NAME?` marker for it:
+  an optional reference drops its whole argv element when the var is unset
+  instead of failing the wake closed.
+- **A resurrected item names its source.** Every node the dream pass distills
+  from a turn capture records the turn it came from (`source: turn <stamp>`)
+  and, when that turn's output named files under the member's own root, those
+  paths (`sources:`), spaces and Windows drive letters intact — so a claim
+  that came back out of a months-old README
+  says so on its face, and one capture plus one `k7e get` answer "where did
+  that come from" with no journals opened. The capture states the root the
+  turn ran in, and a mission review that hands work out names its recipients
+  on a `- delegated:` line. The review prompt itself now says that nothing to
+  delegate is a complete answer, that a dated item with no later activity is
+  history rather than a task, and that a delegation must name what it acted on
+  and that source's date. Closes #267.
+- **Correct a member in conversation and its store follows.** A turn capture
+  now names the knowledge entries that turn's prompt carried and repeats what
+  the turn's people said, and the idle dream pass asks `k7e distill` whether
+  those people contradicted or closed any of those entries. Each one they did
+  is retired — the correction is stored, `supersede` points the stale entry at
+  it, and the entry leaves recall — with the capture stamp and the deciding
+  sentence in the new entry's history. A restatement of the retired claim from
+  the same turn is dropped rather than filed beside the correction, and the
+  day-log line counts the retirements (`1 stored, 1 superseded`). A retired
+  entry is never an append or dedup target in any later turn either — the
+  distill chooses among active entries only, `k7e append` refuses a retired
+  one, the index keeps the status the file states, and `k7e check` names any
+  entry the two disagree about.
+  `k7e distill --dry-run` prints what it would supersede and writes nothing.
+  Whose word this is comes from the roster, not from the wire: a new
+  roster-level `People: neil-phone, neil-email` line names the a8s addresses
+  a correction may come from, and without it no message corrects a store.
+  A peer seat's word does nothing here. Closes #269.
+- **`AR3_PYTHON` picks the interpreter, and a Windows child runs in UTF-8.**
+  Every launcher tries `AR3_PYTHON` before `python3`, `python` and `py -3`, so
+  a desktop harness that bundles its own interpreter and hands its shell a
+  `PATH` without one can be pointed at it instead of having `PATH` edited; a
+  path that does not run is named on stderr and the launcher carries on down
+  `PATH`. The `.cmd` and `.ps1` launchers set `PYTHONUTF8=1` for the child
+  unless the caller set `PYTHONUTF8` or `PYTHONIOENCODING`, so the suite's own
+  arrows and em dashes stop crashing a command on a stock cp1252 console, and
+  `ar3 doctor` gains a `utf-8 output` line reporting what the child got.
+  Closes #275.
+
+### Changed
+
+- **A release on the public mirror is titled AR3.** The mirror's own
+  release workflow, seeded from `.github-public/`, names the release
+  `AR3 vX.Y.Z`; the copy that was creating them carried the product's old
+  name because a deploy key cannot update a workflow file, so the seed is
+  re-applied by hand and now matches the prose rule.
+- **A member remembers; it does not read a store.** The recalled notes in a
+  member's prompt are headed `## What you remember` and stamped `(<age> old)`
+  under their own title — no node ids, and no vocabulary for the machinery
+  holding them — and the framing line now forbids describing that memory at
+  all: take the correction and act on it. The ids move to the operator's side
+  of the same turn, where the capture's `- knowledge:` line already carries
+  them. A retired entry named by id in an incoming message is dropped before
+  packing, so an id in a message cannot put a superseded claim back in front
+  of the member. Closes #268.
+
+### Fixed
+
+- **A body piped to a PowerShell launcher reaches the message.** PowerShell
+  hands a script its pipeline input as `$input` and attaches none of it to a
+  native command the script starts, so `$body | tell.ps1 <name> -` and a piped
+  here-string staged a blank body and exited 0. Every launcher forwards
+  pipeline input when there is some, and leaves stdin alone when there is not,
+  so an interactive or inherited `-` still reads what it is given. The forward
+  is written in UTF-8 whatever the caller's `$OutputEncoding` is, so an em dash
+  or a CJK run is no longer flattened to `?` by the ASCII default on Windows
+  PowerShell 5.1. Closes #274.
+- **`a8s convo` says when it could not read the store instead of printing
+  nothing.** A seat whose sandbox could read the registry but not
+  `conversations.sqlite3` got an empty result and exit 0 from its heartbeat
+  and read it as no mail, with two delivered messages in the file it could
+  not open. A missing or unreadable store is now named on stderr with exit 1
+  (`a8s: cannot read <path>: <reason>`, or `no conversation store at <path>`),
+  a readable store with no rows still prints nothing and exits 0, and reading
+  opens read-only — it neither creates the store nor initializes one, so a
+  zero-byte or unrelated file is named rather than turned into a healthy empty
+  history. `a8s transactions` and `a8s trace` draw the same line over
+  `transactions.sqlite3`. Closes #276.
+- README: the one-pager states no ship date, drops its edit-history comment,
+  and counts presets correctly.
+- k7e: a node id in a search query is an exact lookup and returns that node
+  first, superseded or not.
+
+## 0.1.83
+
+### Added
+
 - **A sender learns what became of its message.** Delivery receipts report
   the whole life of a message — attachments fetched or failed per recipient,
   deferrals, expiries, and nodes that own no such recipient — and the router

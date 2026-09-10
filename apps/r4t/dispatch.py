@@ -231,12 +231,16 @@ PROMPT_DEFAULTS: dict[str, str] = {
     "flush_dump": "Save your current state and progress to STATUS.md.",
     "refound_preamble": "Check your STATUS.md to refresh your memory.",
     "mission_review": (
-        "The roster's queues are empty and no thread is open, but the mission "
-        "may not be met. Review the mission against where things stand and "
-        "decide the next move — delegate the next step down the tree if there "
-        "is one. No communication to the human NEEDS to happen: this is a "
-        "working review, not a status report, so do not message the human "
-        "unless you genuinely have something they must act on."
+        "The roster's queues are empty and no thread is open. Review the "
+        "mission against where things stand. If there is a real next step, "
+        "delegate it; if there is nothing to delegate, say so and stop — that "
+        "is a complete answer, not a failure. A dated item in your own records "
+        "with no activity after it is history, not a task, unless a message in "
+        "this turn reopens it. When you do delegate, your message must name "
+        "what you acted on and the date it carries. No communication to the "
+        "human NEEDS to happen: this is a working review, not a status report, "
+        "so do not message the human unless you genuinely have something they "
+        "must act on."
     ),
 }
 
@@ -1614,6 +1618,65 @@ def _log_internal_only(
     )
 
 
+def _human_message_lines(
+    ctx: DispatchContext, roster: Roster, batch: list[dict]
+) -> list[str]:
+    """The turn's messages that a person sent, verbatim, for the turn capture.
+
+    Two things must hold, and neither answers alone. The envelope's `class`
+    must be `human` — dispatch stamps it at ingress, and a peer that marks its
+    own traffic `auto` is not a person whatever else is true of it. And the
+    sender must be one the roster's `People:` line names, because a8s stamps
+    no class on the wire and an absent one reads as deliberate attention, so
+    on class alone every seat beyond the wall arrives as a person.
+
+    The distill reads what this writes and may retire a stored entry these
+    messages contradict. A roster that names nobody writes no section, and
+    nothing is retired."""
+    lines: list[str] = []
+    for env in batch:
+        if str(env.get("class", "")) != "human":
+            continue
+        body = str(env.get("body", "")).strip()
+        if not body:
+            continue
+        sender = _display_name(ctx.node, str(env.get("from", "?")))
+        if not roster.is_person(sender):
+            continue
+        thread = str(env.get("thread", "")) or "?"
+        lines += [f"### From: {sender} (thread {thread})", "", body, ""]
+    return lines
+
+
+def _review_recipients(
+    ctx: DispatchContext, member: Member, batch: list[dict]
+) -> list[str]:
+    """Who a mission-review turn messaged, from the drafts it staged — read
+    before release, so it says what the member chose to send rather than what
+    survived the gates.
+
+    Only for a review, because only a review is a turn nobody asked for: an
+    ordinary turn's outbound mail answers the messages named in the same
+    header, while a review that hands work out did so on its own reading of
+    the mission and whatever it went looking through."""
+    review = ctx.prompt("mission_review")
+    if not any(
+        str(env.get("from", "")) == f"r4t:{ctx.node}"
+        and str(env.get("body", "")) == review
+        for env in batch
+    ):
+        return []
+    recipients: list[str] = []
+    for path in state.staged_envelopes(ctx.node, member.name):
+        try:
+            to = str(json.loads(path.read_text(encoding="utf-8")).get("to", ""))
+        except (OSError, ValueError):
+            continue
+        if to and to not in recipients:
+            recipients.append(to)
+    return recipients
+
+
 def _capture_turn(
     ctx: DispatchContext,
     member: Member,
@@ -1626,11 +1689,25 @@ def _capture_turn(
     prompt: str,
     output: str,
     prompt_note: str = "",
+    knowledge_ids: list[str],
+    human_messages: list[str],
+    root: Path,
+    delegated: list[str],
 ) -> None:
     """Persist one turn's full assembled prompt and full raw harness output to
     agents/<member>/turns/. Wrapped so a write failure only warns — observability
     must never take down a turn. Captures every dispatched turn, timeouts
-    included: an empty/partial output is exactly the evidence a hang needs."""
+    included: an empty/partial output is exactly the evidence a hang needs.
+
+    Facts ride above the prompt for the readers of this file. `- knowledge:`
+    names the store entries the prompt carried and `## Human messages` repeats
+    what the turn's people said, for the dreaming distill: neither is
+    recoverable from the prose below them, and the distill's question is
+    whether those people contradicted those entries. `- root:` is where the
+    turn ran, so a path in the output below can be told from a path the model
+    merely mentioned. `- delegated:` names who a mission review messaged, so
+    an operator reading the day's captures sees which idle wake handed work
+    out without opening the transcript to find out."""
     stamp = state.turn_capture_stamp()
     meta = "\n".join(
         [
@@ -1641,11 +1718,18 @@ def _capture_turn(
             f"- duration_seconds: {duration:.2f}",
             f"- timed_out: {str(timed_out).lower()}",
             f"- rig: {rig_name}",
+            f"- root: {root}",
         ]
+        + ([f"- knowledge: {', '.join(knowledge_ids)}"] if knowledge_ids else [])
+        + ([f"- delegated: {', '.join(delegated)}"] if delegated else [])
         + ([f"- prompt: {prompt_note}"] if prompt_note else [])
     )
+    said = (
+        "## Human messages\n\n" + "\n".join(human_messages).strip() + "\n\n"
+        if human_messages else ""
+    )
     content = (
-        f"# turn {stamp} ({member.name})\n\n{meta}\n\n"
+        f"# turn {stamp} ({member.name})\n\n{meta}\n\n{said}"
         f"## Prompt\n\n{prompt}\n\n"
         f"## Output\n\n{output.strip() or '(no output)'}\n"
     )
@@ -1998,6 +2082,10 @@ def _run_turn(
         output=output,
         prompt_note=f"{prompt_path} {prompt_total} bytes — "
         + ", ".join(f"{label} {size}" for label, size in stats),
+        knowledge_ids=knowledge.packed_ids(dict(sections).get("knowledge")),
+        human_messages=_human_message_lines(ctx, roster, batch),
+        root=workdir.resolve(),
+        delegated=_review_recipients(ctx, member, batch),
     )
 
     failed = timed_out or exit_code != 0

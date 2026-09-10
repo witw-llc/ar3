@@ -135,6 +135,15 @@ decides that: a message demands no answer. Beyond the wall a8s posts messages
 to nodes and carries no notion of a reply being expected, and inside the walls
 r4t keeps none either.
 
+One thing does read it, and never on its own. A turn capture repeats the
+turn's `human` messages verbatim, but only from the senders the roster's
+`People:` line names, because the dreaming distill may retire a stored note
+those people contradicted (see [Knowledge](r4t-knowledge.md)). The class
+cannot carry that alone: a8s stamps none, an absent one reads as deliberate
+attention, and a peer seat would be heard as a person. A roster that names
+nobody repeats nothing. That is a rule about the store's own contents, not
+about what a member owes anyone.
+
 Metadata is advisory for governance and never for identity. A peer can only
 downgrade its own traffic, an unknown word means deliberate, and thread and hop
 stay garden-internal — nothing on the wire can claim a thread.

@@ -375,6 +375,65 @@ class TestExpandArgv:
         assert validate_var_name("model") == "MODEL"
 
 
+class TestOptionalPlaceholder:
+    """`$NAME?` — the argv-only optional reference behind the model slot
+    (#the-owner-quote "these r4t engine built-in definitions ... aren't
+    really usable" without one). Unset drops the whole argv element that
+    references it; a required `$NAME` in the same call still hard-fails."""
+
+    def test_unset_optional_drops_the_element(self):
+        assert _expand_argv(
+            ["x", "--model=$MODEL?", "y"], "A", "B", "hi",
+        ) == ["x", "y"]
+
+    def test_set_optional_expands_like_a_plain_reference(self):
+        assert _expand_argv(
+            ["x", "--model=$MODEL?", "y"], "A", "B", "hi",
+            vars={"MODEL": "qwen3.6"},
+        ) == ["x", "--model=qwen3.6", "y"]
+
+    def test_required_reference_still_raises_when_unset(self):
+        with pytest.raises(UndefinedVarsError) as ei:
+            _expand_argv(["--model", "$MODEL"], "A", "B", "hi")
+        assert ei.value.names == ["MODEL"]
+
+    def test_required_and_optional_of_the_same_name_together(self):
+        # The required reference (bare $MODEL) still raises even though the
+        # other element only carries the optional form — the `?` marks one
+        # reference optional, not the whole var.
+        with pytest.raises(UndefinedVarsError):
+            _expand_argv(
+                ["--model=$MODEL?", "$MODEL"], "A", "B", "hi",
+            )
+
+    def test_optional_reference_to_a_builtin_is_rejected(self):
+        with pytest.raises(ValueError, match=r"\$SENDER"):
+            _expand_argv(["--from=$SENDER?"], "A", "B", "hi")
+
+    def test_optional_reference_to_a_builtin_is_not_an_undefined_vars_error(self):
+        # A built-in is always defined, so this is a parse-time mistake in
+        # the definition, not the runtime "unset var" case UndefinedVarsError
+        # names — the two must stay distinguishable to a caller.
+        with pytest.raises(ValueError) as ei:
+            _expand_argv(["$SENDER?"], "A", "B", "hi")
+        assert not isinstance(ei.value, UndefinedVarsError)
+
+    def test_element_with_two_optional_refs_drops_if_either_is_unset(self):
+        assert _expand_argv(
+            ["$A?-$B?"], "A", "B", "hi", vars={"A": "x"},
+        ) == []
+
+    def test_element_with_two_optional_refs_expands_when_both_set(self):
+        assert _expand_argv(
+            ["$A?-$B?"], "A", "B", "hi", vars={"A": "x", "B": "y"},
+        ) == ["x-y"]
+
+    def test_does_not_mutate_original_argv(self):
+        argv = ["x", "--model=$MODEL?", "y"]
+        _expand_argv(argv, "A", "B", "hi")
+        assert argv == ["x", "--model=$MODEL?", "y"]
+
+
 class TestNowPlaceholder:
     """`$NOW` is the wake's own local reading. `$TIMESTAMP` stays the stored
     UTC — definitions pick it deliberately because it is machine-readable and
@@ -880,6 +939,7 @@ RUN_ENGINE_IDS = (
     "ollama-claude", "ollama-codex", "ollama-opencode",
 )
 OLLAMA_ENGINE_IDS = tuple(e for e in RUN_ENGINE_IDS if e.startswith("ollama-"))
+NON_OLLAMA_ENGINE_IDS = tuple(e for e in RUN_ENGINE_IDS if e not in OLLAMA_ENGINE_IDS)
 
 # What `--permissions bypass` changes in the engine's OWN argv, per engine:
 # (tokens the base loses, tokens bypass adds). Empty on both sides means the
@@ -1017,6 +1077,46 @@ class TestBundledEngineDefinitions:
         for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
             assert "--model" in block
             assert "$MODEL" in block
+
+    @pytest.mark.parametrize("engine_id", NON_OLLAMA_ENGINE_IDS)
+    def test_non_ollama_engines_carry_the_optional_model_slot(self, engine_id):
+        # The owner's complaint: only the three ollama-* definitions could
+        # pick a model at all. Every other bundled engine definition now
+        # carries the same slot, but written optional (`?`) since these
+        # engines have their own default and must not fail closed when
+        # nobody sets MODEL.
+        for defn in (self._definition(engine_id), self._unrestricted(engine_id)):
+            for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+                assert block.count("--model=$MODEL?") == 1
+
+    @pytest.mark.parametrize("engine_id", OLLAMA_ENGINE_IDS)
+    def test_ollama_engines_keep_model_required_not_optional(self, engine_id):
+        for defn in (self._definition(engine_id), self._unrestricted(engine_id)):
+            for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+                assert "$MODEL?" not in " ".join(block)
+
+    @pytest.mark.parametrize("engine_id", NON_OLLAMA_ENGINE_IDS)
+    def test_build_command_with_no_model_var_omits_the_flag(self, engine_id, agent_root):
+        # (e): no MODEL var at all — the wake that every bundled definition
+        # supports out of the box, unedited, must not gain a dangling
+        # `--model=` element.
+        defn = self._definition(engine_id)
+        argv = build_command(
+            defn, {"from": "neil", "to": "node1", "content": "hi"}, agent_root,
+        )
+        assert not any(a.startswith("--model") for a in argv)
+
+    @pytest.mark.parametrize("engine_id", NON_OLLAMA_ENGINE_IDS)
+    def test_build_command_with_model_var_set_composes_the_flag(
+        self, engine_id, agent_root
+    ):
+        defn = self._definition(engine_id)
+        argv = build_command(
+            defn, {"from": "neil", "to": "node1", "content": "hi"}, agent_root,
+            vars={"MODEL": "x"},
+        )
+        assert "--model=x" in argv
+        assert argv[argv.index("run") + 1] == "--model=x"
 
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
     def test_unrestricted_variant_lifts_permissions_on_every_wake(

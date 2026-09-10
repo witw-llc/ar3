@@ -110,6 +110,39 @@ class TestSearch:
         assert len(results) <= 3
 
 
+class TestExactIdLookup:
+    def test_bare_id_returns_node_first(self, store):
+        node_id = engine.store_entry("Hetzner Server", "Setup notes")
+        results = engine.search(node_id)
+        assert results[0]["id"] == node_id
+        assert results[0]["match"] == "id"
+
+    def test_sentence_with_id_returns_node_first_no_duplicate(self, store):
+        named_id = engine.store_entry("Hetzner Server", "Setup notes")
+        engine.store_entry("Reference Notes", f"See {named_id} for the setup notes")
+        results = engine.search(f"how old is node {named_id}")
+        assert results[0]["id"] == named_id
+        assert results[0]["match"] == "id"
+        ids = [r["id"] for r in results]
+        assert ids.count(named_id) == 1
+        assert len(results) > 1
+
+    def test_superseded_node_lookup_marked_superseded(self, store):
+        old_id = engine.store_entry("Old Protocol", "Original steps")
+        new_id = engine.store_entry("New Protocol", "Replacement steps")
+        engine.supersede(old_id, new_id)
+        results = engine.search(old_id)
+        assert results[0]["id"] == old_id
+        assert results[0]["match"] == "id"
+        assert results[0]["status"] == "superseded"
+
+    def test_nonexistent_id_yields_no_exact_hit(self, store):
+        engine.store_entry("Chrome Stuff", "browser content")
+        results = engine.search("K7E-999-99999")
+        assert all(r["id"] != "K7E-999-99999" for r in results)
+        assert all(r.get("match") != "id" for r in results)
+
+
 class TestReindex:
     def test_rebuilds_from_files(self, store):
         engine.store_entry("Alpha", "alpha content")

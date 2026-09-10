@@ -20,6 +20,13 @@ neither a built-in placeholder nor a set a8s var is a hard error. Process
 environment for a wake is a separate knob, `definition.env`, and the two never
 meet: a var reaches argv, an `env` entry reaches the child's environment.
 
+Argv only, `$NAME?` (trailing `?`) is optional: an unset var drops the whole
+argv element that references it instead of erroring, which is what lets a
+definition offer a flag like `--model=$MODEL?` that vanishes when nobody
+sets `MODEL` rather than reaching the CLI as a dangling `--model=`. A
+built-in can never be written optional (`$SENDER?` is a hard error) — it is
+always defined, so the marker would be meaningless.
+
 Vars also reach the three mailbox path fields — `outbox_dir`, `inbox_dir`,
 `files_dir` — through `_expand_path_field`, which adds one built-in of its own,
 `$NODE` (the registered node name), and refuses the per-message built-ins. That
@@ -90,7 +97,7 @@ RESERVED_PLACEHOLDERS = BUILTIN_PLACEHOLDERS | PATH_FIELD_PLACEHOLDERS
 
 MAILBOX_PATH_FIELDS = ("outbox_dir", "inbox_dir", "files_dir")
 
-PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)(\?)?")
 VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -139,7 +146,11 @@ def load_agent_vars(name: str) -> dict[str, str]:
 
 
 def placeholder_names(argv: list[str]) -> set[str]:
-    """All `$NAME` identifiers referenced in an argv template."""
+    """All `$NAME` identifiers referenced in an argv template.
+
+    A trailing `?` (`$NAME?`, the argv-only optional-reference marker — see
+    `_expand_argv`) is not part of the name; this returns bare names either
+    way, which is what every reserved/collision check wants."""
     found: set[str] = set()
     for a in argv:
         for m in PLACEHOLDER_RE.finditer(a):
@@ -251,6 +262,8 @@ def _expand_path_field(
         raise ValueError(f"definition {field} must be a string")
     if not spec.strip():
         raise ValueError(f"definition {field} must not be empty")
+    if any(m.group(2) for m in PLACEHOLDER_RE.finditer(spec)):
+        raise ValueError(f"definition {field} does not support optional $NAME?")
     values = {k.upper(): v for k, v in (vars or {}).items()}
     values["NODE"] = node
     refs = {n.upper() for n in placeholder_names([spec])}
@@ -459,11 +472,33 @@ def _expand_argv(
     Plus per-node a8s vars (`vars`) as `$KEY` (case-insensitive). Not OS
     environment. Any `$NAME` that is neither a built-in nor present in `vars`
     raises ``UndefinedVarsError``.
+
+    `$NAME?` (trailing `?`) is an optional reference: when `NAME` is set it
+    expands exactly like `$NAME`; when it is unset, the *entire argv element*
+    that contains it is dropped from the returned argv rather than raising.
+    An element with more than one optional reference is dropped as soon as
+    any one of them is unset. A required `$NAME` in the same or another
+    element still raises `UndefinedVarsError` when unset — `?` only changes
+    what happens when the var *is* absent, never the missing-required check.
+    A built-in can never be written as optional (`$SENDER?` etc.) — that is a
+    ValueError naming the built-in, since a built-in is always defined and
+    "optional" would be meaningless.
     """
     node_vars = {k.upper(): v for k, v in (vars or {}).items()}
-    refs = {n.upper() for n in placeholder_names(argv)}
+
+    required: set[str] = set()
+    for a in argv:
+        for m in PLACEHOLDER_RE.finditer(a):
+            name = m.group(1).upper()
+            if m.group(2):
+                if name in BUILTIN_PLACEHOLDERS:
+                    raise ValueError(
+                        f"${name}? is invalid: built-in ${name} cannot be optional"
+                    )
+            else:
+                required.add(name)
     missing = sorted(
-        n for n in refs if n not in BUILTIN_PLACEHOLDERS and n not in node_vars
+        n for n in required if n not in BUILTIN_PLACEHOLDERS and n not in node_vars
     )
     if missing:
         raise UndefinedVarsError(missing)
@@ -494,7 +529,13 @@ def _expand_argv(
     def repl(m: re.Match[str]) -> str:
         return values[m.group(1).upper()]
 
-    return [PLACEHOLDER_RE.sub(repl, a) for a in argv]
+    def keep(a: str) -> bool:
+        return not any(
+            m.group(2) and m.group(1).upper() not in values
+            for m in PLACEHOLDER_RE.finditer(a)
+        )
+
+    return [PLACEHOLDER_RE.sub(repl, a) for a in argv if keep(a)]
 
 
 def build_command(

@@ -162,12 +162,19 @@ def wait_convo(
     timeout: float = 8.0,
     predicate: Callable[[list[dict]], bool],
 ) -> list[dict]:
-    from convo import load_entries
+    from convo import ConversationArchiveError, load_entries
 
     deadline = time.time() + timeout
     with using_a8s_home(home):
         while time.time() < deadline:
-            rows = load_entries()
+            # The archive is created by the first delivery, so waiting for a
+            # row means waiting for the file too. A reader says so rather than
+            # answering "no rows" about a store it never opened; here that is
+            # simply "not yet".
+            try:
+                rows = load_entries()
+            except ConversationArchiveError:
+                rows = []
             if predicate(rows):
                 return rows
             time.sleep(0.05)

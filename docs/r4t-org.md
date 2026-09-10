@@ -78,9 +78,11 @@ mechanism that re-engages a stalled org. When an org goes fully quiet — the
 drain ran nothing, every queue empty, no live turn, and no member has finished
 a turn since the last tick — but the mission may not be met, the idle pass
 hands the topmost leader a budget-gated **mission-review** turn to reweigh the
-mission and delegate the next step (cadence is the a8s `idle.timeout` with a
-widening backoff; three silent reviews go dormant until a real message or a
-`MISSION.md` change re-arms it). Prompt text — the turn framing, doctrine
+mission and delegate the next step if there is one (cadence is the a8s
+`idle.timeout` with a widening backoff; three silent reviews go dormant until a
+real message or a `MISSION.md` change re-arms it). Finding no step is a
+complete answer, and what the review asks for is spelled out in
+[idle](r4t-idle.md#3-heartbeat-mission-review). Prompt text — the turn framing, doctrine
 bullets, and both nudges — is overridable per key under a `prompts` object in
 the a8s node definition (defaults live in `dispatch.py`); the definition
 reaches r4t via `--definition $DEFINITION_PATH`.

@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence, TypeVar
 
-__all__ = ["BUSY_TIMEOUT_MS", "connect", "retry_busy"]
+__all__ = ["BUSY_TIMEOUT_MS", "connect", "connect_read_only", "retry_busy"]
 
 BUSY_TIMEOUT_MS = 5000
 _BUSY_RETRIES = 6
@@ -99,4 +99,39 @@ def connect(
     except sqlite3.Error:
         conn.close()
         raise
+    return conn
+
+
+def connect_read_only(path: Path, *, table: str) -> sqlite3.Connection | None:
+    """Open `path` for reading, or None when it is not the store `table` names.
+
+    `connect` creates what it does not find, which is right for a writer and
+    wrong for a reader: a truncated file or a database belonging to something
+    else comes back an initialized empty store, and the next read reports a
+    truthful "no rows" about a history it has just replaced. `mode=ro` cannot
+    create the file and cannot write a byte of it, so whatever the reader
+    could not use is still there for whoever has to look at it.
+
+    A WAL store whose `-wal` file outlived its `-shm` cannot be opened this
+    way at all; SQLite raises, and the caller says which file and why. That is
+    the answer this reader owes either way — the one thing it must not do is
+    return an empty result it did not read.
+    """
+    # A8S_HOME (lib/ar3/home.py) is deliberately allowed to stay relative, but
+    # as_uri() refuses a relative path outright — absolute() (not resolve(),
+    # which would follow symlinks and rename the path in error messages) is
+    # enough to make it URI-eligible without changing what the user sees.
+    uri_path = path.absolute()
+    conn = sqlite3.connect(
+        f"{uri_path.as_uri()}?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000
+    )
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+        missing = _needs_schema(conn, table)
+    except sqlite3.Error:
+        conn.close()
+        raise
+    if missing:
+        conn.close()
+        return None
     return conn

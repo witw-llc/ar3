@@ -72,6 +72,49 @@ def _score_importance(title, content):
     return max(1, min(10, score))
 
 
+# An r4t turn capture writes both facts above its `## Prompt` block: the ids
+# it recalled from this store into that turn, and verbatim what the turn's
+# people said. Together they are the correction pass's whole input — no other
+# file carries them, and a file missing either is distilled the ordinary way.
+CAPTURE_PROMPT_MARK = "\n## Prompt\n\n"
+_CAPTURE_KNOWLEDGE = re.compile(r"^- knowledge:\s*(.+)$", re.MULTILINE)
+_CAPTURE_STAMP = re.compile(r"^- stamp:\s*(\S+)$", re.MULTILINE)
+# The whole line is the value. A root is a directory a person named, and
+# people put spaces in directory names — `\S+` read `/srv/Project With Spaces`
+# as `/srv/Project` and then matched nothing under it.
+_CAPTURE_ROOT = re.compile(r"^- root:[ \t]*(.+)$", re.MULTILINE)
+_CAPTURE_HUMAN = re.compile(r"(?ms)^## Human messages\n+(.*?)\s*\Z")
+_CAPTURE_OUTPUT = re.compile(r"(?ms)^## Output\n+(.*)\Z")
+_NODE_ID = re.compile(r"K7E-\d{3}-\d{5}")
+# A path inside a delimiter ends where the delimiter does — a Markdown link
+# target, a backticked span, a quoted span. These are the forms a harness
+# writes a path with spaces in, and the only forms that can carry one
+# unambiguously.
+_DELIMITED = re.compile(
+    r"""\]\(([^)\n]+)\)|`([^`\n]+)`|"([^"\n]+)"|'([^'\n]+)'"""
+)
+# Where a bare path can start: POSIX root, a Windows drive, or a UNC share.
+# The lookbehind keeps `http://host` and a second slash out.
+_PATH_START = re.compile(r"""(?<![\w/\\:])(?:/|[A-Za-z]:[\\/]|\\\\(?=[^\\/]))""")
+_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
+_PATH_TRAILING = ".,;:!?*)]}>\"'`"
+# Files one node's `sources:` names. A turn that walked a tree prints hundreds
+# of paths and none of them is the trace; past a handful the list has stopped
+# answering "where did this come from" and started being the output again.
+SOURCE_PATHS_MAX = 10
+# Enough of a recalled entry to judge whether it was contradicted. The whole
+# entry would put the packed pool's full text through a second model call every
+# capture, and a note's claim is at its top.
+CORRECTION_NOTE_MAX = 1500
+# One turn's human messages. A person who pastes a log into a correction must
+# not turn a bounded judgment into an unbounded one.
+CORRECTION_SAID_MAX = 8000
+# How much a fresh candidate may share with an entry this turn superseded
+# before it counts as restating it. The same band `diff_against_store` treats
+# as "the same subject, said again".
+RESTATEMENT_OVERLAP = 0.45
+
+
 def distill(paths, dry_run=False):
     results = []
     for path in paths:
@@ -93,6 +136,8 @@ def distill(paths, dry_run=False):
             # than skip one file.
             try:
                 candidates = extract_from_file(f)
+                corrections = corrections_from_capture(f)
+                source, sources = capture_provenance(f)
             except (OSError, UnicodeDecodeError, ValueError, TypeError) as e:
                 print(
                     f"  [distill] skipping {f}: {type(e).__name__}: {e}",
@@ -102,9 +147,21 @@ def distill(paths, dry_run=False):
                 continue
             candidates = [c for c in candidates if not _should_reject(c["content"])]
             new_knowledge = diff_against_store(candidates)
+            if corrections:
+                new_knowledge = corrections + _without_restatements(
+                    new_knowledge, [c["_supersedes"] for c in corrections]
+                )
             if dry_run:
                 for item in new_knowledge:
-                    results.append({"action": "would_store", "title": item["title"], "source": str(f)})
+                    if item.get("_supersedes"):
+                        results.append({
+                            "action": "would_supersede",
+                            "old_id": item["_supersedes"],
+                            "title": item["title"],
+                            "source": str(f),
+                        })
+                    else:
+                        results.append({"action": "would_store", "title": item["title"], "source": str(f)})
             else:
                 for item in new_knowledge:
                     importance = _score_importance(item["title"], item["content"])
@@ -121,11 +178,27 @@ def distill(paths, dry_run=False):
                             content=content,
                             tags=item.get("tags", []),
                             importance=importance,
+                            source=source,
+                            sources=sources,
                         )
+                        if item.get("_provenance"):
+                            engine.append_entry(node_id, "History", item["_provenance"])
                         engine.supersede(item["_supersedes"], node_id)
                         results.append({"action": "superseded", "id": node_id, "old_id": item["_supersedes"], "title": item["title"], "source": str(f)})
                     elif item.get("_append_to"):
-                        engine.append_entry(item["_append_to"], "Edge Cases", content)
+                        # The write boundary is the last word on what a
+                        # retired entry may become. A refusal costs this one
+                        # candidate, never the sweep: a raised sweep is one
+                        # `dream_sweep` re-runs the whole directory for.
+                        try:
+                            engine.append_entry(
+                                item["_append_to"], "Edge Cases", content,
+                                source=source, sources=sources,
+                            )
+                        except ValueError as e:
+                            print(f"  [distill] {e}", file=sys.stderr)
+                            results.append({"action": "refused", "id": item["_append_to"], "title": item["title"], "source": str(f)})
+                            continue
                         results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
                     else:
                         node_id = engine.store_entry(
@@ -133,9 +206,316 @@ def distill(paths, dry_run=False):
                             content=content,
                             tags=item.get("tags", []),
                             importance=importance,
+                            source=source,
+                            sources=sources,
                         )
                         results.append({"action": "stored", "id": node_id, "title": item["title"], "source": str(f)})
     return results
+
+
+def _terms(text):
+    return set(w.lower() for w in re.findall(r"\b\w{4,}\b", text))
+
+
+def _without_restatements(candidates, superseded_ids):
+    """`candidates` minus the ones that say again what this turn retired.
+
+    A correction and a fresh copy of what it corrects cannot both land. The
+    copy is nobody's supersede target, so it keeps ranking, and the store ends
+    up holding the correction beside the stale claim instead of in front of it
+    — which is what a sibling write looks like from the reader's side. The
+    worst shape is the near-copy the ordinary pipeline would hang off the
+    stale entry as an edge case: appending re-indexes the entry, which puts
+    the retired claim back in recall under its own id."""
+    stale = []
+    for old_id in superseded_ids:
+        try:
+            stale.append(_terms(engine.get(old_id)))
+        except FileNotFoundError:
+            continue
+    kept = []
+    for candidate in candidates:
+        terms = _terms(candidate["content"])
+        if terms and any(
+            max(len(terms & s) / len(terms), len(terms & s) / len(s)) >= RESTATEMENT_OVERLAP
+            for s in stale if s
+        ):
+            print(
+                f"  [distill] skipping candidate {candidate['title']!r}: "
+                "restates an entry this turn superseded",
+                file=sys.stderr,
+            )
+            continue
+        kept.append(candidate)
+    return kept
+
+
+def _is_absolute(value):
+    """Whether `value` starts an absolute path on any platform this suite
+    runs on: `/x`, `C:\\x`, `C:/x`, or `\\\\server\\share`."""
+    return (
+        value.startswith("/")
+        or bool(_DRIVE.match(value))
+        or (value.startswith("\\\\") and not value[2:3] in ("", "\\", "/"))
+    )
+
+
+def _bare_path(rest, under):
+    """The path at the head of `rest`, which runs to a boundary rather than to
+    the first space.
+
+    `under` is the member's root, matched literally so its own spaces are
+    part of the path — the capture states that root, so the extractor knows
+    exactly how much of the line is a directory name and how much is prose.
+    Past the root a space continues the path only when what follows it carries
+    a separator, which is a directory name with a space in it, AND that token
+    is not itself the start of a new absolute path; a token without a
+    separator is the next word of the sentence, and a token that starts an
+    absolute path — the stated root included — is the next source. That
+    leaves one shape a bare run cannot express — a final filename with a
+    space and no directory after it — which is what the delimited forms are
+    for."""
+    if under and rest.startswith(under):
+        consumed = len(under)
+        tail = re.match(r"\S+", rest[consumed:])
+        if tail:
+            consumed += tail.end()
+    else:
+        consumed = re.match(r"\S+", rest).end()
+    while True:
+        joined = re.match(r"[ \t]+(\S+)", rest[consumed:])
+        if not joined:
+            break
+        token = joined.group(1)
+        if not ("/" in token or "\\" in token):
+            break
+        if _is_absolute(token) or (under and token.startswith(under)):
+            break
+        consumed += joined.end()
+    return rest[:consumed].rstrip(_PATH_TRAILING)
+
+
+def absolute_paths(text, under=""):
+    """Every absolute path `text` names, in the order it names them.
+
+    A cross-platform parser, not a whitespace splitter: POSIX paths, Windows
+    drive paths (`C:\\x` and `C:/x`) and UNC shares (`\\\\server\\share\\x`)
+    all count, and a space inside a path is part of it. Delimited forms — a
+    Markdown link target, a backticked span, a quoted span — are matched by
+    their delimiter first, since a delimiter states where the path ends and
+    nothing else in prose does; what a line leaves undelimited is then read
+    as bare runs. The two kinds are merged back by where each one starts in
+    the line, so the result keeps the line's own order rather than grouping
+    delimited paths ahead of bare ones. `under`, the root the capture states,
+    is matched literally wherever it appears, so a root whose own name has
+    spaces survives.
+
+    A quoted span that is not a path is left alone rather than blanked out, so
+    an apostrophe in prose cannot swallow the path that follows it."""
+    found = []
+
+    def add(value):
+        value = value.strip()
+        if _is_absolute(value) and value not in found:
+            found.append(value)
+
+    for line in text.splitlines():
+        remaining = line
+        entries = []
+        for match in _DELIMITED.finditer(line):
+            value = next(g for g in match.groups() if g is not None).strip()
+            if not _is_absolute(value):
+                continue
+            entries.append((match.start(), value))
+            remaining = (
+                remaining[:match.start()]
+                + " " * (match.end() - match.start())
+                + remaining[match.end():]
+            )
+        position = 0
+        while True:
+            start = _PATH_START.search(remaining, position)
+            if not start:
+                break
+            value = _bare_path(remaining[start.start():], under)
+            entries.append((start.start(), value))
+            position = start.start() + max(len(value), 1)
+        for _, value in sorted(entries, key=lambda entry: entry[0]):
+            add(value)
+    return found
+
+
+def _under_root(found, under):
+    """Whether `found` is the capture's root or sits inside it. Separators are
+    normalized for the comparison only: one Windows harness prints `C:\\x` and
+    another `C:/x` for the same file, and the root is stated once. The path
+    itself is kept as the output wrote it."""
+    if not under:
+        return True
+    here = found.replace("\\", "/")
+    root = under.replace("\\", "/")
+    return here == root or here.startswith(root + "/")
+
+
+def capture_provenance(path):
+    """`(source, sources)` for a file being distilled: which turn produced it,
+    and the files that turn's output names under the member's own root.
+
+    A turn capture is the only file that can answer either — it stamps the
+    turn above its prompt and carries the harness's whole output below it —
+    and the pair is what a trace needs: this item came back from THAT turn,
+    which had read THAT file. A capture whose header predates `- root:` keeps
+    every absolute path its output names rather than none; anything that is
+    not a capture distills with no provenance instead of a guessed one."""
+    if _media_type(path):
+        return None, []
+    head, mark, body = Path(path).read_text(encoding="utf-8").partition(
+        CAPTURE_PROMPT_MARK
+    )
+    stamp = _CAPTURE_STAMP.search(head) if mark else None
+    if not stamp:
+        return None, []
+    root = _CAPTURE_ROOT.search(head)
+    under = root.group(1).strip().rstrip("/\\") if root else ""
+    output = _CAPTURE_OUTPUT.search(body)
+    paths = [
+        found
+        for found in absolute_paths(output.group(1) if output else "", under)
+        if _under_root(found, under)
+    ]
+    return f"turn {stamp.group(1)}", paths[:SOURCE_PATHS_MAX]
+
+
+def corrections_from_capture(path):
+    """Corrective candidates for the store entries an r4t turn capture recalled.
+
+    Ruled 2026-09-09: conversation corrects the store. When the roster's human
+    corrects a seat, the correction supersedes what it contradicts — it is
+    never written as one more sibling beside the stale entry, which is how a
+    closed item kept ranking for months after he closed it.
+
+    One bounded model call per capture, whatever the packed pool holds: the
+    entries go in with what the turn's people said, and each verdict comes back
+    as the correction to store and the entry it retires. A capture with no
+    recalled ids, or none the people could have contradicted, costs no call."""
+    if _media_type(path):
+        return []
+    text = Path(path).read_text(encoding="utf-8")
+    head = text.split(CAPTURE_PROMPT_MARK, 1)[0]
+    ids_line = _CAPTURE_KNOWLEDGE.search(head)
+    said = _CAPTURE_HUMAN.search(head)
+    if not ids_line or not said:
+        return []
+    notes = []
+    recalled = []
+    for node_id in _NODE_ID.findall(ids_line.group(1)):
+        try:
+            node = engine.get(node_id)
+        except FileNotFoundError:
+            continue
+        # An entry already retired is not corrected twice; superseding it again
+        # would only point it at a second replacement.
+        if "status: active" not in node:
+            continue
+        title = engine._parse_frontmatter(node).get("title", node_id)
+        body = engine._extract_body(node).strip()[:CORRECTION_NOTE_MAX]
+        notes.append(f"### {node_id} — {title}\n\n{body}")
+        recalled.append(node_id)
+    if not notes:
+        return []
+    stamp_match = _CAPTURE_STAMP.search(head)
+    stamp = stamp_match.group(1) if stamp_match else Path(path).name
+    response = engine._call_llm(
+        _correction_prompt(said.group(1).strip()[:CORRECTION_SAID_MAX], notes),
+        purpose="distill",
+        timeout=180,
+    )
+    if not response:
+        return []
+    return _parse_corrections(response, set(recalled), stamp)
+
+
+def _correction_prompt(said, notes):
+    return (
+        "A member of a roster took a turn. The notes below were recalled from "
+        "its knowledge store and put in its prompt. During the turn, the "
+        "people it works for said what follows. Their word outranks a stored "
+        "note: a note they contradict or close is out of date, whatever it "
+        "says about itself.\n\n"
+        "For EACH note, decide whether what they said contradicts it, closes "
+        "it, or says it is finished, obsolete, or no longer relevant.\n\n"
+        "Return a JSON array holding one object per note that IS contradicted "
+        "or closed:\n"
+        '- "id": that note\'s id, copied exactly from the heading below\n'
+        '- "title": a short noun-phrase title for what is true now (max 6 words)\n'
+        '- "content": what is true now, in one or two sentences, naming who '
+        "said it and what it replaces\n"
+        '- "quote": the sentence they said that decides it\n'
+        "Return [] when nothing they said contradicts any note. A note merely "
+        "mentioned, asked about, or restated is not contradicted. Never invent "
+        "an id.\n\n"
+        f"## What the people said\n\n{said}\n\n"
+        "## The recalled notes\n\n" + "\n\n".join(notes)
+    )
+
+
+def _parse_corrections(text, recalled, stamp):
+    """Verdicts from one correction call. A missing array is a failed call the
+    same way it is in extraction — the notes were never judged — while `[]` is
+    the ordinary answer that nothing was contradicted."""
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if not match:
+        _note_unusable(text, "with no JSON array for the correction pass")
+        return []
+    try:
+        items = json.loads(match.group())
+    except json.JSONDecodeError as e:
+        _note_unusable(
+            text, f"with unparseable JSON in the correction pass ({type(e).__name__})"
+        )
+        return []
+    if not isinstance(items, list):
+        _note_unusable(text, "with a correction payload that is not an array")
+        return []
+    out = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        node_id = str(item.get("id", "")).strip()
+        title = item.get("title")
+        content = item.get("content")
+        if node_id in seen:
+            continue
+        if node_id not in recalled:
+            print(
+                f"  [distill] skipping candidate correction: {node_id!r} is not "
+                "an entry this turn recalled",
+                file=sys.stderr,
+            )
+            continue
+        if not isinstance(title, str) or not isinstance(content, str):
+            print(
+                f"  [distill] skipping candidate correction for {node_id}: "
+                "title and content must be strings",
+                file=sys.stderr,
+            )
+            continue
+        if not title.strip() or not content.strip():
+            continue
+        seen.add(node_id)
+        quote = str(item.get("quote", "")).strip()
+        provenance = f"corrects {node_id}, from turn capture {stamp}"
+        if quote:
+            provenance += f' — a person in that turn said: "{quote}"'
+        out.append({
+            "title": title.strip(),
+            "content": content.strip(),
+            "tags": ["correction"],
+            "_supersedes": node_id,
+            "_provenance": provenance,
+        })
+    return out
 
 
 def _media_type(path):
@@ -432,10 +812,19 @@ def _title_similarity(a, b):
 
 
 def diff_against_store(candidates):
+    """Which candidates are new, and which existing entry each grows.
+
+    Every decision here picks a node to write to, so it sees active entries
+    only. A candidate that names a retired id — a later turn quoting an old
+    item, a peer repeating a claim that was closed — used to reach that entry
+    through the id lookup and be appended to it, which re-indexed the retired
+    claim and put it back in front of the correction that replaced it. A
+    retired entry is not a dedup target either: the correction that replaced
+    it is the entry a restatement belongs to."""
     new = []
     for candidate in candidates:
         # Stage 0: title-based dedup — catches paraphrases with same topic
-        title_results = engine.search(candidate["title"], limit=8)
+        title_results = engine.search(candidate["title"], limit=8, active_only=True)
         if _is_title_duplicate(candidate, title_results):
             continue
 
@@ -445,7 +834,7 @@ def diff_against_store(candidates):
             if len(w) > 3
         )
         search_query = content_terms or candidate["title"]
-        results = engine.search(search_query, limit=8)
+        results = engine.search(search_query, limit=8, active_only=True)
 
         if not results:
             new.append(candidate)

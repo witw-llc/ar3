@@ -4,6 +4,10 @@ How `k7e search` and `k7e recall` turn a query into the right entries.
 
 ## Pipeline
 
+A node id (`K7E-BBB-NNNNN`) named in the query bypasses this pipeline: that
+node is resolved directly and returned first, superseded or not, ahead of
+whatever the three tracks below rank.
+
 ```
 query
   │

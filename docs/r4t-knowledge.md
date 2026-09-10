@@ -103,9 +103,9 @@ and on a bare org it is a convention.
 
 Waking a knowledge-carrying member, dispatch searches its store — seeded with
 the newest message, the member's name and role, and the mission's first line
-— and pastes the top entries into a `## Knowledge` prompt section: ranked
-snippets with provenance (`id`, relative age), framed as fallible background,
-never as instructions. The section rides after the how-to-work doctrine and before
+— and pastes the top entries into a `## What you remember` prompt section:
+ranked snippets under their title and age, framed as the member's own fallible
+recollection, never as instructions. The section rides after the how-to-work doctrine and before
 `Reinforce:`, so the closing line keeps last-read primacy. The budget bounds
 the section in bytes; packing (below) is deterministic. Echo members never get
 the section, and any k7e failure logs `KNOWLEDGE-SKIP` and costs only the
@@ -140,9 +140,9 @@ qualify) sweeps back down the ranks so nothing goes unused. A budget too
 small for the top hit's whole snippet still surfaces evidence from ranks 2
 and 3, instead of spending everything on rank 1 and never reaching the rest.
 
-Each entry's **preamble** — the `### title (id, age)` header plus the
+Each entry's **preamble** — the `### title (age)` header plus the
 staleness status line when present — is atomic: it never truncates, because
-half a provenance stamp is worse than none. Only the snippet backs off, on a
+half an age stamp is worse than none. Only the snippet backs off, on a
 line or sentence boundary where one lands cleanly. An entry whose share can't
 cover its preamble plus a minimum snippet is **skipped outright** rather than
 emitted as a content-free stub.
@@ -154,12 +154,36 @@ from 14/48 to 26/48 — the reason `small` moved from 2048 to 4096 bytes — and
 to 38/48 at `medium` (95% of the retrieval ceiling), with no regression on
 any question type.
 
-## Provenance stamp — relative age, and a staleness status line
+## The member remembers; it does not read a store
 
-Each entry's block header stamps `(id, age)`: `today` under 24 hours old,
-otherwise `<N>d old` — `(K7E-000-00003, 36d old)`. An entry with no
+**The pack the member reads carries no ids and no vocabulary for the
+machinery behind it.** A member that can name that machinery describes it to
+the person correcting it: the owner corrected a fact by phone and was answered
+with a node id, "read-only", and no age (#268). So the section is headed
+`## What you remember`, each block is `### <title> (<age> old)`, and the
+framing line closes with the doctrine — never describe your memory, what it
+holds, or what you can or cannot change about it; take a correction and act
+on it.
+
+The ids are not lost, they are moved: `knowledge_section` returns them
+alongside the lines, and the turn capture writes them as its `- knowledge:`
+line. That is the operator's side of the same fact, and it is what the dream
+pass's correction call and a stale-source trace both read
+([k7e-distillation.md](k7e-distillation.md)). `k7e search` and `k7e get`
+answer an id exactly and first, so the operator asks "how old is that" of the
+router; the member never needs to.
+
+One consequence rides on the same rule: an exact id lookup answers whether or
+not the node is retired, so an id merely named in an incoming message would
+otherwise pack a superseded claim straight back into the prompt. Hits whose
+status is not `active` are dropped before packing.
+
+## Age stamp — relative age, and a staleness status line
+
+Each entry's block header stamps `(age)`: `today` under 24 hours old,
+otherwise `<N>d old` — `### Deploy runbook (36d old)`. An entry with no
 parseable date (k7e's `last_updated` frontmatter missing or unreadable)
-keeps the bare-id form, `(K7E-000-00003)`.
+carries its title alone.
 
 An entry older than 30 days additionally gets one line appended to its
 block, before the body:
@@ -176,18 +200,20 @@ line was the only presentation that worked on both reader classes tested —
 see `apps/r4t/experiments/k-age-presentation/`. The status line's bytes
 count against the section's inject budget like every other block byte.
 
-The stamped id is a second, weaker recency signal whether or not anyone
-intends it — k7e allocates ids in sequence, and models compare the ordinals
-unprompted. It agrees with the age stamp until a store is imported, merged, or
-rebuilt, at which point the ordinals say one thing and the dates another.
-That is why the age stamp has to be right rather than merely present; see
+A stamped id would be a second, weaker recency signal whether or not anyone
+intended it — k7e allocates ids in sequence, and models compare the ordinals
+unprompted. Those ordinals agree with the age until a store is imported,
+merged, or rebuilt, at which point they say one thing and the dates another;
+the member reads the age and nothing else, and in the turn capture the ordinal
+is the operator's to read against the dates. See
 [k7e-architecture.md](k7e-architecture.md#ids-leak-write-order).
 
 ## Framing — the cautionary line, as a knob
 
-Every `## Knowledge` section carries a header and, under it, one line framing
-the entries as fallible background rather than instructions. That line is
-configurable per member and per rig (#62):
+Every recollection section carries a header and, under it, one line framing
+the notes as fallible background rather than instructions and forbidding the
+member to describe its own memory. That line is configurable per member and
+per rig (#62):
 
 ```markdown
 - **Framing:** off                          # drop the line; header and entries stay
@@ -215,8 +241,10 @@ guard against):
 Resolution: a member's explicit `Framing:` line always wins; absent that, the
 member's own turn rig's `framing` default applies; absent both, the built-in
 line renders — the section is byte-identical to a roster and rig config that
-never heard of the field. `off` removes only the framing line: the header,
-provenance stamps, and entry blocks render exactly as they do today.
+never heard of the field. `off` removes only the framing line: the header, age
+stamps, and blocks render exactly as they do today. Custom wording replaces
+the doctrine sentence too, so a roster that writes its own line owns that
+rule.
 
 ## The semantic track — the query at wake, the backlog at night
 
@@ -268,6 +296,40 @@ the mark advances past captures no model ever read, and because captures are
 pruned to the most recent 50 they are then gone. The day-log line reports what
 k7e stored rather than how many captures it was handed — a pass that changed
 nothing reads `no new knowledge`.
+
+### Conversation corrects the store
+
+**The roster names whose word this is.** One roster-level line, in the prose
+under `## Roster` or above the first member block in a `ROSTER.md`:
+
+```markdown
+People: neil-phone, neil-email, neil-macbook
+```
+
+Comma-separated a8s addresses, matched against the sender case-insensitively.
+It makes nobody a member — a roster is still the agents that take turns — it
+says which addresses beyond the wall speak for a person. **Without the line no
+sender qualifies and the pass never runs.**
+
+The class alone cannot decide it. a8s stamps none on the wire, and r4t reads an
+absent class as deliberate attention, so every outside seat — a peer bot
+included — would otherwise arrive as a person. Both must hold: the message
+carries `class: human`, which a member's own traffic never does (everything a
+member releases is marked `auto`), and its sender is one the roster named.
+
+A turn capture then carries two facts above its prompt that the prose below
+cannot supply: `- knowledge:` names the store entries that survived packing
+into that prompt — the ids the member itself was never shown — and a
+`## Human messages` section repeats those people's
+messages verbatim. The dream pass hands both to `k7e distill`, which asks the
+model once per capture whether those people contradicted or closed any of
+those entries, and retires each one it did (see
+[k7e-distillation.md](k7e-distillation.md)). A member's own restatement of a
+retired claim from the same turn is dropped rather than stored beside the
+correction. The day-log line counts the retirements: `1 stored, 1 superseded`.
+
+`r4t roster check` prints the addresses it read, and warns when a member
+carries `Knowledge:` and the roster names nobody.
 
 ### Distill rig — a different writer for the same member
 

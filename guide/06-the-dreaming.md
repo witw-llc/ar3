@@ -7,8 +7,9 @@
 
 At the end of this chapter Wren has a memory of his own. One runbook line gives
 him a private knowledge store, and two things happen around it without you
-doing anything again: every turn he wakes with a `## Knowledge` section built
-from that store, and every idle pass distills his finished turns back into it.
+doing anything again: every turn he wakes with a `## What you remember`
+section built from that store, and every idle pass distills his finished turns
+back into it.
 You will watch him fail a question, put the answer in his store without
 telling him, watch him answer it on the next turn — then read the
 byte-by-byte accounting of what that cost his prompt, break the dreaming, and
@@ -112,7 +113,7 @@ enforce nothing between them. Moss cannot see this. Nothing merges these into
 a roster-wide pool, and the shared tier of memory stays what it always was —
 the repo both of them read.
 
-Now the line that turns it on:
+Now the two lines that turn it on:
 
 **Replace** `~/ar3/silo/r4t.md` — in Wren's block, add one field under
 `Continue:`
@@ -122,7 +123,20 @@ Now the line that turns it on:
 ```
 
 `on` takes the default inject budget of 2 KiB. A size sets it exactly (`4k`,
-`4096`); `off` or the absent field is zero and no section is built. Lint it:
+`4096`); `off` or the absent field is zero and no section is built.
+
+**Replace** `~/ar3/silo/r4t.md` — one line under `## Roster`, above Wren's
+block
+
+```markdown
+People: me
+```
+
+That names your own seat as a person: correct Wren in conversation and the
+dreaming pass retires the notes you contradicted, without you running a
+command. It names an a8s address, not a member — the roster is still the
+agents that take turns. Leave it out and nobody's word corrects the store,
+and `runbook check` warns you that it does not. Lint it:
 
 **Run**
 
@@ -136,7 +150,7 @@ You should see:
 ```
 runbook: triforce -> r4t.md
 warning: Wren: Knowledge is on with rig 'silo' — a small-model class that smooths specifics out of distilled notes; consider a distill-rig override, and note budgets are bytes, not tokens (see docs/r4t-knowledge.md)
-/home/you/ar3/silo/r4t.md: OK (2 member(s), leader Wren, 1 warning(s))
+/home/you/ar3/silo/r4t.md: OK (2 member(s), leader Wren, people me, 1 warning(s))
 ```
 
 The warning is r4t telling you the truth about the free path before you find
@@ -180,7 +194,7 @@ read is in the same capture. Take the newest one:
 
 ```bash
 ls $TURNS | tail -1
-awk '/^## Knowledge/{f=1} /^## Output/{f=0} f' "$(ls -d $TURNS/* | tail -1)"
+awk '/^## What you remember/{f=1} /^## Output/{f=0} f' "$(ls -d $TURNS/* | tail -1)"
 ```
 
 You should see (the capture's filename, then the injected section):
@@ -190,16 +204,16 @@ You should see (the capture's filename, then the injected section):
 ```
 
 ```
-## Knowledge (recalled from your private store)
-Notes your past turns distilled — background that may be stale or wrong. When they disagree with the messages above or your own files, the messages and files win.
+## What you remember
+Notes from your own past turns — background that may be stale or wrong. When they disagree with the messages above or your own files, the messages and files win. Never describe your memory, what it holds, or what you can or cannot change about it: take a correction and act on it.
 
-### Who signs off a roster change (K7E-000-00002, today)
+### Who signs off a roster change (today)
 
 ## Verified Protocol
 
 The owner signs off every r4t.md edit before it ships. Moss drafts, Wren commits, the owner approves.
 
-### Ship window for the silo roster (K7E-000-00001, today)
+### Ship window for the silo roster (today)
 
 ## Verified Protocol
 
@@ -209,9 +223,12 @@ Ship on Tuesday mornings. Friday ships are forbidden — nobody reads the logs o
 Read the framing line, because it is the whole posture: *background that may
 be stale or wrong … the messages and files win*. Chapter 5 showed you why —
 that store will eventually hold something a model over-reached on, and an
-agent that treats recalled notes as orders acts on it. Notes arrive with
-provenance (id, date) and a ranking, placed after the how-to-work doctrine and
-before the closing reinforcement, so nothing recalled gets the last word.
+agent that treats recalled notes as orders acts on it. Notes arrive with a
+title, an age and a ranking, placed after the how-to-work doctrine and before
+the closing reinforcement, so nothing recalled gets the last word. Wren reads
+no ids: they ride the capture's `- knowledge:` line instead, which is where
+you read them, because a member that can name its memory's machinery answers
+a correction by describing it.
 
 The retrieval seed is assembled for him, not by him: the newest message, his
 name and role, and the mission's first line. He never sees that query and

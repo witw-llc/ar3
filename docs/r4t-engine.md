@@ -419,10 +419,13 @@ own root on every wake, which matches `run`'s `--dir`-less default:
   `idle.timeout` seconds of quiet, and `--idle`'s own latch means only the
   first quiet tick spends a turn; any real turn re-arms it.
 
-The three `ollama-*` definitions additionally need `--model` — set the a8s var
-`MODEL` (`a8s add my-bare-node ~/somewhere engine-ollama-claude
---model=qwen3.6`, or `a8s vars my-bare-node set MODEL qwen3.6` after the
-fact) — since the launcher has no default model of its own.
+Every one of these definitions takes the a8s var `MODEL` (`a8s add
+my-bare-node ~/somewhere engine-ollama-claude --model=qwen3.6`, or `a8s vars
+my-bare-node set MODEL qwen3.6` after the fact). The three `ollama-*`
+definitions require it, since the launcher has no default model of its own;
+the rest carry it as `--model=$MODEL?`, an optional reference (see
+[docs/a8s.md](a8s.md)) — set, the turn pins that model, unset, the flag drops
+and the engine picks its own default.
 
 Each of the ten also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by

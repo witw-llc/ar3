@@ -1655,3 +1655,26 @@ class TestOptionsSheet:
         `docs/*.md` symlinked by `install.sh --skills` are exactly those whose
         first line is `---`."""
         assert not self.SHEET.read_text(encoding="utf-8").startswith("---")
+
+
+class TestPeople:
+    """`People:` is roster-level in both formats: the prose under `## Roster`
+    here, above the first member block in a ROSTER.md (#269)."""
+
+    def test_the_roster_section_prose_names_them(self, node, r4t_home):
+        path = write(node, MINIMAL.replace(
+            "## Roster\n", "## Roster\n\n    People: neil-phone, neil-email\n"
+        ))
+        roster = load_runbook(path).roster
+        assert roster.people == ["neil-phone", "neil-email"]
+        assert roster.is_person("neil-phone")
+
+    def test_absent_names_nobody(self, node, r4t_home):
+        assert load_runbook(write(node, MINIMAL)).roster.people == []
+
+    def test_a_member_block_refuses_the_line(self, node, r4t_home):
+        path = write(node, MINIMAL.replace(
+            "- **Leader:** yes", "- **Leader:** yes\n    - **People:** neil-phone"
+        ))
+        roster = load_runbook(path, validate=False).roster
+        assert "People: is a roster-level line" in roster.find("lead").error

@@ -2438,6 +2438,18 @@ class TestMissionReview:
         assert "You are Gerry" in prompt
         assert "No communication to the human NEEDS to happen" in prompt
 
+    def test_the_review_says_nothing_to_delegate_is_an_answer(self, ctx, fake_harness):
+        """#267: a leader that reads "delegate the next step" as an order goes
+        and finds one, and old files are where steps are found. The review has
+        to say that no step is a complete answer, that a dated line nothing
+        followed is history, and that a delegation names what it acted on."""
+        self._review(ctx)
+        assert self._review(ctx)["fired"] is True
+        prompt = read_prompt(harness_calls(fake_harness)[-1])
+        assert "nothing to delegate, say so and stop" in prompt
+        assert "is history, not a task" in prompt
+        assert "name what you acted on and the date it carries" in prompt
+
     def test_backoff_resets_on_real_work(self, ctx, fake_harness):
         self._review(ctx)
         assert self._review(ctx)["fired"] is True
@@ -2988,6 +3000,33 @@ class TestBatchIngress:
             "r4t: BATCH ingested 3 of 3 message(s) from alice, bob, carol"
             in read_log()
         )
+
+    def test_a_wire_with_no_class_is_not_a_person(self, ctx, fake_harness):
+        """a8s stamps no `meta.class`, so every outside seat reads `human` at
+        ingress. The roster decides whose word corrects a store, and this
+        roster names nobody (#269)."""
+        raw = json.dumps([{"from": "peer-a", "to": "acme", "content": "that is closed"}])
+        assert handle_batch(ctx, raw) == 0
+        (capture,) = state.list_turn_captures(NODE, "gerry")
+        text = capture.read_text(encoding="utf-8")
+        assert "## Human messages" not in text
+        assert "that is closed" in text
+
+    def test_a_named_sender_on_the_same_wire_is_a_person(self, ctx, fake_harness):
+        path = ctx.root / "ROSTER.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "Preamble prose that is not a member block.",
+                "Preamble prose that is not a member block.\n\nPeople: peer-a",
+            ),
+            encoding="utf-8",
+        )
+        raw = json.dumps([{"from": "peer-a", "to": "acme", "content": "that is closed"}])
+        assert handle_batch(ctx, raw) == 0
+        (capture,) = state.list_turn_captures(NODE, "gerry")
+        text = capture.read_text(encoding="utf-8")
+        assert "## Human messages" in text
+        assert "### From: peer-a (thread " in text
 
     def test_from_and_meta_class_reach_ledger_and_queue(self, ctx, fake_harness):
         raw = json.dumps([

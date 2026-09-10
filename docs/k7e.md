@@ -88,7 +88,9 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
   `embeddings` to `none` to turn the track off outright.
 - **Recall** is RAG: retrieve + synthesize an answer (reranker on by default).
 - **Distill** extracts knowledge from raw files (LLM), dedupes, and stores only
-  genuine deltas. Requires `distill_command` or `llm_command`.
+  genuine deltas. Requires `distill_command` or `llm_command`. Over an r4t turn
+  capture it also retires the entries that turn's people contradicted, rather
+  than filing the correction beside the claim it corrects.
 - **LLM backend** is whatever you configure — stdin in, stdout out. No
   auto-detection, no bundled ollama generation path.
 

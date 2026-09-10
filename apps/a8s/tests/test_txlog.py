@@ -175,8 +175,14 @@ class TestReadEvents:
         assert event["detail"] == "preview"
         assert event["timestamp"].endswith("Z")
 
-    def test_missing_store_returns_empty(self, fake_home):
-        assert read_events("01ABC") == []
+    def test_a_missing_store_is_said_rather_than_answered_as_empty(self, fake_home):
+        """"No events for this ULID" is a claim about the log's contents. A
+        log that is not there supports no such claim, and reading must not
+        create one either — a store made by a reader answers truthfully about
+        a history it just discarded."""
+        with pytest.raises(TransactionLogError) as raised:
+            read_events("01ABC")
+        assert str(transactions_path()) in str(raised.value)
         assert not transactions_path().exists()
 
     def test_unknown_id_returns_empty(self, fake_home):
@@ -358,7 +364,53 @@ class TestReadRecent:
         fresh = read_recent(after_seq=cursor, senders=["alice"])
         assert [e["msg_id"] for _s, e in fresh] == ["01E"]
 
-    def test_missing_store_is_empty(self, fake_home):
+    def test_a_missing_store_is_said_rather_than_answered_as_empty(self, fake_home):
+        with pytest.raises(TransactionLogError):
+            read_recent()
+        assert not transactions_path().exists()
+
+    def test_an_unreadable_store_is_said_rather_than_answered_as_empty(
+        self, fake_home, unreadable_file
+    ):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        unreadable_file(transactions_path())
+        with pytest.raises(TransactionLogError) as raised:
+            read_recent()
+        assert "cannot read" in str(raised.value)
+        assert str(transactions_path()) in str(raised.value)
+
+    @pytest.mark.parametrize("shape", ["zero-byte", "unrelated-schema"])
+    @pytest.mark.parametrize("read", [read_recent, lambda: read_events("01A")])
+    def test_a_file_that_is_not_the_log_is_said_and_left_alone(
+        self, fake_home, shape, read
+    ):
+        """Same rule as the archive, and the same repair.
+
+        `is_file()` passes on a zero-byte file and on a database holding
+        somebody else's tables, and the writable connect turned both into an
+        initialized empty log — so `a8s tx` and `a8s trace` reported "no
+        transaction events" about a log they had just created. Both readers
+        are driven: `trace` reaches the store on its own path.
+        """
+        path = transactions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        if shape == "unrelated-schema":
+            with sqlite3.connect(path) as conn:
+                conn.execute("CREATE TABLE somebody_elses (id INTEGER)")
+        before = path.read_bytes()
+        with pytest.raises(TransactionLogError) as raised:
+            read()
+        assert "cannot read" in str(raised.value)
+        assert str(path) in str(raised.value)
+        assert path.read_bytes() == before
+
+    def test_a_readable_empty_store_is_empty(self, fake_home):
+        """The positive control. Without it, "raise on everything" passes both
+        cases above and takes the real answer with it."""
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("DELETE FROM transactions")
         assert read_recent() == []
 
 
@@ -389,7 +441,27 @@ class TestCmdTransactions:
         assert cmd_transactions(["--limit", "0"]) == 2
         assert "--limit must be a positive integer" in capsys.readouterr().err
 
-    def test_empty_store_reports_and_exits_one(self, fake_home, capsys):
+    def test_a_missing_log_names_the_file_and_exits_one(self, fake_home, capsys):
+        assert cmd_transactions([]) == 1
+        err = capsys.readouterr().err
+        assert "no transaction log at" in err
+        assert str(transactions_path()) in err
+
+    def test_an_unreadable_log_names_the_file_and_exits_one(
+        self, fake_home, capsys, unreadable_file
+    ):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        unreadable_file(transactions_path())
+        assert cmd_transactions([]) == 1
+        err = capsys.readouterr().err
+        assert f"a8s: cannot read {transactions_path()}" in err
+
+    def test_a_readable_empty_log_reports_no_events_and_exits_one(
+        self, fake_home, capsys
+    ):
+        log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("DELETE FROM transactions")
         assert cmd_transactions([]) == 1
         assert "no transaction events" in capsys.readouterr().err
 
