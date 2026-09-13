@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -430,6 +431,13 @@ def parse_tell_argv(
     return recipient, attachments, message_argv, check, split
 
 
+def split_recipients(recipient: str) -> list[str]:
+    recipients = [name.strip() for name in re.split(r"[,;]", recipient)]
+    if not all(recipients):
+        raise TellUsageError("recipient list contains an empty name")
+    return recipients
+
+
 STDIN_WAIT_SEC = 2.0
 TELL_STDIN_WAIT_ENV = "TELL_STDIN_WAIT_SEC"
 
@@ -601,6 +609,7 @@ _USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>|-]"
 
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
+    print('       quote comma/semicolon-separated recipients: "alpha,beta;gamma"', file=sys.stderr)
     print("       --attach/--file may repeat; multiple paths after one flag OK if they exist", file=sys.stderr)
     print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
     print(f"       size limit: {TELL_FILE_MAX_ENV} (bytes or 50m), else max_file_bytes / 50MiB", file=sys.stderr)
@@ -782,7 +791,8 @@ def run_check(recipient: str | None) -> int:
     if note is not None:
         lines.append(f"  warning: {note}")
 
-    if recipient is not None:
+    recipients = split_recipients(recipient) if recipient is not None else []
+    for recipient in recipients:
         if not _outbox_is_registered(outbox):
             if not _registry_readable():
                 lines.append(
@@ -819,6 +829,7 @@ def tell_main(argv: list[str]) -> int:
     harden_stdio()
     try:
         recipient, attachments, message_argv, check, split = parse_tell_argv(argv)
+        recipients = split_recipients(recipient) if recipient is not None else []
     except TellHelp:
         _print_usage()
         return 0
@@ -872,65 +883,73 @@ def tell_main(argv: list[str]) -> int:
         print(f"tell: warning: {note}", file=sys.stderr)
 
     sender = _optional_sender(outbox)
-    to = recipient
-    kind: str | None = None
-    if _outbox_is_registered(outbox):
-        rc, canonical, kind = _validate_recipient(recipient)
-        if rc != 0:
-            return rc
-        assert canonical is not None
-        to = canonical
+    registered = _outbox_is_registered(outbox)
+    targets: list[tuple[str, str | None]] = []
+    for recipient in recipients:
+        to = recipient
+        kind: str | None = None
+        if registered:
+            rc, canonical, kind = _validate_recipient(recipient)
+            if rc != 0:
+                return rc
+            assert canonical is not None
+            to = canonical
+        targets.append((to, kind))
 
-    msg_id = new_ulid()
-    split_dir = outbox / f".{msg_id}.parts"
+    split_dir = outbox / f".{new_ulid()}.parts"
     try:
         prepared, prep_rc = _prepare_attachment_entries(
             files, split=split, work_dir=split_dir
         )
         if prep_rc != 0:
             return prep_rc
-        committed = False
-        try:
+        for to, kind in targets:
+            msg_id = new_ulid()
+            committed = False
             try:
-                staged_files = (
-                    stage_outbox_attachments(outbox, msg_id, prepared)
-                    if prepared
-                    else []
+                try:
+                    staged_files = (
+                        stage_outbox_attachments(outbox, msg_id, prepared)
+                        if prepared
+                        else []
+                    )
+                except OSError as e:
+                    print(f"tell: attachment staging failed for {to!r}: {e}", file=sys.stderr)
+                    return 1
+                write_outbox_envelope(
+                    outbox,
+                    to,
+                    content,
+                    staged_files,
+                    from_name=sender[0] if sender is not None else None,
+                    msg_id=msg_id,
                 )
+                committed = True
             except OSError as e:
-                print(f"tell: attachment staging failed: {e}", file=sys.stderr)
+                print(f"tell: envelope write failed for {to!r}: {e}", file=sys.stderr)
                 return 1
-            write_outbox_envelope(
-                outbox,
-                to,
-                content,
-                staged_files,
-                from_name=sender[0] if sender is not None else None,
-                msg_id=msg_id,
-            )
-            committed = True
-        finally:
-            if not committed:
-                shutil.rmtree(outbox_bundle_dir(outbox, msg_id), ignore_errors=True)
+            finally:
+                if not committed:
+                    shutil.rmtree(outbox_bundle_dir(outbox, msg_id), ignore_errors=True)
+
+            preview = _preview(content)
+            line = f"tell -> {to}: {preview}"
+            if sender is not None:
+                sender_name, _ = sender
+                if kind == "alias":
+                    from registry import resolve_name
+
+                    _, members = resolve_name(to)
+                    out_agent(
+                        sender_name,
+                        f"tell -> {to} (alias of {len(members)}): {preview}",
+                    )
+                else:
+                    out_agent(sender_name, line)
+            else:
+                print(line)
     finally:
         if split_dir.is_dir():
             shutil.rmtree(split_dir, ignore_errors=True)
-
-    preview = _preview(content)
-    line = f"tell -> {to}: {preview}"
-    if sender is not None:
-        sender_name, _ = sender
-        if kind == "alias":
-            from registry import resolve_name
-
-            _, members = resolve_name(recipient)
-            out_agent(
-                sender_name,
-                f"tell -> {to} (alias of {len(members)}): {preview}",
-            )
-        else:
-            out_agent(sender_name, line)
-    else:
-        print(line)
 
     return 0

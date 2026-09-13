@@ -20,6 +20,25 @@ quotes the shell expands `$…` and runs backticks before `tell` is reached.
 | Router | `apps/a8s/mailbox.py` (`route_outboxes`) |
 | Receive-side | `apps/a8s/tells.py` (`tells_main`) — see below |
 
+Recipients may be separated with commas or semicolons in one quoted argument:
+`tell "alpha,beta;gamma" - < message.md`. Quote the list so the shell passes
+the separators through. Spaces around each name are trimmed; empty entries
+(including a trailing separator) are rejected. These separators delimit
+recipients even inside a namespace address.
+
+Each listed recipient gets a separate envelope with a unique ULID and its own
+attachment bundle. The body is read once, and oversized attachments are split
+once before their parts are copied for each recipient. Names, aliases, and
+namespace addresses use the usual routing rules; repeated names or overlapping
+aliases can produce multiple deliveries. `tell --check "alpha;beta"` checks
+each recipient without sending.
+
+All recipients are validated before any envelope or attachment bundle is
+written, wherever registry validation applies. Sends then happen in list
+order, with a confirmation line per envelope. An I/O failure stops the send
+and removes the failed envelope's partial bundle; earlier envelopes remain
+queued, so retry only the recipients whose sends did not succeed.
+
 ## What the sender learns
 
 A send is asynchronous, so the outcome comes back as a receipt the router

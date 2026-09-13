@@ -119,6 +119,167 @@ def test_a8s_tell_writes_outbox_without_registry(tmp_path):
     assert msg["content"] == "via a8s tell"
 
 
+@pytest.mark.parametrize("run", [_run, _run_a8s])
+@pytest.mark.parametrize("recipients", ["alpha,beta,gamma", "alpha;beta;gamma", " alpha, beta ; gamma "])
+def test_tell_multiple_recipients_share_stdin_body(tmp_path, run, recipients):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    body = "first line; commas, too\n$literal `body` — last line\n"
+    res = run(tmp_path, recipients, "-", stdin=body)
+    assert res.returncode == 0, res.stderr
+    envelopes = sorted(outbox.glob("*.json"))
+    messages = [json.loads(path.read_text()) for path in envelopes]
+    assert sorted(msg["to"] for msg in messages) == ["alpha", "beta", "gamma"]
+    assert res.stdout.index("tell -> alpha:") < res.stdout.index("tell -> beta:") < res.stdout.index("tell -> gamma:")
+    assert len({msg["id"] for msg in messages}) == 3
+    for path, msg in zip(envelopes, messages, strict=True):
+        assert path.stem == msg["id"]
+        assert msg["content"] == body.strip()
+        assert msg["files"] == []
+        assert res.stdout.count(f"tell -> {msg['to']}:") == 1
+
+
+@pytest.mark.parametrize("recipients", ["", " ", ",alpha", "alpha;", "alpha,,beta", "alpha; ;beta"])
+@pytest.mark.parametrize("check", [False, True])
+def test_tell_empty_recipient_list_entries_send_nothing(tmp_path, recipients, check):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    args = ("--check", recipients) if check else (recipients, "hello")
+    res = _run(tmp_path, *args)
+    assert res.returncode == 2
+    assert "empty name" in res.stderr
+    assert list(outbox.iterdir()) == []
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_tell_multiple_recipients_validate_before_sending(fake_home, tmp_path, check):
+    from registry import save_registry
+
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    save_registry({"sender": {"root": str(tmp_path)}})
+    payload = tmp_path / "payload.txt"
+    payload.write_text("attachment")
+    args = ("--check", "sender;missing") if check else (
+        "sender;missing", "--attach", str(payload), "hello"
+    )
+    res = _run_a8s(tmp_path, *args)
+    assert res.returncode == 1
+    assert "no agent or alias named 'missing'" in res.stderr
+    assert "tell ->" not in res.stdout
+    assert list(outbox.iterdir()) == []
+
+
+def test_tell_multiple_recipients_check_staging_outbox(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    res = _run(tmp_path, "--check", "alpha;beta")
+    assert res.returncode == 0, res.stderr
+    for recipient in ("alpha", "beta"):
+        assert f"recipient '{recipient}': not checked" in res.stdout
+    assert list(outbox.iterdir()) == []
+
+
+def test_tell_multiple_recipients_route_attachment_copies(fake_home, tmp_path):
+    from core import Participant, inbox_dir
+    from mailbox import ensure_mailboxes, route_outboxes
+    from registry import save_aliases, save_namespaces, save_registry
+
+    participants = [Participant(name, tmp_path / name) for name in ("sender", "alpha", "beta", "gamma")]
+    for participant in participants:
+        participant.root.mkdir()
+        ensure_mailboxes(participant)
+    save_registry({p.name: {"root": str(p.root)} for p in participants})
+    save_aliases({"team": ["beta"]})
+    save_namespaces({"work": "gamma"})
+    sender = participants[0]
+    payload = sender.root / "payload.txt"
+    payload.write_text("attachment bytes")
+    recipients = "ALPHA,TEAM;WORK:ops:review"
+    check = _run_a8s(sender.root, "--check", recipients)
+    assert check.returncode == 0, check.stderr
+    assert "recipient 'ALPHA': ok" in check.stdout
+    assert "alias -> team" in check.stdout
+    assert "namespace -> gamma" in check.stdout
+    res = _run_a8s(sender.root, recipients, "--attach", str(payload), "hello")
+    assert res.returncode == 0, res.stderr
+    outbox = sender.root / ".outbox"
+    messages = [json.loads(path.read_text()) for path in sorted(outbox.glob("*.json"))]
+    assert sorted(msg["to"] for msg in messages) == ["alpha", "team", "work:ops:review"]
+    assert len({msg["id"] for msg in messages}) == 3
+    assert all(msg["from"] == "sender" for msg in messages)
+    payload.unlink()
+    route_outboxes(participants, all_agents=participants)
+    for participant in participants[1:]:
+        _, msg = _read_outbox(inbox_dir(participant.name))
+        assert msg["content"] == "hello"
+        assert msg["files"] == [{"filename": "payload.txt"}]
+        assert (participant.files_bundle_dir(msg["id"]) / "payload.txt").read_text() == "attachment bytes"
+
+
+def test_tell_multiple_recipients_split_attachments_once(tmp_path):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"abcdefghij")
+    res = _run(tmp_path, "alpha;beta", "--attach", str(payload), "--split", "hello", env={"TELL_FILE_MAX": "4"})
+    assert res.returncode == 0, res.stderr
+    assert res.stderr.count("splitting 'payload.bin'") == 1
+    messages = [json.loads(path.read_text()) for path in outbox.glob("*.json")]
+    assert len(messages) == 2
+    for msg in messages:
+        bundle = outbox_bundle_dir(outbox, msg["id"])
+        assert len(msg["files"]) == 3
+        assert b"".join((bundle / entry["filename"]).read_bytes() for entry in msg["files"]) == payload.read_bytes()
+    assert list(outbox.glob(".*.parts")) == []
+
+
+def test_tell_multiple_recipients_allow_remote_names(fake_home, tmp_path):
+    from network import save_network_config
+    from registry import save_registry
+
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    save_registry({"sender": {"root": str(tmp_path)}})
+    save_network_config({"remotes": {"hub": {"transport": "folder", "path": str(tmp_path / "remote")}}})
+    res = _run_a8s(tmp_path, "sender;remote:review", "hello")
+    assert res.returncode == 0, res.stderr
+    messages = [json.loads(path.read_text()) for path in outbox.glob("*.json")]
+    assert sorted(msg["to"] for msg in messages) == ["remote:review", "sender"]
+
+
+@pytest.mark.parametrize("failure", ["stage_outbox_attachments", "write_outbox_envelope"])
+def test_tell_multiple_recipients_later_failure_preserves_sent_envelopes(tmp_path, monkeypatch, capsys, failure):
+    import tell as tell_mod
+
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    payload = tmp_path / "payload.txt"
+    payload.write_text("attachment")
+    original = getattr(tell_mod, failure)
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated disk failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tell_mod, failure, fail_second)
+    rc = tell_mod.tell_main(["alpha;beta;gamma", "--attach", str(payload), "hello"])
+    assert rc == 1
+    _, msg = _read_outbox(outbox)
+    assert msg["to"] == "alpha"
+    assert {path.name for path in outbox.iterdir()} == {msg["id"], f"{msg['id']}.json"}
+    output = capsys.readouterr()
+    assert "tell -> alpha:" in output.out
+    assert "tell -> beta:" not in output.out
+    assert "'beta'" in output.err
+    assert "simulated disk failure" in output.err
+
+
 def test_tell_requires_tell_outbox_dir_from_subdir(tmp_path):
     outbox = tmp_path / ".outbox"
     outbox.mkdir()

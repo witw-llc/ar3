@@ -24,6 +24,9 @@ tell [--attach PATH ...] [--split] <recipient> [<message...>|-]
 ```
 
 - `<recipient>` is an opaque name — do not guess who/what it is or change tone.
+- To send the same message to several recipients, separate names with commas
+  or semicolons in one quoted argument: `tell "alpha,beta;gamma" - < message.md`.
+  Each listed recipient gets a separate message and its own attachment copies.
 - A trailing `<message...>` argument suits a short plain body. Anything holding
   `$`, backticks, backslashes, quotes, or newlines goes on stdin — inside double
   quotes the shell eats it (`"$1.25"` sends `.25`).
