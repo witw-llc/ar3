@@ -11,7 +11,7 @@ from engines.base import QuotaError, window_label
 
 # Engines whose CLI exposes no way to read remaining subscription without
 # spending a turn, so their module implements no quota verb.
-QUOTALESS = {"muse"}
+QUOTALESS = {"muse", "devin"}
 
 
 class TestResolution:
@@ -42,6 +42,7 @@ class TestResolution:
     def test_only_the_verified_engines_also_answer_for_run(self):
         run_engines = {
             "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse",
+            "devin",
         }
         for name in engines.MODULES:
             expected = [] if name in QUOTALESS else ["quota"]

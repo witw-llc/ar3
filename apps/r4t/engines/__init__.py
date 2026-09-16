@@ -37,7 +37,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from engines import agy, claude, codex, copilot, cursor, muse, ollama, opencode, run
+from engines import agy, claude, codex, copilot, cursor, devin, muse, ollama, opencode, run
 from engines.base import QuotaError
 from state import r4t_home
 
@@ -60,6 +60,7 @@ MODULES = {
     "agy": agy,
     "opencode": opencode,
     "muse": muse,
+    "devin": devin,
     "ollama": ollama,
 }
 

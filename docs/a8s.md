@@ -346,7 +346,8 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `opencode.json` | [OpenCode](https://opencode.ai/) — BYO model. `opencode run --auto`, fresh session every wake. Operator picks the provider/model in each agent's own `opencode.json` (e.g. `{"model": "ollama/gpt-oss:20b"}`), not in the a8s definition. |
 | `ollama-opencode.json` | OpenCode via `ollama launch` — requires a8s var `MODEL`. Example: `a8s add bob ./ ollama-opencode --model=qwen3.6`. |
 | `muse.json`     | Meta Muse (`muse exec`) with `--approval-mode never` and `--user-input-auto-resolve`, fresh session every wake. The sandbox stays on; `--user-input-auto-resolve` is what stops an unattended turn blocking when the model reaches for `request_user_input`. |
-| `engine-<id>.json`     | Ten bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `muse`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
+| `devin.json`    | Devin CLI (`devin -p`) with `--permission-mode dangerous` — every mode below it still prompts for exec and writes, which a headless turn cannot answer — and `--respect-workspace-trust false` so `-p` does not fail in an untrusted directory. Fresh session every wake. |
+| `engine-<id>.json`     | Eleven bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `muse`, `devin`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](r4t.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
@@ -456,8 +457,8 @@ Two agents in one repo, one definition file each, no vars:
 ```
 
 ```bash
-a8s add codex-ares  ~/ar3-private  two-seat-codex
-a8s add claude-ares ~/ar3-private  two-seat-claude
+a8s add codex-iris  ~/ar3-private  two-seat-codex
+a8s add claude-iris ~/ar3-private  two-seat-claude
 ```
 
 Each seat now owns `<repo>/.outbox-<name>/`, the wake injects that path as `TELL_OUTBOX_DIR`, and the router stamps `from` from the node owning the directory it ingested. Bundled definitions carry no path fields — the pattern is a user-installed copy (`a8s defs add ./two-seat-claude.json`).

@@ -60,8 +60,8 @@ the last line names the binaries to install.
 
 Rig **names** are yours (`leader`, `member`, `reviewer`, …); **presets** are
 CLI templates aligned with [a8s definitions](../apps/a8s/definitions/):
-`claude`, `codex`, `cursor`, `opencode`, `copilot`, `agy`, plus the
-`ollama launch`-wrapped local variants (`ollama-opencode`, `ollama-claude`,
+`claude`, `codex`, `cursor`, `opencode`, `copilot`, `agy`, `muse`, `devin`,
+plus the `ollama launch`-wrapped local variants (`ollama-opencode`, `ollama-claude`,
 `ollama-codex`, `ollama-copilot` — see
 [r4t-harness-ollama-launch.md](r4t-harness-ollama-launch.md)).
 
@@ -259,7 +259,7 @@ CLI's own conversation instead of a cold prompt every wake: the agent keeps
 its recent work, and the provider cache prices the wake as a continuation.
 It needs a rig whose preset carries continuation tokens — `r4t rig presets`
 prints a `continue:` line for each one that does (`agy`, `claude`, `codex`,
-`cursor`, `opencode`, `ollama-opencode`); anything else fails closed at
+`cursor`, `devin`, `opencode`, `ollama-opencode`); anything else fails closed at
 `r4t roster check` and at dispatch. Most presets append a `--continue` flag;
 `codex` resumes through the `exec resume --last --include-non-interactive`
 subcommand, so its tokens are inserted after `exec` instead. `copilot` is the
@@ -652,9 +652,9 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `budget_max` / `budget_earn_per_hour` (rig) | 8 / 4 | Per-member spend bucket. A turn costs 1 unit regardless of how many queued messages it consumes; empty = resting. Put frontier rigs on a low budget (slow, smart), local rigs on a high one (near-free) | Money burn; a fast rig outrunning its quota |
 | `rig_budget_max` / `rig_budget_earn_per_hour` (rig) | unset (no rig gate) | Machine-global rig spend bucket for the subscription behind the rig. A turn also costs 1 rig unit; when empty, every member on that rig rests on every roster. Set both together to bind a shared plan (e.g. 20 / 20 for ~20 prompts an hour) | A shared subscription outrunning its real quota across projects |
 | `max_sends_per_turn` (rig) | 6 | Envelopes released per turn; excess dead-letters | Runaway fan-out width |
-| `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/codex/claude) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
+| `history_max_bytes` / `history_body_max` / `prompt_body_max` (rig) | by preset tier — big (agy/claude/codex/devin/muse) 50k/12k/24k · moderate (cursor/opencode/copilot) 25k/6k/12k · small (ollama variants, or no preset) 8192/2000/4000 | Context sizing on the rig: rolling-history budget, per-entry history clip, and per-message prompt clip. `rig add`/`swap` record the preset; explicit values override the tier | A weak rig drowning in context, or a strong one starved of it |
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
-| `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo), for agy (its idiom writes `~/.gemini` in the member's home, and needs `run_as`) and for bare ollama (no idiom at all) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
+| `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo), for devin (its idiom writes `.devin/mcp_config.local.json` into the same tree), for agy (its idiom writes `~/.gemini` in the member's home, and needs `run_as`) and for bare ollama (no idiom at all) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
 | `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance the machine caps: a runbook may name one, and the trust ceiling (`auto` unless `r4t add --trust`) is what a repo cannot raise |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |

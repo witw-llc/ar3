@@ -46,6 +46,7 @@ cold behavior, cross-directory scope probe.
 | `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
 | `muse` | `muse exec --approval-mode never --user-input-auto-resolve {prompt}` | **no** | none | Meta Muse; `--yolo` is bypass. No quota verb — the CLI exposes no usage surface |
+| `devin` | `devin --permission-mode dangerous --respect-workspace-trust false -p {prompt}` | `--continue` (directory-scoped; help-verified, not live-verified) | `devin-file` (opt-in) | Every permission mode below `dangerous` still prompts for exec and writes — the floor is bypass. No quota verb — `/usage` and `/session-stats` are in-session views |
 | `ollama-opencode` | `ollama launch opencode --model … -- run --auto --dir {workdir}` | `--continue` | `opencode-env` | Requires `--model` |
 | `ollama-claude` | `ollama launch claude --model … -y -- … -p` | no | `claude-flag` | Requires `--model` |
 | `ollama-codex` | `ollama launch codex --model … -y -- exec --sandbox workspace-write` | no | `codex-config` | Requires `--model` |
@@ -96,7 +97,6 @@ notes for agy and the `ollama launch` wrappers:
 | **Charm Crush** | `crush run` is the documented one-shot path. The product is client/server-shaped. Revisit only if the print contract stays a plain local subprocess |
 | **Warp Agent** | Embedded in Warp / Oz cloud harness plumbing — not a standalone argv→stdout coding CLI for r4t to spawn |
 | **Kilo Code CLI** | `kilo run --auto "…"` works, but the product is server/daemon-shaped (`kilo serve`, `kilo daemon`, attach). Engine-redundant with OpenCode, which r4t already supports |
-| **Devin** | Cloud delegation, not a local harness |
 | **OpenHands / SWE-agent** | Container / job-shaped runners |
 | **Roo Code** | Editor-first |
 | **Amazon Q CLI** | Migrating to Kiro |
@@ -118,6 +118,7 @@ the last column; see
 | opencode / ollama-opencode | `--continue` | per-directory store | distinct workdirs | yes |
 | muse (preset) | `muse resume --last` exists | per-workspace, but the subcommand is **interactive** — it opens the session picker, and `muse exec` rejects `--last` | `muse exec --session-id <uuid>` (#17) | **no** — no headless resume exists |
 | agy (preset) | `--continue` | project-associated (agy/gemini family) | distinct workdirs | yes |
+| devin (preset) | `--continue` | per-directory ("the most recent session in the current directory") | `--resume <id>` exists; distinct workdirs | yes — flag verified in help; the no-prior-session path is unverified |
 | copilot (preset) | `--session-id <id>` to found, `--resume=<id>` + `-C` to drive | per **session id**, minted per member | the pin itself; bare `--continue` is machine-global and has injected a prompt into a live session | yes, graded **good** — two members pinned on one host each recalled only their own session |
 | Gemini CLI | `--resume` / `-r` | project hash under `~/.gemini/tmp/` | session id | candidate |
 | Cline | `--continue` | current directory’s latest task | `--taskId` (unverified) / workdirs | candidate |
@@ -147,6 +148,7 @@ should expose `a8s` tell the way current MCP presets do.
 | cursor | `.cursor/mcp.json` in worktree (`cursor-file`) | yes | Opt-in (writes into the repo) |
 | agy | `$HOME/.gemini/config/mcp_config.json` (`agy-home`) | **no** — `$HOME` is the only lever | Opt-in; allowed only under `run_as`, where that home is the member's own |
 | muse | none | no | Speaks MSP and *serves* it (`muse serve`); not an MCP client |
+| devin | `.devin/mcp_config.local.json` in worktree (`devin-file`) | yes | Opt-in (writes into the repo); the `.local` scope is the conventionally gitignored one |
 | ollama (bare) | none | no | No tools |
 | Gemini CLI | `mcpServers` in user/project `settings.json`; `gemini mcp add` | file-scoped | Same family as agy’s constraint |
 | Cline | `cline_mcp_settings.json` / `cline mcp` | global (isolatable via `--data-dir` / `CLINE_DIR`) | Confirm path for installed major |

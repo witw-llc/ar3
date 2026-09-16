@@ -162,7 +162,7 @@ here shadows a machine rig of the same name **whole** — never field-merged.
 | `Echo:` | boolean | `off` | `- **Echo:** on` | Stage cleaned stdout as the one reply and drop the messaging scaffolding. |
 | `Echo max:` | a number of characters | `1500` | `- **Echo max:** 4000` | Where an echoed body is truncated and attached instead. |
 | `Max sends:` | a number | `6` | `- **Max sends:** 3` | Envelopes released per turn; the excess dead-letters. |
-| `History:` | a number of bytes | by preset tier — 50000 for `claude`/`codex`/`agy`, 25000 for `cursor`/`opencode`/`copilot`, 8192 for the `ollama` variants | `- **History:** 25000` | The rolling history budget in the turn prompt. |
+| `History:` | a number of bytes | by preset tier — 50000 for `claude`/`codex`/`agy`/`devin`/`muse`, 25000 for `cursor`/`opencode`/`copilot`, 8192 for the `ollama` variants | `- **History:** 25000` | The rolling history budget in the turn prompt. |
 
 Numbers are read as integers, so `1500.0` and `1500` are the same value.
 
@@ -283,7 +283,7 @@ it should have come from. `r4t runbook check` prints them all at once.
 | `names neither Engine: nor Rig: — there is nothing to run` | an empty member block | give it one of the two |
 | `a rig block needs an Engine: line` | a rig with no engine | add one |
 | `the rig sets Allowed tools: and Engine: --allowed-tools — delete one` | the allowlist written twice | keep either spelling |
-| `is not an engine — choose one of:` | an unknown engine id | the message lists all eleven |
+| `is not an engine — choose one of:` | an unknown engine id | the message lists all thirteen |
 | `Engine: unknown flag` | a flag outside the closed four | use `--model`, `--permissions`, `--allowed-tools`, `--timeout` |
 | `Engine: takes no --continue` | continuation written on the rig | put `Continue:` on the member |
 | `is not a stance — one of: ask, auto, bypass` | a bad `--permissions` value | pick one of the three |

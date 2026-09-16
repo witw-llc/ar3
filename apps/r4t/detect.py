@@ -225,7 +225,7 @@ def install_hint(rows: list[Detection]) -> str:
     return (
         "No agent CLI found on PATH. Install one — claude (Claude Code), "
         "copilot (GitHub Copilot CLI), codex, agent (Cursor), opencode, agy "
-        "(Antigravity) or muse — then re-run `r4t rig detect`."
+        "(Antigravity), muse or devin — then re-run `r4t rig detect`."
     )
 
 

@@ -980,7 +980,7 @@ class TestCmdLsRemotes:
         from txlog import log
 
         save_registry({})
-        log("PUBLISHED", recipient="ghost", sender="ares", remote="broker")
+        log("PUBLISHED", recipient="ghost", sender="iris", remote="broker")
         assert cmd_ls([]) == 0
         out = capsys.readouterr().out
         # We handed the transport a message. Nothing proves anyone read it.

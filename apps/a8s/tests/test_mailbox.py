@@ -538,7 +538,7 @@ class TestTwoNodesOneRepo:
         repo = tmp_path / "ar3-private"
         repo.mkdir()
         reg = {}
-        for name in ("codex-ares", "claude-ares"):
+        for name in ("codex-iris", "claude-iris"):
             defn = tmp_path / f"two-seat-{name}.json"
             defn.write_text(json.dumps({
                 "invoke": ["harness", "-p", "$MESSAGE"],
@@ -552,12 +552,12 @@ class TestTwoNodesOneRepo:
             reg[name] = {"root": str(repo), "definition": str(defn)}
         save_registry(reg)
         parts = {p.name: p for p in participants_from_registry()}
-        return repo, parts["codex-ares"], parts["claude-ares"]
+        return repo, parts["codex-iris"], parts["claude-iris"]
 
     def test_resolution_is_distinct_and_absolute(self, two_seats):
         repo, codex, claude = two_seats
-        assert codex.outbox_path() == (repo / ".outbox-codex-ares").resolve()
-        assert claude.outbox_path() == (repo / ".outbox-claude-ares").resolve()
+        assert codex.outbox_path() == (repo / ".outbox-codex-iris").resolve()
+        assert claude.outbox_path() == (repo / ".outbox-claude-iris").resolve()
         assert codex.inbox_path() != claude.inbox_path()
         assert codex.files_path() != claude.files_path()
 
@@ -566,7 +566,7 @@ class TestTwoNodesOneRepo:
         from definitions import load_definition
 
         _repo, codex, _claude = two_seats
-        env = daemon._wake_env(codex, load_definition("codex-ares"))
+        env = daemon._wake_env(codex, load_definition("codex-iris"))
         assert env["TELL_OUTBOX_DIR"] == str(codex.outbox_path())
 
     def test_each_seat_is_stamped_by_the_owner_of_its_outbox(self, two_seats):
@@ -577,30 +577,30 @@ class TestTwoNodesOneRepo:
         _repo, codex, claude = two_seats
         for p in (codex, claude):
             ensure_mailboxes(p)
-        write_outbox_envelope(codex.outbox_path(), "claude-ares", "from codex", [])
-        write_outbox_envelope(claude.outbox_path(), "codex-ares", "from claude", [])
+        write_outbox_envelope(codex.outbox_path(), "claude-iris", "from codex", [])
+        write_outbox_envelope(claude.outbox_path(), "codex-iris", "from claude", [])
 
         route_outboxes([codex, claude], all_agents=[codex, claude])
 
-        to_claude = json.loads(next(inbox_dir("claude-ares").iterdir()).read_text())
-        to_codex = json.loads(next(inbox_dir("codex-ares").iterdir()).read_text())
-        assert to_claude["from"] == "codex-ares"
+        to_claude = json.loads(next(inbox_dir("claude-iris").iterdir()).read_text())
+        to_codex = json.loads(next(inbox_dir("codex-iris").iterdir()).read_text())
+        assert to_claude["from"] == "codex-iris"
         assert to_claude["content"] == "from codex"
-        assert to_codex["from"] == "claude-ares"
+        assert to_codex["from"] == "claude-iris"
         assert to_codex["content"] == "from claude"
 
     def test_neither_outbox_is_emptied_by_the_other_handler(self, two_seats):
-        # One handler holding only `codex-ares` must not ingest the Claude
+        # One handler holding only `codex-iris` must not ingest the Claude
         # seat's outbox: the two are separate keys in `owners_by_outbox`.
         from tell import write_outbox_envelope
 
         _repo, codex, claude = two_seats
         for p in (codex, claude):
             ensure_mailboxes(p)
-        write_outbox_envelope(claude.outbox_path(), "codex-ares", "mine", [])
+        write_outbox_envelope(claude.outbox_path(), "codex-iris", "mine", [])
         route_outboxes([codex], all_agents=[codex, claude])
         assert [f.name for f in claude.outbox_path().iterdir()]
-        assert list(inbox_dir("codex-ares").iterdir()) == []
+        assert list(inbox_dir("codex-iris").iterdir()) == []
 
     def test_a_tell_typed_in_the_repo_still_refuses_to_guess(self, two_seats, monkeypatch):
         # `TELL_OUTBOX_DIR` unset and CWD inside the shared root matches both

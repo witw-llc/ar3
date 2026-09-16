@@ -355,11 +355,13 @@ class TestWorkdirPlaceholder:
 class TestContinue:
     def test_only_verified_presets_declare_continue(self):
         # Each of these was verified against the installed CLI's own --help and
-        # then live. copilot is here by the OTHER idiom: it declares no
+        # then live — except devin, whose --continue is help-verified only (the
+        # seat that added it has no devin login to run a live resume with).
+        # copilot is here by the OTHER idiom: it declares no
         # continue flag at all and continues by naming a session instead.
         assert continue_presets() == [
-            "agy", "claude", "codex", "copilot", "cursor", "ollama-opencode",
-            "opencode",
+            "agy", "claude", "codex", "copilot", "cursor", "devin",
+            "ollama-opencode", "opencode",
         ]
         assert session_presets() == ["copilot"]
         assert not HARNESS_PRESETS["copilot"].get("continue_argv")
@@ -680,9 +682,9 @@ class TestMcpHomeRefusals:
 class TestHarnessPresets:
     def test_preset_names_match_a8s_kinds(self):
         assert preset_names() == [
-            "agy", "claude", "codex", "copilot", "cursor", "muse", "ollama",
-            "ollama-claude", "ollama-codex", "ollama-copilot", "ollama-opencode",
-            "opencode",
+            "agy", "claude", "codex", "copilot", "cursor", "devin", "muse",
+            "ollama", "ollama-claude", "ollama-codex", "ollama-copilot",
+            "ollama-opencode", "opencode",
         ]
 
     def test_every_preset_declares_a_known_text_tier(self):
@@ -691,7 +693,7 @@ class TestHarnessPresets:
         tiers = {name: HARNESS_PRESETS[name]["text_tier"] for name in preset_names()}
         assert set(tiers.values()) <= set(TEXT_TIERS)
         assert tiers == {
-            "agy": "big", "claude": "big", "codex": "big",
+            "agy": "big", "claude": "big", "codex": "big", "devin": "big",
             "copilot": "moderate", "cursor": "moderate", "opencode": "moderate",
             "muse": "big",
             "ollama": "small", "ollama-opencode": "small",

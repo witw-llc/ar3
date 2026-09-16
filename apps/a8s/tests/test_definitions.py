@@ -671,34 +671,34 @@ class TestPathFieldInterpolation:
 
     @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
     def test_expands_node_var(self, root, field, resolve):
-        got = resolve(root, {field: f".box-$SEAT"}, "codex-ares", {"SEAT": "a"})
+        got = resolve(root, {field: f".box-$SEAT"}, "codex-iris", {"SEAT": "a"})
         assert got == (root / ".box-a").resolve()
 
     @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
     def test_expands_dollar_node_with_no_vars(self, root, field, resolve):
-        got = resolve(root, {field: ".box-$NODE"}, "codex-ares", {})
-        assert got == (root / ".box-codex-ares").resolve()
+        got = resolve(root, {field: ".box-$NODE"}, "codex-iris", {})
+        assert got == (root / ".box-codex-iris").resolve()
 
     @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
     def test_absent_field_keeps_the_default(self, root, field, resolve):
         default = {"outbox_dir": ".outbox", "inbox_dir": ".inbox", "files_dir": ".files"}
-        assert resolve(root, {}, "codex-ares", {"SEAT": "a"}) == (
+        assert resolve(root, {}, "codex-iris", {"SEAT": "a"}) == (
             root / default[field]
         ).resolve()
 
     @pytest.mark.parametrize("field,resolve", FIELD_RESOLVERS)
     def test_unset_var_raises_and_names_it(self, root, field, resolve):
         with pytest.raises(UndefinedVarsError) as e:
-            resolve(root, {field: ".box-$SEAT"}, "codex-ares", {})
+            resolve(root, {field: ".box-$SEAT"}, "codex-iris", {})
         assert "$SEAT" in str(e.value)
 
     def test_node_builtin_is_not_shadowed_by_a_stored_var(self, root):
         # `$NODE` is the one value guaranteed distinct between two
         # registrations. A var that claims the name cannot take it over.
         got = resolve_outbox_dir(
-            root, {"outbox_dir": ".outbox-$NODE"}, "codex-ares", {"NODE": "impostor"}
+            root, {"outbox_dir": ".outbox-$NODE"}, "codex-iris", {"NODE": "impostor"}
         )
-        assert got == (root / ".outbox-codex-ares").resolve()
+        assert got == (root / ".outbox-codex-iris").resolve()
 
     def test_no_partial_expansion(self, root):
         # A path that half-resolves is a plausible directory that is silently
@@ -756,9 +756,9 @@ class TestPathFieldForAgent:
     def test_node_name_reaches_the_field(self, fake_home, tmp_path):
         from definitions import resolve_outbox_dir_for_agent
 
-        root = self._register(tmp_path, "codex-ares", ".outbox-$NODE")
-        assert resolve_outbox_dir_for_agent("codex-ares", root) == (
-            root / ".outbox-codex-ares"
+        root = self._register(tmp_path, "codex-iris", ".outbox-$NODE")
+        assert resolve_outbox_dir_for_agent("codex-iris", root) == (
+            root / ".outbox-codex-iris"
         ).resolve()
 
     def test_registry_vars_reach_the_field(self, fake_home, tmp_path):
@@ -935,7 +935,7 @@ class TestBundledEngineNode:
 # (its ulid module shadows a8s's own — see apps/r4t/tests/run's separate
 # invocation), so the source of truth is duplicated here rather than imported.
 RUN_ENGINE_IDS = (
-    "claude", "codex", "agy", "copilot", "cursor", "opencode",
+    "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse", "devin",
     "ollama-claude", "ollama-codex", "ollama-opencode",
 )
 OLLAMA_ENGINE_IDS = tuple(e for e in RUN_ENGINE_IDS if e.startswith("ollama-"))
@@ -960,7 +960,9 @@ BYPASS_ARGV_DELTA = {
         ("--dangerously-bypass-approvals-and-sandbox",),
     ),
     "copilot": (("--allow-all-tools",), ("--allow-all",)),
+    "muse": (("--approval-mode", "never"), ("--yolo",)),
     "agy": ((), ()),
+    "devin": ((), ()),
     "cursor": ((), ()),
     "opencode": ((), ()),
     "ollama-opencode": ((), ()),
@@ -1177,7 +1179,7 @@ class TestBundledEngineDefinitions:
         self, engine_id, engine_argv_pairs
     ):
         # `--permissions bypass` reaches the engine CLI as different flags per
-        # engine, and for four of the nine as no flags at all. Each variant's
+        # engine, and for five of the eleven as no flags at all. Each variant's
         # description states its own case, so pin both: a real-flag engine
         # against its documented token swap, a no-op engine against argv
         # identity — which turns a future PermissionRule change into a failure

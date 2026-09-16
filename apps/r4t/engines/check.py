@@ -89,6 +89,15 @@ PROBES: dict[str, Probe] = {
         "agy prints its Go flag listing and exits, so the listing is the check",
     ),
     "opencode": Probe("opencode", ("run", "--help"), _OPENCODE_HELP),
+    # Verified against devin 3000.10.27: the same clap behavior as codex —
+    # `devin --not-a-flag --help` exits 2 on the unexpected argument, so the
+    # composed argv goes to the CLI itself.
+    "devin": Probe(
+        "devin", ("--help",),
+        "devin's clap parser reports an unexpected argument even with --help "
+        "present, so devin parses the composed argv itself",
+        strict=True,
+    ),
     # Verified against Muse Code 1.0.1: `muse exec --not-a-flag --help` and
     # `--approval-mode nonsense --help` both print the help and exit 0, so
     # muse never parses the rest of the line and the listing is the check.

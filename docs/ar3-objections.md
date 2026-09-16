@@ -83,6 +83,7 @@ evidence and must not be made)
 
 r4t runs each vendor's own CLI as its own process, in the automation mode that
 CLI documents: `claude`, `codex`, `cursor`, `copilot`, `agy`, `opencode`, `muse`,
+`devin`,
 and local `ollama-*` wrappers. No subscription token is handed to a foreign
 tool, which is the line the vendors' terms actually draw. Spend is capped twice:
 the budget buckets above, and `max_ai_credits`, which composes the vendor's own

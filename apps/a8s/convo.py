@@ -152,7 +152,7 @@ output:
 
 examples:
   a8s convo my-desktop -f --limit 10 --glow
-  a8s convo my-desktop -f --from ares
+  a8s convo my-desktop -f --from iris
   a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
   a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
   a8s convo my-desktop --since 01J8X9K2QZ5VJ0G3R7T6M4N8FP --json

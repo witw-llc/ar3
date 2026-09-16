@@ -35,7 +35,8 @@ plan always declares a refill rate.
 rig, using the harness's own idiom, and teach the member the `a8s_tell` tool
 instead of the shell command. Tri-state: unset takes the preset's default (on
 wherever the idiom is invisible to the roster repo — see
-`MCP_DEFAULT_ON_IDIOMS`, off for cursor, for agy, and for presets with no idiom
+`MCP_DEFAULT_ON_IDIOMS`, off for the file-writing idioms — cursor, devin, agy —
+and for presets with no idiom
 at all), and an explicit true/false in rigs.json always wins. A preset with no
 tools at all (bare ollama) refuses an explicit on. agy takes MCP config only
 from `$HOME/.gemini`, never per invocation, so its idiom is safe exactly where
@@ -505,9 +506,46 @@ HARNESS_PRESETS: dict[str, dict] = {
         # it.
         "instruments": "copilot",
     },
+    "devin": {
+        # The floor is `dangerous`, verified against devin 3000.10.27: its
+        # parser accepts normal (alias auto), accept-edits, dangerous
+        # (aliases yolo, bypass) and autonomous (requires --sandbox), plus
+        # smart, which parses on this build though the rejection text does
+        # not list it. Every mode below dangerous still prompts for exec
+        # and file writes — a prompt a headless -p turn cannot answer, so
+        # under them a member cannot run tell or git. OS isolation, not the
+        # harness permission layer, is the security boundary.
+        "text_tier": "big",
+        "description": (
+            "Devin CLI — `-p` headless; --permission-mode dangerous (every "
+            "mode below it still prompts for exec and writes, which a print "
+            "turn cannot answer) and --respect-workspace-trust false (-p "
+            "cannot show the trust prompt and fails outright in an untrusted "
+            "workdir)"
+        ),
+        "a8s_definition": "devin.json",
+        "headless": "-p",
+        "mcp": "devin-file",
+        "invoke": [
+            "devin",
+            "--permission-mode",
+            "dangerous",
+            "--respect-workspace-trust",
+            "false",
+            "-p",
+            "{prompt}",
+        ],
+        # Fuzzy names (opus, swe) resolve server-side; `devin models list`
+        # enumerates but the string passes through like copilot's.
+        "model_argv": ["--model", "{model}"],
+        # Directory-scoped per the CLI's own help ("resume the most recent
+        # session in the current directory"); the no-prior-session path is
+        # unverified — this seat has no login to measure it with.
+        "continue_argv": ["--continue"],
+    },
 }
 
-# --- the permission vocabulary: one table, three words, nine spellings -------
+# --- the permission vocabulary: one table, three words, ten spellings -------
 #
 # `ask` / `auto` / `bypass` are ar3's words for a stance every engine CLI
 # spells differently. This table is the ONLY place those spellings live, so
@@ -720,6 +758,25 @@ _COPILOT_PERMISSIONS = EnginePermissions(
     },
 )
 
+_DEVIN_FLOOR = (
+    "devin below --permission-mode dangerous still prompts for exec and file "
+    "writes, which a headless -p turn cannot answer — a member cannot run "
+    "tell or git under it"
+)
+_DEVIN_PERMISSIONS = EnginePermissions(
+    anchor=None,
+    modes={
+        "ask": PermissionRule(error=_DEVIN_FLOOR),
+        "auto": PermissionRule(error=_DEVIN_FLOOR),
+        "bypass": PermissionRule(
+            note=(
+                "devin already runs at 'bypass' (--permission-mode dangerous); "
+                "the preset's own flags are unchanged"
+            )
+        ),
+    },
+)
+
 PERMISSION_TRANSLATION: dict[str, EnginePermissions] = {
     "claude": _CLAUDE_PERMISSIONS,
     "codex": _CODEX_PERMISSIONS,
@@ -728,6 +785,7 @@ PERMISSION_TRANSLATION: dict[str, EnginePermissions] = {
     "agy": _AGY_PERMISSIONS,
     "copilot": _COPILOT_PERMISSIONS,
     "muse": _MUSE_PERMISSIONS,
+    "devin": _DEVIN_PERMISSIONS,
     # The launchers carry the wrapped engine's own tokens after `--`, so they
     # take the wrapped engine's rules; only the anchor differs.
     "ollama-claude": EnginePermissions(anchor="--", modes=_CLAUDE_PERMISSIONS.modes),
@@ -753,6 +811,9 @@ _ALLOWED_TOOLS_REASONS = {
     "muse": "muse takes tool policy from a permission profile "
              "(--permission-profile) or its settings, never as one "
              "per-invocation allowlist",
+    "devin": "devin takes tool policy from `permissions` rules in "
+             ".devin/config.json and ~/.config/devin/config.json, never per "
+             "invocation",
     "ollama": "bare `ollama run` has no tool use at all",
 }
 
@@ -1463,7 +1524,7 @@ def splice_session(argv: list[str], *, tokens: list[str], session: str) -> list[
     )
 
 
-# --- the `mcp` knob: one stdio server, six harness idioms --------------------
+# --- the `mcp` knob: one stdio server, seven harness idioms ------------------
 #
 # The server definition is MEMBER-AGNOSTIC. A harness spawns its stdio servers
 # as children of the turn process, which already carries the per-turn
@@ -1525,10 +1586,11 @@ def mcp_presets() -> list[str]:
 # under the member's own state dir. Those default the knob ON — the tell-arms
 # experiment measured the tool eliminating the no-send failure class outright
 # (20/20 against 9/20), so an untouched rig has to be the one that sends.
-# `cursor-file` writes `.cursor/mcp.json` into the working tree and `agy-home`
-# writes into the agent user's own `~/.gemini`: writing a file into a directory
-# r4t does not own is a different consent level than passing a flag, so both
-# stay opt-in.
+# `cursor-file` writes `.cursor/mcp.json` into the working tree, `devin-file`
+# writes `.devin/mcp_config.local.json` there, and `agy-home` writes into the
+# agent user's own `~/.gemini`: writing a file into a directory r4t does not
+# own is a different consent level than passing a flag, so all three stay
+# opt-in.
 MCP_DEFAULT_ON_IDIOMS = frozenset({
     "claude-flag",
     "codex-config",
@@ -1661,12 +1723,11 @@ def _write_if_changed(path: Path, text: str) -> None:
     _add_read_bits(path, 0o044)
 
 
-def _write_cursor_mcp(
-    cwd: Path, env: dict, command: list[str], *, isolated: bool = False
+def _write_mcp_servers_file(
+    path: Path, env: dict, command: list[str], *, isolated: bool = False
 ) -> Path:
-    """cursor has no per-invocation flag, so the server rides a file in the
-    effective cwd. Any other server already configured there is preserved."""
-    path = cwd / ".cursor" / "mcp.json"
+    """Merge the a8s server into an `mcpServers` file the harness reads from
+    its working tree. Any other server already configured there is preserved."""
     payload: dict = {}
     if path.is_file():
         try:
@@ -1681,6 +1742,68 @@ def _write_cursor_mcp(
         MCP_SERVER_NAME: _mcp_server_entry(env, command, isolated=isolated),
     }
     _write_if_changed(path, json.dumps(payload, indent=2))
+    return path
+
+
+def _write_cursor_mcp(
+    cwd: Path, env: dict, command: list[str], *, isolated: bool = False
+) -> Path:
+    """cursor has no per-invocation flag, so the server rides a file in the
+    effective cwd."""
+    return _write_mcp_servers_file(
+        cwd / ".cursor" / "mcp.json", env, command, isolated=isolated
+    )
+
+
+def _git_exclude(path: Path) -> None:
+    """Keep `path` out of `git status` by appending its repo-relative path to
+    the worktree's `.git/info/exclude` — the same mechanism `devin mcp add
+    --scope local` uses for the same file. No-op outside a worktree or without
+    git; existing exclude lines are preserved."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "--git-path", "info/exclude"],
+            cwd=path.parent,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if proc.returncode != 0:
+        return
+    top, _, git_path = proc.stdout.partition("\n")
+    try:
+        rel = path.resolve().relative_to(Path(top.strip()).resolve()).as_posix()
+    except ValueError:
+        return
+    exclude = Path(git_path.strip())
+    if not exclude.is_absolute():
+        exclude = (path.parent / exclude).resolve()
+    try:
+        existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if rel in {line.strip() for line in existing.splitlines()}:
+            return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        boundary = "\n" if existing and not existing.endswith("\n") else ""
+        with exclude.open("a", encoding="utf-8") as f:
+            f.write(f"{boundary}{rel}\n")
+    except OSError:
+        return
+
+
+def _write_devin_mcp(
+    cwd: Path, env: dict, command: list[str], *, isolated: bool = False
+) -> Path:
+    """Same file idiom as cursor, at devin's project-local path: the `.local`
+    file is the conventionally gitignored scope, so the injected server never
+    dirties the member's tree. devin's own `mcp add --scope local` keeps that
+    promise through `.git/info/exclude`, which `_git_exclude` mirrors so the
+    file stays invisible to `git status` even where devin never ran."""
+    path = _write_mcp_servers_file(
+        cwd / ".devin" / "mcp_config.local.json", env, command, isolated=isolated
+    )
+    _git_exclude(path)
     return path
 
 
@@ -1858,6 +1981,8 @@ def apply_mcp(
         # The file lands in the effective cwd — the workplace, which both
         # wrappers already give the harness — so only its mode has to hold.
         plan.read_paths.append(_write_cursor_mcp(cwd, env, command, isolated=isolated))
+    elif idiom == "devin-file":
+        plan.read_paths.append(_write_devin_mcp(cwd, env, command, isolated=isolated))
     elif idiom == AGY_HOME_IDIOM:
         peers = [p for p in (env.get(ENV_MCP_HOME_PEERS) or "").split(",") if p]
         refusal = agy_home_refusal(rig, isolation, peers)

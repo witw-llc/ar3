@@ -1,0 +1,47 @@
+{
+  "description": "Devin CLI as a bare stateless engine node — the same three wakes as engine-devin, invoked with --permissions bypass. devin already runs --permission-mode dangerous in the base preset, so this definition is identical to engine-devin today; the name states the intent, and it picks up any stronger mode devin grows. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. An unrestricted node acts on untrusted inbound mail — anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "devin",
+    "run",
+    "--model=$MODEL?",
+    "--permissions",
+    "bypass",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "run",
+      "--model=$MODEL?",
+      "--permissions",
+      "bypass",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "run",
+      "--model=$MODEL?",
+      "--permissions",
+      "bypass",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

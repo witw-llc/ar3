@@ -306,8 +306,8 @@ class TestEngineFlagsPassThrough:
 
     def test_agent_adds_the_convo_step(self, r4t_home, tmp_path, preset):
         config = write_rigs(tmp_path, claude_rig())
-        assert run_rig(tmp_path, config, "--agent", "ares") == 0
-        assert "a8s convo ares" in only_call(preset)["argv"][-1]
+        assert run_rig(tmp_path, config, "--agent", "iris") == 0
+        assert "a8s convo iris" in only_call(preset)["argv"][-1]
 
     def test_continue_splices_the_presets_own_tokens(self, r4t_home, tmp_path, preset):
         config = write_rigs(tmp_path, claude_rig())

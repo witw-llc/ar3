@@ -616,7 +616,7 @@ class TestExecuteAndSpawn:
         assert capsys.readouterr().err == ""
 
 
-QUOTALESS = {"muse"}  # see engines/muse.py
+QUOTALESS = {"muse", "devin"}  # see engines/muse.py, engines/devin.py
 
 
 class TestCapabilities:

@@ -10,6 +10,33 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## Unreleased
+
+### Added
+
+- **`devin` is a supported r4t engine.** The preset composes
+  `devin --permission-mode dangerous --respect-workspace-trust false -p
+  {prompt}`: every permission mode below `dangerous` still prompts for exec
+  and file writes, which a print-mode turn cannot answer, so that mode is the
+  floor and `--permissions ask`/`auto` are refused by name; trust is disabled
+  because `-p` cannot show the workspace-trust prompt and fails outright in an
+  untrusted directory. `--model` pins a model, `r4t engine devin run
+  --continue` passes devin's own directory-scoped `--continue` (help-verified;
+  the no-prior-session path is unverified), and `r4t engine devin check`
+  parses the composed argv — devin's clap parser rejects unknown flags even
+  beside `--help`. There is no quota verb: `/usage` and `/session-stats` are
+  in-session views and the CLI exposes no headless account-balance endpoint,
+  so `r4t engine devin quota` refuses while naming the engines that do answer.
+  MCP rides a new opt-in `devin-file` idiom that merges the a8s server into
+  `.devin/mcp_config.local.json` in the member's working tree and appends the
+  file to the worktree's `.git/info/exclude` — the same mechanism `devin mcp
+  add --scope local` uses — so the injected server never shows up in `git
+  status` and cannot be committed by accident. Three a8s definitions ship:
+  `devin.json` (direct),
+  `engine-devin.json` and `engine-devin-unrestricted.json` (which composes
+  the same argv as the base, the preset already running at devin's strongest
+  mode).
+
 ## 0.1.85
 
 ### Added
@@ -1713,8 +1740,8 @@ version when the batch is ready to merge.
   - **The `Human:` and `Address:` roster fields.** A roster is members that
     take turns, so every member carries a `Rig:` and the operator has no row.
     Both fields now name themselves as retired and disable the member that
-    carries one. The Ark's own roster keeps Ares as prose about the PR gate
-    rather than a member entry.
+    carries one. The Ark's own roster keeps the resident seat as prose
+    about the PR gate rather than a member entry.
   - **The task ledger and every answer obligation.** `tasks.py`,
     `tasktrace.py`, the `r4t task` verb, the `quiet_task_seconds` knob and the
     quiet-thread sweep are gone, along with thread status, thread closure, the

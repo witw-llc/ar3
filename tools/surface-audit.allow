@@ -61,6 +61,8 @@ runbook:a8s:engine-copilot  # neither a test nor a docs page names it
 runbook:a8s:engine-copilot-unrestricted  # neither a test nor a docs page names it
 runbook:a8s:engine-cursor  # documented, but no test names it — a rename would not fail
 runbook:a8s:engine-cursor-unrestricted  # neither a test nor a docs page names it
+runbook:a8s:engine-devin  # neither a test nor a docs page names it
+runbook:a8s:engine-devin-unrestricted  # neither a test nor a docs page names it
 runbook:a8s:engine-muse  # neither a test nor a docs page names it
 runbook:a8s:engine-muse-unrestricted  # neither a test nor a docs page names it
 runbook:a8s:engine-ollama-claude  # neither a test nor a docs page names it
@@ -71,4 +73,3 @@ runbook:a8s:engine-ollama-opencode  # neither a test nor a docs page names it
 runbook:a8s:engine-ollama-opencode-unrestricted  # neither a test nor a docs page names it
 runbook:a8s:engine-opencode  # neither a test nor a docs page names it
 runbook:a8s:engine-opencode-unrestricted  # neither a test nor a docs page names it
-runbook:a8s:muse  # documented, but no test names it — a rename would not fail

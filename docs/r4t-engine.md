@@ -24,8 +24,8 @@ r4t engine <id> run [--dir DIR] [--model M] [--agent NAME] [--timeout S]
 ```
 
 Supported engines: `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`,
-`muse`, and the `ollama-claude` / `ollama-codex` / `ollama-opencode` local
-launchers —
+`muse`, `devin`, and the `ollama-claude` / `ollama-codex` / `ollama-opencode`
+local launchers —
 the ones whose headless, unattended invocation is verified (an unsupported id
 is a clear error naming this set). The `ollama-*` engines run local models
 through `ollama launch`: no cloud quota spent, but each needs `--model` (an
@@ -97,7 +97,7 @@ spending a turn.
   carries a permission map r4t must stop overriding.
 - `auto` — the engine approves tool use without prompting. The engine's deny
   rules still apply, so `auto` means "ask nothing", never "permit everything".
-  Nine of the ten presets already sit here.
+  Nine of the eleven presets already sit here.
 - `bypass` — the engine's strongest available auto-approval.
 
 | Engine | `ask` | `auto` | `bypass` |
@@ -107,6 +107,7 @@ spending a turn.
 | `cursor` | drop `--trust --force --approve-mcps` | `--trust --force --approve-mcps` | = `auto` + a note |
 | `copilot` | **error** — `-p` needs `--allow-all-tools` at all | `--allow-all-tools` | `--allow-all` |
 | `agy` | **error** — see below | **error** — see below | `--dangerously-skip-permissions --mode accept-edits` |
+| `devin` | **error** — see below | **error** — see below | `--permission-mode dangerous` |
 | `opencode` | drop `--auto` | `--auto` | = `auto` + a note |
 | `muse` | drop `--approval-mode never` + `--user-input-auto-resolve` | `--approval-mode never` | `--yolo` |
 | `ollama-*` | as the wrapped engine | as the wrapped engine | as the wrapped engine |
@@ -118,7 +119,11 @@ note (`r4t engine: opencode's strongest mode is 'auto'; 'bypass' means the same
 here`), because the argv is then the most permissive one available, which is
 what was asked for. agy's floor is `bypass`: 1.1.3+ auto-denies command tools
 in headless `--print` runs, so anything weaker is a turn that cannot run `tell`
-or `git`.
+or `git`. devin's floor is `bypass` for the same shape of reason: every mode
+below `--permission-mode dangerous` still prompts for exec and file writes,
+which a print-mode turn cannot answer. (Watch the naming collision: devin's own
+`--permission-mode auto` is its *normal* mode — auto-approving only reads —
+not this table's `auto`.)
 
 **Two things the table does not make obvious.**
 
@@ -154,12 +159,14 @@ r4t engine claude run --allowed-tools "Bash(git:*) Bash(gh:*) Read Edit" "land t
 Only `claude` and `ollama-claude` take a tool allowlist per invocation; every
 other engine errors with the reason (copilot takes `--allow-tool`/`--deny-tool`
 per tool; cursor, opencode and agy express tool policy only in config files;
-muse takes a named `--permission-profile` rather than a list).
+devin takes `permissions` maps in `.devin/config.json` and
+`~/.config/devin/config.json`, never per invocation; muse takes a named
+`--permission-profile` rather than a list).
 
 #### `--continue`
 
 Resumes the conversation the CLI already has in `--dir`, in the preset's own
-idiom — `--continue` for claude, cursor, agy and opencode,
+idiom — `--continue` for claude, cursor, agy, devin and opencode,
 `exec resume --last --include-non-interactive` for codex. `muse` refuses:
 `muse resume` is an interactive subcommand that opens the workspace session
 picker, and `muse exec` rejects `--last` outright, so there is no headless
@@ -395,7 +402,7 @@ Every engine in `RUN_ENGINES` ships its own bundled
 `apps/a8s/definitions/engine-<id>.json` (`engine-claude.json`,
 `engine-codex.json`, `engine-agy.json`, `engine-copilot.json`,
 `engine-cursor.json`, `engine-opencode.json`, `engine-muse.json`,
-`engine-ollama-claude.json`, `engine-ollama-codex.json`,
+`engine-devin.json`, `engine-ollama-claude.json`, `engine-ollama-codex.json`,
 `engine-ollama-opencode.json`), each wiring all three wake paths:
 
 ```bash
@@ -427,14 +434,15 @@ the rest carry it as `--model=$MODEL?`, an optional reference (see
 [docs/a8s.md](a8s.md)) — set, the turn pins that model, unset, the flag drops
 and the engine picks its own default.
 
-Each of the ten also ships an `engine-<id>-unrestricted` variant: the same
+Each of the eleven also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by
 engine, and each variant's own description says which — codex trades its
 sandbox for `--dangerously-bypass-approvals-and-sandbox`, claude moves to
 `--permission-mode bypassPermissions` with settings.json deny rules still in
 force, copilot moves to `--allow-all`, while cursor, opencode,
-ollama-opencode and agy already run at their strongest mode in the base
-preset, so those four variants compose the same argv as the base today:
+ollama-opencode, agy and devin already run at their strongest mode in the
+base preset, so those five variants compose the same argv as the base
+today:
 
 ```bash
 a8s add amos ~/agents/amos engine-codex-unrestricted
@@ -447,7 +455,7 @@ not ask. Only for an agent on its own machine and its own account.
 The stance lives on the definition's own invoke lines, chosen by name at `add`
 time — the base variants never grow it.
 
-A custom node beyond these ten is a copy: `a8s defs add` installs a template
+A custom node beyond these eleven is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for
 recipes.
 
@@ -503,11 +511,14 @@ snapshots that still answer when the live check cannot. A snapshot lives at
 `<r4t home>/quota/<engine>.json` — the same home as rigs and rosters,
 relocatable with `R4T_HOME`.
 
-**Not every engine answers.** `muse` is the first that cannot: Muse Code
+**Not every engine answers.** `muse` and `devin` cannot: Muse Code
 exposes no usage, limits or balance surface, and nothing on disk carries an
 entitlement — the only limit-shaped numbers in its model catalog are a model's
-context and output windows. So `apps/r4t/engines/muse.py` implements no `quota`
-function, `r4t engine list` prints `[run, check]` for it, and `r4t engine muse
+context and output windows. Devin's `/usage` and `/session-stats` report a
+session's own consumption, but there is no account-quota endpoint the CLI can
+answer without spending a turn. So `apps/r4t/engines/muse.py` and
+`apps/r4t/engines/devin.py` implement no `quota`
+function, `r4t engine list` prints `[run, check]` for each, and `r4t engine muse
 quota` refuses while naming the engines that do answer. A verb the registry
 advertises and can never satisfy would be worse than the refusal. A snapshot answer
 carries `"origin": "snapshot"` and `age_seconds` — its age as a number, like

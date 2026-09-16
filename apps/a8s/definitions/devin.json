@@ -1,0 +1,9 @@
+{
+  "description": "Devin CLI default — `devin -p` with --permission-mode dangerous (every mode below it still prompts for exec and writes, which a headless turn cannot answer) and --respect-workspace-trust false so -p does not fail in an untrusted directory. Fresh session every wake.",
+  "invoke": [
+    "devin",
+    "--permission-mode", "dangerous",
+    "--respect-workspace-trust", "false",
+    "-p", "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ]
+}

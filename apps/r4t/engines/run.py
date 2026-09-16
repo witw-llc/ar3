@@ -126,7 +126,7 @@ __all__ = [
 ]
 
 RUN_ENGINES = frozenset({
-    "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse",
+    "claude", "codex", "agy", "copilot", "cursor", "opencode", "muse", "devin",
     "ollama-claude", "ollama-codex", "ollama-opencode",
 })
 
