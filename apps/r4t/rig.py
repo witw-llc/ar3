@@ -2254,7 +2254,14 @@ def agy_model_names(timeout: float = AGY_MODELS_TIMEOUT_SECONDS) -> list[str]:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
         raise RigError(f"`agy models` failed (exit {proc.returncode}): {detail}")
-    names = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    # agy 1.2 lists each model as "<slug>\t<display name>"; 1.1 printed the
+    # display name alone. --model accepts either field but never the raw
+    # line, so only the display name goes forward.
+    names = [
+        name
+        for line in proc.stdout.splitlines()
+        if (name := line.rsplit("\t", 1)[-1].strip())
+    ]
     if not names:
         raise RigError("`agy models` returned no models to match against")
     return names

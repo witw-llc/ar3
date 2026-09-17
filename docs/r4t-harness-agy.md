@@ -132,8 +132,10 @@ agy shares the owner's real subscription across **two quotas** — a larger
 Gemini quota and a smaller Anthropic (Claude models) quota. The model list is
 **live**: `agy models` display names drift across releases, so r4t stores the
 friendly `--model` string and re-resolves it against `agy models` before every
-turn (`resolve_agy_model` in `rig.py`). Prefer Gemini models for routine work;
-reserve Claude models for turns that need them.
+turn (`resolve_agy_model` in `rig.py`). `agy models` prints each model as
+`slug<TAB>display name`; the match runs against the display-name column, and
+a slug like `gemini-3.1-pro-low` resolves through token matching. Prefer
+Gemini models for routine work; reserve Claude models for turns that need them.
 
 ## Incident case study (2026-07-14, org d5n, milestone M4)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1104,6 +1105,47 @@ class TestFuzzyMatchModel:
 
     def test_resolve_agy_model_uses_injected_names(self):
         assert resolve_agy_model("opus", names=AGY_MODEL_LIST) == "Claude Opus 4.6 (Thinking)"
+
+    def test_slug_query_resolves_to_display_name(self):
+        # `agy models` column one is a slug; a slug pasted as --model still
+        # resolves through the display-name tokens (#286).
+        assert fuzzy_match_model("gemini-3.1-pro-low", AGY_MODEL_LIST) == "Gemini 3.1 Pro (Low)"
+
+
+class TestAgyModelNames:
+    def _fake_run(self, stdout, returncode=0, stderr=""):
+        return lambda *a, **k: subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    def test_strips_the_slug_column(self, monkeypatch):
+        # agy 1.2 lists "<slug>\t<display name>"; splicing the raw line into
+        # --model is what #286 broke on.
+        monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run(
+            "gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n"
+            "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+        ))
+        assert rig_module.agy_model_names() == [
+            "Gemini 3.1 Pro (Low)",
+            "Claude Sonnet 4.6 (Thinking)",
+        ]
+
+    def test_single_column_output_still_parses(self, monkeypatch):
+        monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run(
+            "Gemini 3.1 Pro (Low)\n\nClaude Sonnet 4.6 (Thinking)\n"
+        ))
+        assert rig_module.agy_model_names() == [
+            "Gemini 3.1 Pro (Low)",
+            "Claude Sonnet 4.6 (Thinking)",
+        ]
+
+    def test_empty_output_errors(self, monkeypatch):
+        monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run("\n \n"))
+        with pytest.raises(RigError, match="no models"):
+            rig_module.agy_model_names()
+
+    def test_nonzero_exit_errors(self, monkeypatch):
+        monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run("", 1, "boom"))
+        with pytest.raises(RigError, match="exit 1"):
+            rig_module.agy_model_names()
 
 
 class TestRemoveRig:

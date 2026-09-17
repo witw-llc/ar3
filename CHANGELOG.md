@@ -37,6 +37,14 @@ version when the batch is ready to merge.
   the same argv as the base, the preset already running at devin's strongest
   mode).
 
+### Fixed
+
+- **r4t resolves `agy --model` again on agy 1.2** (#286). `agy models` now
+  prints each model as `slug<TAB>display name` where 1.1 printed the display
+  name alone; the whole line was being fuzzy-matched and spliced verbatim
+  into `--model`, which agy rejects. Resolution strips the slug column, so
+  slugs, friendly names, and exact display names all select again.
+
 ## 0.1.85
 
 ### Added
