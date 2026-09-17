@@ -406,6 +406,8 @@ CHECKS: tuple[Check, ...] = (
     Check("copilot", HARNESS, _version_probe("copilot"), "install the GitHub Copilot CLI"),
     Check("opencode", HARNESS, _version_probe("opencode"), "install OpenCode"),
     Check("agy", HARNESS, _version_probe("agy"), "install Antigravity"),
+    Check("muse", HARNESS, _version_probe("muse"), "install Meta Muse"),
+    Check("devin", HARNESS, _version_probe("devin"), "install the Devin CLI"),
     Check("ollama", HARNESS, _version_probe("ollama"), "install ollama"),
     Check("ollama serve", SERVICES, _ollama_probe, "ollama serve, then ollama pull <model>"),
     Check("docker", SERVICES, _docker_probe, "start Docker Desktop or the docker daemon"),

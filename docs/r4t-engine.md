@@ -434,6 +434,11 @@ the rest carry it as `--model=$MODEL?`, an optional reference (see
 [docs/a8s.md](a8s.md)) — set, the turn pins that model, unset, the flag drops
 and the engine picks its own default.
 
+Every one also carries `--timeout=$TIMEOUT?` on all three wakes:
+`a8s vars my-bare-node set TIMEOUT 1800` raises the turn timeout
+for that node, unset drops the flag and the run keeps the engine default
+of 900s.
+
 Each of the eleven also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by
 engine, and each variant's own description says which — codex trades its
