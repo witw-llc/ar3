@@ -14,6 +14,58 @@ version when the batch is ready to merge.
 
 ### Added
 
+- **`ar3 update --engine NAME ...` and `--all-engines` update engine
+  binaries — the whole agent-machine refresh in one line.** With either
+  flag, running a8s nodes are stopped first (`a8s stop` waits for the
+  current wake, so nothing is mid-turn while its binary is replaced), the
+  selected engines update, the suite update runs, and exactly the stopped
+  nodes start again — even when an update fails. Each engine updates by
+  its own known method: a self-update verb (`claude update`, `agent
+  update`, `agy update`, `devin update`, `opencode upgrade`), its package
+  manager when the binary resolves to one (`brew upgrade` for Cellar,
+  `brew upgrade --cask` for Caskroom, `npm install -g` for globals —
+  through `sudo` when the global root is not writable), or a forced check
+  (muse's launcher updates itself under `MUSE_SYNC_UPDATE=1`).
+  Package-managed installs go through the manager, never the self-verb, so
+  an updater cannot lay a second copy beside the managed one. Command
+  names are resolved before they run, so `.cmd` shims and version-manager
+  installs work on Windows, WSL, Ubuntu and macOS alike. Names are the
+  binaries `ar3 doctor` probes; engine ids like `cursor` or `ollama-codex`
+  resolve to their binary. An engine with no known method — or an
+  explicitly named engine that is not installed — fails the run after the
+  rest have been tried.
+
+## 0.1.89
+
+### Added
+
+- **Per-node engine-run timeout via the `TIMEOUT` a8s variable** (#288).
+  All 22 `engine-*` definitions carry `--timeout=$TIMEOUT?` on the invoke,
+  batch, and idle wakes; unset, the token drops and the engine's default
+  applies, matching the optional-`$VAR?` pattern `MODEL` already used.
+  `a8s vars <node> set TIMEOUT 1800` lengthens a node's turn budget with no
+  custom definition.
+
+### Fixed
+
+- **`ar3 doctor` probes `devin` and `muse`** (#288). `RUN_ENGINES` gained
+  both in 0.1.87/0.1.88 but the doctor `CHECKS` tuple is a hand-maintained
+  list and never followed, so installed copies reported nothing.
+
+## 0.1.88
+
+### Fixed
+
+- **r4t resolves `agy --model` again on agy 1.2** (#286). `agy models` now
+  prints each model as `slug<TAB>display name` where 1.1 printed the display
+  name alone; the whole line was being fuzzy-matched and spliced verbatim
+  into `--model`, which agy rejects. Resolution strips the slug column, so
+  slugs, friendly names, and exact display names all select again.
+
+## 0.1.87
+
+### Added
+
 - **`devin` is a supported r4t engine.** The preset composes
   `devin --permission-mode dangerous --respect-workspace-trust false -p
   {prompt}`: every permission mode below `dangerous` still prompts for exec
@@ -37,13 +89,12 @@ version when the batch is ready to merge.
   the same argv as the base, the preset already running at devin's strongest
   mode).
 
-### Fixed
+## 0.1.86
 
-- **r4t resolves `agy --model` again on agy 1.2** (#286). `agy models` now
-  prints each model as `slug<TAB>display name` where 1.1 printed the display
-  name alone; the whole line was being fuzzy-matched and spliced verbatim
-  into `--model`, which agy rejects. Resolution strips the slug column, so
-  slugs, friendly names, and exact display names all select again.
+### Added
+
+- **`tell` fans out to comma- or semicolon-separated recipients** (#284) —
+  `tell a,b` or `tell a;b` delivers one message to each named agent.
 
 ## 0.1.85
 

@@ -611,19 +611,437 @@ def update_refusal(root: Path) -> Optional[str]:
     return None
 
 
-def cmd_update(_args: argparse.Namespace) -> int:
-    script = REPO_ROOT / UPDATE_SCRIPT
-    if not script.is_file():
-        print(
-            f"ar3 update: no {UPDATE_SCRIPT} beside this copy ({REPO_ROOT}) — "
-            f"reinstall from github.com/witw-llc/ar3 to get one",
-            file=sys.stderr,
+# ---------- engine updates ----------
+
+# The binary each HARNESS check probes is also the engine's update target.
+# Self-update argv (plus env overlay) for the CLIs that bring themselves
+# current; engines absent here — codex, copilot, ollama — have no such verb
+# and only update through their package manager.
+ENGINE_SELF_UPDATE: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
+    "claude": (("claude", "update"), {}),
+    "agent": (("agent", "update"), {}),
+    "agy": (("agy", "update"), {}),
+    # muse has no update verb; its launcher updates itself on any invocation
+    # when MUSE_SYNC_UPDATE=1, otherwise on a once-an-hour timer.
+    "muse": (("muse", "--version"), {"MUSE_SYNC_UPDATE": "1"}),
+    "devin": (("devin", "update"), {}),
+    "opencode": (("opencode", "upgrade"), {}),
+}
+
+# --engine spellings that name an engine rather than its binary.
+ENGINE_ALIASES = {"cursor": "agent"}
+
+
+def engine_binaries() -> list[str]:
+    """The updateable engine set — the same names `ar3 doctor` probes."""
+    return [c.name for c in CHECKS if c.group == HARNESS]
+
+
+def _npm_bin_owner(node_modules: Path, stem: str) -> str | None:
+    """The package under `node_modules` whose bin map publishes `stem` —
+    how a wrapper script like `<prefix>/codex.cmd` names the package it
+    execs, without following the script's contents."""
+    candidates = sorted(node_modules.glob("*/package.json"))
+    candidates += sorted(node_modules.glob("@*/*/package.json"))
+    for pkg_json in candidates:
+        try:
+            data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        binfield = data.get("bin")
+        if isinstance(binfield, dict):
+            names = binfield
+        elif isinstance(binfield, str):
+            names = [str(data.get("name", "")).rsplit("/", 1)[-1]]
+        else:
+            continue
+        if stem in names:
+            name = data.get("name")
+            if isinstance(name, str):
+                return name
+    return None
+
+
+def _npm_node_modules(binary: Path) -> Path | None:
+    """The global `node_modules` a resolved binary belongs to — reached
+    through the path itself for a real package file, or beside the wrapper
+    scripts npm drops at the prefix (a `foo.cmd` on Windows has no symlink
+    chain to follow)."""
+    parts = binary.parts
+    if "node_modules" in parts:
+        return Path(*parts[: parts.index("node_modules") + 1])
+    for candidate in (
+        binary.parent / "node_modules",
+        binary.parent.parent / "node_modules",
+        binary.parent.parent / "lib" / "node_modules",
+    ):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def install_method(binary: str) -> tuple[str | None, str | None, Path | None]:
+    """(manager, package, node_modules) for a resolved binary path, or
+    (None, None, None) when the path answers none — a brew Cellar or
+    Caskroom install, or an npm global, each identified by where the
+    binary lands. The third element is the npm root for globals and None
+    otherwise."""
+    resolved = Path(binary).resolve()
+    parts = resolved.parts
+    for marker, manager in (
+        ("Cellar", "brew"),
+        ("Caskroom", "brew-cask"),
+    ):
+        if marker not in parts:
+            continue
+        i = parts.index(marker)
+        if i + 1 >= len(parts):
+            continue
+        return manager, parts[i + 1], None
+    node_modules = _npm_node_modules(resolved)
+    if node_modules is None:
+        return None, None, None
+    if "node_modules" in parts:
+        i = parts.index("node_modules")
+        package = parts[i + 1] if i + 1 < len(parts) else None
+        if package is not None and package.startswith("@"):
+            package = (
+                f"{package}/{parts[i + 2]}" if i + 2 < len(parts) else None
+            )
+        if package == ".bin":  # the shim directory, not a package
+            package = _npm_bin_owner(node_modules, resolved.stem)
+    else:
+        package = _npm_bin_owner(node_modules, resolved.stem)
+    if package is None:
+        return None, None, None
+    return "npm", package, node_modules
+
+
+def engine_update(name: str) -> tuple[list[str] | None, dict[str, str], str | None]:
+    """(argv, env overlay, refusal) — how to bring engine `name` current.
+
+    A package-managed install is updated by its manager, not the engine's own
+    verb: a self-updater would lay a second copy beside the managed one.
+    Every command name is resolved through `which` before it is returned —
+    Windows' CreateProcess only appends `.exe` to a bare name, so an
+    unresolved `npm` or `agent` would fail on the `.cmd` shims npm and the
+    installers ship there. npm installs whose global root the caller cannot
+    write go through sudo — the command asks for the password itself, and a
+    platform without sudo gets a refusal instead. brew is never run under
+    sudo; it refuses, so a root-owned Cellar fails with brew's own error."""
+    binary = shutil.which(name)
+    if binary is None:
+        return None, {}, f"{name} is not on PATH"
+    manager, package, node_modules = install_method(binary)
+    if manager in ("brew", "brew-cask"):
+        tool = shutil.which("brew")
+        if tool is None:
+            return None, {}, (
+                f"{name} is a Homebrew install ({package}) but brew is not "
+                f"on PATH — update it the way it was installed"
+            )
+        argv = [tool, "upgrade", package]
+        if manager == "brew-cask":
+            argv.insert(2, "--cask")
+        return argv, {}, None
+    if manager == "npm":
+        tool = shutil.which("npm")
+        if tool is None:
+            return None, {}, (
+                f"{name} is an npm global ({package}) but npm is not on "
+                f"PATH — update it the way it was installed"
+            )
+        # `--prefix` pins the install this binary came from: the first npm
+        # on PATH can belong to a different global root (a Node version
+        # manager's), which would install a second copy and leave the
+        # detected one stale. npm puts globals under <prefix>/lib on POSIX
+        # and directly at <prefix> on Windows.
+        prefix = (
+            node_modules.parent.parent
+            if node_modules.parent.name == "lib"
+            else node_modules.parent
         )
-        return 1
-    refusal = update_refusal(REPO_ROOT)
-    if refusal:
-        print(f"ar3 update: {refusal}", file=sys.stderr)
-        return 1
+        argv = [
+            tool,
+            "install",
+            "-g",
+            "--prefix",
+            str(prefix),
+            f"{package}@latest",
+        ]
+        if not os.access(node_modules, os.W_OK):
+            sudo = shutil.which("sudo")
+            if sudo is None:
+                return None, {}, (
+                    f"{name} is installed under {node_modules}, which you "
+                    f"cannot write — update it as that directory's owner"
+                )
+            argv = [sudo, *argv]
+        return argv, {}, None
+    self_update = ENGINE_SELF_UPDATE.get(name)
+    if self_update is not None:
+        argv, env = self_update
+        argv = [shutil.which(argv[0]) or argv[0], *argv[1:]]
+        return argv, dict(env), None
+    return None, {}, (
+        f"{name} has no known update method — update it the way it was installed"
+    )
+
+
+def _engine_names(args: argparse.Namespace) -> tuple[list[str] | None, int]:
+    """The binary names the flags select, or (None, exit code) on a usage
+    error — resolved before any node is stopped so a bad flag cannot cycle
+    the fleet."""
+    if args.all_engines:
+        names = [n for n in engine_binaries() if shutil.which(n)]
+        if not names:
+            print("ar3 update: no engines found on PATH", file=sys.stderr)
+            return None, 1
+        return names, 0
+    names = []
+    for raw in args.engines:
+        name = ENGINE_ALIASES.get(raw.strip().lower(), raw.strip().lower())
+        if name.startswith("ollama-"):
+            name = "ollama"
+        if name not in engine_binaries():
+            print(
+                f"ar3 update: unknown engine {raw!r} "
+                f"(engines: {', '.join(engine_binaries())})",
+                file=sys.stderr,
+            )
+            return None, 2
+        if name not in names:
+            names.append(name)
+    return names, 0
+
+
+def _run_engine_updates(names: list[str]) -> int:
+    failures = 0
+    for name in names:
+        argv, env, refusal = engine_update(name)
+        if argv is None:
+            print(f"ar3 update: {name}: {refusal}", file=sys.stderr)
+            failures += 1
+            continue
+        print(f"ar3 update: {name}: {' '.join(argv)}")
+        try:
+            done = subprocess.run(argv, env={**os.environ, **env})
+        except OSError as e:
+            print(f"ar3 update: {name}: cannot run {argv[0]}: {e}", file=sys.stderr)
+            failures += 1
+            continue
+        if done.returncode != 0:
+            print(
+                f"ar3 update: {name}: update failed (exit {done.returncode})",
+                file=sys.stderr,
+            )
+            failures += 1
+    return 1 if failures else 0
+
+
+def _a8s() -> Optional[str]:
+    """The a8s shim — on PATH (as install.sh leaves it) or beside this copy.
+    None means nodes cannot be stopped or started from here."""
+    found = shutil.which("a8s")
+    if found:
+        return found
+    shim = REPO_ROOT / "a8s"
+    return str(shim) if shim.is_file() else None
+
+
+def _running_groups(a8s: str) -> dict[int, list[str]] | None:
+    """Handler PID → node names it serves, from `a8s ps` — or None when ps
+    cannot answer (a8s missing, errored, or slow). None is not "nothing
+    running": a caller that would restart the difference must not guess,
+    or it could start a second handler beside a live one. The PID grouping
+    matters because one handler serves a whole alias's members under a
+    single remote session identity."""
+    try:
+        done = subprocess.run(
+            [a8s, "ps"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    groups: dict[int, list[str]] = {}
+    for line in (done.stdout or "").splitlines():
+        cols = line.split()
+        if len(cols) < 3 or not cols[1].isdigit():
+            continue
+        groups.setdefault(int(cols[1]), []).append(cols[0])
+    return groups
+
+
+def _running_nodes(a8s: str) -> list[str] | None:
+    groups = _running_groups(a8s)
+    if groups is None:
+        return None
+    return [n for names in groups.values() for n in names]
+
+
+def _a8s_names() -> tuple[set[str], dict[str, list[str]]]:
+    """(agent names, alias→members) from a8s's own registry file — the
+    data `a8s start <alias>` resolves against. Missing or malformed reads
+    as empty: no alias matches, and groups fall back to per-node starts."""
+    try:
+        data = json.loads((a8s_home() / "a8s.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set(), {}
+    if not isinstance(data, dict):
+        return set(), {}
+    agents = data.get("agents")
+    aliases = data.get("aliases")
+    return (
+        set(agents) if isinstance(agents, dict) else set(),
+        aliases if isinstance(aliases, dict) else {},
+    )
+
+
+def _expand_alias(
+    agents: set[str], aliases: dict[str, list[str]], name: str
+) -> list[str] | None:
+    """Resolved member names of alias `name`, or None when a8s itself
+    would refuse it (cycle, unknown member). Mirrors `resolve_name` in
+    apps/a8s/registry.py: a diamond is not a cycle, and agent names dedup
+    by canonical case."""
+    agent_lookup = {a.lower(): a for a in agents}
+    alias_lookup = {a.lower(): a for a in aliases}
+    out: list[str] = []
+    path: set[str] = set()
+    seen: set[str] = set()
+
+    def walk(member: object) -> None:
+        key = str(member).lower()
+        if key in agent_lookup:
+            resolved = agent_lookup[key]
+            if resolved not in out:
+                out.append(resolved)
+            return
+        if key in alias_lookup:
+            if key in path:
+                raise ValueError(f"alias cycle at {member!r}")
+            if key in seen:
+                return
+            members = aliases[alias_lookup[key]]
+            if not isinstance(members, list):
+                raise KeyError(member)
+            path.add(key)
+            try:
+                for m in members:
+                    walk(m)
+            finally:
+                path.discard(key)
+            seen.add(key)
+            return
+        raise KeyError(member)
+
+    try:
+        walk(name)
+    except (KeyError, ValueError):
+        return None
+    return out
+
+
+def _restart_targets(
+    groups: dict[int, list[str]],
+    stopped: list[str],
+    agents: set[str],
+    aliases: dict[str, list[str]],
+) -> list[str]:
+    """One `a8s start` target per handler that went down, mirroring
+    `_update_restart_targets` in apps/a8s/commands.py: a group that
+    stopped together restarts through the alias resolving to exactly its
+    members — one process, the same `a,b` node tag, and the remote
+    session identity it feeds — otherwise each member starts alone.
+    Only nodes confirmed down become targets; a node still running must
+    not get a second handler."""
+    down = {n.lower() for n in stopped}
+    targets: list[str] = []
+    for _pid, names in sorted(groups.items(), key=lambda kv: kv[1][0].lower()):
+        group_down = [n for n in names if n.lower() in down]
+        if not group_down:
+            continue
+        name_set = {n.lower() for n in names}
+        hit = None
+        if len(group_down) == len(names):
+            for alias in sorted(aliases, key=str.lower):
+                members = _expand_alias(agents, aliases, alias)
+                if members is not None and {
+                    m.lower() for m in members
+                } == name_set:
+                    hit = alias
+                    break
+        if hit is not None:
+            targets.append(hit)
+        else:
+            targets.extend(group_down)
+    return targets
+
+
+def _stop_nodes(a8s: str, names: list[str], stopped: list[str]) -> None:
+    """`a8s stop` each running node — it waits for the current wake to
+    detach, so nothing is mid-turn when its engine binary is replaced.
+    Every originally-running name confirmed down is appended to `stopped`
+    as it happens: one handler can serve several nodes, so a single stop
+    can take siblings with it, and a loop interrupted mid-stop still
+    leaves `stopped` holding what the restart must bring back. A node
+    that will not stop is reported and the update continues rather than
+    held hostage."""
+    live = list(names)
+    for name in names:
+        if name not in live:
+            continue
+        print(f"ar3 update: stopping node {name}")
+        try:
+            done = subprocess.run([a8s, "stop", name])
+        except OSError as e:
+            print(f"ar3 update: {name}: cannot stop: {e}", file=sys.stderr)
+            continue
+        if done.returncode != 0:
+            print(
+                f"ar3 update: {name}: stop exited {done.returncode} — "
+                f"its engine may be mid-turn while it is replaced",
+                file=sys.stderr,
+            )
+            continue
+        refreshed = _running_nodes(a8s)
+        down = (
+            [name]
+            if refreshed is None
+            else [n for n in names if n not in refreshed]
+        )
+        stopped.extend(n for n in down if n not in stopped)
+        if refreshed is not None:
+            live = refreshed
+
+
+def _start_nodes(a8s: str, names: list[str]) -> int:
+    """Bring back exactly the nodes `_stop_nodes` recorded — ones that
+    were already down stay down. A failed start is reported and counted
+    so the update's exit status reflects a node left offline; the rest
+    still try."""
+    failures = 0
+    for name in names:
+        print(f"ar3 update: starting node {name}")
+        try:
+            done = subprocess.run([a8s, "start", name])
+        except OSError as e:
+            print(f"ar3 update: {name}: cannot start: {e}", file=sys.stderr)
+            failures += 1
+            continue
+        if done.returncode != 0:
+            print(
+                f"ar3 update: {name}: start exited {done.returncode} — "
+                f"start it yourself with `a8s start {name}`",
+                file=sys.stderr,
+            )
+            failures += 1
+    return 1 if failures else 0
+
+
+def _update_suite(script: Path) -> int:
+    """get.sh against this copy — the pre-flag behavior of `ar3 update`."""
     before = _suite_version()
     # AR3_DIR is passed rather than left to default: `get.sh` alone would
     # update whatever lives at ~/.ar3, which is not necessarily the copy the
@@ -643,6 +1061,75 @@ def cmd_update(_args: argparse.Namespace) -> int:
     else:
         print(f"ar3 update: {before} -> {after}")
     return 0
+
+
+def _update_everything(args: argparse.Namespace, script: Path) -> int:
+    """The agent-machine pipeline: stop running nodes so no handler is
+    mid-turn on a binary about to be replaced, update the engines, update
+    the suite, then start exactly the nodes that were stopped. Nodes come
+    back in a `finally` — a failed update must not leave a machine dark."""
+    names, err = _engine_names(args)
+    if names is None:
+        return err
+    stopped: list[str] = []
+    running: list[str] = []
+    groups: dict[int, list[str]] = {}
+    a8s = _a8s()
+    restart_rc = 0
+    try:
+        if a8s is None:
+            print(
+                "ar3 update: a8s not found — running nodes cannot be stopped "
+                "before their engines are replaced; continuing anyway",
+                file=sys.stderr,
+            )
+        else:
+            groups = _running_groups(a8s) or {}
+            running = [n for names in groups.values() for n in names]
+            _stop_nodes(a8s, running, stopped)
+        engine_rc = _run_engine_updates(names)
+        suite_rc = _update_suite(script)
+    finally:
+        if a8s is not None:
+            # An interrupted stop may have taken a node down without a
+            # recorded entry — reconcile against what is still up, but only
+            # when ps answers: guessing here could start a second handler
+            # beside a live one.
+            live = _running_nodes(a8s)
+            if live is not None:
+                stopped.extend(
+                    n
+                    for n in running
+                    if n not in stopped and n not in live
+                )
+            agents, aliases = _a8s_names()
+            targets = _restart_targets(groups, stopped, agents, aliases)
+            restart_rc = _start_nodes(a8s, targets)
+    return suite_rc or engine_rc or restart_rc
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    if args.all_engines and args.engines:
+        print(
+            "ar3 update: --engine and --all-engines contradict — pick one",
+            file=sys.stderr,
+        )
+        return 2
+    script = REPO_ROOT / UPDATE_SCRIPT
+    if not script.is_file():
+        print(
+            f"ar3 update: no {UPDATE_SCRIPT} beside this copy ({REPO_ROOT}) — "
+            f"reinstall from github.com/witw-llc/ar3 to get one",
+            file=sys.stderr,
+        )
+        return 1
+    refusal = update_refusal(REPO_ROOT)
+    if refusal:
+        print(f"ar3 update: {refusal}", file=sys.stderr)
+        return 1
+    if args.all_engines or args.engines:
+        return _update_everything(args, script)
+    return _update_suite(script)
 
 
 # ---------- cli ----------
@@ -678,15 +1165,36 @@ def main(argv: list[str] | None = None) -> int:
     deps.set_defaults(func=cmd_deps)
     update = sub.add_parser(
         "update",
-        help="Update this AR3 install in place",
+        help="Update this AR3 install in place, or the engine binaries",
         description=(
             "ar3 update runs the suite's own installer against the copy you "
             "invoked, which pulls it forward and restarts running a8s nodes so "
             "handlers re-exec the new code. AR3_VERSION pins a release and "
             "AR3_CHANNEL selects stable or beta, exactly as at install time. A "
             "working checkout — dirty, or on a branch other than the default — "
-            "is refused rather than pulled."
+            "is refused rather than pulled. With --engine or --all-engines it "
+            "also updates engine binaries: running a8s nodes are stopped "
+            "first so nothing is mid-turn while a binary is replaced, the "
+            "engines update, the suite update runs, and the stopped nodes "
+            "start again — the whole agent-machine refresh in one line."
         ),
+    )
+    update.add_argument(
+        "--engine",
+        nargs="+",
+        metavar="NAME",
+        dest="engines",
+        help="Also update the named engine(s), each by its own method — a "
+        "self-update verb, brew, or npm (which may prompt for sudo). Known: "
+        f"{', '.join(engine_binaries())}; engine ids like cursor or "
+        "ollama-codex are accepted too.",
+    )
+    update.add_argument(
+        "--all-engines",
+        action="store_true",
+        dest="all_engines",
+        help="Also update every engine binary found on PATH — the set "
+        "`ar3 doctor` probes — each by its own method.",
     )
     update.set_defaults(func=cmd_update)
     args = parser.parse_args(argv)

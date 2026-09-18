@@ -120,6 +120,33 @@ release and `AR3_CHANNEL` picks stable or beta, exactly as at install time.
 
 It reports the version it moved from and to, or says nothing moved.
 
+**`--engine NAME [NAME ...]` and `--all-engines` update engine binaries as
+part of the same run** — the agent-machine refresh in one line. With either
+flag the sequence is: every running a8s node is stopped (`a8s stop` waits
+for the current wake, so nothing is mid-turn while its binary is
+replaced), the selected engines update, the suite update runs, and exactly
+the nodes that were stopped start again. Nodes come back even when an
+update fails. The two flags contradict.
+
+Each engine is updated by its own known method — a self-update verb
+(`claude update`, `agent update`, `agy update`, `devin update`,
+`opencode upgrade`), its package manager when the binary resolves to one
+(`brew upgrade` for Cellar installs, `brew upgrade --cask` for Caskroom,
+`npm install -g <pkg>@latest` for npm globals, with `sudo` when the global
+root is not writable), or a forced check (muse's launcher updates itself on
+any invocation under `MUSE_SYNC_UPDATE=1`). Package-managed installs are
+updated by the manager, never the engine's own verb — a self-updater would
+lay a second copy beside the managed one. Names are the binaries `ar3
+doctor` probes (`claude`, `agent`, `codex`, `copilot`, `opencode`, `agy`,
+`muse`, `devin`, `ollama`); engine ids like `cursor` or `ollama-codex` are
+accepted and resolve to their binary. Command names are resolved to their
+paths before they run, so npm `.cmd` shims and version-manager installs
+work on Windows, WSL, Ubuntu and macOS alike; a platform without `sudo`,
+or a brew/npm-managed binary whose manager is not on PATH, gets a named
+refusal rather than a failed command. An engine with no known method, or
+an explicitly named engine that is not installed, fails the run after the
+rest have been tried.
+
 **It refuses on a working checkout.** `get.sh` reaches the tree with
 `git pull --ff-only`, and on a pinned version `git checkout -f`. Run against a
 clone somebody is developing in, that ranges from a confusing failure to
