@@ -166,6 +166,8 @@ RESERVED_CONFIG_KEYS = frozenset({
 # allowed to gate where a warm window is not.
 HARNESS_PRESETS: dict[str, dict] = {
     "claude": {
+        "effort_argv": ["--effort", "{effort}"],
+        "effort_values": ["low", "medium", "high", "xhigh", "max"],
         "text_tier": "big",
         "description": "Claude Code — matches apps/a8s/definitions/claude.json",
         "a8s_definition": "claude.json",
@@ -197,6 +199,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "codex": {
+        "effort_argv": ["-c", "model_reasoning_effort={effort}"],
+        "effort_anchor": "exec",
         # Continuation is the `resume --last` SUBCOMMAND, so it cannot be
         # appended to a finished argv — it goes immediately after `exec`, the
         # same anchor the model flags use, leaving
@@ -253,6 +257,18 @@ HARNESS_PRESETS: dict[str, dict] = {
         "no_prior_conversation": r"no previous chats found",
     },
     "muse": {
+        "effort_argv": ["--reasoning-effort", "{effort}"],
+        "effort_values": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ],
+        "effort_anchor": "exec",
         # No `continue_argv`. `muse resume` is a top-level subcommand that
         # opens the workspace session picker, and `muse exec` rejects it
         # outright ("unknown option --last", verified against Muse Code
@@ -281,6 +297,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         "model_anchor": "exec",
     },
     "opencode": {
+        "effort_argv": ["--variant", "{effort}"],
+        "effort_anchor": "run",
         "text_tier": "moderate",
         "description": (
             "OpenCode 1.17+ — `run` (not `-i`) with --auto for headless repo tools"
@@ -320,6 +338,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "ollama-opencode": {
+        "effort_argv": ["--variant", "{effort}"],
+        "effort_anchor": "run",
         "text_tier": "small",
         "description": (
             "OpenCode via `ollama launch` — local models, no cloud quota; "
@@ -347,6 +367,9 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "ollama-claude": {
+        "effort_argv": ["--effort", "{effort}"],
+        "effort_values": ["low", "medium", "high", "xhigh", "max"],
+        "effort_anchor": "--",
         "text_tier": "small",
         "description": (
             "Claude Code via `ollama launch` — local models, no cloud quota; "
@@ -376,6 +399,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "ollama-codex": {
+        "effort_argv": ["-c", "model_reasoning_effort={effort}"],
+        "effort_anchor": "exec",
         "text_tier": "small",
         "description": (
             "Codex via `ollama launch` — local models, no cloud quota; "
@@ -400,6 +425,9 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "ollama-copilot": {
+        "effort_argv": ["--reasoning-effort", "{effort}"],
+        "effort_values": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        "effort_anchor": "--",
         "text_tier": "small",
         "description": (
             "Copilot CLI via `ollama launch` — local models, no cloud quota; "
@@ -427,6 +455,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         ],
     },
     "agy": {
+        "effort_argv": ["--effort", "{effort}"],
+        "effort_values": ["low", "medium", "high"],
         "text_tier": "big",
         "description": (
             "Antigravity 1.1+ — --print for headless turns; --mode accept-edits "
@@ -454,6 +484,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_argv": ["--continue"],
     },
     "copilot": {
+        "effort_argv": ["--reasoning-effort", "{effort}"],
+        "effort_values": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         # No continue_argv, deliberately, and it is not an omission — see
         # `session_argv` below. `copilot --continue` resumes the machine's most
         # recent session whatever the directory, and on 2026-09-02 it did worse
@@ -1185,6 +1217,7 @@ class Rig:
     prompt_body_max: int = DEFAULT_PROMPT_BODY_MAX
     model: str | None = None
     model_resolver: str | None = None
+    effort: str | None = None
     preset: str | None = None
     echo: bool = False
     echo_max_chars: int = DEFAULT_ECHO_MAX_CHARS
@@ -1314,6 +1347,7 @@ class Rig:
         # turn cannot raise here.
         chosen, _ = apply_permissions(chosen, self.preset, self.permissions)
         chosen = apply_allowed_tools(chosen, self.preset, self.allowed_tools)
+        chosen = apply_effort(chosen, self.preset, self.effort)
         # The pin, before {workdir} is substituted, because the resume tokens
         # carry a `-C {workdir}` of their own. A member that has one is either
         # founding its session this turn or coming back to it; nothing else.
@@ -1368,10 +1402,11 @@ class Rig:
         pool = self.pool()
         if not pool:
             return None
-        argv = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in pool[0]]
+        argv = apply_effort(pool[0], self.preset, self.effort)
+        argv = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in argv]
         if self.model_resolver == "agy-live":
             try:
-                resolved = resolve_agy_model(self.model or "")
+                resolved = resolve_agy_model(self.model or "", effort=self.effort)
             except RigError:
                 return None
             argv = [resolved if a == "{model}" else a for a in argv]
@@ -2140,8 +2175,86 @@ def format_preset_invoke(preset: str) -> str:
     return " ".join(build_preset_invoke(preset))
 
 
-def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
-    """Materialize a preset argv for a given --model.
+def apply_effort(
+    argv: list[str], preset: str | None, effort: str | None, *, where: str = ""
+) -> list[str]:
+    if effort is None:
+        return list(argv)
+    entry = HARNESS_PRESETS.get(preset or "", {})
+    tokens = entry.get("effort_argv")
+    if not tokens:
+        hint = (
+            "; use --model with [effort=...] for Cursor" if preset == "cursor" else ""
+        )
+        raise RigError(f"{where}engine {preset!r} does not support --effort{hint}")
+    values = entry.get("effort_values")
+    if (
+        not isinstance(effort, str)
+        or not effort.strip()
+        or (values and effort not in values)
+    ):
+        accepted = (
+            ", ".join(values) if values else "a non-empty engine/provider effort value"
+        )
+        raise RigError(
+            f"{where}engine {preset!r}: invalid effort {effort!r}; accepted: {accepted}"
+        )
+
+    # The launcher owns everything before --; only edit the child CLI's args.
+    start = 1
+    if (preset or "").startswith("ollama-"):
+        if "--" not in argv:
+            raise RigError(
+                f"{where}engine {preset!r}: effort requires the launcher -- separator"
+            )
+        start = argv.index("--") + 1
+    out = list(argv[:start])
+    flags = {tokens[0]}
+    config = tokens[0] == "-c"
+    if config:
+        flags.add("--config")
+    if preset in {"copilot", "ollama-copilot"}:
+        flags.add("--effort")
+    i = start
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            out.extend(argv[i:])
+            break
+        if config and arg.startswith("-c") and arg != "-c":
+            value = arg[2:].removeprefix("=")
+            if value.partition("=")[0].strip() == "model_reasoning_effort":
+                i += 1
+                continue
+        flag, sep, inline = arg.partition("=")
+        if flag in flags:
+            value = inline if sep else (argv[i + 1] if i + 1 < len(argv) else "")
+            if (
+                not config
+                or value.partition("=")[0].strip() == "model_reasoning_effort"
+            ):
+                i += 1 if sep else 2
+                continue
+        out.append(arg)
+        i += 1
+    # AGY's live resolver encodes effort in the pinned model variant. Its CLI
+    # rejects a separate effort flag even when that flag agrees with the name.
+    if preset == "agy" and "{model}" in out:
+        return out
+    anchor = entry.get("effort_anchor")
+    if anchor and anchor not in out[start - 1 :]:
+        raise RigError(
+            f"{where}engine {preset!r}: effort requires argv anchor {anchor!r}"
+        )
+    insert_at = out.index(anchor, start - 1) + 1 if anchor else start
+    out[insert_at:insert_at] = [arg.replace("{effort}", effort) for arg in tokens]
+    return out
+
+
+def build_preset_invoke(
+    preset: str, *, model: str | None = None, effort: str | None = None
+) -> list[str]:
+    """Materialize a preset argv for --model and --effort.
 
     Three shapes, keyed off the preset's metadata:
 
@@ -2167,11 +2280,15 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
     if any("{model}" in arg for arg in entry["invoke"]):
         if not model_value:
             raise RigError(f"preset {preset_key!r} requires --model")
-        return [model_value if arg == "{model}" else arg for arg in entry["invoke"]]
+        return apply_effort(
+            [model_value if arg == "{model}" else arg for arg in entry["invoke"]],
+            preset_key,
+            effort,
+        )
 
     argv = list(entry["invoke"])
     if not model_value:
-        return argv
+        return apply_effort(argv, preset_key, effort)
 
     model_argv = entry.get("model_argv")
     if not model_argv:
@@ -2181,7 +2298,7 @@ def build_preset_invoke(preset: str, *, model: str | None = None) -> list[str]:
     anchor = entry.get("model_anchor")
     insert_at = argv.index(anchor) + 1 if anchor else 1
     argv[insert_at:insert_at] = flag_pair
-    return argv
+    return apply_effort(argv, preset_key, effort)
 
 
 AGY_MODELS_TIMEOUT_SECONDS = 10
@@ -2268,13 +2385,31 @@ def agy_model_names(timeout: float = AGY_MODELS_TIMEOUT_SECONDS) -> list[str]:
 
 
 def resolve_agy_model(
-    query: str, *, timeout: float = AGY_MODELS_TIMEOUT_SECONDS, names: list[str] | None = None
+    query: str,
+    *,
+    timeout: float = AGY_MODELS_TIMEOUT_SECONDS,
+    names: list[str] | None = None,
+    effort: str | None = None,
 ) -> str:
     """Fuzzy-match `query` against the live `agy models` list. Nothing is cached:
     the list is re-fetched per call so it stays current as agy ships versions."""
     if names is None:
         names = agy_model_names(timeout)
-    return fuzzy_match_model(query, names)
+    if effort is None:
+        return fuzzy_match_model(query, names)
+    apply_effort(HARNESS_PRESETS["agy"]["invoke"], "agy", effort)
+    suffix = re.compile(r"(?:\s*\((low|medium|high)\)|[\s_-]+(low|medium|high))$", re.I)
+    selected = fuzzy_match_model(suffix.sub("", query.strip()), names)
+    family = suffix.sub("", selected).casefold()
+    variants = [name for name in names if suffix.sub("", name).casefold() == family]
+    for name in variants:
+        match = suffix.search(name)
+        if match and (match[1] or match[2]).lower() == effort:
+            return name
+    raise RigError(
+        f"agy model {selected!r} does not support effort {effort!r}; "
+        f"available variants: {', '.join(variants)}"
+    )
 
 
 def _validate_rig_name(name: str) -> str:
@@ -2313,6 +2448,7 @@ def add_preset_rig(
     preset: str,
     *,
     model: str | None = None,
+    effort: str | None = None,
     force: bool = False,
 ) -> str:
     """Add or replace a symbolic rig from a named CLI preset. Returns rig key."""
@@ -2342,6 +2478,9 @@ def add_preset_rig(
     if model and entry.get("model_resolver"):
         rig_entry["model"] = model.strip()
         rig_entry["model_resolver"] = entry["model_resolver"]
+    apply_effort(invoke, preset_key, effort)
+    if effort is not None:
+        rig_entry["effort"] = effort
     payload[rig_key] = rig_entry
     atomic_write_json(path, payload)
     return rig_key
@@ -2353,6 +2492,7 @@ def swap_preset_rig(
     preset: str,
     *,
     model: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Switch an existing rig's invoke to a preset's, preserving every other
     key (timeout_seconds, budget_max, ...). Returns rig key."""
@@ -2380,6 +2520,10 @@ def swap_preset_rig(
     apply_allowed_tools(
         checked, preset_key, existing.get("allowed_tools"), where=f"rig {rig_key!r}: "
     )
+    chosen_effort = resolve_override(effort, existing.get("effort"))
+    apply_effort(invoke, preset_key, chosen_effort, where=f"rig {rig_key!r}: ")
+    if chosen_effort is not None:
+        existing["effort"] = chosen_effort
     note = f"Swapped to preset {preset_key!r} by `r4t rig swap`."
     if model:
         note += f" model={model.strip()}."
@@ -2465,9 +2609,9 @@ CONFIGURABLE_INT_KEYS = (
 CONFIGURABLE_FLOAT_KEYS = ("rig_budget_max", "rig_budget_earn_per_hour")
 CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
 # Free-text keys handed to the harness as written. `permissions` is validated
-# against the preset's translation table; `allowed_tools` is the engine's own
-# syntax and stays opaque to r4t.
-CONFIGURABLE_STR_KEYS = ("permissions", "allowed_tools")
+# against the preset's translation table; `effort` uses its accepted values;
+# `allowed_tools` is the engine's own syntax and stays opaque to r4t.
+CONFIGURABLE_STR_KEYS = ("permissions", "allowed_tools", "effort")
 CONFIGURABLE_RIG_KEYS = (
     "rig_budget_max",
     "rig_budget_earn_per_hour",
@@ -2475,6 +2619,7 @@ CONFIGURABLE_RIG_KEYS = (
     "history_body_max",
     "prompt_body_max",
     "model",
+    "effort",
     "echo",
     "echo_max_chars",
     "mcp",
@@ -2746,6 +2891,8 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
         for argv in _entry_pool(entry):
             if key == "permissions":
                 apply_permissions(argv, preset, text, where=where)
+            elif key == "effort":
+                apply_effort(argv, preset, text, where=where)
             else:
                 apply_allowed_tools(argv, preset, text, where=where)
         entry[key] = text
@@ -2958,7 +3105,7 @@ def _parse_rig(name: str, raw: object) -> Rig:
     # allowlist the CLI takes only from a config file — fails the rig closed
     # by name, at `rig get` / `roster check` / the first turn, rather than
     # composing an argv that quietly means something else.
-    for key in ("permissions", "allowed_tools"):
+    for key in ("permissions", "allowed_tools", "effort"):
         raw_value = raw.get(key)
         if raw_value is None:
             continue
@@ -2971,10 +3118,12 @@ def _parse_rig(name: str, raw: object) -> Rig:
         for argv in rig.pool():
             argv, _ = apply_permissions(argv, rig.preset, rig.permissions, where=where)
             apply_allowed_tools(argv, rig.preset, rig.allowed_tools, where=where)
+            apply_effort(argv, rig.preset, rig.effort, where=where)
     except RigError as exc:
         problems.append(str(exc))
         rig.permissions = None
         rig.allowed_tools = None
+        rig.effort = None
 
     # A rig env entry the turn owns, or a value that is not a plain string,
     # fails the rig closed here — the operator hears about it at `rig get` /

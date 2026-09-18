@@ -6,6 +6,24 @@ selection, the settings surface, and the governance knob table. For the
 roster side see the [tutorial](r4t-tutorial.md); for why each governance layer
 exists see [r4t-governance.md](r4t-governance.md).
 
+## Reasoning effort
+
+```bash
+r4t rig add worker claude --effort low
+r4t rig set worker effort high
+r4t rig run worker --effort low "summarize the diff"
+r4t rig unset worker effort
+```
+
+The `effort` key is stored separately from `invoke`. It applies to roster turns,
+knowledge distillation, and `rig run`; a runtime `--effort` overrides it without
+changing the saved value. `rig swap` retains it and validates it against the new
+engine before writing; `rig swap --effort LEVEL` supplies a replacement.
+`rig get`, `rig show`, and `rig configure` expose the setting.
+
+See [reasoning effort](r4t-engine.md#reasoning-effort) for accepted values,
+AGY model-family selection, and Cursor's explicit model bracket convention.
+
 ## Detect what you already have
 
 The first rig should not be configured. `r4t rig detect` probes every
@@ -86,7 +104,7 @@ r4t rig run cheap --idle          # the quiet-tick consolidation pass
 ```
 
 ```
-r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M]
+r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M] [--effort LEVEL]
                   [--agent NAME] [--timeout S] [--no-scaffold] [--idle]
                   [--echo] [--lessons-cap N] [--continue]
                   [--permissions MODE] [--allowed-tools SPEC]
@@ -104,7 +122,7 @@ already on it and the rig's budget in front of it. No roster and no
 **What the rig supplies.** The `preset` is the engine, and it must be one the
 `run` verb supports (a rig with no preset, or one riding `ollama` /
 `ollama-copilot`, is refused with the engines that can). On top of it the rig
-supplies `model`, `permissions`, `allowed_tools`, `timeout_seconds` and the
+supplies `model`, `effort`, `permissions`, `allowed_tools`, `timeout_seconds` and the
 `env` map. **Precedence is flag > rig > preset**: a per-invocation flag wins,
 then the rig's own key, then unset — which is the preset's own flags, byte for
 byte. `--echo` prints the composed argv so the resolution is readable in one
@@ -656,6 +674,7 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `echo` / `echo_max_chars` (rig) | false / 1500 | Stdout-only members (see [Echo rigs](#echo-rigs)): no messaging scaffolding in the prompt, cleaned stdout staged as the one reply, bodies past the cap truncated with the full text attached | A model that misuses `tell`, looping "I did it" messages instead of answering |
 | `mcp` (rig) | by preset — **on** for claude/codex/copilot/opencode and their `ollama launch` variants; **off** for cursor (its idiom writes `.cursor/mcp.json` into your repo), for devin (its idiom writes `.devin/mcp_config.local.json` into the same tree), for agy (its idiom writes `~/.gemini` in the member's home, and needs `run_as`) and for bare ollama (no idiom at all) | Members send with the `a8s_tell` tool instead of the `tell` shell command (see [The `a8s_tell` tool](#the-a8s_tell-tool-mcp)): `a8s mcp serve` is injected per turn through the harness's own idiom and the prompt names the tool. `mcp off` is the escape hatch anywhere; `mcp on` errors on bare ollama | Shell quoting mangling a body, and a member that describes a message instead of sending one |
 | `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance the machine caps: a runbook may name one, and the trust ceiling (`auto` unless `r4t add --trust`) is what a repo cannot raise |
+| `effort` (rig) | unset — embedded model effort or engine default | Reasoning depth translated through the preset; runtime `--effort` overrides it for one turn. Invalid values and unsupported engines error | Tune routine turns cheaply or increase reasoning for difficult work |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |

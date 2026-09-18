@@ -815,7 +815,7 @@ def _run_harness_turn(
         # silently ignores an unrecognized string, so a stale/bad value must
         # fail the turn loudly rather than run the account default.
         try:
-            resolved = resolve_agy_model(rig.model or "")
+            resolved = resolve_agy_model(rig.model or "", effort=rig.effort)
         except RigError as e:
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]

@@ -914,7 +914,7 @@ class TestAgyHomeIdiom:
     ):
         # The live `agy models` resolver runs before any injection and is not
         # what is under test here.
-        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q: "Gemini 3 Pro")
+        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q, **kw: "Gemini 3 Pro")
         rig, env, workplace, _staging = self._turn(tmp_path, fakebin, Isolation())
 
         code, out, _dur, timed = run_harness(rig, "P", workplace, env=env)
@@ -996,7 +996,7 @@ class TestAgyHomeKnobOff:
         assert revoke_mcp(rig, env, iso) is None
 
     def test_the_turn_removes_it_and_still_runs(self, tmp_path, fakebin, monkeypatch):
-        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q: "Gemini 3 Pro")
+        monkeypatch.setattr(dispatch, "resolve_agy_model", lambda q, **kw: "Gemini 3 Pro")
         home = tmp_path / "agent-home"
         rig, env, workplace, staging, _iso = self._turn(tmp_path, fakebin, home=home)
         _seed_agy_config(home, {"mcpServers": {"a8s": _a8s_entry(str(staging))}})

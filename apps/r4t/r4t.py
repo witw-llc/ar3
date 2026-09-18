@@ -1602,6 +1602,7 @@ def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
         return 1
     options = dict(
         model=args.model,
+        effort=args.effort,
         permissions=args.permissions,
         allowed_tools=args.allowed_tools,
         continue_conversation=args.continue_conversation,
@@ -1690,6 +1691,7 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             prompt,
             dir_path=dir_path,
             model=args.model,
+            effort=args.effort,
             agent=args.agent,
             timeout=args.timeout,
             scaffold=not args.no_scaffold,
@@ -1905,6 +1907,7 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             prompt,
             dir_path=dir_path,
             model=resolve_override(args.model, _rig_pinned_model(rig)),
+            effort=resolve_override(args.effort, rig.effort),
             agent=args.agent,
             timeout=(
                 args.timeout if args.timeout is not None else int(rig.timeout_seconds)
@@ -2059,9 +2062,11 @@ def cmd_rig_add(args: argparse.Namespace) -> int:
             args.rig,
             args.preset,
             model=args.model,
+            effort=args.effort,
             force=args.force,
         )
-        invoke = build_preset_invoke(preset_key, model=args.model)
+        effort = rig_setting(config_path, rig_key, "effort").value
+        invoke = build_preset_invoke(preset_key, model=args.model, effort=effort)
     except RigError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -2081,8 +2086,10 @@ def cmd_rig_swap(args: argparse.Namespace) -> int:
             args.rig,
             args.preset,
             model=args.model,
+            effort=args.effort,
         )
-        invoke = build_preset_invoke(preset_key, model=args.model)
+        effort = rig_setting(config_path, rig_key, "effort").value
+        invoke = build_preset_invoke(preset_key, model=args.model, effort=effort)
     except RigError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -2941,6 +2948,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dir", metavar="DIR", help="Working directory for the turn (default: CWD)."
     )
     rig_run_p.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        help="Reasoning effort; accepted levels depend on the engine.",
+    )
+    rig_run_p.add_argument(
         "--model", metavar="M", help="Model for this turn, overriding the rig's."
     )
     rig_run_p.add_argument(
@@ -3052,6 +3064,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing rig with the same name.",
     )
     rig_add_p.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        help="Reasoning effort; accepted levels depend on the engine.",
+    )
+    rig_add_p.add_argument(
         "--model",
         metavar="MODEL",
         help="Optional model for the preset (required for ollama; agy resolves it live).",
@@ -3074,6 +3091,11 @@ def build_parser() -> argparse.ArgumentParser:
         "preset",
         choices=preset_names(),
         help="CLI preset name (see `r4t rig presets`).",
+    )
+    rig_swap_p.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        help="Reasoning effort; accepted levels depend on the engine.",
     )
     rig_swap_p.add_argument(
         "--model",
@@ -3194,6 +3216,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dir",
         metavar="DIR",
         help="run: working directory for the turn (default: CWD).",
+    )
+    engine_p.add_argument(
+        "--effort",
+        metavar="LEVEL",
+        help="run/check: reasoning effort; accepted levels depend on the engine.",
     )
     engine_p.add_argument(
         "--model",

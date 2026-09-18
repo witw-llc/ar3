@@ -1663,3 +1663,43 @@ class TestWrapWakeArgv:
         wrapped = wrap_wake_argv({"wake_shell": "login"}, ["printf", "%s", body])
         out = subprocess.run(wrapped, capture_output=True, text=True).stdout
         assert out.endswith(body)
+
+
+@pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+@pytest.mark.parametrize("unrestricted", [False, True])
+@pytest.mark.parametrize("effort", [None, "low"])
+def test_bundled_engine_effort_all_wakes(engine_id, unrestricted, effort, tmp_path):
+    from definitions import BatchEntry, build_batch_command, build_idle_command
+
+    suffix = "-unrestricted" if unrestricted else ""
+    defn = json.loads(
+        default_definition_path(f"engine-{engine_id}{suffix}").read_text()
+    )
+    variables = {"MODEL": "local-model"}
+    if effort is not None:
+        variables["EFFORT"] = effort
+    commands = [
+        build_command(
+            defn,
+            {"from": "sender", "to": "worker", "content": "hi"},
+            tmp_path,
+            vars=variables,
+        ),
+        build_batch_command(
+            defn,
+            "worker",
+            [
+                BatchEntry(
+                    {"from": "sender", "date": "2026-09-18T12:00:00Z", "content": "hi"},
+                    "message.json",
+                )
+            ],
+            vars=variables,
+        ),
+        build_idle_command(defn, "worker", vars=variables),
+    ]
+    for argv in commands:
+        assert [arg for arg in argv if arg.startswith("--effort=")] == (
+            [] if effort is None else ["--effort=low"]
+        )
+        assert not any("$EFFORT" in arg for arg in argv)

@@ -10,7 +10,26 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## Unreleased
+## 0.1.91
+
+### Added
+
+- **Per-engine reasoning effort** (#289): `engine run` / `engine check`,
+  `rig add` / `rig swap` / `rig run` accept `--effort`; rigs persist an
+  `effort` setting with get/set/unset/configure support. Runtime overrides
+  leave the saved setting unchanged. Dispatch and knowledge distillation
+  apply the same setting; swaps validate retained values before saving.
+- **Per-node `EFFORT` variable** on all engine definitions and all three
+  wakes, using optional `--effort=$EFFORT?` expansion. Presets validate their
+  advertised values; Codex and OpenCode pass non-empty engine/provider
+  values through. Ollama wrappers send flags to the child CLI.
+- **AGY effort selects a live variant within the requested model family**,
+  overriding embedded low/medium/high suffixes and rejecting unavailable
+  combinations. Pinned variants carry effort in the model name, without a
+  separate native flag. Cursor preserves effort in `--model` bracket syntax;
+  separate effort requests on Cursor, Devin, or bare Ollama fail explicitly.
+
+## 0.1.90
 
 ### Added
 

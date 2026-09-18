@@ -301,6 +301,7 @@ def _build_argv_template(
     engine: str,
     *,
     model: str | None,
+    effort: str | None = None,
     timeout: int,
     workdir: Path,
     continue_conversation: bool = False,
@@ -333,14 +334,14 @@ def _build_argv_template(
             "IS the continuation, and it says which conversation"
         )
     try:
-        argv = build_preset_invoke(engine, model=model)
+        argv = build_preset_invoke(engine, model=model, effort=effort)
         argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")
         argv = apply_allowed_tools(argv, engine, allowed_tools, where="r4t engine: ")
     except RigError as exc:
         raise RunError(str(exc)) from exc
     if HARNESS_PRESETS[engine].get("model_resolver") == "agy-live" and "{model}" in argv:
         try:
-            resolved = resolve_agy_model(model or "")
+            resolved = resolve_agy_model(model or "", effort=effort)
         except RigError as exc:
             raise RunError(f"agy --model {model!r} did not resolve: {exc}") from exc
         argv = [resolved if a == "{model}" else a for a in argv]
@@ -360,6 +361,7 @@ def build_argv(
     prompt: str,
     *,
     model: str | None,
+    effort: str | None = None,
     timeout: int,
     workdir: Path,
     continue_conversation: bool = False,
@@ -372,6 +374,7 @@ def build_argv(
     template, _ = _build_argv_template(
         engine,
         model=model,
+        effort=effort,
         timeout=timeout,
         workdir=workdir,
         continue_conversation=continue_conversation,
@@ -453,6 +456,7 @@ def execute(
     *,
     dir_path: Path,
     model: str | None,
+    effort: str | None = None,
     agent: str | None,
     timeout: int,
     scaffold: bool,
@@ -506,6 +510,7 @@ def execute(
         template, note = _build_argv_template(
             engine,
             model=model,
+            effort=effort,
             timeout=timeout,
             workdir=dir_path,
             continue_conversation=continue_conversation,

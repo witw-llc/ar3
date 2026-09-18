@@ -277,3 +277,14 @@ class TestCheckCli:
                 "quota", "run", "check"
             ]
             assert engines.capabilities(name) == expected
+
+
+def test_check_effort_threads_into_probe_argv(bin_dir, capsys):
+    fake_binary(bin_dir, "claude", flags=[*CLAUDE_FLAGS, "--effort"])
+    assert engine_cli("claude", "check", "--effort", "low", "--json") == 0
+    [payload] = json.loads(capsys.readouterr().out)
+    assert payload["argv"][payload["argv"].index("--effort") + 1] == "low"
+    assert engine_cli("claude", "check", "--effort", "banana", "--json") == 1
+    [payload] = json.loads(capsys.readouterr().out)
+    assert payload["method"] == "composition"
+    assert "invalid effort" in payload["detail"]

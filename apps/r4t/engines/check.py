@@ -202,6 +202,7 @@ def check_engine(
     engine: str,
     *,
     model: str | None = None,
+    effort: str | None = None,
     permissions: str | None = None,
     allowed_tools: str | None = None,
     continue_conversation: bool = False,
@@ -218,6 +219,7 @@ def check_engine(
         template, _ = _build_argv_template(
             engine,
             model=model,
+            effort=effort,
             timeout=timeout,
             workdir=workdir or Path.cwd(),
             continue_conversation=continue_conversation,

@@ -16,7 +16,7 @@ echo "long prompt piped in" | r4t engine agy run -
 ```
 
 ```
-r4t engine <id> run [--dir DIR] [--model M] [--agent NAME] [--timeout S]
+r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--timeout S]
                      [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
@@ -73,6 +73,55 @@ tool) plus this turn's own measurement flags (see
 turn with a model, a permission stance, an env map and a spend budget already
 attached is [`r4t rig run <rig>`](r4t-rigs.md#rig-run--one-headless-turn-as-a-rig),
 which composes through this very path and gates it on the rig's bucket.
+
+### Reasoning effort
+
+`--effort LEVEL` selects the engine's reasoning depth. Each preset owns its
+accepted values; there is no global list that discards engine-specific levels.
+Unset leaves the invocation unchanged. An unsupported engine or a value outside
+its advertised vocabulary fails before the harness starts.
+
+| Engine | Native option | Accepted values |
+| --- | --- | --- |
+| claude / ollama-claude | `--effort` | low, medium, high, xhigh, max |
+| copilot / ollama-copilot (dispatch preset) | `--reasoning-effort` | none, minimal, low, medium, high, xhigh, max |
+| muse | `--reasoning-effort` | none, minimal, low, medium, high, xhigh, max, ultra |
+| agy | model variant when pinned; `--effort` otherwise | low, medium, high; pinned models must offer the requested variant |
+| codex / ollama-codex | `-c model_reasoning_effort=VALUE` | non-empty string; model-specific acceptance belongs to Codex |
+| opencode / ollama-opencode | `--variant` | non-empty provider-specific variant |
+| cursor | inside `--model` | preserve bracket syntax; separate `--effort` errors |
+| devin / bare ollama | unsupported | separate `--effort` errors |
+
+Codex CLI 0.147.0's generated `ReasoningEffort` schema is a non-empty string,
+so r4t passes it through without imposing an enum. OpenCode's provider variants
+also pass through. These engines can still reject a value for the chosen model.
+Wrapped engines receive effort after `ollama launch`'s `--` separator.
+
+```bash
+r4t engine claude run --effort low "summarize the diff"
+r4t engine muse run --effort ultra "review the architecture"
+r4t engine agy run --model "Gemini 3.1 Pro (High)" --effort low "check the tests"
+r4t engine cursor run --model 'claude-opus-4-8[context=1m,effort=high]' "review the diff"
+```
+
+For AGY, explicit effort overrides the model name's `(Low)`, `(Medium)`, or
+`(High)` suffix. r4t resolves the family against the live `agy models` list,
+then selects that family's requested variant. The example selects
+`Gemini 3.1 Pro (Low)` without a native `--effort` flag: AGY rejects that flag
+alongside these model variants even when the values agree.
+A missing variant errors with the family's available
+choices; it never switches families or interprets `(Thinking)` as a numeric
+level. Without a pinned model, r4t passes the native flag to AGY; AGY rejects
+it if the current model does not support a separate effort setting.
+Without explicit effort, the existing model selection rules apply.
+
+Rig effort is a separate persisted setting: `rig add` and `rig swap` accept
+`--effort`, and `rig set NAME effort LEVEL` / `rig unset NAME effort` tune it.
+A `rig run --effort` override affects only that turn. Precedence is the runtime
+flag, then the rig setting, then embedded model effort or the engine default.
+Engine swaps preserve effort and refuse incompatible values before saving;
+unset it before switching to Cursor or Devin. Dispatch and knowledge
+distillation also use the rig setting. `--echo` shows the resulting argv.
 
 ### The three translated parameters
 
@@ -374,7 +423,7 @@ r4t engine check --json
 ```
 
 `check` composes the exact argv `run` would spend a turn on — same `--model`,
-`--permissions`, `--allowed-tools`, `--continue` — and asks the installed
+`--effort`, `--permissions`, `--allowed-tools`, `--continue` — and asks the installed
 binary whether it parses. **No turn is spent and no tokens are billed:** the
 prompt is removed from the argv, and the only things run are the CLI's own
 `--help` and `--version`.
@@ -438,6 +487,12 @@ Every one also carries `--timeout=$TIMEOUT?` on all three wakes:
 `a8s vars my-bare-node set TIMEOUT 1800` raises the turn timeout
 for that node, unset drops the flag and the run keeps the engine default
 of 900s.
+
+All definitions also carry `--effort=$EFFORT?` on invoke, batch, and idle:
+`a8s vars my-bare-node set EFFORT low` selects reasoning effort for that node.
+Unset drops the token. Cursor keeps effort inside `MODEL` bracket syntax;
+setting a separate `EFFORT` on Cursor or Devin produces an unsupported error.
+See [reasoning effort](#reasoning-effort) for each engine's values.
 
 Each of the eleven also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by
