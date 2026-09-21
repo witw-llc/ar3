@@ -54,10 +54,7 @@ from rig import RigConfig, resolve_framing, resolve_knowledge_bytes
 
 K7E_ENTRY = Path(__file__).resolve().parent.parent / "k7e" / "k7e.py"
 SEARCH_LIMIT = 8
-# The rank-proportional packer's weighting pool (k-budget-packing
-# s4-rank-proportional) — matches SEARCH_LIMIT because a search
-# already returns at most that many hits, so every hit found earns a
-# 1/(rank+1) share before slack sweeps back down the ranks.
+# Baseline constants retained for the frozen packing experiment harness.
 RANK_POOL = SEARCH_LIMIT
 # The smallest snippet worth an entry's overhead. Below this the content is
 # gone in all but name, so the entry is skipped rather than reduced to a
@@ -217,18 +214,8 @@ def _distill_skips(stdout: str) -> list[str]:
 
 
 def _seed_query(ctx, member, batch: list[dict]) -> str:
-    """Retrieval seed per the research gate: newest message + who is waking +
-    the mission's first line. The member never sees this — it only steers
-    which notes surface."""
-    from runbook import mission_text
-
-    parts = [member.name, member.role]
-    mission = mission_text(ctx.root, ctx.node)
-    if mission:
-        parts.append(mission.splitlines()[0].lstrip("# ").strip())
-    if batch:
-        parts.append(str(batch[-1].get("body", ""))[:SEED_BODY_MAX])
-    return " ".join(p for p in parts if p)
+    return next((str(item.get("body", ""))[:SEED_BODY_MAX]
+                 for item in reversed(batch) if str(item.get("body", "")).strip()), "")
 
 
 def _entry_snippet(raw: str) -> tuple[str, str]:
@@ -372,27 +359,39 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> KnowledgePack
     The lines are the member's; the pack's `ids` are the operator's. A member
     reads titles and ages and no id at all, so nothing it can parrot names the
     machinery behind its memory."""
-    budget = resolve_knowledge_bytes(member, rig)
-    if budget <= 0:
+    return retrieve(
+        store_home(ctx.node, member.name), _seed_query(ctx, member, batch),
+        resolve_knowledge_bytes(member, rig), framing=resolve_framing(member, rig),
+        log=lambda message: state.append_log(ctx.node, f"r4t: {message}"),
+        label=member.name.lower(),
+    )
+
+
+def retrieval_depth(budget: int) -> int:
+    return 8 if budget <= 8192 else 16 if budget < 32768 else 32
+
+
+def retrieve(home: Path, query: str, budget: int, *, framing=None,
+             log=lambda message: None, label="memory", depth=None) -> KnowledgePack:
+    if budget <= 0 or not query.strip() or not (home / "nodes").is_dir():
         return KnowledgePack()
-    home = store_home(ctx.node, member.name)
-    if not (home / "nodes").is_dir():
-        return KnowledgePack()
-    query = _seed_query(ctx, member, batch)
+    limit = depth if depth is not None else retrieval_depth(budget)
+    frame = KNOWLEDGE_FRAMING if framing is None else (
+        "" if framing.off else framing.text if framing.text is not None else KNOWLEDGE_FRAMING
+    )
+    prefix = [KNOWLEDGE_HEADER] + ([frame] if frame else []) + [""]
+    available = max(0, budget - len(("\n".join(prefix) + "\n").encode()))
     started = time.perf_counter()
     try:
         res = _run_k7e(
-            home, "search", query, "--json", "--limit", str(SEARCH_LIMIT),
+            home, "search", query, "--json", "--limit", str(limit), "--no-rerank",
             timeout=SEARCH_TIMEOUT,
         )
         if res.returncode != 0:
             raise RuntimeError(res.stderr.strip() or f"search exit {res.returncode}")
         hits = json.loads(res.stdout or "[]")
     except Exception as e:
-        state.append_log(
-            ctx.node,
-            f"r4t: KNOWLEDGE-SKIP {member.name.lower()} search failed: {e}",
-        )
+        log(f"KNOWLEDGE-SKIP {label} search failed: {e}")
         return KnowledgePack()
     search_ms = round((time.perf_counter() - started) * 1000)
     embed_note = _embed_note(res.stderr or "")
@@ -404,14 +403,14 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> KnowledgePack
     # Fetch before packing: the rank-proportional split needs every pool
     # entry's snippet size to weigh and redistribute, so — unlike the old
     # greedy loop — fetching does not stop early just because the entries
-    # seen so far already cover the budget. It still stops at RANK_POOL:
+    # seen so far already cover the budget. It stops at the selected depth:
     # a hit past the weighting pool would never earn a share, so getting it
     # would only cost bytes for nothing. This sizing read is untracked
     # (`--no-track`) because most of what it reads never reaches the prompt
     # — `_touch_injected` below bumps usage for what does. One call for the
     # whole pool: the per-entry read is trivial next to interpreter startup,
     # so N gets cost N startups and a wake must never wait on this path.
-    pool = [str(hit["id"]) for hit in hits[:RANK_POOL]]
+    pool = [str(hit["id"]) for hit in hits[:limit]]
     texts: dict[str, str] = {}
     if pool:
         try:
@@ -421,7 +420,7 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> KnowledgePack
         except Exception:
             texts = {}
     entries: list[dict] = []
-    for hit in hits[:RANK_POOL]:
+    for hit in hits[:limit]:
         text = texts.get(str(hit["id"]))
         if text is None:
             continue
@@ -440,24 +439,17 @@ def knowledge_section(ctx, member, batch: list[dict], rig=None) -> KnowledgePack
             else header
         )
         entries.append({"id": hit["id"], "preamble": preamble, "snippet": snippet})
-    packed = _pack_rank_proportional(entries, budget)
+    packed = _pack_rank_proportional(entries, available)
     blocks = [block for _, block in packed]
     used = sum(len(b.encode("utf-8")) for b in blocks)
     _touch_injected(home, [entries[i]["id"] for i, _ in packed])
     total_ms = round((time.perf_counter() - started) * 1000)
-    state.append_log(
-        ctx.node,
-        f"r4t: KNOWLEDGE {member.name.lower()} {len(blocks)} "
-        f"entr{'y' if len(blocks) == 1 else 'ies'} {used}B in {total_ms}ms "
-        f"(search {search_ms}ms, {embed_note})",
-    )
+    noun = "entry" if len(blocks) == 1 else "entries"
+    log(f"KNOWLEDGE {label} {len(blocks)} {noun} {used}B in {total_ms}ms "
+        f"(search {search_ms}ms, {embed_note})")
     if not blocks:
         return KnowledgePack()
-    spec = resolve_framing(member, rig)
-    parts = [KNOWLEDGE_HEADER]
-    if not spec.off:
-        parts.append(spec.text if spec.text is not None else KNOWLEDGE_FRAMING)
-    parts.append("")
+    parts = prefix
     for block in blocks:
         parts += [block, ""]
     return KnowledgePack(parts, [entries[i]["id"] for i, _ in packed])

@@ -12,6 +12,7 @@ Hybrid search (BM25 + metadata + semantic), fused and ranked.
 --json                 JSON output
 --ids                  IDs only, one per line
 --rerank               LLM rerank the candidate pool
+--no-rerank            disable reranking even when configured globally
 --include-superseded   include retired entries
 ```
 
@@ -48,7 +49,10 @@ entries without reading them — the other half of `get --no-track`.
 RAG: retrieve relevant entries for a topic or pasted conversation and synthesize
 an answer (LLM, reranker on by default). Accepts text as an arg or via stdin.
 
-### `list [--tag X] [--status active] [--ids]`
+### `list [--tag X] [--status active] [--limit N] [--ids]`
+
+Newest updated entries first, with newer IDs breaking same-day ties. `--limit`
+bounds the output; zero returns no entries and negative values are rejected.
 List entries with optional filters.
 
 ### `stats [--json]`
@@ -69,6 +73,10 @@ Create a new entry. Content from `--content` or stdin.
 Append content (arg or stdin) to a named section of an existing entry.
 
 ### `supersede <old_id> <new_id>`
+
+Repeated calls replace the frontmatter pointer in place. Reindex preserves it.
+Do not supersede a general standing rule with a narrower scoped reinforcement;
+store the scoped fact beside the general rule unless it actually replaces it.
 Mark `old_id` as superseded by `new_id`. Preserves the audit trail; hides the
 old entry from default search.
 
@@ -76,6 +84,10 @@ old entry from default search.
 Store a binary content-addressed (SHA256, deduped). Prints the stored path.
 
 ### `distill <file|dir> [--dry-run]`
+
+`--job ID` gives one immutable capture file a stable processing identity. Extraction decisions
+and mutations are journaled for recovery, including appends and supersession.
+Engine workers provide this automatically. Keep the identity stable on retries.
 Extract knowledge from raw files, and over an r4t turn capture supersede the
 entries that turn's people contradicted. See
 [k7e-distillation.md](k7e-distillation.md).
@@ -103,6 +115,11 @@ on a path someone is waiting on.
 Regenerate all Maps of Content from entry tags.
 
 ### `check [--fix]`
+
+Reports duplicate standard sections and duplicate replacement pointers.
+`--fix` merges section content, repairs malformed pointers using the surviving
+index value when available, and rebuilds inconsistent indexes from Markdown.
+A valid single file pointer remains authoritative over a disagreeing index.
 Audit structural integrity; `--fix` repairs what it safely can. The `Index:`
 line names any gap between the files and the SQLite index — how many entries
 each holds, and every entry whose file status and indexed status disagree.

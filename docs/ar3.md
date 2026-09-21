@@ -117,6 +117,9 @@ re-exec the new code. It runs `get.sh` — the same installer the one-liner
 fetches — from beside the copy you invoked, with `AR3_DIR` pointed at that
 copy, so the install you updated is the one you ran. `AR3_VERSION` pins a
 release and `AR3_CHANNEL` picks stable or beta, exactly as at install time.
+On Windows it runs `get.sh` through Git for Windows' `sh` — the one on PATH,
+or the one beside `git` when PowerShell or cmd.exe carries only Git's `cmd\`
+directory — so the verb works from any shell, not only Git Bash.
 
 It reports the version it moved from and to, or says nothing moved.
 

@@ -470,6 +470,11 @@ def execute(
     charge_hook: Callable[[], None] | None = None,
     max_credits: int | None = None,
     record: dict | None = None,
+    memory: str = "off",
+    memory_home: str | None = None,
+    memory_writer: str | None = None,
+    memory_people: str | None = None,
+    memory_rig_context: dict | None = None,
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
@@ -491,6 +496,22 @@ def execute(
         prompt = scaffold_prompt(dir_path, message, agent=agent)
     else:
         prompt = message
+    memory_turn = None
+    if memory and memory != "off":
+        import engine_memory
+        try:
+            memory_turn = engine_memory.Turn(
+                engine=engine, model=model, effort=effort, agent=agent,
+                directory=dir_path, message=message, mode=memory,
+                home=memory_home, writer=memory_writer, people=memory_people, env=env,
+                rig_context=memory_rig_context,
+            )
+            prompt = memory_turn.inject(prompt)
+        except ValueError as exc:
+            raise RunError(str(exc)) from exc
+        except OSError as exc:
+            engine_memory.note(f"memory unavailable: {exc}")
+            memory_turn = None
     with ExitStack() as stack:
         # A roster turn puts its instruments in the member's workdir, because
         # that is the one directory writable across an isolation boundary.
@@ -527,7 +548,25 @@ def execute(
         argv = [prompt if a == "{prompt}" else a for a in template]
         if charge_hook is not None:
             charge_hook()
-        exit_code = _spawn(argv, dir_path, timeout, instruments.env_for(env))
+        # The wake's routing facts belong to this turn; a nested `r4t engine run`
+        # must key memory on its own --agent, not inherit this node's store.
+        env = {k: v for k, v in (env if env is not None else os.environ).items()
+               if not k.startswith("A8S_TURN_")}
+        if memory_turn is None:
+            exit_code = _spawn(argv, dir_path, timeout, instruments.env_for(env))
+        else:
+            try:
+                exit_code, output = engine_memory.spawn(argv, dir_path, timeout, instruments.env_for(env))
+            except OSError as exc:
+                try:
+                    memory_turn.finish("", 1)
+                except (OSError, ValueError) as capture_error:
+                    engine_memory.note(f"failed turn capture unavailable: {capture_error}")
+                raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
+            try:
+                memory_turn.finish(output, exit_code)
+            except (OSError, ValueError) as exc:
+                engine_memory.note(f"capture or worker failed: {exc}")
         measured, lines = instruments.measure()
         for line in lines:
             print(f"r4t engine: {line}", file=sys.stderr)

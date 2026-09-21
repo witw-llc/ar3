@@ -10,6 +10,56 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.92
+
+### Added
+
+- **Private K7E memory for engine and rig runs** (#157): `--memory on`
+  retrieves bounded recollections and queues successful turns for background
+  distillation. Named agents retain separate, portable stores across engine
+  and directory changes. Bundled a8s definitions accept `MEMORY`,
+  `MEMORY_HOME`, `MEMORY_WRITER`, and `MEMORY_PEOPLE` on all three wakes.
+- **Recoverable memory writes:** durable capture queues, serialized workers,
+  journaled extraction decisions and idempotent mutations survive interrupted
+  workers. Routed correction authority comes from envelope attribution and
+  an explicit sender list. Engine output keeps streaming unchanged.
+- **Bounded K7E listings:** `list --limit N` returns newest entries first.
+
+### Changed
+
+- **`AGENTS.md` is the complete onboarding for any agent working in this
+  repo; `CLAUDE.md` imports it.** The resident seat's own files — `.ares/`,
+  root `STATUS.md`, `LESSONS.md` and `LESSONS-ARCHIVE.md` — are gitignored,
+  so the seat boots the same from an interactive harness or a headless
+  `r4t engine run` turn inside the checkout, and neither dirties the tree.
+- **Plain `tells` waits for the next message with no time limit.** It prints
+  the burst and exits 0, so a seat runs it as a background command that wakes
+  once per arrival and costs nothing while the inbox is quiet. `--timeout SEC`
+  still bounds the wait and exits 1 when nothing lands.
+
+### Fixed
+
+- **K7E structure and supersession** (#280, #283): standard sections do not
+  duplicate template stubs; repeated supersession replaces one frontmatter
+  pointer; reindex preserves it. `check --fix` repairs duplicate sections,
+  duplicate pointers and index disagreement. Status explains keyword-only use.
+- **`ar3 update` runs from PowerShell and cmd.exe.** It ran `get.sh` through
+  a bare `sh`, which those shells do not have on PATH: Git for Windows puts
+  its `cmd\` directory there, not `usr\bin`, and the `bash.exe` in System32
+  is the WSL launcher. When PATH has no `sh`, the shell is now read off git's
+  own install tree (`bin\sh.exe`, the launcher that puts `/usr/bin` on the
+  child's PATH, then the bare `usr\bin\sh.exe`), and a box with neither gets
+  told what to install instead of `[WinError 2]`.
+- **`get.sh` no longer appends a duplicate rc line on Windows.** `ar3 update`
+  hands it `AR3_DIR` spelled `C:\Users\me\.ar3`; the source line Git Bash's
+  install wrote reads `/c/Users/me/.ar3`, so the rc check missed and every
+  update added another line. The installer now normalizes `AR3_DIR` to its
+  POSIX spelling before anything reads it.
+- **Memory retrieval** (#104): newest-message queries and budget-dependent
+  candidate depth follow fresh FTS/hybrid evidence. Small/medium keep eight
+  candidates; large retrieves 32. Framing counts against the byte budget and
+  the automatic retrieval path disables LLM reranking.
+
 ## 0.1.91
 
 ### Added

@@ -1703,3 +1703,24 @@ def test_bundled_engine_effort_all_wakes(engine_id, unrestricted, effort, tmp_pa
             [] if effort is None else ["--effort=low"]
         )
         assert not any("$EFFORT" in arg for arg in argv)
+
+
+@pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+@pytest.mark.parametrize("unrestricted", [False, True])
+def test_bundled_engine_memory_all_wakes(engine_id, unrestricted, tmp_path):
+    from definitions import BatchEntry, build_batch_command, build_idle_command
+
+    suffix = "-unrestricted" if unrestricted else ""
+    definition = json.loads(default_definition_path(f"engine-{engine_id}{suffix}").read_text())
+    variables = {"MODEL": "local-model", "MEMORY": "medium", "MEMORY_HOME": "/portable memory",
+                 "MEMORY_PEOPLE": "operator-phone", "MEMORY_WRITER": "curator"}
+    commands = [
+        build_command(definition, {"from": "sender", "to": "worker", "content": "hello"}, tmp_path, vars=variables),
+        build_batch_command(definition, "worker", [BatchEntry({"from": "sender", "content": "hello"}, "message.json")], vars=variables),
+        build_idle_command(definition, "worker", vars=variables),
+    ]
+    for argv in commands:
+        assert "--memory=medium" in argv
+        assert "--memory-home=/portable memory" in argv
+        assert "--memory-people=operator-phone" in argv
+        assert "--memory-writer=curator" in argv

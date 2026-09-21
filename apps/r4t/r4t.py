@@ -1626,6 +1626,19 @@ def _turn_dir(args: argparse.Namespace) -> Path:
     return Path(args.dir).expanduser().resolve() if args.dir else Path.cwd()
 
 
+def _memory_options(parser):
+    parser.add_argument("--memory", choices=["off", "on", "small", "medium", "large"], default="off",
+                        help="Opt-in private K7E memory; sizes are byte budgets.")
+    parser.add_argument("--memory-home", help="Portable store directory, bound to this agent identity.")
+    parser.add_argument("--memory-writer", help="Configured rig to distill memory instead of this engine/model.")
+    parser.add_argument("--memory-people", help="Comma-separated a8s senders allowed to correct recalled facts.")
+
+
+def _memory_kwargs(args):
+    return {key: getattr(args, key, None) for key in
+            ("memory", "memory_home", "memory_writer", "memory_people")}
+
+
 def _turn_prompt(
     args: argparse.Namespace, dir_path: Path, where: str
 ) -> tuple[str | None, int]:
@@ -1638,6 +1651,9 @@ def _turn_prompt(
 
     marker = dir_path / engine_run.IDLE_MARKER_NAME
     if args.idle:
+        if getattr(args, "memory", "off") != "off":
+            from engine_memory import kick_idle
+            kick_idle(args, dir_path)
         if marker.exists():
             return None, 0
         marker.touch()
@@ -1702,6 +1718,7 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             allowed_tools=args.allowed_tools,
             session=args.session,
             max_credits=args.max_credits,
+            **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
@@ -1852,6 +1869,9 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
     # Peeked before the gate so `--wait` never blocks for a turn the latch
     # would skip anyway; `_turn_prompt` is what actually arms it.
     if args.idle and (dir_path / engine_run.IDLE_MARKER_NAME).exists():
+        if getattr(args, "memory", "off") != "off":
+            from engine_memory import kick_idle
+            kick_idle(args, dir_path)
         return finish(0, "idle-latched")
 
     budgeted = rig.rig_budget_max is not None
@@ -1922,6 +1942,8 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             charge_hook=_charge if budgeted else None,
             max_credits=resolve_override(args.max_credits, rig.max_ai_credits),
             record=report,
+            memory_rig_context={"rig": rig.name, "config": str(config_path)},
+            **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
         print(f"r4t rig run: {exc}", file=sys.stderr)
@@ -3022,6 +3044,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rig-config",
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
     )
+    _memory_options(rig_run_p)
     rig_run_p.set_defaults(func=cmd_rig_run)
 
     rig_fuel_p = rig_sub.add_parser(
@@ -3190,6 +3213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Accepts an engine id or any rig preset id; `list` shows both, and "
         "bare `check` probes every run-capable engine.",
     )
+    _memory_options(engine_p)
     engine_p.add_argument(
         "target",
         help="Engine or preset id (see `r4t engine list`), `list`, or `check`.",

@@ -48,6 +48,7 @@ from engine import (
 )
 from distill import distill, consolidate
 from hygiene import run_audit, index_disagreement
+from ar3.locking import file_lock
 
 
 COMMANDS: list[tuple[str, str, str]] = [
@@ -94,7 +95,9 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--json", action="store_true")
     p.add_argument("--ids", action="store_true", help="Output IDs only, one per line")
-    p.add_argument("--rerank", action="store_true", help="Rerank results with the LLM")
+    reranking = p.add_mutually_exclusive_group()
+    reranking.add_argument("--rerank", action="store_true", help="Rerank results with the LLM")
+    reranking.add_argument("--no-rerank", action="store_true", help="Never call an LLM for ranking")
     p.add_argument("--include-superseded", action="store_true", help="Include superseded entries")
 
     # get
@@ -136,6 +139,7 @@ def main(argv=None):
 
     # distill
     p = sub.add_parser("distill", help="Extract knowledge from files")
+    p.add_argument("--job", help="Stable job identity for recoverable, idempotent writes")
     p.add_argument("paths", nargs="+", help="Files or directories")
     p.add_argument("--dry-run", action="store_true")
 
@@ -169,6 +173,7 @@ def main(argv=None):
 
     # list
     p = sub.add_parser("list", help="List entries")
+    p.add_argument("--limit", type=int, default=None, help="Maximum entries, newest first")
     p.add_argument("--status", default=None)
     p.add_argument("--tag", default=None)
     p.add_argument("--json", action="store_true")
@@ -183,6 +188,10 @@ def main(argv=None):
     p.add_argument("value", nargs="?", default=None, help="Value to set (omit to read)")
 
     args = parser.parse_args(argv)
+    if args.command == "list" and args.limit is not None and args.limit < 0:
+        parser.error("--limit must be non-negative")
+    if args.command == "distill" and args.job and (len(args.paths) != 1 or Path(args.paths[0]).is_dir()):
+        parser.error("--job requires exactly one immutable file")
 
     if not args.command:
         parser.print_help()
@@ -195,7 +204,7 @@ def main(argv=None):
             args.query,
             limit=args.limit,
             include_superseded=args.include_superseded,
-            rerank=True if args.rerank else None,
+            rerank=False if args.no_rerank else True if args.rerank else None,
         )
         # What the semantic track cost this query, so a caller on a latency
         # budget (r4t's wake inject) can price it without timing the whole CLI.
@@ -309,7 +318,11 @@ def main(argv=None):
             print(_LLM_REQUIRED.format(cmd="distill"), file=sys.stderr)
             return 1
         engine.reset_llm_failures()
-        results = distill(args.paths, dry_run=args.dry_run)
+        if args.job:
+            with file_lock(engine.NODES_DIR.parent / ".distill.lock"):
+                results = distill(args.paths, dry_run=args.dry_run, job_id=args.job)
+        else:
+            results = distill(args.paths, dry_run=args.dry_run)
         for r in results:
             action = r["action"]
             if action == "skipped":
@@ -327,6 +340,8 @@ def main(argv=None):
         # bridge, and reading it as one retries a capture that was distilled
         # perfectly well.
         failures = engine.llm_failures("distill")
+        if args.job and any(r["action"] == "skipped" for r in results):
+            return 1
         if failures:
             # ANY failed call fails the run, not only an all-failed one. A
             # capture is chunked, and the caller's watermark is per capture:
@@ -411,7 +426,7 @@ def main(argv=None):
             print(f"Index: {disagreement}")
 
     elif args.command == "list":
-        nodes = list_nodes(status=args.status, tag=args.tag)
+        nodes = list_nodes(status=args.status, tag=args.tag, limit=args.limit)
         if args.ids:
             for n in nodes:
                 print(n['id'])

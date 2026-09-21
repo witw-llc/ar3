@@ -56,6 +56,7 @@ from ar3.proc import pid_alive  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+IS_WINDOWS = os.name == "nt"
 
 WORDMARK = ("A R K", "8 4 7", "S T E")
 
@@ -1040,15 +1041,52 @@ def _start_nodes(a8s: str, names: list[str]) -> int:
     return 1 if failures else 0
 
 
+def _posix_sh() -> Optional[str]:
+    """The `sh` that runs get.sh, or None when nothing here can run it.
+
+    POSIX has one on every PATH. Windows does not: Git for Windows puts its
+    `cmd\\` directory on the user Path and keeps `sh.exe` under `usr\\bin`,
+    and the `bash.exe` System32 does hold is the WSL launcher, which would
+    run the installer inside a Linux distro against a Windows path. So when
+    PATH has no `sh`, the shell is read off git's own install tree, the way
+    git itself names it. `bin\\sh.exe` comes first: it is the launcher that
+    puts `/usr/bin` (uname, cygpath) on the child's PATH the way Git Bash
+    does, where `usr\\bin\\sh.exe` is the bare interpreter with only the
+    caller's PATH.
+    """
+    found = shutil.which("sh")
+    if found or not IS_WINDOWS:
+        return found
+    exec_path = _git_out(REPO_ROOT, "--exec-path")
+    if not exec_path:
+        return None
+    parents = Path(exec_path).parents  # <root>/mingw64/libexec/git-core
+    if len(parents) < 3:
+        return None
+    root = parents[2]
+    for candidate in (root / "bin" / "sh.exe", root / "usr" / "bin" / "sh.exe"):
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _update_suite(script: Path) -> int:
     """get.sh against this copy — the pre-flag behavior of `ar3 update`."""
+    sh = _posix_sh()
+    if sh is None:
+        print(
+            f"ar3 update: no sh to run {script.name} with — on Windows, install "
+            f"Git for Windows (its sh runs the installer) or run this from Git Bash",
+            file=sys.stderr,
+        )
+        return 1
     before = _suite_version()
     # AR3_DIR is passed rather than left to default: `get.sh` alone would
     # update whatever lives at ~/.ar3, which is not necessarily the copy the
     # operator just invoked.
     env = {**os.environ, "AR3_DIR": str(REPO_ROOT)}
     try:
-        done = subprocess.run(["sh", str(script)], env=env)
+        done = subprocess.run([sh, str(script)], env=env)
     except OSError as e:
         print(f"ar3 update: cannot run {script}: {e}", file=sys.stderr)
         return 1

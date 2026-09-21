@@ -20,7 +20,6 @@ cli:a8s:unalias  # documented, but no test names it — a rename would not fail
 cli:a8s:unnamespace  # documented, but no test names it — a rename would not fail
 cli:a8s:unremote  # documented, but no test names it — a rename would not fail
 cli:a8s:unstorage  # documented, but no test names it — a rename would not fail
-cli:ar3:update  # documented, but no test names it — a rename would not fail
 cli:k7e:asset  # documented, but no test names it — a rename would not fail
 cli:k7e:consolidate  # documented, but no test names it — a rename would not fail
 cli:k7e:rebuild-mocs  # documented, but no test names it — a rename would not fail
@@ -37,7 +36,6 @@ config:a8s:namespace_options  # tested, but no docs page names it
 config:r4t:Cells  # documented, but no test names it — a rename would not fail
 config:r4t:Rituals  # documented, but no test names it — a rename would not fail
 config:r4t:allowedtools  # documented, but no test names it — a rename would not fail
-config:r4t:continue  # documented, but no test names it — a rename would not fail
 config:r4t:echomax  # neither a test nor a docs page names it
 config:r4t:extends  # documented, but no test names it — a rename would not fail
 config:r4t:history  # tested, but no docs page names it

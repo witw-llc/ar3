@@ -32,6 +32,8 @@ Read [a8s.md](a8s.md) first for concept and usage.
   later, loosely, with `tells` (`-f`, `--sent`). `tell` is the one thing every
   harness and every remote seat shares, so every convenience goes on `tells`
   or on the roster, never on `tell`. Owner ruling, 2026-09-03.
+- **Plain `tells` never times out by default.** It waits for the next
+  arrival with no limit; only an explicit positive `--timeout` bounds it.
 - **Agent-directory invariant — `.outbox/` is one-way.** a8s never reads or
   writes sidecars there. Ingest is atomic rename into `pending/`.
 - **Remote routing publishes to all configured remotes.** Receivers dedupe by ULID.

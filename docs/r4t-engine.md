@@ -20,8 +20,16 @@ r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--t
                      [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
+                     [--memory on|off|small|medium|large] [--memory-home DIR]
+                     [--memory-writer RIG] [--memory-people SENDERS]
                      [--] PROMPT
 ```
+
+**Private memory:** add `--memory on` for automatic K7E retrieval and background
+learning. Each named `--agent` retains its own store across engine and directory
+changes. For a bundled a8s node, use `a8s vars NAME set MEMORY on`.
+See [engine memory](r4t-engine-memory.md) for portability, corrections, writer
+selection, and diagnostics.
 
 Supported engines: `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`,
 `muse`, `devin`, and the `ollama-claude` / `ollama-codex` / `ollama-opencode`
@@ -364,7 +372,8 @@ persona. A bare engine node has none of that — every wake is a fresh CLI
 session with zero transcript memory, so whatever it knew has to already be
 sitting in a file. `run` supplies the reading and writing discipline that
 makes that work: `STATUS.md` and `LESSONS.md`, read on the way in and
-rewritten/appended on the way out, are the entire memory.
+rewritten/appended on the way out, carry working state. Optional K7E memory
+adds retrieved knowledge and asynchronous learning across turns.
 
 ### The scaffold (default on; `--no-scaffold` sends `PROMPT` untouched)
 

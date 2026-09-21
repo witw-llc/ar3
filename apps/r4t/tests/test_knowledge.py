@@ -255,14 +255,14 @@ class TestKnowledgeSection:
         roster = load_roster(ctx.roster_path)
         phil = roster.find("phil")
         phil.knowledge_on = True
-        phil.knowledge_bytes = 400  # room for the preamble + a truncated snippet
+        phil.knowledge_bytes = 800  # framing, preamble and a truncated snippet
         batch = [{"body": "that long note about words"}]
         one = knowledge.knowledge_section(ctx, phil, batch)
         two = knowledge.knowledge_section(ctx, phil, batch)
         assert one == two
         blocks = one[3:]  # after header, framing, blank
         assert blocks
-        assert sum(len(b.encode("utf-8")) for b in blocks if b) <= 400
+        assert len("\n".join(one).encode("utf-8")) <= 800
 
     def test_starved_budget_skips_the_entry_instead_of_a_stub(self, ctx):
         """A budget too small for even one preamble + MIN_SNIPPET bytes of
@@ -314,7 +314,7 @@ class TestKnowledgeSection:
         roster = load_roster(ctx.roster_path)
         phil = roster.find("phil")
         phil.knowledge_on = True
-        assert knowledge.knowledge_section(ctx, phil, []) == []
+        assert knowledge.knowledge_section(ctx, phil, [{"body": "deploy question"}]) == []
         assert "KNOWLEDGE-SKIP phil" in read_log()
 
     def test_wake_prices_the_search_and_falls_back_to_fts(self, ctx):
@@ -642,7 +642,7 @@ class TestTheMemberNeverReadsAStore:
         seed_store("phil", "Old release rule", "Releases go out on Fridays.")
         seed_store("phil", "Current release rule", "Releases go out on Tuesdays.")
         listed = knowledge._run_k7e(home, "list", "--ids")
-        old_id, new_id = listed.stdout.split()
+        new_id, old_id = listed.stdout.split()
         res = knowledge._run_k7e(home, "supersede", old_id, new_id)
         assert res.returncode == 0, res.stderr
         roster = load_roster(ctx.roster_path)

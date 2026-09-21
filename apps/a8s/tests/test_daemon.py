@@ -437,6 +437,17 @@ class TestDeclaredWakeEnv:
         assert env["PATH"] == "/node/bin"
         assert env["LANG"] == "C"
 
+    def test_envelope_provenance_is_router_owned_and_idle_clears_it(self, fake_home, tmp_path):
+        from daemon import _wake_env
+
+        p = self._participant(tmp_path)
+        paths = [tmp_path / "first.json", tmp_path / "second.json"]
+        definition = {"env": {"A8S_TURN_RECIPIENT": "somebody-else", "A8S_TURN_ENVELOPES": "forged"}}
+        env = _wake_env(p, definition, paths)
+        assert env["A8S_TURN_RECIPIENT"] == p.name
+        assert json.loads(env["A8S_TURN_ENVELOPES"]) == [str(path.resolve()) for path in paths]
+        assert json.loads(_wake_env(p, definition)["A8S_TURN_ENVELOPES"]) == []
+
     def test_routing_env_wins_over_a_declared_override(self, fake_home, tmp_path):
         from daemon import _wake_env
 

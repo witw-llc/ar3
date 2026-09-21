@@ -1,7 +1,8 @@
 """Tests for `tells` — the receive-side complement of `tell`.
 
 `tells` resolves the node from `TELL_OUTBOX_DIR` (like `tell`), snapshots the
-`.inbox` beside the outbox, then blocks up to `--timeout` for new envelopes.
+`.inbox` beside the outbox, then waits with no time limit for new envelopes
+(`--timeout SEC` bounds the wait).
 The end-to-end timeout path is exercised through the repo-root `tells` shim; the
 arrival paths inject messages from a background thread while `tells_main` polls.
 """
@@ -106,6 +107,83 @@ def test_tells_timeout_exits_1(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "no message within 0.5s" in err
+
+
+def _fake_clock(monkeypatch, on_sleep):
+    """Each poll sleep advances a fake monotonic clock by a minute."""
+    import tells as tells_mod
+
+    clock = {"now": 0.0, "sleeps": 0}
+
+    def fake_sleep(_interval: float) -> None:
+        clock["sleeps"] += 1
+        clock["now"] += 60.0
+        on_sleep(clock["sleeps"])
+
+    monkeypatch.setattr(tells_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    return clock
+
+
+def test_tells_default_waits_past_any_old_limit(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+
+    def on_sleep(n: int) -> None:
+        if n == 600:
+            _drop_inbox(inbox, "BOB", "ten hours later", "01QUIETWAIT00000000000000")
+
+    clock = _fake_clock(monkeypatch, on_sleep)
+    rc = tells_main([])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert clock["now"] >= 600 * 60.0
+    assert "BOB: ten hours later" in captured.out
+    assert "no message within" not in captured.err
+
+
+def test_tells_default_ctrl_c_exits_0(tmp_path, monkeypatch, capsys):
+    outbox, _inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+
+    def on_sleep(n: int) -> None:
+        if n == 50:
+            raise KeyboardInterrupt
+
+    _fake_clock(monkeypatch, on_sleep)
+    rc = tells_main([])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_tells_shim_default_still_waiting_then_prints(tmp_path):
+    outbox, inbox = _setup_node(tmp_path)
+    env = dict(os.environ)
+    env[TELL_OUTBOX_DIR_ENV] = str(outbox)
+    proc = subprocess.Popen(
+        [str(TELLS)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+    )
+    try:
+        time.sleep(1.0)
+        assert proc.poll() is None
+        _drop_inbox(inbox, "BOB", "it landed", "01SHIMWAIT000000000000000")
+        out, err = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0
+    assert "BOB: it landed" in out
+
+
+def test_tells_timeout_1_still_bounded(tmp_path, monkeypatch, capsys):
+    outbox, _inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    rc = tells_main(["--timeout", "1"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "no message within 1s" in err
 
 
 def test_tells_without_outbox_env_fails(tmp_path, monkeypatch, capsys):

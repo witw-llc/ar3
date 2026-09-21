@@ -545,26 +545,116 @@ class _Done:
         self.stdout = stdout
 
 
-def test_update_runs_the_local_installer_against_this_copy(tmp_path, monkeypatch, capsys):
-    root = _installed(tmp_path)
-    monkeypatch.setattr(ar3, "REPO_ROOT", root)
-    seen = {}
+def _sh_on_path(monkeypatch, path="/bin/sh"):
+    """What every POSIX box and every Git Bash shell look like: `sh` resolves.
+    Pinned rather than left to the host, so the suite reads the same on a
+    Mac runner and on a Windows checkout."""
+    monkeypatch.setattr(ar3.shutil, "which", lambda name: path if name == "sh" else None)
 
+
+LAUNCHER = ("bin", "sh.exe")
+BARE = ("usr", "bin", "sh.exe")
+
+
+def _git_for_windows(tmp_path, monkeypatch, *shims):
+    """A Windows box whose PATH has git and no sh — PowerShell or cmd.exe with
+    Git for Windows installed. `git --exec-path` answers three levels under
+    the install root; `shims` says which of the tree's two sh.exe copies
+    exist there. No shims means git is absent too."""
+    root = tmp_path / "Git"
+    for rel in shims:
+        exe = root.joinpath(*rel)
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("", encoding="utf-8")
+    exec_path = str(root / "mingw64" / "libexec" / "git-core") if shims else None
+    monkeypatch.setattr(ar3, "IS_WINDOWS", True)
+    monkeypatch.setattr(ar3.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        ar3, "_git_out",
+        lambda _root, *args: exec_path if args == ("--exec-path",) else None,
+    )
+    return root
+
+
+def _recording_run(seen):
     def fake_run(argv, env=None, **kw):
         seen["argv"] = argv
         seen["dir"] = (env or {}).get("AR3_DIR")
         return _Done(0)
 
-    monkeypatch.setattr(ar3.subprocess, "run", fake_run)
+    return fake_run
+
+
+def test_update_runs_the_local_installer_against_this_copy(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    _sh_on_path(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(ar3.subprocess, "run", _recording_run(seen))
     assert ar3.cmd_update(_update_args()) == 0
-    assert seen["argv"] == ["sh", str(root / "get.sh")]
+    assert seen["argv"] == ["/bin/sh", str(root / "get.sh")]
     # Without this, get.sh updates whatever lives at ~/.ar3 instead of the
     # copy the operator actually invoked.
     assert seen["dir"] == str(root)
 
 
+def test_update_on_windows_runs_the_installer_through_git_bash_launcher(tmp_path, monkeypatch):
+    # PowerShell and cmd.exe carry Git's cmd\ directory, not usr\bin, so a
+    # bare `sh` is [WinError 2] there. bin\sh.exe is the launcher that puts
+    # /usr/bin on the child's PATH; it wins over the bare interpreter beside it.
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    git = _git_for_windows(tmp_path, monkeypatch, LAUNCHER, BARE)
+    seen = {}
+    monkeypatch.setattr(ar3.subprocess, "run", _recording_run(seen))
+    assert ar3.cmd_update(_update_args()) == 0
+    assert seen["argv"] == [str(git / "bin" / "sh.exe"), str(root / "get.sh")]
+
+
+def test_update_on_windows_falls_back_to_the_bare_interpreter(tmp_path, monkeypatch):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    git = _git_for_windows(tmp_path, monkeypatch, BARE)
+    seen = {}
+    monkeypatch.setattr(ar3.subprocess, "run", _recording_run(seen))
+    assert ar3.cmd_update(_update_args()) == 0
+    assert seen["argv"][0] == str(git / "usr" / "bin" / "sh.exe")
+
+
+def test_update_on_windows_without_git_says_what_to_install(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    _git_for_windows(tmp_path, monkeypatch)
+
+    def explode(*a, **k):
+        raise AssertionError("installer ran with no sh to run it")
+
+    monkeypatch.setattr(ar3.subprocess, "run", explode)
+    assert ar3.cmd_update(_update_args()) == 1
+    err = capsys.readouterr().err
+    assert "Git for Windows" in err
+    assert "WinError" not in err
+
+
+def test_update_on_posix_does_not_read_git_for_a_shell(tmp_path, monkeypatch, capsys):
+    # The git-tree walk is a Windows answer to a Windows PATH; a POSIX box
+    # with no `sh` at all is not something to paper over from here.
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    monkeypatch.setattr(ar3, "IS_WINDOWS", False)
+    monkeypatch.setattr(ar3.shutil, "which", lambda _name: None)
+
+    def no_git(*a):
+        raise AssertionError("git consulted for a shell on POSIX")
+
+    monkeypatch.setattr(ar3, "_git_out", no_git)
+    assert ar3.cmd_update(_update_args()) == 1
+    assert "no sh" in capsys.readouterr().err
+
+
 def test_update_reports_the_version_it_moved_to(tmp_path, monkeypatch, capsys):
     root = _installed(tmp_path, "0.1.0")
+    _sh_on_path(monkeypatch)
 
     def fake_run(argv, env=None, **kw):
         (root / "VERSION").write_text("0.1.9\n", encoding="utf-8")
@@ -579,6 +669,7 @@ def test_update_reports_the_version_it_moved_to(tmp_path, monkeypatch, capsys):
 def test_update_says_so_when_nothing_moved(tmp_path, monkeypatch, capsys):
     root = _installed(tmp_path, "0.1.0")
     monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    _sh_on_path(monkeypatch)
     monkeypatch.setattr(ar3.subprocess, "run", lambda *a, **k: _Done(0))
     assert ar3.cmd_update(_update_args()) == 0
     assert "already at 0.1.0" in capsys.readouterr().out
@@ -587,6 +678,7 @@ def test_update_says_so_when_nothing_moved(tmp_path, monkeypatch, capsys):
 def test_update_propagates_installer_failure(tmp_path, monkeypatch, capsys):
     root = _installed(tmp_path)
     monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    _sh_on_path(monkeypatch)
     monkeypatch.setattr(ar3.subprocess, "run", lambda *a, **k: _Done(3))
     assert ar3.cmd_update(_update_args()) == 3
     # No invented success line on top of the installer's own complaint.
@@ -645,6 +737,7 @@ def _pipeline(tmp_path, monkeypatch, nodes=(), binaries=None, fail=(),
     a8s = _engine_path(tmp_path, "bin", "a8s")
     table = dict(binaries or {})
     table["a8s"] = a8s
+    table["sh"] = "/bin/sh"
     monkeypatch.setattr(ar3.shutil, "which", _which(table))
     home = tmp_path / "a8s-home"
     home.mkdir(exist_ok=True)
@@ -891,7 +984,7 @@ def test_update_engine_runs_the_engine_then_the_suite(tmp_path, monkeypatch):
     assert seen == [
         [a8s, "ps"],
         [binary, "update"],
-        ["sh", str(root / "get.sh")],
+        ["/bin/sh", str(root / "get.sh")],
         [a8s, "ps"],
     ]
 
@@ -969,7 +1062,7 @@ def test_update_stops_nodes_before_engines_and_restarts_them(tmp_path, monkeypat
         [a8s, "stop", "N2"],
         [a8s, "ps"],
         [binary, "update"],
-        ["sh", str(root / "get.sh")],
+        ["/bin/sh", str(root / "get.sh")],
         [a8s, "ps"],
         [a8s, "start", "N1"],
         [a8s, "start", "N2"],

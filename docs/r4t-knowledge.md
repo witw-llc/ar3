@@ -1,7 +1,7 @@
 # Knowledge — a member's private k7e memory
 
-Experimental (#41, #52): default off, and the defaults below are lab knobs
-until the K0 experiment freezes them.
+Private roster memory is opt-in. For agents without a roster, see
+[engine memory](r4t-engine-memory.md).
 
 A member with a `Knowledge:` roster line gets a private
 [k7e](k7e.md) store and two automatic behaviors around it:
@@ -24,7 +24,7 @@ In ascending specificity:
 |---|---|
 | `off` (or absent) | No store, no section — the prompt is byte-identical to a roster that never heard of the field. |
 | `on` | Store on, inject budget from the rig's tier (below). |
-| `small` (4096) / `medium` (8192) / `large` (32768) | T-shirt sizes — the **primary** grammar. Mapped to bytes by a table r4t owns (`roster.KNOWLEDGE_SIZES`), so a roster written today stays meaningful as usable context grows: move what `large` means in one place and every roster using it moves with it. `large` is currently unreachable in practice: `SEARCH_LIMIT` caps the retrieved pool well under 32768 bytes mean, tracked as its own issue rather than folded into this one. |
+| `small` (4096) / `medium` (8192) / `large` (32768) | T-shirt sizes — the **primary** grammar. Mapped to bytes by a table r4t owns (`roster.KNOWLEDGE_SIZES`), so a roster written today stays meaningful as usable context grows: move what `large` means in one place and every roster using it moves with it. The retrieval pool scales with the budget: eight candidates through `medium`, 32 at `large`, and 16 for exact byte budgets between them. |
 | `4k` / `4096` | An exact byte count — the escape hatch for a budget the sizes don't fit. |
 | `<rig>` (e.g. `claude`) | A distill-rig override (below) at the tier default budget. |
 | `<size> <rig>` (e.g. `4k claude`, `large agy`) | Both together, in either order. |
@@ -102,7 +102,7 @@ and on a bare org it is a convention.
 ## Inject on the way in
 
 Waking a knowledge-carrying member, dispatch searches its store — seeded with
-the newest message, the member's name and role, and the mission's first line
+the newest nonempty message alone
 — and pastes the top entries into a `## What you remember` prompt section:
 ranked snippets under their title and age, framed as the member's own fallible
 recollection, never as instructions. The section rides after the how-to-work doctrine and before

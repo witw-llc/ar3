@@ -500,7 +500,7 @@ def _tell_outbox_env(p: Participant) -> dict[str, str]:
     }
 
 
-def _wake_env(p: Participant, definition: dict) -> dict[str, str]:
+def _wake_env(p: Participant, definition: dict, envelopes=()) -> dict[str, str]:
     """The layer `_start_wake_subprocess` puts over its own environment.
 
     Declared node env underneath, routing variables on top: an operator who
@@ -508,7 +508,9 @@ def _wake_env(p: Participant, definition: dict) -> dict[str, str]:
     routes to, because a node that answers into someone else's outbox is worse
     than a node that does not answer.
     """
-    return {**wake_env(definition), **_tell_outbox_env(p)}
+    return {**wake_env(definition), **_tell_outbox_env(p),
+            "A8S_TURN_RECIPIENT": p.name,
+            "A8S_TURN_ENVELOPES": json.dumps([str(path.resolve()) for path in envelopes])}
 
 
 def _deliver_file_proxy(p: Participant) -> None:
@@ -699,7 +701,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
         ))
-        spawn_env = _wake_env(p, definition)
+        spawn_env = _wake_env(p, definition, [trashed])
     except ValueError as e:
         out_agent(p.name, f"[{p.name}] wake aborted: {e}")
         _settle_wake(p, [trashed], None, reason=str(e))
@@ -785,7 +787,7 @@ def wake_batch(
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
         ))
-        spawn_env = _wake_env(p, definition)
+        spawn_env = _wake_env(p, definition, trashed)
     except ValueError as e:
         out_agent(p.name, f"[{p.name}] batch wake aborted: {e}")
         _settle_wake(p, trashed, None, reason=str(e))

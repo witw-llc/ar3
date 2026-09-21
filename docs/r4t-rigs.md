@@ -686,3 +686,11 @@ contract held by the admission lock, not a setting (see
 [the rotation](r4t-operations.md#the-rotation)); parallelism is a second node.
 | `log_retention_days` | 14 | Days of roster transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
 | `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |
+
+## Memory on a direct rig run
+
+`r4t rig run NAME --agent wren --memory on "Do the work"` uses the same
+private memory lifecycle as an engine run. Model and effort overrides apply
+to the default memory writer, and the rig's environment is resolved from its
+configuration. `--memory-writer` selects a separate configured rig. See
+[engine memory](r4t-engine-memory.md).

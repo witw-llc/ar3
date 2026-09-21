@@ -11,6 +11,8 @@ distill_command (or llm_command) is unset.
 """
 
 import json
+import hashlib
+from ar3.fsio import atomic_write_text
 import os
 import re
 import sys
@@ -115,7 +117,10 @@ CORRECTION_SAID_MAX = 8000
 RESTATEMENT_OVERLAP = 0.45
 
 
-def distill(paths, dry_run=False):
+def distill(paths, dry_run=False, job_id=None):
+    engine.init()
+    if job_id and (len(paths) != 1 or Path(paths[0]).is_dir()):
+        raise ValueError("a distillation job requires exactly one immutable file")
     results = []
     for path in paths:
         p = Path(path)
@@ -134,23 +139,36 @@ def distill(paths, dry_run=False):
             # the same directory next time, so an undecodable byte anywhere in
             # a capture directory used to wedge distillation permanently rather
             # than skip one file.
+            plan_key = hashlib.sha256(job_id.encode()).hexdigest() if job_id else None
+            plan_path = engine.NODES_DIR.parent / ".jobs" / f"{plan_key}.json" if plan_key else None
             try:
-                candidates = extract_from_file(f)
-                corrections = corrections_from_capture(f)
-                source, sources = capture_provenance(f)
+                input_hash = hashlib.sha256(f.read_bytes()).hexdigest() if plan_key else None
+                if plan_path and plan_path.exists() and not dry_run:
+                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                    if plan["input_hash"] != input_hash:
+                        raise ValueError("job ID is already bound to different input")
+                    new_knowledge, source, sources = plan["items"], plan["source"], plan["sources"]
+                else:
+                    candidates = extract_from_file(f)
+                    corrections = corrections_from_capture(f)
+                    source, sources = capture_provenance(f)
+                    candidates = [c for c in candidates if not _should_reject(c["content"])]
+                    new_knowledge = diff_against_store(candidates)
+                    if corrections:
+                        new_knowledge = corrections + _without_restatements(
+                            new_knowledge, [c["_supersedes"] for c in corrections]
+                        )
+                    if plan_path and not dry_run:
+                        if engine.llm_failures("distill"):
+                            continue
+                        atomic_write_text(plan_path, json.dumps({
+                            "items": new_knowledge, "source": source, "sources": sources,
+                            "input_hash": input_hash,
+                        }), fsync=True)
             except (OSError, UnicodeDecodeError, ValueError, TypeError) as e:
-                print(
-                    f"  [distill] skipping {f}: {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                )
+                print(f"  [distill] skipping {f}: {type(e).__name__}: {e}", file=sys.stderr)
                 results.append({"action": "skipped", "source": str(f), "reason": str(e)})
                 continue
-            candidates = [c for c in candidates if not _should_reject(c["content"])]
-            new_knowledge = diff_against_store(candidates)
-            if corrections:
-                new_knowledge = corrections + _without_restatements(
-                    new_knowledge, [c["_supersedes"] for c in corrections]
-                )
             if dry_run:
                 for item in new_knowledge:
                     if item.get("_supersedes"):
@@ -163,7 +181,12 @@ def distill(paths, dry_run=False):
                     else:
                         results.append({"action": "would_store", "title": item["title"], "source": str(f)})
             else:
-                for item in new_knowledge:
+                for item_index, item in enumerate(new_knowledge):
+                    def mutate(step, fn, *args, **kwargs):
+                        if plan_key:
+                            return engine.run_operation(f"{plan_key}/{item_index}/{step}", fn, *args, **kwargs)
+                        return fn(*args, **kwargs)
+
                     importance = _score_importance(item["title"], item["content"])
                     # Store asset and embed link for media files
                     asset_ref = ""
@@ -173,7 +196,7 @@ def distill(paths, dry_run=False):
                     content = item["content"] + asset_ref
 
                     if item.get("_supersedes"):
-                        node_id = engine.store_entry(
+                        node_id = mutate("store", engine.store_entry,
                             title=item["title"],
                             content=content,
                             tags=item.get("tags", []),
@@ -182,8 +205,8 @@ def distill(paths, dry_run=False):
                             sources=sources,
                         )
                         if item.get("_provenance"):
-                            engine.append_entry(node_id, "History", item["_provenance"])
-                        engine.supersede(item["_supersedes"], node_id)
+                            mutate("history", engine.append_entry, node_id, "History", item["_provenance"])
+                        mutate("supersede", engine.supersede, item["_supersedes"], node_id)
                         results.append({"action": "superseded", "id": node_id, "old_id": item["_supersedes"], "title": item["title"], "source": str(f)})
                     elif item.get("_append_to"):
                         # The write boundary is the last word on what a
@@ -191,7 +214,7 @@ def distill(paths, dry_run=False):
                         # candidate, never the sweep: a raised sweep is one
                         # `dream_sweep` re-runs the whole directory for.
                         try:
-                            engine.append_entry(
+                            mutate("append", engine.append_entry,
                                 item["_append_to"], "Edge Cases", content,
                                 source=source, sources=sources,
                             )
@@ -201,7 +224,7 @@ def distill(paths, dry_run=False):
                             continue
                         results.append({"action": "appended", "id": item["_append_to"], "title": item["title"], "source": str(f)})
                     else:
-                        node_id = engine.store_entry(
+                        node_id = mutate("store", engine.store_entry,
                             title=item["title"],
                             content=content,
                             tags=item.get("tags", []),
@@ -369,6 +392,11 @@ def capture_provenance(path):
     not a capture distills with no provenance instead of a guessed one."""
     if _media_type(path):
         return None, []
+    capture = read_engine_capture(path)
+    if capture is not None:
+        root = capture["root"].rstrip("/\\")
+        paths = [p for p in absolute_paths(capture["output"], root) if _under_root(p, root)]
+        return f"turn {capture['stamp']}", paths[:SOURCE_PATHS_MAX]
     head, mark, body = Path(path).read_text(encoding="utf-8").partition(
         CAPTURE_PROMPT_MARK
     )
@@ -400,22 +428,34 @@ def corrections_from_capture(path):
     recalled ids, or none the people could have contradicted, costs no call."""
     if _media_type(path):
         return []
-    text = Path(path).read_text(encoding="utf-8")
-    head = text.split(CAPTURE_PROMPT_MARK, 1)[0]
-    ids_line = _CAPTURE_KNOWLEDGE.search(head)
-    said = _CAPTURE_HUMAN.search(head)
-    if not ids_line or not said:
+    capture = read_engine_capture(path)
+    if capture is not None:
+        ids = capture["knowledge"]
+        human_text = "\n".join(capture["human_messages"])
+        stamp = capture["stamp"]
+    else:
+        text = Path(path).read_text(encoding="utf-8")
+        head = text.split(CAPTURE_PROMPT_MARK, 1)[0]
+        ids_line = _CAPTURE_KNOWLEDGE.search(head)
+        said = _CAPTURE_HUMAN.search(head)
+        if not ids_line or not said:
+            return []
+        ids = _NODE_ID.findall(ids_line.group(1))
+        human_text = said.group(1).strip()
+        stamp_match = _CAPTURE_STAMP.search(head)
+        stamp = stamp_match.group(1) if stamp_match else Path(path).name
+    if not ids or not human_text:
         return []
     notes = []
     recalled = []
-    for node_id in _NODE_ID.findall(ids_line.group(1)):
+    for node_id in ids:
         try:
             node = engine.get(node_id)
         except FileNotFoundError:
             continue
         # An entry already retired is not corrected twice; superseding it again
         # would only point it at a second replacement.
-        if "status: active" not in node:
+        if engine._parse_frontmatter(node).get("status") != "active":
             continue
         title = engine._parse_frontmatter(node).get("title", node_id)
         body = engine._extract_body(node).strip()[:CORRECTION_NOTE_MAX]
@@ -423,10 +463,8 @@ def corrections_from_capture(path):
         recalled.append(node_id)
     if not notes:
         return []
-    stamp_match = _CAPTURE_STAMP.search(head)
-    stamp = stamp_match.group(1) if stamp_match else Path(path).name
     response = engine._call_llm(
-        _correction_prompt(said.group(1).strip()[:CORRECTION_SAID_MAX], notes),
+        _correction_prompt(human_text[:CORRECTION_SAID_MAX], notes),
         purpose="distill",
         timeout=180,
     )
@@ -526,10 +564,31 @@ def _media_type(path):
     return None
 
 
+def read_engine_capture(path):
+    if Path(path).suffix != ".json":
+        return None
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("format") != "r4t-memory-turn-v1":
+        return None
+    for key in ("stamp", "root", "input", "output"):
+        if not isinstance(data.get(key), str):
+            raise ValueError(f"capture {key} must be a string")
+    for key in ("knowledge", "human_messages"):
+        if not isinstance(data.get(key), list) or not all(isinstance(v, str) for v in data[key]):
+            raise ValueError(f"capture {key} must be a list of strings")
+    if data.get("exit") != 0:
+        raise ValueError("unsuccessful turn is not distillation input")
+    return data
+
+
 def extract_from_file(path):
     if _media_type(path):
         return _multimodal_extract(path)
-    text = Path(path).read_text(encoding="utf-8")
+    capture = read_engine_capture(path)
+    if capture is not None:
+        text = json.dumps({"input": capture["input"], "output": capture["output"]}, ensure_ascii=False)
+    else:
+        text = Path(path).read_text(encoding="utf-8")
     return _llm_extract(text)
 
 
@@ -987,7 +1046,7 @@ def _dedup_candidates(candidates):
 
 
 def _llm_extract(text):
-    if len(text) < 100:
+    if len(text) < MIN_CONTENT_LENGTH:
         return []
 
     import config

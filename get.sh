@@ -35,6 +35,19 @@ main() {
     AR3_BIN=""
   fi
 
+  # `ar3 update` on Windows hands AR3_DIR over as python spells it,
+  # C:\Users\me\.ar3. MSYS opens that path, so the pull itself works, but
+  # the rc check below compares strings, and the line Git Bash's install
+  # wrote reads /c/Users/me/.ar3 — so every update appended a second source
+  # line. One spelling, the POSIX one, before anything reads the variable.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if command -v cygpath >/dev/null 2>&1; then
+        AR3_DIR="$(cygpath -u "$AR3_DIR")"
+      fi
+      ;;
+  esac
+
   AR3_CHANNEL="${AR3_CHANNEL:-stable}"
   AR3_VERSION="${AR3_VERSION:-}"
   case "$AR3_CHANNEL" in

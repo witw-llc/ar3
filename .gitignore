@@ -18,3 +18,10 @@ venv/
 # macOS
 .DS_Store
 .claude/
+
+# The resident seat's own files: identity, memory, and the engine-run
+# working-state pair. Never tracked, so a headless turn can live in the checkout.
+.ares/
+/STATUS.md
+/LESSONS.md
+/LESSONS-ARCHIVE.md

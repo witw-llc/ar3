@@ -215,7 +215,8 @@ is the receive-side complement of `tell`. It resolves the node the same way
 (`<outbox-parent>/.inbox`).
 
 1. Snapshot the `.json` envelopes already in `.inbox`.
-2. Poll (0.1s) up to `--timeout` seconds (default 5) for new envelopes; `-f` /
+2. Poll (0.1s) with no time limit until new envelopes land, print the burst,
+   and exit 0. `--timeout SEC` bounds the wait to SEC seconds; `-f` /
    `--timeout 0` follows until Ctrl+C.
 3. Print each new envelope as `sender: body` by default. Bodies longer than
    `--body-max` / `TELLS_BODY_MAX` (default **16000** chars; `0` = unlimited)
@@ -227,7 +228,8 @@ is the receive-side complement of `tell`. It resolves the node the same way
    takes a plain path for a reader who has one. Neither needs an outbox or a
    registry: a clipped message is recoverable from wherever the reader is. With `--glow` and/or `--heading-out` /
    `--heading-in`, print the same markdown as `a8s convo` (shared
-   `format_entry` / GlowStream). Timeout prints one stderr line and exits 1.
+   `format_entry` / GlowStream). A positive `--timeout` that passes with nothing
+   new prints one stderr line and exits 1.
 
 A message whose delivery is more than 10 minutes after the `date` its sender
 stamped prints with a `[late 32h]` prefix, computed from the envelope's own

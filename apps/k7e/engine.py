@@ -21,11 +21,16 @@ import sqlite3
 import struct
 import sys
 import time
+import threading
+from contextlib import contextmanager
+from functools import wraps
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from ar3.home import app_home
+from ar3.fsio import atomic_write_text
+from ar3.locking import file_lock
 
 
 def _k7e_home():
@@ -36,6 +41,82 @@ NODES_DIR = None
 MOCS_DIR = None
 ASSETS_DIR = None
 INDEX_DB = None
+_writing = threading.local()
+
+
+@contextmanager
+def write_lock():
+    if getattr(_writing, "active", False):
+        yield
+        return
+    home = NODES_DIR.parent if NODES_DIR is not None else _k7e_home()
+    with file_lock(home / ".write.lock"):
+        _writing.active = True
+        try:
+            init()
+            recover_operations()
+            yield
+        finally:
+            _writing.active = False
+
+
+def _write_locked(fn):
+    @wraps(fn)
+    def call(*args, **kwargs):
+        with write_lock():
+            return fn(*args, **kwargs)
+    return call
+
+
+def _persist_node(path, text, *, result=None):
+    operation = getattr(_writing, "operation", None)
+    if operation:
+        atomic_write_text(operation.with_suffix(".pending.json"), json.dumps({
+            "node": path.stem, "text": text,
+            "result": path.stem if result is None else result,
+        }), fsync=True)
+    atomic_write_text(path, text, fsync=True)
+
+
+def _index_text(node_id, text):
+    meta = _parse_frontmatter(text)
+    body = _extract_body(text)
+    _index_node(node_id, meta.get("title", ""), meta.get("aliases", []),
+                meta.get("tags", []), body, meta.get("last_updated", ""),
+                content_hash=hashlib.sha256(body.encode()).hexdigest()[:16],
+                confidence=meta.get("confidence", 0.5),
+                status=meta.get("status", "active"),
+                superseded_by=meta.get("superseded_by", ""))
+    _update_mocs(node_id, meta.get("title", ""), meta.get("tags", []))
+
+
+def recover_operations():
+    for path in sorted((NODES_DIR.parent / ".operations").glob("*.pending.json")):
+        done = path.with_name(path.name.replace(".pending.json", ".json"))
+        if done.exists():
+            path.unlink()
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        atomic_write_text(_node_path(data["node"]), data["text"], fsync=True)
+        _index_text(data["node"], data["text"])
+        atomic_write_text(done, json.dumps({"result": data["result"]}), fsync=True)
+        path.unlink()
+
+
+def run_operation(key, fn, *args, **kwargs):
+    """Replay a decided mutation after a crash without appending it twice."""
+    with write_lock():
+        path = NODES_DIR.parent / ".operations" / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))["result"]
+        _writing.operation = path
+        try:
+            result = fn(*args, **kwargs)
+            atomic_write_text(path, json.dumps({"result": result}), fsync=True)
+            path.with_suffix(".pending.json").unlink(missing_ok=True)
+            return result
+        finally:
+            _writing.operation = None
 
 def _ollama_url():
     return os.environ.get("OLLAMA_URL") or _load_config_val("ollama_url", "http://localhost:11434")
@@ -176,6 +257,7 @@ def init():
     conn.close()
 
 
+@_write_locked
 def next_id():
     """Generate next K7E-BBB-NNNNN ID. Sequential across all buckets.
     Uses a counter in the sqlite meta table for O(1) performance.
@@ -237,6 +319,7 @@ def _all_node_files():
             yield f
 
 
+@_write_locked
 def store_entry(title, content, tags=None, aliases=None, importance=5,
                 source=None, sources=None):
     """Store a new knowledge entry. Deduplicates by content hash at storage layer.
@@ -273,23 +356,14 @@ last_updated: {now}
 tags: [{', '.join(tags)}]
 ---
 
-## Verified Protocol
-
-{content.strip()}
-
-## Edge Cases
-
-## False Paths
-
-## History
-* {now}: Initial entry.
 """
+    body += entry_sections(content, now)
 
     body = _with_provenance(body, source, sources)
 
     node_path = _node_path(node_id)
     node_path.parent.mkdir(parents=True, exist_ok=True)
-    node_path.write_text(body, encoding="utf-8")
+    _persist_node(node_path, body)
 
     _index_node(node_id, title, aliases, tags, content, now, content_hash=content_hash, confidence=confidence)
     _update_mocs(node_id, title, tags)
@@ -297,6 +371,7 @@ tags: [{', '.join(tags)}]
     return node_id
 
 
+@_write_locked
 def append_entry(node_id, section, content, source=None, sources=None):
     """Grow an existing entry, and refuse one that is not active.
 
@@ -348,28 +423,30 @@ def append_entry(node_id, section, content, source=None, sources=None):
     # operator is tracing was resurrected by the turn that touched it last.
     text = _with_provenance(text, source, sources)
 
-    node_path.write_text(text, encoding="utf-8")
+    _persist_node(node_path, text)
 
     meta = _parse_frontmatter(text)
     full_content = _extract_body(text)
     _index_node(
         node_id, meta.get("title", ""),
         meta.get("aliases", []), meta.get("tags", []),
-        full_content, now, status=meta.get("status", "active")
+        full_content, now, status=meta.get("status", "active"),
+        superseded_by=meta.get("superseded_by", "")
     )
 
     return node_id
 
 
+@_write_locked
 def supersede(old_id, new_id):
     """Mark old_id as superseded by new_id. Returns True if old_id existed."""
     node_path = _node_path(old_id)
     if not node_path.exists():
         return False
     text = node_path.read_text(encoding="utf-8")
-    text = re.sub(r"status: active", "status: superseded", text)
-    text = re.sub(r"(tags: \[.*?\])", r"\1\nsuperseded_by: " + new_id, text)
-    node_path.write_text(text, encoding="utf-8")
+    text = _set_frontmatter_key(text, "status", "superseded")
+    text = _set_frontmatter_key(text, "superseded_by", new_id)
+    _persist_node(node_path, text, result=True)
     # Update index
     conn = _connect()
     conn.execute("UPDATE nodes SET status = 'superseded', superseded_by = ? WHERE id = ?", (new_id, old_id))
@@ -495,6 +572,7 @@ def get(node_id, track_usage=False):
     return text
 
 
+@_write_locked
 def reindex(embeddings=False):
     init()
     conn = _connect()
@@ -518,11 +596,11 @@ def reindex(embeddings=False):
 
         conn.execute(
             "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-            "verification_count, last_updated, tags, created_at, updated_at, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (node_id, title, ", ".join(aliases), meta.get("status", "active"),
              meta.get("confidence", 0.5), meta.get("verification_count", 0),
-             now, ", ".join(tags), now, now, content_hash)
+             now, ", ".join(tags), now, now, content_hash, meta.get("superseded_by", ""))
         )
         conn.execute(
             "INSERT INTO nodes_fts (rowid, title, aliases, tags, content) "
@@ -553,7 +631,9 @@ def reindex(embeddings=False):
         process_pending_embeddings()
 
 
-def list_nodes(status=None, tag=None):
+def list_nodes(status=None, tag=None, limit=None):
+    if limit is not None and limit < 0:
+        raise ValueError("limit must be non-negative")
     init()
     conn = _connect()
     query = "SELECT id, title, status, confidence, tags FROM nodes"
@@ -567,7 +647,10 @@ def list_nodes(status=None, tag=None):
         params.append(f"%{tag}%")
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY last_updated DESC"
+    query += " ORDER BY last_updated DESC, id DESC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [{"id": r[0], "title": r[1], "status": r[2], "confidence": r[3], "tags": r[4]} for r in rows]
@@ -1276,20 +1359,23 @@ def _connect():
 
 
 def _index_node(node_id, title, aliases, tags, content, now, content_hash=None,
-                confidence=0.5, status="active"):
+                confidence=0.5, status="active", superseded_by=None):
     """Write one node's row and its FTS text. `status` is the file's own —
     a literal here would say active about a node whose frontmatter says
     superseded or compiled, and search reads the index, not the file."""
     conn = _connect()
+    if superseded_by is None:
+        path = _node_path(node_id)
+        superseded_by = _parse_frontmatter(path.read_text(encoding="utf-8")).get("superseded_by", "") if path.exists() else ""
     alias_str = ", ".join(aliases) if isinstance(aliases, list) else aliases
     tag_str = ", ".join(tags) if isinstance(tags, list) else tags
 
     conn.execute(
         "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-        "verification_count, last_updated, tags, created_at, updated_at, content_hash) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+        "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by) "
+        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
         (node_id, title, alias_str, status, confidence, now, tag_str, now, now,
-         content_hash)
+         content_hash, superseded_by)
     )
 
     conn.execute("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)", (node_id,))
@@ -1522,13 +1608,70 @@ def _set_frontmatter_key(text, key, value):
         return text
     front = match.group(1)
     line = f"{key}: {value}"
-    if re.search(rf"(?m)^{re.escape(key)}:", front):
-        # A path is not a replacement template: `\g` in one would otherwise be
-        # read as a group reference.
-        front = re.sub(rf"(?m)^{re.escape(key)}:.*$", lambda _m: line, front, count=1)
-    else:
-        front = f"{front}\n{line}"
+    lines = front.splitlines()
+    positions = [i for i, item in enumerate(lines) if item.startswith(key + ":")]
+    at = positions[0] if positions else len(lines)
+    lines = [item for i, item in enumerate(lines) if i not in positions]
+    lines.insert(at, line)
+    front = "\n".join(lines)
     return f"---\n{front}\n---\n{text[match.end():]}"
+
+
+STANDARD_HEADINGS = ("Verified Protocol", "Edge Cases", "False Paths", "History")
+
+
+def _section_blocks(body):
+    blocks = [[None, []]]
+    fence = None
+    for line in body.splitlines():
+        marker = re.match(r"^\s{0,3}(`{3,}|~{3,})", line)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            blocks[-1][1].append(line)
+            continue
+        heading = re.match(r"^## (.+?)\s*$", line) if fence is None else None
+        if heading:
+            blocks.append([heading.group(1), []])
+        else:
+            blocks[-1][1].append(line)
+    return blocks
+
+
+def collapse_sections(body):
+    """Merge repeated template sections, preserving their content and code fences."""
+    merged, seen, duplicates = [], {}, []
+    blocks = _section_blocks(body)
+    for name, lines in blocks:
+        if name in STANDARD_HEADINGS and name in seen:
+            seen[name][1].extend(["", *lines])
+            duplicates.append(name)
+        else:
+            block = [name, lines]
+            merged.append(block)
+            if name in STANDARD_HEADINGS:
+                seen[name] = block
+    result = []
+    for name, lines in merged:
+        content = "\n".join(lines).strip()
+        result.append((f"## {name}\n\n" if name else "") + content)
+    return "\n\n".join(part.rstrip() for part in result if part.strip()) + "\n", duplicates
+
+
+def entry_sections(content, date):
+    body, _ = collapse_sections(content)
+    headings = {name for name, _ in _section_blocks(body)}
+    if "Verified Protocol" not in headings:
+        body = "## Verified Protocol\n\n" + body
+    for name in STANDARD_HEADINGS[1:]:
+        if name not in headings:
+            body = body.rstrip() + f"\n\n## {name}\n"
+    if "History" not in headings:
+        body += f"* {date}: Initial entry.\n"
+    return body
 
 
 def _with_provenance(text, source, sources):

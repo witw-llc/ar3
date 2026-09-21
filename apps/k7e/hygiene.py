@@ -5,8 +5,10 @@ import time
 from pathlib import Path
 
 import engine
+from ar3.fsio import atomic_write_text
 
 
+@engine._write_locked
 def run_audit(fix=False):
     """Audit store for structural issues. Returns list of issues found."""
     engine.init()
@@ -18,11 +20,32 @@ def run_audit(fix=False):
     tag_to_nodes = {}
     referenced_assets = set()
     issues = []
+    conn = engine._connect()
+    indexed = dict(conn.execute("SELECT id, superseded_by FROM nodes").fetchall())
+    conn.close()
+    changed = False
 
     for node_path in nodes:
         text = node_path.read_text(encoding="utf-8")
         meta = engine._parse_frontmatter(text)
         node_id = node_path.stem
+        repaired = text
+        body = engine._extract_body(text)
+        collapsed, duplicates = engine.collapse_sections(body)
+        if duplicates:
+            issues.append(f"[{node_id}] Duplicate sections: {', '.join(dict.fromkeys(duplicates))}")
+            repaired = text[:len(text) - len(body)] + "\n" + collapsed
+        front = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+        pointers = re.findall(r"(?m)^superseded_by:[ \t]*(.*)$", front.group(1)) if front else []
+        if len(pointers) > 1:
+            issues.append(f"[{node_id}] Duplicate superseded_by pointers")
+            # The old writer prepended its newest pointer. A surviving index
+            # value disambiguates that malformed file; valid files remain truth.
+            pointer = indexed.get(node_id) or pointers[0]
+            repaired = engine._set_frontmatter_key(repaired, "superseded_by", pointer)
+        if fix and repaired != text:
+            atomic_write_text(node_path, repaired, fsync=True)
+            changed = True
 
         required = ["id", "title", "status", "last_updated", "tags"]
         missing = [f for f in required if f not in meta]
@@ -65,6 +88,8 @@ def run_audit(fix=False):
             if fix:
                 asset.unlink()
 
+    if fix and (changed or index_disagreement()):
+        engine.reindex()
     return issues
 
 
@@ -81,17 +106,24 @@ def index_disagreement():
     Returns a message describing the gap, or None when they agree."""
     engine.init()
     conn = engine._connect()
-    indexed = dict(conn.execute("SELECT id, status FROM nodes").fetchall())
+    indexed = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT id, status, superseded_by FROM nodes")}
     conn.close()
     store_count = 0
     disagreed = []
+    file_ids = set()
     for path in engine._all_node_files():
         store_count += 1
         meta = engine._parse_frontmatter(path.read_text(encoding="utf-8"))
         node_id = meta.get("id", path.stem)
+        file_ids.add(node_id)
         on_disk = meta.get("status", "active")
-        if node_id in indexed and indexed[node_id] != on_disk:
-            disagreed.append(f"{node_id} is {on_disk} but indexed {indexed[node_id]}")
+        if node_id in indexed:
+            if indexed[node_id][0] != on_disk:
+                disagreed.append(f"{node_id} is {on_disk} but indexed {indexed[node_id][0]}")
+            if (indexed[node_id][1] or "") != meta.get("superseded_by", ""):
+                disagreed.append(f"{node_id} superseded_by differs from its index")
+    if store_count == len(indexed) and file_ids != set(indexed):
+        disagreed.append("indexed IDs differ from node files")
     if store_count == len(indexed) and not disagreed:
         return None
     gaps = []

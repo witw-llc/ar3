@@ -3,6 +3,7 @@ import re
 from pathlib import Path as _P
 REPO_ROOT = _P(__file__).resolve().parent.parent.parent.parent
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -912,6 +913,7 @@ sys.path.insert(0, {r4t_dir!r})
 
 pidfile = pathlib.Path({pidfile!r})
 child_script = pathlib.Path({child_script!r})
+import os
 import subprocess
 leader = subprocess.Popen(
     ["/bin/sh", "-c", f"{{sys.executable}} {{child_script}} {{pidfile}} & exit 0"],
@@ -1043,6 +1045,21 @@ class TestArgv0IsResolvedBeforeExec:
         engine_run._spawn(["codex", "--version"], tmp_path, 5)
         assert seen == [["/resolved/codex.CMD", "--version"]]
 
+
+    def test_the_wake_routing_env_stops_at_the_turn(self, tmp_path, monkeypatch):
+        """A nested `r4t engine run` inside the engine must key memory on its
+        own --agent, so the child never inherits the wake's A8S_TURN_* names."""
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            engine_run, "_spawn",
+            lambda argv, cwd, timeout, env=None: (seen.append(dict(env or {})), 0)[1],
+        )
+        env = {"PATH": os.environ.get("PATH", ""), "A8S_TURN_RECIPIENT": "nodea",
+               "A8S_TURN_ENVELOPES": "[]", "TELL_OUTBOX_DIR": str(tmp_path)}
+        engine_run.execute("claude", "hi", dir_path=tmp_path, model=None, agent=None,
+                           timeout=5, scaffold=False, env=env)
+        assert seen and not any(k.startswith("A8S_TURN_") for k in seen[0])
+        assert seen[0]["TELL_OUTBOX_DIR"] == str(tmp_path)
 
 class TestNoUserFacingStringNamesAToolOutsideTheSuite:
     """A note that tells the reader to run something they do not have is worse

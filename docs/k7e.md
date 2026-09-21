@@ -29,6 +29,13 @@ k7e is deliberately **personal, single-user, and local** — the inverse of
 multi-tenant cloud memory layers. It optimizes for one person's (and their
 agents') accumulated expertise, portable as a folder of text files.
 
+For automatic retrieval and background formation on standalone engine turns,
+see [private engine memory](r4t-engine-memory.md). Each named agent owns a
+store that stays with it across engine and directory changes.
+
+Supersession means replacement. Keep a narrower scoped reinforcement beside
+a general standing rule unless it actually replaces that rule.
+
 ## Cheat sheet
 
 ```bash

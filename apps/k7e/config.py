@@ -208,6 +208,8 @@ def status():
         lines.append("  Search: Semantic (embeddings) ✓")
     else:
         lines.append("  Search: Semantic (embeddings) ✗ — FTS5-only mode")
+        if not disabled:
+            lines.append("    → For intentional keyword-only use: k7e config embeddings off")
 
     lines.append("")
     missing = []

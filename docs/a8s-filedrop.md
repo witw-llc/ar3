@@ -60,6 +60,12 @@ done with the refactor
 EOF
 ```
 
+**Waking a harness seat:** run plain `tells` as a background shell command,
+not `tells -f` under a harness Monitor that caps each watch. It costs nothing
+while the inbox is quiet and exits on the first arrival. Re-run it before
+reading what arrived, then backfill with `a8s convo <seat> --since <cursor>`
+to cover the moment between exit and re-run.
+
 When CWD is inside a unique registered filedrop root, `tell` / `tells` can
 infer the outbox without the env var (see below). Outside that root, set
 `TELL_OUTBOX_DIR`.

@@ -2,18 +2,18 @@
 
 Receive-side complement of `tell`. The node is resolved from `TELL_OUTBOX_DIR`
 exactly as `tell` resolves the sender: the file-proxy inbox is `.inbox` beside
-the outbox. By default `tells` snapshots what is already there, then blocks up to
-`--timeout` seconds (default 5) for new envelopes to land, prints each
-(sender + body) to stdout, and exits 0. Nothing new within the timeout prints
-one line to stderr and exits 1.
+the outbox. By default `tells` snapshots what is already there, then waits with
+no time limit for new envelopes to land, prints the burst (sender + body) to
+stdout, and exits 0. Run it as a background command to wake once per arrival
+at no cost while the inbox is quiet.
 
 With `-f` / `--follow` or `--timeout 0`, poll the inbox continuously and print
 each new message as it arrives until interrupted (Ctrl+C). An explicit
-`--timeout` greater than zero follows for that many seconds; `-f` cannot be
-combined with a positive `--timeout`. Follow mode prints whatever is already
-in the inbox first, under a boundary line, each carrying a `[backlog]`
-prefix, so a re-armed monitor never reads old mail as live; `--live` skips
-that backlog and starts from the arm.
+`--timeout` greater than zero follows for that many seconds and exits 1 when
+nothing arrived; `-f` cannot be combined with a positive `--timeout`. Follow
+mode prints whatever is already in the inbox first, under a boundary line,
+each carrying a `[backlog]` prefix, so a re-armed monitor never reads old mail
+as live; `--live` skips that backlog and starts from the arm.
 
 `--glow [theme]` and `--heading-out` / `--heading-in` reuse convo's markdown
 formatting (and optional GlowStream rendering). Plain `sender: body` remains
@@ -49,7 +49,6 @@ from pathlib import Path
 from core import harden_stdio, version_line as _version_line
 from tell import agent_root_from_outbox, find_outbox
 
-DEFAULT_TIMEOUT_SEC = 5.0
 POLL_INTERVAL_SEC = 0.1
 INBOX_DIRNAME = ".inbox"
 # Display cap so host monitors (which often clip mid-body with a bare
@@ -97,7 +96,7 @@ def _print_usage() -> None:
     from convo import convo_help_epilog
 
     print(_USAGE, file=sys.stderr)
-    print("       default: wait up to 5s for the next message burst, then exit", file=sys.stderr)
+    print("       default: wait (no time limit) for the next message burst, then exit", file=sys.stderr)
     print("       --timeout SEC: follow the inbox for SEC seconds (0 = until Ctrl+C)", file=sys.stderr)
     print("       -f: same as --timeout 0 (cannot combine with positive --timeout)", file=sys.stderr)
     print("       --live: with -f, skip the inbox backlog and print only messages that arrive after the arm", file=sys.stderr)
@@ -358,7 +357,7 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     except ValueError as e:
         raise TellsUsageError(str(e)) from e
 
-    timeout = DEFAULT_TIMEOUT_SEC
+    timeout = 0.0
     follow = False
     timeout_explicit = False
     live = False
@@ -764,18 +763,17 @@ def tells_main(argv: list[str]) -> int:
             print(f"tells: no message within {opts.timeout:g}s", file=sys.stderr)
             return 1
 
-        deadline = time.monotonic() + opts.timeout
         printed_any = False
-        while True:
-            printed = _poll_new_messages(inbox, seen, **poll_kwargs)
-            if printed:
-                printed_any = True
-            elif printed_any:
-                return 0
-            if not printed_any and time.monotonic() >= deadline:
-                print(f"tells: no message within {opts.timeout:g}s", file=sys.stderr)
-                return 1
-            time.sleep(POLL_INTERVAL_SEC)
+        try:
+            while True:
+                printed = _poll_new_messages(inbox, seen, **poll_kwargs)
+                if printed:
+                    printed_any = True
+                elif printed_any:
+                    return 0
+                time.sleep(POLL_INTERVAL_SEC)
+        except KeyboardInterrupt:
+            return 0
     finally:
         if glow_stream is not None:
             glow_stream.close()
