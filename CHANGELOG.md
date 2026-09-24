@@ -12,6 +12,45 @@ version when the batch is ready to merge.
 
 ## Unreleased
 
+### Added
+
+- **`r4t engine muse quota` answers.** Muse 1.3.0's `muse serve` speaks MSP
+  — newline-delimited JSON-RPC — over stdio, and its `usage/read` returns the
+  host's last-observed subscription window: five-hour and weekly percents
+  with reset stamps and the tier id. The observation lives only in the
+  host's memory and is minted by provider traffic, so a host spawned for the
+  check mints it: one minimal turn (`denyUnmatched` approvals, throwaway
+  workspace, `reasoningEffort: none`), cancelled the moment `usage/changed`
+  lands. Muse is the one engine whose live read spends a turn, and the turn
+  runs at the provider's pace — seconds to a minute-plus — so a terminal
+  caller gets progress lines on stderr instead of a silent wait.
+
+- **A paid quota read only happens where a turn was asked for.** The mint is
+  gated behind `spend=True` on `engines.quota`/`engines.fuel`: `r4t engine
+  muse quota` opts in, and automatic readers (`rig detect`, `rig fuel`)
+  serve muse's last snapshot or report no reading — they never spawn a host
+  or start a turn.
+
+- **Each engine agent commits under its own name.** `r4t engine <id> run
+  --git-name NAME --git-email EMAIL` sets `GIT_AUTHOR_*` and
+  `GIT_COMMITTER_*` on the turn's environment, so every commit the turn
+  makes, in any repo and including amends and rebases, names that agent
+  instead of the machine's shared git config. Each flag stands alone and wins
+  over an inherited value; unset leaves the environment as it was. Every
+  bundled `engine-*` definition carries both as optional slots, set per node
+  with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`.
+
+### Changed
+
+- **`r4t engine agy quota` reads all four pools.** `agy -p "/usage"
+  --output-format json` (agy ≥1.1.13) is a no-agent-turn machine answer that
+  needs no running session or IDE, and it carries the two pools — Gemini
+  five-hour and Claude/GPT weekly — that the local Connect-RPC API cannot
+  see. The local API remains as the fallback and still supplies the plan
+  name when a session happens to be running.
+
+## 0.1.93
+
 ### Fixed
 
 - **A remote delivery is finished only when it is written down.** The receive

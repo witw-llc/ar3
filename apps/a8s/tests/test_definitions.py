@@ -1120,6 +1120,97 @@ class TestBundledEngineDefinitions:
         assert "--model=x" in argv
         assert argv[argv.index("run") + 1] == "--model=x"
 
+    GIT_SLOTS = ("--git-name=$GIT_NAME?", "--git-email=$GIT_EMAIL?")
+    GIT_VARS = {"GIT_NAME": "Ada (agent)", "GIT_EMAIL": "ada@example.com"}
+    GIT_CLAUSE = (
+        "Commit as the agent with `a8s vars <name> set GIT_NAME ...` and "
+        "`GIT_EMAIL ...`; unset uses git's own config."
+    )
+
+    def _both_variants(self, engine_id):
+        return (self._definition(engine_id), self._unrestricted(engine_id))
+
+    @staticmethod
+    def _three_wakes(defn, agent_root, node_vars):
+        from definitions import BatchEntry, build_batch_command, build_idle_command
+
+        entries = [
+            BatchEntry(
+                {"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"
+            ),
+        ]
+        return (
+            build_command(
+                defn, {"from": "neil", "to": "node1", "content": "hi"}, agent_root,
+                vars=node_vars,
+            ),
+            build_batch_command(defn, "node1", entries, vars=node_vars),
+            build_idle_command(defn, "node1", vars=node_vars),
+        )
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_every_engine_definition_carries_the_git_identity_slots(self, engine_id):
+        # Several seats under one Unix user otherwise all commit as the one
+        # shared git config identity. Both slots are optional, so a node that
+        # sets neither commits under git's own config.
+        for defn in self._both_variants(engine_id):
+            for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+                for slot in self.GIT_SLOTS:
+                    assert block.count(slot) == 1
+                    assert block.index(slot) < block.index("--agent")
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_unset_git_vars_leave_no_dangling_flag(self, engine_id, agent_root):
+        node_vars = {"MODEL": "qwen3.6"} if engine_id in OLLAMA_ENGINE_IDS else None
+        for defn in self._both_variants(engine_id):
+            for argv in self._three_wakes(defn, agent_root, node_vars):
+                assert not any(a.startswith("--git-") for a in argv)
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_set_git_vars_expand_to_one_element_each(self, engine_id, agent_root):
+        node_vars = dict(self.GIT_VARS)
+        if engine_id in OLLAMA_ENGINE_IDS:
+            node_vars["MODEL"] = "qwen3.6"
+        for defn in self._both_variants(engine_id):
+            for argv in self._three_wakes(defn, agent_root, node_vars):
+                assert argv.count("--git-name=Ada (agent)") == 1
+                assert argv.count("--git-email=ada@example.com") == 1
+
+    @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
+    def test_descriptions_say_how_to_set_the_git_identity(self, engine_id):
+        for defn in self._both_variants(engine_id):
+            assert self.GIT_CLAUSE in defn["description"]
+
+    def test_r4t_parses_the_expanded_identity_flags(self, agent_root):
+        # The consumer, not the template: every definition's expanded argv,
+        # handed to r4t's own parser, lands the identity where `engine run`
+        # reads it.
+        wakes = []
+        for engine_id in RUN_ENGINE_IDS:
+            node_vars = dict(self.GIT_VARS)
+            if engine_id in OLLAMA_ENGINE_IDS:
+                node_vars["MODEL"] = "qwen3.6"
+            for defn in self._both_variants(engine_id):
+                wakes += [argv[2:] for argv in self._three_wakes(defn, agent_root, node_vars)]
+        probe = (
+            "import json, sys\n"
+            "import r4t\n"
+            "parser = r4t.build_parser()\n"
+            "print(json.dumps([[a.git_name, a.git_email] for a in "
+            "(parser.parse_args(w) for w in json.loads(sys.argv[1]))]))\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", probe, json.dumps(wakes)],
+            cwd=_R4T_DIR,
+            env={**os.environ, "PYTHONPATH": f"{_R4T_DIR}{os.pathsep}{_REPO_ROOT / 'lib'}"},
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        parsed = json.loads(proc.stdout)
+        assert len(parsed) == len(RUN_ENGINE_IDS) * 2 * 3
+        assert parsed == [["Ada (agent)", "ada@example.com"]] * len(parsed)
+
     @pytest.mark.parametrize("engine_id", RUN_ENGINE_IDS)
     def test_unrestricted_variant_lifts_permissions_on_every_wake(
         self, engine_id, agent_root

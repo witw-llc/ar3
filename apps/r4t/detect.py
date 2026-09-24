@@ -12,9 +12,11 @@ already exist and invents nothing —
   BROKEN rather than offered, because adding a rig that cannot run is worse
   than saying nothing.
 - **what is left in it** — `engines.fuel`, the same reading `r4t rig fuel`
-  reports, asked with no model pinned. Best-effort by construction: an engine
-  with no quota surface, an expired login, or a dead endpoint costs the row
-  its number and nothing else. **No turn is ever spent here.**
+  reports, asked with no model pinned and no spend allowed. Best-effort by
+  construction: an engine with no quota surface, an expired login, or a dead
+  endpoint costs the row its number and nothing else, and an engine whose
+  live read costs a turn (muse mints one) answers from its last snapshot or
+  not at all. **No turn is ever spent here.**
 - **can it be added without asking** — a preset whose invoke carries an inline
   `{model}` (every `ollama-*` launcher) has no bare form, so `--add` skips it
   and says which flag it wanted.
@@ -157,6 +159,9 @@ def detect(*, check_fn=None, fuel_fn=None, workdir: Path | None = None) -> list[
     detected ones first. The two probes are injected so tests can drive the
     table without a harness or a network."""
     check_fn = check_fn or engine_check.check_engine
+    # Detection never spends: `engines.fuel`'s default is no-spend, and the
+    # injected seam stays `(preset, model)`. engines tests pin the real path —
+    # a flipped default there fails them.
     fuel_fn = fuel_fn or engines.fuel
     rows: list[Detection] = []
     for preset in sorted(RUN_ENGINES):

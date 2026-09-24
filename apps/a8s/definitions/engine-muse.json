@@ -1,5 +1,5 @@
 {
-  "description": "Meta Muse as a bare stateless engine node \u2014 `r4t engine muse run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md hold working state; enable private K7E memory with `a8s vars <name> set MEMORY on`. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. Tune it with --permissions on the invoke lines below; `r4t engine muse check` proves the argv still parses. Turn timeout defaults to 900s; override per node with `a8s vars <name> set TIMEOUT <secs>`. Set EFFORT to an engine-supported reasoning level; unset uses the engine default.",
+  "description": "Meta Muse as a bare stateless engine node \u2014 `r4t engine muse run`, one headless turn per wake with no roster or dispatcher; STATUS.md/LESSONS.md hold working state; enable private K7E memory with `a8s vars <name> set MEMORY on`. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. Tune it with --permissions on the invoke lines below; `r4t engine muse check` proves the argv still parses. Turn timeout defaults to 900s; override per node with `a8s vars <name> set TIMEOUT <secs>`. Set EFFORT to an engine-supported reasoning level; unset uses the engine default. Commit as the agent with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`; unset uses git's own config.",
   "invoke": [
     "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
@@ -13,6 +13,8 @@
     "--timeout=$TIMEOUT?",
     "--effort=$EFFORT?",
     "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
     "--agent",
     "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
@@ -32,6 +34,8 @@
       "--timeout=$TIMEOUT?",
       "--effort=$EFFORT?",
       "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
       "--agent",
       "$RECIPIENT"
     ]
@@ -51,6 +55,8 @@
       "--timeout=$TIMEOUT?",
       "--effort=$EFFORT?",
       "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
       "--idle",
       "--agent",
       "$RECIPIENT"

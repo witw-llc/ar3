@@ -4,6 +4,7 @@ from pathlib import Path as _P
 REPO_ROOT = _P(__file__).resolve().parent.parent.parent.parent
 
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -617,7 +618,7 @@ class TestExecuteAndSpawn:
         assert capsys.readouterr().err == ""
 
 
-QUOTALESS = {"muse", "devin"}  # see engines/muse.py, engines/devin.py
+QUOTALESS = {"devin"}  # see engines/devin.py
 
 
 class TestCapabilities:
@@ -1060,6 +1061,351 @@ class TestArgv0IsResolvedBeforeExec:
                            timeout=5, scaffold=False, env=env)
         assert seen and not any(k.startswith("A8S_TURN_") for k in seen[0])
         assert seen[0]["TELL_OUTBOX_DIR"] == str(tmp_path)
+
+
+AGENT_NAME = "Ada (agent)"
+AGENT_EMAIL = "ada@example.com"
+AGENT_IDENTITY = {
+    "GIT_AUTHOR_NAME": AGENT_NAME,
+    "GIT_COMMITTER_NAME": AGENT_NAME,
+    "GIT_AUTHOR_EMAIL": AGENT_EMAIL,
+    "GIT_COMMITTER_EMAIL": AGENT_EMAIL,
+}
+GIT_IDENTITY_NAMES = tuple(AGENT_IDENTITY)
+
+
+def env_recording_cli(tmp_path: Path) -> tuple[Path, Path]:
+    """A stand-in CLI that records the four git identity names as its own
+    environment holds them (absent names absent), then exits 0."""
+    script = tmp_path / "env-engine.py"
+    record = tmp_path / "env-engine.json"
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            import json, os
+            names = {list(GIT_IDENTITY_NAMES)!r}
+            with open({str(record)!r}, "w", encoding="utf-8") as f:
+                json.dump({{k: os.environ[k] for k in names if k in os.environ}}, f)
+            """
+        ),
+        encoding="utf-8",
+    )
+    return script, record
+
+
+class TestGitIdentity:
+    """`--git-name` / `--git-email`: several engine seats under one Unix user
+    otherwise all commit as the one shared git config identity. git's
+    environment beats every config file, so the four names on the turn's
+    child environment cover every commit the turn makes, in any repo."""
+
+    @pytest.fixture
+    def child_envs(self, monkeypatch):
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            engine_run, "_spawn",
+            lambda argv, cwd, timeout, env=None: (seen.append(dict(env or {})), 0)[1],
+        )
+        return seen
+
+    @staticmethod
+    def _run(tmp_path, env, **kwargs):
+        return engine_run.execute(
+            "claude", "hi", dir_path=tmp_path, model=None, agent=None,
+            timeout=5, scaffold=False, env=env, **kwargs,
+        )
+
+    @staticmethod
+    def _base(tmp_path) -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)}
+
+    def test_both_flags_add_exactly_the_four_names(self, tmp_path, child_envs):
+        base = self._base(tmp_path)
+        self._run(tmp_path, dict(base), git_name=AGENT_NAME, git_email=AGENT_EMAIL)
+        assert child_envs == [{**base, **AGENT_IDENTITY}]
+
+    def test_name_alone_sets_only_the_name_pair(self, tmp_path, child_envs):
+        base = self._base(tmp_path)
+        self._run(tmp_path, dict(base), git_name=AGENT_NAME)
+        assert child_envs == [
+            {**base, "GIT_AUTHOR_NAME": AGENT_NAME, "GIT_COMMITTER_NAME": AGENT_NAME}
+        ]
+
+    def test_email_alone_sets_only_the_email_pair(self, tmp_path, child_envs):
+        base = self._base(tmp_path)
+        self._run(tmp_path, dict(base), git_email=AGENT_EMAIL)
+        assert child_envs == [
+            {**base, "GIT_AUTHOR_EMAIL": AGENT_EMAIL, "GIT_COMMITTER_EMAIL": AGENT_EMAIL}
+        ]
+
+    @pytest.mark.parametrize(
+        "identity",
+        [
+            {},
+            {"git_name": None, "git_email": None},
+            # An a8s var set to "" expands to `--git-name=`: the same as unset.
+            {"git_name": "", "git_email": ""},
+            {"git_name": "  ", "git_email": "\t"},
+        ],
+        ids=["absent", "none", "empty", "blank"],
+    )
+    def test_unset_leaves_the_child_env_byte_identical(
+        self, tmp_path, child_envs, identity
+    ):
+        base = {
+            **self._base(tmp_path),
+            "GIT_AUTHOR_NAME": "Inherited Name",
+            "GIT_COMMITTER_EMAIL": "inherited@example.com",
+        }
+        self._run(tmp_path, dict(base), **identity)
+        assert child_envs == [base]
+
+    def test_the_flag_wins_over_an_inherited_identity(self, tmp_path, child_envs):
+        # The operator's per-agent setting is explicit; the daemon's ambient
+        # environment is not.
+        base = {
+            **self._base(tmp_path),
+            "GIT_AUTHOR_NAME": "Shared Login",
+            "GIT_AUTHOR_EMAIL": "shared@example.com",
+            "GIT_COMMITTER_NAME": "Shared Login",
+            "GIT_COMMITTER_EMAIL": "shared@example.com",
+        }
+        self._run(tmp_path, dict(base), git_name=AGENT_NAME, git_email=AGENT_EMAIL)
+        assert child_envs == [{**base, **AGENT_IDENTITY}]
+
+    def test_an_inherited_environment_keeps_everything_else(
+        self, tmp_path, child_envs, monkeypatch
+    ):
+        monkeypatch.setenv("R4T_TEST_KEPT", "kept")
+        monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+        self._run(tmp_path, None, git_name=AGENT_NAME)
+        [child] = child_envs
+        assert child["R4T_TEST_KEPT"] == "kept"
+        assert child["GIT_AUTHOR_NAME"] == AGENT_NAME
+        assert "GIT_AUTHOR_EMAIL" not in child
+
+    @pytest.mark.parametrize("flag", ["git_name", "git_email"])
+    @pytest.mark.parametrize(
+        "bad",
+        ["Ada\nEvil", "Ada\rEvil", "Ada\0", "Ada <ada@example.com>", "a>b"],
+        ids=["newline", "return", "nul", "angle-open", "angle-close"],
+    )
+    def test_a_value_git_would_rewrite_is_refused_before_spawn(
+        self, tmp_path, child_envs, flag, bad
+    ):
+        # git silently drops `<`, `>` and newlines from an ident, so a value
+        # carrying one would commit as something the operator never typed.
+        charged: list[int] = []
+        with pytest.raises(engine_run.RunError, match=f"--{flag.replace('_', '-')}"):
+            self._run(
+                tmp_path, self._base(tmp_path),
+                charge_hook=lambda: charged.append(1), **{flag: bad},
+            )
+        assert child_envs == []
+        assert charged == []
+
+    def test_the_memory_spawn_path_carries_the_identity(self, tmp_path, monkeypatch):
+        import engine_memory
+        import rig as rig_module
+
+        class FakeTurn:
+            def __init__(self, **_kwargs):
+                pass
+
+            def inject(self, prompt):
+                return prompt
+
+            def finish(self, output, exit_code):
+                pass
+
+        script, record = env_recording_cli(tmp_path)
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        monkeypatch.setattr(engine_memory, "Turn", FakeTurn)
+        monkeypatch.setattr(
+            engine_run, "_spawn", lambda *a, **k: pytest.fail("memory turn used the plain spawn")
+        )
+        code = self._run(
+            tmp_path, self._base(tmp_path),
+            memory="small", git_name=AGENT_NAME, git_email=AGENT_EMAIL,
+        )
+        assert code == 0
+        import json as jsonlib
+        assert jsonlib.loads(record.read_text(encoding="utf-8")) == AGENT_IDENTITY
+
+    def test_echo_names_the_identity_it_applies(self, tmp_path, child_envs, capsys):
+        self._run(
+            tmp_path, self._base(tmp_path), echo=True,
+            git_name=AGENT_NAME, git_email=AGENT_EMAIL,
+        )
+        lines = [
+            line for line in capsys.readouterr().err.splitlines()
+            if line.startswith("r4t engine echo: env:")
+        ]
+        assert lines == [
+            "r4t engine echo: env: GIT_AUTHOR_NAME='Ada (agent)' "
+            "GIT_COMMITTER_NAME='Ada (agent)' GIT_AUTHOR_EMAIL=ada@example.com "
+            "GIT_COMMITTER_EMAIL=ada@example.com"
+        ]
+
+    def test_echo_without_an_identity_prints_no_env_line(
+        self, tmp_path, child_envs, capsys
+    ):
+        self._run(tmp_path, self._base(tmp_path), echo=True)
+        assert "r4t engine echo: env:" not in capsys.readouterr().err
+
+    def test_the_cli_flags_reach_the_child(self, tmp_path, monkeypatch):
+        # The `--flag=value` spelling is what an a8s definition's
+        # `--git-name=$GIT_NAME?` element expands to.
+        import rig as rig_module
+
+        script, record = env_recording_cli(tmp_path)
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        for name in GIT_IDENTITY_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--no-scaffold",
+            f"--git-name={AGENT_NAME}", f"--git-email={AGENT_EMAIL}", "go",
+        )
+        assert code == 0
+        import json as jsonlib
+        assert jsonlib.loads(record.read_text(encoding="utf-8")) == AGENT_IDENTITY
+
+    def test_the_cli_without_the_flags_passes_nothing(self, tmp_path, monkeypatch):
+        import rig as rig_module
+
+        script, record = env_recording_cli(tmp_path)
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        for name in GIT_IDENTITY_NAMES:
+            monkeypatch.delenv(name, raising=False)
+        assert engine_cli("claude", "run", "--dir", str(tmp_path), "--no-scaffold", "go") == 0
+        import json as jsonlib
+        assert jsonlib.loads(record.read_text(encoding="utf-8")) == {}
+
+    def test_the_cli_refuses_a_bad_value_and_spawns_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--no-scaffold",
+            "--git-email", "<ada@example.com>", "go",
+        )
+        assert code == 1
+        assert "r4t engine: --git-email" in capsys.readouterr().err
+        assert list(calls.iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+class TestGitIdentityRealCommit:
+    """The positive control: a turn's child runs a real `git commit`, and the
+    commit's author and committer are whatever the turn's environment says.
+    HOME and GIT_CONFIG_GLOBAL point into tmp_path, so the configured
+    identity is the fixture's and the user's own git config is never read."""
+
+    CONFIGURED = ["Configured Owner", "owner@example.com"] * 2
+
+    @pytest.fixture
+    def committing_engine(self, tmp_path, monkeypatch):
+        import rig as rig_module
+
+        home = tmp_path / "home"
+        home.mkdir()
+        gitconfig = tmp_path / "gitconfig"
+        gitconfig.write_text(
+            "[user]\n\tname = Configured Owner\n\temail = owner@example.com\n"
+            "[init]\n\tdefaultBranch = main\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        for name in (*GIT_IDENTITY_NAMES, "EMAIL", "GIT_DIR", "GIT_WORK_TREE"):
+            monkeypatch.delenv(name, raising=False)
+
+        script = tmp_path / "committing-engine.py"
+        script.write_text(
+            textwrap.dedent(
+                """\
+                import subprocess, sys
+                repo = sys.argv[1]
+                subprocess.run(["git", "init", "-q", repo], check=True)
+                subprocess.run(
+                    ["git", "-C", repo, "commit", "-q", "--allow-empty", "-m", "turn"],
+                    check=True,
+                )
+                ident = subprocess.run(
+                    ["git", "-C", repo, "log", "-1", "--format=%an%n%ae%n%cn%n%ce"],
+                    capture_output=True, text=True, check=True,
+                ).stdout
+                with open(repo + ".ident", "w", encoding="utf-8") as f:
+                    f.write(ident)
+                """
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+
+        def commit(repo: Path, *flags: str) -> list[str]:
+            code = engine_cli(
+                "claude", "run", "--dir", str(tmp_path), "--no-scaffold", *flags,
+                str(repo),
+            )
+            assert code == 0
+            return Path(f"{repo}.ident").read_text(encoding="utf-8").splitlines()
+
+        return commit
+
+    def test_the_commit_is_authored_and_committed_as_the_agent(
+        self, tmp_path, committing_engine
+    ):
+        assert committing_engine(
+            tmp_path / "with-flags",
+            f"--git-name={AGENT_NAME}", f"--git-email={AGENT_EMAIL}",
+        ) == [AGENT_NAME, AGENT_EMAIL, AGENT_NAME, AGENT_EMAIL]
+
+    def test_without_the_flags_git_keeps_its_configured_identity(
+        self, tmp_path, committing_engine
+    ):
+        assert committing_engine(tmp_path / "without-flags") == self.CONFIGURED
+
+    def test_one_flag_leaves_the_other_half_to_git_config(
+        self, tmp_path, committing_engine
+    ):
+        assert committing_engine(
+            tmp_path / "name-only", f"--git-name={AGENT_NAME}",
+        ) == [AGENT_NAME, "owner@example.com", AGENT_NAME, "owner@example.com"]
+
+    def test_the_flag_beats_an_inherited_git_environment(
+        self, tmp_path, committing_engine, monkeypatch
+    ):
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "Shared Login")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "Shared Login")
+        assert committing_engine(
+            tmp_path / "over-inherited", f"--git-name={AGENT_NAME}",
+        ) == [AGENT_NAME, "owner@example.com", AGENT_NAME, "owner@example.com"]
+
 
 class TestNoUserFacingStringNamesAToolOutsideTheSuite:
     """A note that tells the reader to run something they do not have is worse

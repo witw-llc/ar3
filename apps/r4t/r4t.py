@@ -1567,7 +1567,9 @@ def cmd_engine(args: argparse.Namespace) -> int:
     if args.action == "check":
         return _cmd_engine_check(args, args.target.strip().lower())
     try:
-        payload = engines.quota(args.target)
+        # The explicit quota command is the opt-in: engines whose live read
+        # spends (muse) mint it here and nowhere else.
+        payload = engines.quota(args.target, spend=True)
     except engines.QuotaError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
         return 1
@@ -1718,6 +1720,8 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             allowed_tools=args.allowed_tools,
             session=args.session,
             max_credits=args.max_credits,
+            git_name=args.git_name,
+            git_email=args.git_email,
             **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
@@ -3329,6 +3333,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allowed_tools",
         help="run/check: the engine's own tool-allowlist string, replacing the "
         "preset's list (claude and ollama-claude only; other engines error).",
+    )
+    engine_p.add_argument(
+        "--git-name",
+        metavar="NAME",
+        dest="git_name",
+        help="run: author and committer name for every commit the turn makes.",
+    )
+    engine_p.add_argument(
+        "--git-email",
+        metavar="EMAIL",
+        dest="git_email",
+        help="run: author and committer email for every commit the turn makes.",
     )
     engine_p.set_defaults(func=cmd_engine)
 

@@ -1,5 +1,5 @@
 {
-  "description": "Antigravity (agy) as a bare stateless engine node \u2014 the same three wakes as engine-agy, invoked with --permissions bypass. agy already runs unrestricted in the base preset, so this definition is identical to engine-agy today; the name states the intent, and it picks up any stronger mode agy grows. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. An unrestricted node acts on untrusted inbound mail \u2014 anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account. Turn timeout defaults to 900s; override per node with `a8s vars <name> set TIMEOUT <secs>`. Set EFFORT to an engine-supported reasoning level; unset uses the engine default.",
+  "description": "Antigravity (agy) as a bare stateless engine node \u2014 the same three wakes as engine-agy, invoked with --permissions bypass. agy already runs unrestricted in the base preset, so this definition is identical to engine-agy today; the name states the intent, and it picks up any stronger mode agy grows. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. An unrestricted node acts on untrusted inbound mail \u2014 anyone who can reach its inbox, including over a broker or a shared folder, is driving a CLI that will not ask. Only for an agent on its own machine and its own account. Turn timeout defaults to 900s; override per node with `a8s vars <name> set TIMEOUT <secs>`. Set EFFORT to an engine-supported reasoning level; unset uses the engine default. Commit as the agent with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`; unset uses git's own config.",
   "invoke": [
     "$PYTHON",
     "$A8S_DIR/../r4t/r4t.py",
@@ -13,6 +13,8 @@
     "--timeout=$TIMEOUT?",
     "--effort=$EFFORT?",
     "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
     "--permissions",
     "bypass",
     "--agent",
@@ -34,6 +36,8 @@
       "--timeout=$TIMEOUT?",
       "--effort=$EFFORT?",
       "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
       "--permissions",
       "bypass",
       "--agent",
@@ -55,6 +59,8 @@
       "--timeout=$TIMEOUT?",
       "--effort=$EFFORT?",
       "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
       "--permissions",
       "bypass",
       "--idle",

@@ -24,6 +24,12 @@ Every check returns the same shape so callers can route on it:
 QuotaError with remediation in the message; `quota()` turns the last good
 snapshot into an aged answer before giving up.
 
+A module whose live read is not free declares `QUOTA_SPENDS_TURN = True`
+(muse mints its observation with a provider turn). `quota()` and `fuel()`
+serve such an engine only when the caller passes `spend=True` — an explicit
+`r4t engine <id> quota`. Every other caller gets the snapshot-or-refusal
+path, so automatic readers like `rig detect` never start a turn.
+
 `fuel()` reduces that spread of dials to one number for one model. It is a
 selection over the bucket shape above and nothing more — no engine's endpoint
 is visible from here, so endpoint churn stays inside the engine modules. Its
@@ -198,10 +204,15 @@ def format_age(seconds: float | None) -> str:
     return f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
 
 
-def quota(preset_or_engine: str) -> dict:
+def quota(preset_or_engine: str, spend: bool = False) -> dict:
     """Live check for the engine behind `preset_or_engine`, falling back to a
     snapshot young enough to still be true. Raises QuotaError when neither can
-    answer."""
+    answer.
+
+    `spend` opts in to a live read that is not free. When the engine declares
+    `QUOTA_SPENDS_TURN` and the caller did not opt in, the check behaves as if
+    it failed — the snapshot below answers, or the refusal explains what a
+    paid reading costs and which command takes one."""
     engine = engine_for(preset_or_engine)
     if engine is None:
         raise QuotaError(
@@ -217,6 +228,11 @@ def quota(preset_or_engine: str) -> dict:
             f"{', '.join(answering)})"
         )
     try:
+        if not spend and getattr(MODULES[engine], "QUOTA_SPENDS_TURN", False):
+            raise QuotaError(
+                f"{engine}'s live quota check spends a provider turn — "
+                f"`r4t engine {engine} quota` mints a reading on demand"
+            )
         payload = checker()
     except QuotaError as exc:
         snapshot = load_snapshot(engine)
@@ -301,9 +317,10 @@ def binding_index(buckets: list[dict]) -> int | None:
     return min(gauged, key=lambda i: buckets[i]["remaining_fraction"])
 
 
-def fuel(preset_or_engine: str, model: str | None = None) -> dict:
+def fuel(preset_or_engine: str, model: str | None = None, spend: bool = False) -> dict:
     """How much tank is left for one model on one engine: the engine's quota,
     narrowed to the buckets that model burns, reduced to the binding one.
+    `spend` is `quota()`'s own opt-in, passed through unchanged.
 
     `state` is what a dispatcher branches on, because `fuel` alone cannot tell
     an empty account from an unmeasured one:
@@ -321,7 +338,7 @@ def fuel(preset_or_engine: str, model: str | None = None) -> dict:
     asked for, the same value `rig run --json` calls `engine`; `quota_engine`
     is the engine that actually answered. Raises QuotaError exactly where
     `quota` does."""
-    payload = quota(preset_or_engine)
+    payload = quota(preset_or_engine, spend=spend)
     buckets = [b for b in payload.get("buckets") or [] if _constrains(b, model)]
     index = binding_index(buckets)
     binding = buckets[index] if index is not None else None

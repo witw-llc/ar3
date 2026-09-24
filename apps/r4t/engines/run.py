@@ -120,6 +120,7 @@ __all__ = [
     "DEFAULT_IDLE_PROMPT",
     "RunError",
     "build_argv",
+    "git_identity_env",
     "scaffold_prompt",
     "rotate_lessons_if_oversized",
     "execute",
@@ -144,6 +145,35 @@ DEFAULT_IDLE_PROMPT = (
 
 class RunError(Exception):
     """The turn could not be composed or started. The message says why."""
+
+
+_GIT_IDENTITY_FLAGS = (
+    ("--git-name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+    ("--git-email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL")),
+)
+_GIT_IDENT_REFUSED = ("\n", "\r", "\0", "<", ">")
+
+
+def git_identity_env(name: str | None, email: str | None) -> dict[str, str]:
+    """The git environment names one turn commits under. `name` sets the
+    author and committer name, `email` both emails, each independently. git's
+    environment beats every config file, so the names cover every commit the
+    turn makes in any repo, amends and rebases included. An unset or blank
+    value adds nothing and leaves git's own config in charge. A value with a
+    line break or NUL, or with `<` or `>`, is refused: git drops the ident
+    delimiters silently, so the commit would name something the operator
+    never typed."""
+    identity: dict[str, str] = {}
+    for (flag, names), value in zip(_GIT_IDENTITY_FLAGS, (name, email)):
+        if value is None or not value.strip():
+            continue
+        if any(c in value for c in _GIT_IDENT_REFUSED):
+            raise RunError(
+                f"{flag} must be one line of text without '<' or '>' (git "
+                f"drops those from an identity): {value!r}"
+            )
+        identity.update(dict.fromkeys(names, value))
+    return identity
 
 
 def scaffold_prompt(dir_path: Path, message: str, *, agent: str | None) -> str:
@@ -385,14 +415,21 @@ def build_argv(
     return [prompt if a == "{prompt}" else a for a in template]
 
 
-def _print_echo(template: list[str], prompt: str) -> None:
+def _print_echo(
+    template: list[str], prompt: str, env_added: dict[str, str] | None = None
+) -> None:
     """`--echo`: the exact argv and prompt a turn is about to run, on stderr
     so stdout stays the engine's own reply stream. The turn still runs —
     this is an echo, not a dry-run. `template` still carries `{prompt}` as a
     literal placeholder (never value-matched against argv elements, so an
     engine literally named the same as the prompt is not elided); the
-    prompt block below it is the one full copy."""
+    prompt block below it is the one full copy. `env_added` is what the turn
+    sets on the child's environment beyond what it inherits (the git
+    identity), one line when there is any."""
     print(f"r4t engine echo: argv: {shlex.join(template)}", file=sys.stderr)
+    if env_added:
+        pairs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env_added.items())
+        print(f"r4t engine echo: env: {pairs}", file=sys.stderr)
     print("r4t engine echo: --- prompt ---", file=sys.stderr)
     print(prompt, file=sys.stderr)
     print("r4t engine echo: --- end prompt ---", file=sys.stderr)
@@ -475,6 +512,8 @@ def execute(
     memory_writer: str | None = None,
     memory_people: str | None = None,
     memory_rig_context: dict | None = None,
+    git_name: str | None = None,
+    git_email: str | None = None,
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
@@ -490,7 +529,10 @@ def execute(
     turn measured about itself (`spend`, `otel`) for a caller with a
     machine-readable surface; the one-line human forms go to stderr either
     way. A roster turn arms the same instruments through the same helper —
-    see `dispatch.run_harness`."""
+    see `dispatch.run_harness`. `git_name` / `git_email` put the agent's git
+    identity on the child's environment, over any inherited value (see
+    `git_identity_env`); a bad value is refused before anything is touched."""
+    identity = git_identity_env(git_name, git_email)
     if scaffold:
         rotate_lessons_if_oversized(dir_path, lessons_cap)
         prompt = scaffold_prompt(dir_path, message, agent=agent)
@@ -544,7 +586,7 @@ def execute(
         if note:
             print(f"r4t engine: {note}", file=sys.stderr)
         if echo:
-            _print_echo(template, prompt)
+            _print_echo(template, prompt, identity)
         argv = [prompt if a == "{prompt}" else a for a in template]
         if charge_hook is not None:
             charge_hook()
@@ -552,6 +594,7 @@ def execute(
         # must key memory on its own --agent, not inherit this node's store.
         env = {k: v for k, v in (env if env is not None else os.environ).items()
                if not k.startswith("A8S_TURN_")}
+        env.update(identity)
         if memory_turn is None:
             exit_code = _spawn(argv, dir_path, timeout, instruments.env_for(env))
         else:

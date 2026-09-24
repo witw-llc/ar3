@@ -37,6 +37,15 @@ def quota() -> dict:
         if engine is None:
             notes.append(f"{provider}: no quota check exists")
             continue
+        # A fan-out read is not an opt-in to spend: a delegate whose live
+        # check costs a turn (muse declares QUOTA_SPENDS_TURN) is pointed at
+        # its own explicit command instead of being invoked.
+        if getattr(MODULES[engine], "QUOTA_SPENDS_TURN", False):
+            notes.append(
+                f"{provider}: {engine}'s live read spends a turn — "
+                f"`r4t engine {engine} quota` mints a reading on demand"
+            )
+            continue
         try:
             delegated = MODULES[engine].quota()
         except QuotaError as exc:

@@ -5,13 +5,13 @@ import sqlite3
 import pytest
 
 import engines
-from engines import agy, claude, codex, copilot, cursor
+from engines import agy, claude, codex, copilot, cursor, muse
 from engines.base import QuotaError, window_label
 
 
 # Engines whose CLI exposes no way to read remaining subscription without
 # spending a turn, so their module implements no quota verb.
-QUOTALESS = {"muse", "devin"}
+QUOTALESS = {"devin"}
 
 
 class TestResolution:
@@ -30,11 +30,11 @@ class TestResolution:
         assert engines.engine_for("  Codex ") == "codex"
 
     def test_an_engine_answers_quota_only_when_its_module_implements_one(self):
-        # muse is the first engine with no usage surface to read at all —
-        # engines/muse.py says why it therefore defines no quota(). Naming it
+        # devin is the engine with no usage surface to read at all —
+        # engines/devin.py says why it therefore defines no quota(). Naming it
         # here keeps this a guard: an engine that loses its quota check by
-        # accident still fails, and adding muse to QUOTALESS is the deliberate
-        # act that records a second one.
+        # accident still fails, and adding an engine to QUOTALESS is the
+        # deliberate act that records it.
         for name in engines.MODULES:
             answers = "quota" in engines.capabilities(name)
             assert answers is (name not in QUOTALESS)
@@ -486,6 +486,196 @@ class TestAgyParse:
             agy.parse_user_status({"userStatus": {}})
 
 
+class TestAgyUsageCommand:
+    """The `agy -p "/usage"` print path: all four pools, no session needed."""
+
+    PAYLOAD = {
+        "status": "SUCCESS",
+        "command": {
+            "name": "usage",
+            "data": {
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "buckets": [
+                            {
+                                "id": "gemini-weekly",
+                                "window": "weekly",
+                                "remaining_fraction": 0.89,
+                                "reset_time": "2026-09-30T02:24:25Z",
+                            },
+                            {
+                                "id": "gemini-5h",
+                                "window": "5h",
+                                "remaining_fraction": 0.98,
+                                "reset_time": "2026-09-24T22:54:39Z",
+                            },
+                        ],
+                    },
+                    {
+                        "name": "Claude and GPT models",
+                        "buckets": [
+                            {
+                                "id": "3p-weekly",
+                                "window": "weekly",
+                                "remaining_fraction": 0.55,
+                                "reset_time": "2026-09-25T14:39:37Z",
+                            },
+                            {
+                                "id": "3p-5h",
+                                "window": "5h",
+                                "remaining_fraction": 1.0,
+                                "reset_time": "2026-09-24T23:16:59Z",
+                            },
+                        ],
+                    },
+                ]
+            },
+        },
+    }
+
+    def test_all_four_pools_arrive(self):
+        result = agy.parse_usage_command(self.PAYLOAD)
+        labels = {b["label"]: b for b in result["buckets"]}
+        assert set(labels) == {
+            "Gemini Weekly Limit",
+            "Gemini Five Hour Limit",
+            "Claude/GPT Weekly Limit",
+            "Claude/GPT Five Hour Limit",
+        }
+        assert labels["Gemini Weekly Limit"]["remaining_fraction"] == pytest.approx(0.89)
+        assert labels["Claude/GPT Five Hour Limit"]["reset_time"] == (
+            "2026-09-24T23:16:59Z"
+        )
+        assert result["origin"] == "live"
+
+    def test_no_command_payload_raises(self):
+        # An agy too old for machine-readable slash answers prints the table
+        # as text — the envelope carries no `command`, which must refuse
+        # rather than parse the prose.
+        with pytest.raises(QuotaError) as caught:
+            agy.parse_usage_command({"status": "SUCCESS", "response": "table"})
+        assert "1.1.13" in str(caught.value)
+
+    def test_empty_groups_raise(self):
+        with pytest.raises(QuotaError):
+            agy.parse_usage_command({"command": {"data": {"groups": []}}})
+
+    def test_quota_prefers_the_print_path(self, monkeypatch):
+        monkeypatch.setattr(agy, "_usage_command", lambda: self.PAYLOAD)
+        monkeypatch.setattr(agy, "_plan_from_local_api", lambda: "Pro")
+        # The language-server path must not be consulted at all when the
+        # print path answers.
+        monkeypatch.setattr(
+            agy,
+            "_find_language_server",
+            lambda: (_ for _ in ()).throw(AssertionError("consulted")),
+        )
+        result = agy.quota()
+        assert len(result["buckets"]) == 4
+        assert result["plan"] == "Pro"
+
+    def test_quota_falls_back_to_the_local_api(self, monkeypatch):
+        monkeypatch.setattr(
+            agy,
+            "_usage_command",
+            lambda: (_ for _ in ()).throw(QuotaError("agy is not on PATH")),
+        )
+        monkeypatch.setattr(agy, "_find_language_server", lambda: (1, "csrf"))
+        monkeypatch.setattr(agy, "_listen_ports", lambda pid: [8080])
+        monkeypatch.setattr(
+            agy,
+            "_post_user_status",
+            lambda ports, csrf: {
+                "userStatus": {
+                    "planStatus": {"planInfo": {"planDisplayName": "Pro"}},
+                    "cascadeModelConfigData": {
+                        "clientModelConfigs": [
+                            {
+                                "label": "Gemini 3.1 Pro",
+                                "quotaInfo": {"remainingFraction": 0.5},
+                            }
+                        ]
+                    },
+                }
+            },
+        )
+        result = agy.quota()
+        assert result["buckets"][0]["label"] == "Gemini Weekly Limit"
+
+    def test_quota_combines_both_failures(self, monkeypatch):
+        monkeypatch.setattr(
+            agy,
+            "_usage_command",
+            lambda: (_ for _ in ()).throw(QuotaError("agy is not on PATH")),
+        )
+        monkeypatch.setattr(
+            agy,
+            "_find_language_server",
+            lambda: (_ for _ in ()).throw(QuotaError("language server not running")),
+        )
+        with pytest.raises(QuotaError) as caught:
+            agy.quota()
+        message = str(caught.value)
+        assert "agy is not on PATH" in message
+        assert "language server not running" in message
+
+
+class TestMuseParse:
+    """`usage/read` over `muse serve`: the last-observed window, or nothing."""
+
+    def test_window_and_weekly_become_buckets(self):
+        result = muse.parse_usage(
+            {
+                "usage": {
+                    "tier": "power",
+                    "observedAtMs": 1790273739931,
+                    "window": {
+                        "usedPercent": 40,
+                        "windowDurationMins": 300,
+                        "resetsAtMs": 1790286036000,
+                    },
+                    "weekly": {
+                        "usedPercent": 16,
+                        "resetsAtMs": 1790553600000,
+                    },
+                }
+            }
+        )
+        assert result["plan"] == "power"
+        window, weekly = result["buckets"]
+        assert window["label"] == "Five Hour Limit"
+        assert window["remaining_fraction"] == pytest.approx(0.60)
+        assert window["reset_time"].startswith("2026-09-24T")
+        assert weekly["label"] == "Weekly Limit"
+        assert weekly["remaining_fraction"] == pytest.approx(0.84)
+        assert "observed" in result["note"]
+
+    def test_over_spend_clamps_to_empty(self):
+        # usedPercent may exceed 100 — a remainder cannot go below zero.
+        result = muse.parse_usage(
+            {
+                "usage": {
+                    "window": {"usedPercent": 140, "windowDurationMins": 300},
+                    "weekly": {"usedPercent": 50},
+                }
+            }
+        )
+        assert result["buckets"][0]["remaining_fraction"] == 0.0
+        assert result["buckets"][0]["reset_time"] is None
+
+    def test_a_cold_host_raises_instead_of_inventing(self):
+        # `usage` is omitted, never null, when the host has observed nothing —
+        # the honest failure that lets the snapshot fallback answer.
+        with pytest.raises(QuotaError) as caught:
+            muse.parse_usage({})
+        assert "observed no usage" in str(caught.value)
+
+    def test_windows_with_no_fields_raise(self):
+        with pytest.raises(QuotaError):
+            muse.parse_usage({"usage": {}})
+
+
 class TestSnapshotRoundTrip:
     def test_save_then_load_reports_age(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -735,7 +925,7 @@ class TestQuotaExitCodes:
     def _serve(self, monkeypatch, origin):
         monkeypatch.setattr(
             engines, "quota",
-            lambda target: {"engine": "codex", "origin": origin, "buckets": [],
+            lambda target, spend=False: {"engine": "codex", "origin": origin, "buckets": [],
                             "note": None if origin == "live" else "live check failed: x"},
         )
 

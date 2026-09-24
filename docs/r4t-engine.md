@@ -20,6 +20,7 @@ r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--t
                      [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
+                     [--git-name NAME] [--git-email EMAIL]
                      [--memory on|off|small|medium|large] [--memory-home DIR]
                      [--memory-writer RIG] [--memory-people SENDERS]
                      [--] PROMPT
@@ -74,10 +75,12 @@ tool) plus this turn's own measurement flags (see
   and soft); see the same section.
 - `--continue`, `--permissions MODE`, `--allowed-tools SPEC` — the three
   translated parameters; see below.
+- `--git-name NAME`, `--git-email EMAIL` — the identity every commit the turn
+  makes carries; see [git identity](#git-identity).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
-`engine run` is bare metal: no budget, no identity, nothing named. The same
+`engine run` is bare metal: no budget, no rig, nothing named. The same
 turn with a model, a permission stance, an env map and a spend budget already
 attached is [`r4t rig run <rig>`](r4t-rigs.md#rig-run--one-headless-turn-as-a-rig),
 which composes through this very path and gates it on the rig's bucket.
@@ -130,6 +133,36 @@ flag, then the rig setting, then embedded model effort or the engine default.
 Engine swaps preserve effort and refuse incompatible values before saving;
 unset it before switching to Cursor or Devin. Dispatch and knowledge
 distillation also use the rig setting. `--echo` shows the resulting argv.
+
+### Git identity
+
+Engine agents that run under one Unix user share one git config, so every
+commit they make carries the same author. `--git-name NAME` and
+`--git-email EMAIL` give one turn its own. The turn's child environment gets
+`GIT_AUTHOR_NAME` and `GIT_COMMITTER_NAME` from the name, and
+`GIT_AUTHOR_EMAIL` and `GIT_COMMITTER_EMAIL` from the email. git reads these
+before any config file, so they cover every commit the turn makes in any repo
+or worktree, amends and rebases included.
+
+```bash
+r4t engine claude run --git-name "Ada (agent)" --git-email ada@example.com "fix the lint errors"
+```
+
+- Each flag stands alone. An unset or empty flag leaves the environment the
+  turn inherits exactly as it was, so git's own config decides, or a `GIT_*`
+  identity already in that environment.
+- A set flag wins over an inherited value. It is the operator's setting for
+  this agent; the environment a daemon happens to run under is not.
+- A value with a line break, `<` or `>` is refused before the turn starts
+  (exit 1). git drops those characters from an identity without a word.
+- No identity is derived from the agent's name. The owner sets one per agent;
+  an agent with none commits as git's config says.
+- `--echo` prints the names the turn sets, on one `r4t engine echo: env:` line.
+
+A hosting service still records the account that pushed, and a squash merge
+is authored by whoever merges. `r4t rig run` takes no identity flags: a rig
+carries the same four names in its [`env` map](r4t-rigs.md#harness-env-knobs-env)
+(`r4t rig set <rig> env.GIT_AUTHOR_NAME "Ada (agent)"`).
 
 ### The three translated parameters
 
@@ -503,6 +536,20 @@ Unset drops the token. Cursor keeps effort inside `MODEL` bracket syntax;
 setting a separate `EFFORT` on Cursor or Devin produces an unsupported error.
 See [reasoning effort](#reasoning-effort) for each engine's values.
 
+All definitions also carry `--git-name=$GIT_NAME?` and
+`--git-email=$GIT_EMAIL?` on invoke, batch, and idle, so each node commits
+under its own [git identity](#git-identity):
+
+```bash
+a8s vars ada set GIT_NAME "Ada (agent)"
+a8s vars ada set GIT_EMAIL ada@example.com
+# or at registration:
+a8s add ada ~/agents/ada engine-claude --GIT_NAME="Ada (agent)" --GIT_EMAIL=ada@example.com
+```
+
+Unset drops the flag, and the node commits as git's own config says. Nothing
+is derived from the node's name: the owner sets each node's identity.
+
 Each of the eleven also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by
 engine, and each variant's own description says which — codex trades its
@@ -580,16 +627,30 @@ snapshots that still answer when the live check cannot. A snapshot lives at
 `<r4t home>/quota/<engine>.json` — the same home as rigs and rosters,
 relocatable with `R4T_HOME`.
 
-**Not every engine answers.** `muse` and `devin` cannot: Muse Code
-exposes no usage, limits or balance surface, and nothing on disk carries an
-entitlement — the only limit-shaped numbers in its model catalog are a model's
-context and output windows. Devin's `/usage` and `/session-stats` report a
-session's own consumption, but there is no account-quota endpoint the CLI can
-answer without spending a turn. So `apps/r4t/engines/muse.py` and
-`apps/r4t/engines/devin.py` implement no `quota`
-function, `r4t engine list` prints `[run, check]` for each, and `r4t engine muse
-quota` refuses while naming the engines that do answer. A verb the registry
-advertises and can never satisfy would be worse than the refusal. A snapshot answer
+**Not every engine answers.** `devin` cannot: its `/usage` and
+`/session-stats` report a session's own consumption, but there is no
+account-quota endpoint the CLI can answer without spending a turn. So
+`apps/r4t/engines/devin.py` implements no `quota` function, `r4t engine list`
+prints `[run, check]` for it, and `r4t engine devin quota` refuses while
+naming the engines that do answer. A verb the registry advertises and can
+never satisfy would be worse than the refusal.
+
+`muse` answers, with two caveats — freshness and cost. Its quota rides
+`muse serve`, the MSP session host, whose `usage/read` returns the host's
+last-observed subscription window. The observation is in-memory and minted
+by provider traffic, and a host spawned for the check has run no turn, so a
+cold check mints one itself: a session and a single minimal turn
+(`denyUnmatched` approvals, a throwaway workspace, `reasoningEffort: none`),
+after which `usage/changed` carries the window. That makes muse the one
+engine whose live read *spends a turn* — and whose speed is the provider's,
+anywhere from a few seconds to over a minute when the queue is congested.
+On a terminal the wait announces itself and heartbeats every few seconds
+rather than sitting silent.
+
+Because the live read spends, it runs only where a turn was asked for:
+`r4t engine muse quota` opts in, and nowhere else does — `rig detect` and
+`rig fuel` serve muse's last snapshot or report no reading, so automatic
+checks never start a provider turn. A snapshot answer
 carries `"origin": "snapshot"` and `age_seconds` — its age as a number, like
 every other duration r4t reports; the text lines render the human string.
 
