@@ -10,6 +10,80 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## Unreleased
+
+### Fixed
+
+- **A remote delivery is finished only when it is written down.** The receive
+  path answered every transport the same way whether or not the envelope
+  reached an inbox, so an inbox that briefly would not take a write — a full
+  disk, a directory that lost its permissions — cost the message: the s3
+  transport deleted the object, the folder transport stamped its ledger, and
+  the seen-ids ring then turned away a republished copy of the same bytes.
+  The answer now reports what actually happened, the ring records only ids
+  that reached an inbox, and the folder transport honours the answer instead
+  of discarding it. A name this cluster does not hold still counts as
+  finished, so an undeliverable envelope cannot loop forever.
+- **A deferred attachment download no longer acknowledges the message it is
+  still fetching.** Held mail lived only in a pool thread's closure while the
+  wire was told the envelope was consumed, so a restart during the retry
+  window — up to `storage_receive_wait_seconds`, 900s by default — lost it.
+  The claim is now held across the download by the thread doing the work, and
+  the message settles when the last recipient is done; the copy on the wire
+  stays until then, which is what a restart finds.
+- **An s3 poll advances through a mailbox instead of re-reading its first
+  page.** A listing is one page, and anything the transport cannot delete —
+  a delivery that failed, an object it could not fetch, or on AWS a
+  `CommonPrefixes` entry, which spends the page's key budget the same as an
+  object does — held the front of the mailbox and hid every envelope behind
+  it. A poll now resumes where the last one stopped and starts over at the end
+  of the listing, so retries and new arrivals both come back around.
+
+### Added
+
+- **An s3 transport for a8s remotes** (#297): `a8s remote <name>
+  s3://<bucket>/<prefix>` joins a machine that can reach HTTPS on 443 and
+  nothing else — no broker port and no shared filesystem. One object per
+  envelope under a prefix per recipient, so a poll is one listing in send
+  order; the node whose registry holds a name owns that prefix, and deleting
+  what it delivers is the acknowledgement. `--poll-seconds` (10),
+  `--retain-days` (3), `--region`, `--profile`, `--endpoint-url`,
+  `--timeout-s`. Registration installs `boto3` through the `a8s-s3` group at
+  the verb, and `a8s health` exercises PUT, GET, LIST and DELETE against the
+  configured prefix.
+- **A transport prefix and a storage prefix may not overlap.** `a8s remote` and
+  `a8s storage` each refuse an s3 prefix the other already owns *in the same
+  bucket at the same endpoint*, because the transport deletes objects under its
+  own prefix and the storage service never deletes at all. Two S3-compatible
+  services can hold buckets of the same name, and neither one's deletes reach
+  the other.
+
+### Fixed
+
+- **An s3 remote no longer deletes an envelope another daemon is delivering.**
+  Every daemon on a machine runs its own subscriber, so several poll the same
+  mailbox. The receive path now reports whether it consumed the envelope, and
+  the transport deletes only on that answer — a message claimed by a sibling,
+  or left deliverable after a failed delivery, stays in the bucket for the next
+  poll. `--retain-days` no longer sweeps a well-formed envelope addressed to
+  this node, however long it has failed to land; that is what a bucket
+  lifecycle rule is for.
+- **Redefining a remote or a storage service as another kind drops the previous
+  kind's stored secrets.** An mqtt remote re-registered as an s3 one kept its
+  `pass` in `secrets.json`, which the s3 transport then refused as an unknown
+  option — the remote was skipped at every daemon start while the command that
+  caused it printed success.
+- **`a8s remote <name> s3://<bucket>/<prefix>` suggests an attachment service
+  command that runs.** The suggested prefix is now one no s3 remote owns, so
+  pasting the printed line no longer collides with the remote that printed it.
+- **An s3 remote whose dependency group cannot be installed stops retrying
+  every poll.** A failed install is remembered for ten minutes instead of
+  spawning a pip subprocess at the poll interval for as long as the daemon
+  runs.
+- **`a8s health` names the verb an s3 policy is actually missing.** Its probe
+  object is removed whatever failed, and a delete it is not allowed to make no
+  longer reports over the top of the read failure it was cleaning up after.
+
 ## 0.1.92
 
 ### Added

@@ -5,6 +5,7 @@ a real broker."""
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -857,6 +858,54 @@ class TestDeliveryClaim:
             network._write_to_inbox = boom
         assert network.claim_message(msg_id) is True
 
+    def test_a_delivered_message_is_finished_with(self, two_local_agents):
+        assert receive_envelope(self._envelope(new_ulid()), two_local_agents) is True
+
+    def test_a_message_already_in_the_ring_is_finished_with(self, two_local_agents):
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is True
+
+    def test_a_message_a_sibling_holds_is_not_this_receiver_s_to_finish(
+        self, two_local_agents
+    ):
+        # The claim is the whole point: another daemon is delivering it right
+        # now. A wire holding the only copy must not read "returned without
+        # raising" as "consumed" and destroy it.
+        msg_id = new_ulid()
+        assert network.claim_message(msg_id) is True
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+
+    def test_a_message_nobody_here_holds_is_finished_with(self, two_local_agents):
+        # Not consumed is a claim about this delivery attempt, not about
+        # whether anything was written: an envelope for a name this node does
+        # not have will never be deliverable here, and a wire that kept it
+        # would bounce it again every poll, forever.
+        assert receive_envelope(
+            self._envelope(new_ulid(), to="NOBODY"), two_local_agents
+        ) is True
+        assert receive_envelope(b"not json {", two_local_agents) is True
+
+    def test_the_callback_reports_what_the_receive_path_answered(
+        self, two_local_agents, monkeypatch
+    ):
+        from network import make_receive_callback
+
+        callback = make_receive_callback(lambda: two_local_agents, services=[])
+        msg_id = new_ulid()
+        assert callback(self._envelope(msg_id)) is True
+        assert callback(self._envelope(msg_id)) is True
+
+        held = new_ulid()
+        assert network.claim_message(held) is True
+        assert callback(self._envelope(held)) is False
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("disk went away")
+
+        monkeypatch.setattr(network, "_write_to_inbox", explode)
+        assert callback(self._envelope(new_ulid())) is False
+
     def test_sweep_drops_only_stale_claims(self, fake_home, monkeypatch):
         import os as _os
         fresh, dead = new_ulid(), new_ulid()
@@ -867,3 +916,304 @@ class TestDeliveryClaim:
         network.sweep_stale_claims()
         assert (network._claims_dir() / fresh).exists()
         assert not (network._claims_dir() / dead).exists()
+
+
+class TestDurableReceipt:
+    """Finished means written down somewhere a restart can find it.
+
+    A transport that can redeliver reads this path's answer as permission to
+    drop the only copy it holds, and the seen-ids ring turns away everything
+    that comes after. So the two of them have to agree with the disk: an
+    envelope that never reached an inbox is not finished, however normally
+    the code that tried to put it there returned.
+    """
+
+    def _envelope(self, msg_id, to="B"):
+        return json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": to,
+            "content": "hello", "files": [],
+        }).encode()
+
+    def test_a_failed_inbox_write_is_not_a_receipt(
+        self, two_local_agents, monkeypatch
+    ):
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: False)
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert seen_id_contains(msg_id) is False
+        assert not (network._claims_dir() / msg_id).exists(), "claimable again"
+
+    def test_a_repaired_inbox_still_takes_the_message(
+        self, two_local_agents, monkeypatch
+    ):
+        real = network._write_to_inbox
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: False)
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        monkeypatch.setattr(network, "_write_to_inbox", real)
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is True
+        assert (inbox_dir("B") / f"{msg_id}.json").is_file()
+
+    def test_one_lost_member_of_a_fan_out_holds_the_whole_message(
+        self, two_local_agents, monkeypatch
+    ):
+        save_aliases({"ops": ["A", "B"]})
+        real = network._write_to_inbox
+
+        def only_a(msg, recipient, *rest, **kw):
+            if recipient.name == "B":
+                return False
+            return real(msg, recipient, *rest, **kw)
+
+        monkeypatch.setattr(network, "_write_to_inbox", only_a)
+        msg_id = new_ulid()
+        assert receive_envelope(
+            self._envelope(msg_id, to="ops"), two_local_agents
+        ) is False
+        assert seen_id_contains(msg_id) is False
+        assert (inbox_dir("A") / f"{msg_id}.json").is_file()
+        assert not (inbox_dir("B") / f"{msg_id}.json").exists()
+
+        # The redelivery that answer buys: B is filed, and A — whose write the
+        # first pass did commit — is not given a second copy.
+        monkeypatch.setattr(network, "_write_to_inbox", real)
+        assert receive_envelope(
+            self._envelope(msg_id, to="ops"), two_local_agents
+        ) is True
+        assert (inbox_dir("B") / f"{msg_id}.json").is_file()
+        assert len(list(inbox_dir("A").iterdir())) == 1
+
+
+class TestDeferredCustody:
+    """While an attachment download runs, the wire holds the only full copy.
+
+    The envelope lives in a closure on a pool thread for as long as
+    `storage_receive_wait_seconds` allows, and nothing on disk can rebuild it.
+    So the message is not finished and the claim is not given up until the
+    last deferred recipient is done.
+    """
+
+    def _envelope(self, msg_id, to="B"):
+        return json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": to, "content": "hello",
+            "files": [{"filename": "big.bin", "storage": "s3://bucket/big.bin"}],
+        }).encode()
+
+    @pytest.fixture
+    def held_pool(self, monkeypatch):
+        """Catch the deferred job instead of running it."""
+        from concurrent.futures import Future
+
+        class Pool:
+            def __init__(self):
+                self.jobs = []
+
+            def submit(self, fn):
+                self.jobs.append(fn)
+                done = Future()
+                done.set_result(None)
+                return done
+
+        pool = Pool()
+        monkeypatch.setattr(network, "_get_attachment_pool", lambda: pool)
+        monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
+        monkeypatch.setattr(network, "_attachments_missing", lambda *a, **k: True)
+        yield pool
+        # A job this fixture caught and never ran is a debt nothing will pay,
+        # and the debt outlives the test: the claim holder keeps beating for
+        # it and `_deferred_in_flight` keeps answering for its id.
+        with network._attachment_pool_lock:
+            network._deferred_owed.clear()
+            network._deferred_failed.clear()
+            network._claim_holder = None
+
+    def test_a_deferred_message_is_not_finished_with(
+        self, two_local_agents, held_pool
+    ):
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert seen_id_contains(msg_id) is False
+        assert (network._claims_dir() / msg_id).exists(), "still this node's"
+        assert len(held_pool.jobs) == 1
+
+    def test_the_last_worker_out_settles_the_message(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        save_aliases({"ops": ["A", "B"]})
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "mailbox._download_files_to_recipient", lambda msg, *a, **k: msg
+        )
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id, to="ops"), two_local_agents)
+        assert len(held_pool.jobs) == 2
+
+        held_pool.jobs[0]()
+        assert seen_id_contains(msg_id) is False, "one recipient still owed"
+        assert (network._claims_dir() / msg_id).exists()
+
+        held_pool.jobs[1]()
+        assert seen_id_contains(msg_id) is True
+        assert not (network._claims_dir() / msg_id).exists()
+
+    def test_a_deferred_write_that_fails_leaves_the_message_deliverable(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: False)
+        monkeypatch.setattr(
+            "mailbox._download_files_to_recipient", lambda msg, *a, **k: msg
+        )
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        held_pool.jobs[0]()
+        assert seen_id_contains(msg_id) is False
+        assert not (network._claims_dir() / msg_id).exists(), "somebody else's turn"
+
+    def test_a_worker_that_raises_still_settles_the_message(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        def boom(msg, *a, **k):
+            if "wait_s" in k:
+                return msg  # the probe pass, which only decides to defer
+            raise RuntimeError("the network went away")
+
+        monkeypatch.setattr("mailbox._download_files_to_recipient", boom)
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        held_pool.jobs[0]()
+        assert seen_id_contains(msg_id) is False
+        assert not (network._claims_dir() / msg_id).exists()
+
+    def test_a_redelivery_does_not_start_a_second_download(
+        self, two_local_agents, held_pool
+    ):
+        # Only reachable when the claims directory cannot be written, where
+        # claim_message waves everything through.
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert len(held_pool.jobs) == 1
+
+
+    def test_a_job_waiting_for_a_worker_keeps_its_claim_alive(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        """The pool has four workers and the window is fifteen minutes, so a
+        job can sit in the queue longer than a claim lives. The heartbeat
+        starts when the work is queued, not when it finally runs."""
+        import os as _os
+
+        monkeypatch.setattr(network, "CLAIM_HEARTBEAT_SECONDS", 0.01)
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "mailbox._download_files_to_recipient", lambda msg, *a, **k: msg
+        )
+        msg_id = new_ulid()
+        receive_envelope(self._envelope(msg_id), two_local_agents)
+        claim = network._claims_dir() / msg_id
+        stale = time.time() - network.CLAIM_STALE_SECONDS - 60
+        _os.utime(claim, (stale, stale))
+
+        deadline = time.time() + 5
+        while claim.stat().st_mtime == stale and time.time() < deadline:
+            time.sleep(0.01)
+        assert claim.stat().st_mtime > stale, "nobody re-stamped the claim"
+        assert network.claim_message(msg_id) is False, "still this node's"
+        held_pool.jobs[0]()  # settle it so the heartbeat stops
+
+    def test_a_failure_while_queuing_does_not_silence_the_message(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        """An unpaid debt is a lost message, not a lost attachment.
+
+        `_deferred_in_flight` turns away every redelivery of an id that is
+        still owed. Leave one owed and that id goes quiet for the life of the
+        process, while the wire ages out the only copy there is.
+        """
+        real_out = network.out_agent
+        thrown = []
+
+        def flaky(name, text):
+            if "not ready; retrying" in text and not thrown:
+                thrown.append(True)
+                raise OSError(28, "No space left on device")
+            return real_out(name, text)
+
+        monkeypatch.setattr(network, "out_agent", flaky)
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert thrown, "the fault under test did not fire"
+        assert network._deferred_in_flight(msg_id) is False, "nothing still owed"
+        assert seen_id_contains(msg_id) is False
+
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "mailbox._download_files_to_recipient", lambda msg, *a, **k: msg
+        )
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert len(held_pool.jobs) == 1, "the redelivery is not turned away"
+        held_pool.jobs[0]()
+        assert seen_id_contains(msg_id) is True
+
+    def test_a_submit_that_queues_and_still_raises_is_counted_once(
+        self, two_local_agents, monkeypatch
+    ):
+        """`ThreadPoolExecutor.submit` enqueues the work and only then starts
+        a worker, so it can run the job and raise. Both the guard and the job
+        then settle, and counting both would take the debt below zero and
+        stamp the ring for a delivery nobody has made."""
+        jobs = []
+
+        class QueuesThenRaises:
+            def submit(self, fn):
+                jobs.append(fn)
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(network, "_get_attachment_pool", QueuesThenRaises)
+        monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
+        monkeypatch.setattr(network, "_attachments_missing", lambda *a, **k: True)
+        monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: True)
+        monkeypatch.setattr(
+            "mailbox._download_files_to_recipient", lambda msg, *a, **k: msg
+        )
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert seen_id_contains(msg_id) is False
+        jobs[0]()  # the worker picked it up anyway
+        assert seen_id_contains(msg_id) is False, "one delivery, one settlement"
+        assert network._deferred_in_flight(msg_id) is False
+
+    def test_a_job_that_cannot_be_queued_does_not_strand_the_message(
+        self, two_local_agents, held_pool, monkeypatch
+    ):
+        class Refuses:
+            def submit(self, fn):
+                raise RuntimeError("pool is shut down")
+
+        monkeypatch.setattr(network, "_get_attachment_pool", lambda: Refuses())
+        msg_id = new_ulid()
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
+        assert seen_id_contains(msg_id) is False
+        assert not (network._claims_dir() / msg_id).exists(), "nobody is working"
+
+
+class TestClaimHolding:
+    def test_a_stale_claim_has_one_winner(self, fake_home):
+        import os as _os
+
+        msg_id = new_ulid()
+        assert network.claim_message(msg_id) is True
+        old = time.time() - network.CLAIM_STALE_SECONDS - 60
+        _os.utime(network._claims_dir() / msg_id, (old, old))
+        assert network.claim_message(msg_id) is True, "the holder is gone"
+        assert network.claim_message(msg_id) is False, "and now it is taken"
+
+    def test_holding_a_claim_keeps_it_out_of_reach(self, fake_home):
+        import os as _os
+
+        msg_id = new_ulid()
+        assert network.claim_message(msg_id) is True
+        old = time.time() - network.CLAIM_STALE_SECONDS - 60
+        _os.utime(network._claims_dir() / msg_id, (old, old))
+        network.hold_claim(msg_id)
+        assert network.claim_message(msg_id) is False

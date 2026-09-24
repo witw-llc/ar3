@@ -1940,6 +1940,19 @@ class TestCmdRemote:
         assert "hub" not in load_network_config()["remotes"]
         assert "hub" not in load_secrets_config()["remotes"]
 
+    def test_a_secret_does_not_survive_a_change_of_kind(self, fake_home, tmp_path):
+        # A secret is vocabulary, and `pass` is a broker's. Carried into a
+        # folder spec it is an option the folder transport has never heard of.
+        from network import load_remotes, load_secrets_config
+
+        cmd_remote(["hub", "mqtt://x", "t", "--pass", "KEEPME"])
+        assert cmd_remote(["hub", str(tmp_path / "shared")]) == 0
+        assert load_secrets_config()["remotes"] == {}
+        assert [r.id for r in load_remotes()] == ["hub"]
+
+        cmd_remote(["hub", "mqtt://x", "t", "--pass", "AGAIN"])
+        assert load_secrets_config()["remotes"]["hub"]["pass"] == "AGAIN"
+
 
 def _ulid_at(prefix: str) -> str:
     """A valid ULID whose sort position is fixed by its leading characters.
@@ -2311,6 +2324,224 @@ class TestCmdRemoteFolder:
         assert "hub" not in load_network_config()["remotes"]
 
 
+class TestCmdRemoteS3:
+    """`a8s remote <name> s3://<bucket>/<prefix>`.
+
+    One place, like the folder form; the scheme is what picks between them.
+    Nothing here reaches a bucket: registration builds the transport and
+    installs the dependency group, and neither needs one.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _deps_are_satisfied(self, monkeypatch, tmp_path):
+        from ar3 import deps as ar3_deps
+
+        group = tmp_path / "a8s-s3"
+        group.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: group)
+
+        def boom(g):
+            raise AssertionError("the group is already satisfied")
+
+        monkeypatch.setattr(ar3_deps, "install_group", boom)
+
+    def test_registers_the_bucket_and_prefix(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "--region", "us-west-2"])
+        assert rc == 0
+        assert load_network_config()["remotes"]["bucket"] == {
+            "transport": "s3",
+            "bucket": "my-bucket",
+            "prefix": "a8s-mail",
+            "region": "us-west-2",
+        }
+        out = capsys.readouterr().out
+        assert "added remote bucket (s3 s3://my-bucket/a8s-mail --region=us-west-2)" in out
+        assert "attachments need their own service" in out
+
+    def test_no_storage_service_is_created(self, fake_home):
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert load_network_config()["services"] == {}
+
+    def test_a_missing_prefix_is_refused(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3://my-bucket"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "names no key prefix" in err
+        assert "bucket" not in load_network_config()["remotes"]
+
+    def test_a_missing_bucket_is_refused(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3:///a8s-mail"])
+        assert rc == 2
+        assert "names no bucket" in capsys.readouterr().err
+
+    def test_prefix_as_an_option_is_refused(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "--prefix", "other"])
+        assert rc == 2
+        assert "the path in the URL" in capsys.readouterr().err
+
+    def test_a_typo_d_option_fails_at_the_verb(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "--regionn", "x"])
+        assert rc == 2
+        assert "unknown option" in capsys.readouterr().err
+        assert "bucket" not in load_network_config()["remotes"]
+
+    def test_the_broker_form_points_at_the_one_place_form(self, fake_home, capsys):
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "a8s/team"])
+        assert rc == 2
+        assert "an s3 remote is one place, not two" in capsys.readouterr().err
+
+    def test_a_storage_prefix_is_not_available_to_the_transport(
+        self, fake_home, capsys
+    ):
+        assert cmd_storage(["files", "s3://my-bucket/a8s-files"]) == 0
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-files/mail"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "storage files already writes under" in err
+        assert "bucket" not in load_network_config()["remotes"]
+
+    def test_a_different_prefix_in_the_same_bucket_is_fine(self, fake_home, capsys):
+        assert cmd_storage(["files", "s3://my-bucket/a8s-files"]) == 0
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert "attachments need their own service" not in capsys.readouterr().out
+
+    def test_a_storage_service_may_not_move_under_a_remote(self, fake_home, capsys):
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        rc = cmd_storage(["files", "s3://my-bucket/a8s-mail/files"])
+        assert rc == 2
+        assert "remote bucket already owns that prefix" in capsys.readouterr().err
+        assert "files" not in load_network_config()["services"]
+
+    def test_the_default_storage_prefix_counts(self, fake_home, capsys):
+        # `a8s storage x s3://my-bucket` writes under `a8s`, named nowhere in
+        # the URL — the collision the operator cannot see.
+        assert cmd_storage(["files", "s3://my-bucket"]) == 0
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s"]) == 2
+        assert "storage files already writes under" in capsys.readouterr().err
+
+    def test_a_failed_group_install_registers_nothing(
+        self, fake_home, capsys, monkeypatch
+    ):
+        from ar3 import deps as ar3_deps
+
+        def fail(group):
+            raise RuntimeError("no network in test")
+
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: None)
+        monkeypatch.setattr(ar3_deps, "install_group", fail)
+        rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail"])
+        assert rc == 1
+        assert "bucket" not in load_network_config()["remotes"]
+        err = capsys.readouterr().err
+        assert "no network in test" in err
+        assert "ar3 deps" not in err
+
+    def test_overwrite_replaces_the_spec(self, fake_home, capsys):
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert cmd_remote(["bucket", "s3://other-bucket/mail", "--poll-seconds", "30"]) == 0
+        assert load_network_config()["remotes"]["bucket"] == {
+            "transport": "s3",
+            "bucket": "other-bucket",
+            "prefix": "mail",
+            "poll_seconds": "30",
+        }
+        assert "updated remote bucket" in capsys.readouterr().out
+
+    def test_unremote_forgets_it(self, fake_home):
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert cmd_unremote(["bucket"]) == 0
+        assert "bucket" not in load_network_config()["remotes"]
+
+    def test_the_suggested_storage_command_is_one_that_works(self, fake_home, capsys):
+        # The remote takes `a8s-files` itself, so the suggestion cannot be
+        # that prefix: `a8s storage` refuses it over this very remote, and a
+        # printed command that refuses itself is worse than none.
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-files"]) == 0
+        printed = capsys.readouterr().out
+        suggestion = next(
+            line for line in printed.splitlines() if "a8s storage" in line
+        )
+        argv = suggestion.split("a8s storage ", 1)[1].split()
+        assert cmd_storage(argv) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_a_remote_redefined_as_s3_drops_the_broker_password(
+        self, fake_home, capsys
+    ):
+        # `pass` is broker vocabulary. Left in secrets.json it is merged back
+        # into an s3 spec that has no option by that name, and `load_remotes`
+        # skips the remote at every daemon start — while this command printed
+        # success.
+        from network import load_remotes, load_secrets_config
+
+        assert cmd_remote(
+            ["hub", "mqtt://broker.example:1883", "a8s/team", "--pass", "s3cret"]
+        ) == 0
+        assert cmd_remote(["hub", "s3://my-bucket/a8s-mail"]) == 0
+        assert load_secrets_config()["remotes"] == {}
+        assert [r.id for r in load_remotes()] == ["hub"]
+
+    def test_two_endpoints_are_two_object_stores(self, fake_home, capsys):
+        # A bucket name is only unique within one S3-compatible service, and
+        # the operator cannot rename a bucket somebody else owns.
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert cmd_storage(
+            ["files", "s3://my-bucket/a8s-mail", "--endpoint-url", "https://s3.example"]
+        ) == 0
+        assert cmd_remote(
+            [
+                "other", "s3://my-bucket/a8s-mail",
+                "--endpoint-url", "https://other.example",
+            ]
+        ) == 0
+        assert capsys.readouterr().err == ""
+
+    def test_one_endpoint_still_refuses_an_overlapping_prefix(self, fake_home, capsys):
+        assert cmd_remote(
+            ["bucket", "s3://my-bucket/a8s-mail", "--endpoint-url", "https://s3.example"]
+        ) == 0
+        rc = cmd_storage(
+            [
+                "files", "s3://my-bucket/a8s-mail",
+                "--endpoint-url", "https://s3.example/",
+            ]
+        )
+        assert rc == 2
+        assert "remote bucket already owns that prefix" in capsys.readouterr().err
+
+    def test_health_installs_a_missing_group_instead_of_warning(
+        self, fake_home, capsys, monkeypatch
+    ):
+        save_network_config({
+            "remotes": {
+                "bucket": {
+                    "transport": "s3",
+                    "bucket": "my-bucket",
+                    "prefix": "a8s-mail",
+                }
+            },
+            "services": {},
+        })
+        calls: list[str] = []
+
+        def fail(group):
+            calls.append(group)
+            raise RuntimeError("no network in test")
+
+        from ar3 import deps as ar3_deps
+
+        monkeypatch.setattr(ar3_deps, "ensure_group", lambda g: None)
+        monkeypatch.setattr(ar3_deps, "install_group", fail)
+        from commands import cmd_health
+
+        cmd_health()
+        out = capsys.readouterr().out
+        assert calls == ["a8s-s3"]
+        assert "remote bucket: FAIL" in out
+        assert "no network in test" in out
+        assert "run `ar3 deps" not in out
+
+
 class TestSyncClientNote:
     """The note says what appears to be syncing this folder. It is the only
     moment a8s gets to tell an operator that nothing is."""
@@ -2538,6 +2769,20 @@ class TestCmdStorage:
         assert "pass" not in spec and "password" not in spec
         merged = merge_spec_secrets("services", "fm", dict(spec))
         assert merged["password"] == "s3cret"
+
+    def test_a_secret_does_not_survive_a_change_of_kind(self, fake_home):
+        # Same hole as `a8s remote`'s, from the other side: a webdav password
+        # left behind is an option `tempfile_org` refuses to build with.
+        from network import load_secrets_config, load_services
+
+        assert cmd_storage([
+            "fm", "webdav://dav.example.com/dav",
+            "--base-url", "https://files.example.com",
+            "--user", "alice@example.com", "--pass", "s3cret",
+        ]) == 0
+        assert cmd_storage(["fm", "https://tempfile.org"]) == 0
+        assert load_secrets_config()["services"] == {}
+        assert [s.id for s in load_services()] == ["fm"]
 
     def test_blank_prefix_means_no_prefix(self, fake_home):
         rc = cmd_storage([

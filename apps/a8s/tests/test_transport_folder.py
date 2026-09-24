@@ -204,6 +204,33 @@ class TestPoll:
         t._poll_once()
         assert len(seen) == 1
 
+    def test_an_unconsumed_envelope_is_not_stamped(self, fake_home, folder, capsys):
+        """A receive path that answers False has not finished with the message.
+
+        Stamping the ledger here is worse than losing the answer, because the
+        ledger is consulted before the file is ever read again: the envelope
+        stays on disk looking delivered and is never offered to anybody.
+        """
+        msg_id = new_ulid()
+        (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
+        answers = [False, True]
+        seen: list[str] = []
+
+        def cb(raw: bytes) -> bool:
+            seen.append(json.loads(raw)["id"])
+            return answers.pop(0)
+
+        t = _transport(folder)
+        t._on_message = cb
+        t._poll_once()
+        assert msg_id not in t._consumed, "nobody took it"
+        t._poll_once()
+        assert seen == [msg_id, msg_id], "offered again"
+        assert msg_id in t._consumed
+        t._poll_once()
+        assert seen == [msg_id, msg_id], "and now it is done"
+        assert capsys.readouterr().out.count("delivery unfinished") == 1
+
     def test_a_failing_callback_says_so_once(self, fake_home, folder, capsys):
         """Nothing arriving is this transport's whole failure surface, so a
         handler that raises every fifteen seconds owes the log one line."""

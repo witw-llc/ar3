@@ -611,7 +611,7 @@ class FolderTransport(Transport):
             if cb is None:
                 continue
             try:
-                cb(raw)
+                consumed = cb(raw) is not False
             except Exception as e:
                 # Retried on the next pass, and the ledger is not stamped — so
                 # a handler that fails every time is an invisible 15-second
@@ -620,6 +620,18 @@ class FolderTransport(Transport):
                     f"deliver:{type(e).__name__}",
                     f"WARN: remote {self._remote_id}: delivery failed "
                     f"({type(e).__name__}: {e}); retrying",
+                )
+                continue
+            if not consumed:
+                # The receive path says it is not finished: an inbox that
+                # would not take the envelope, or a sibling holding the claim.
+                # Stamping the ledger here is what makes a file the only copy
+                # of a message and then forgets it, because this loop skips
+                # every stem the ledger names and never reads the file again.
+                self._warn_once(
+                    "unconsumed",
+                    f"WARN: remote {self._remote_id}: delivery unfinished; "
+                    f"retrying until it is taken",
                 )
                 continue
             self._record_consumed(stem)

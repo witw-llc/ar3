@@ -118,6 +118,46 @@ Read [a8s.md](a8s.md) first for concept and usage.
   only if bytes are missing does it hand that recipient's delivery to a bounded
   pool, which retries, writes the inbox, and sends the receipt. Ordering is
   preserved for everything that downloads first try.
+- **An s3 remote's prefix has one owner and deletes what it consumes.** The
+  node whose registry holds a name is the only node that may poll
+  `<prefix>/<name>/`, because deletion is the acknowledgement: a second reader
+  on the same prefix deletes mail the first one was owed. That is why a publish
+  addressed to a name the publishing node already answers for writes nothing,
+  and why `a8s remote` and `a8s storage` each refuse a prefix the other owns at
+  the same endpoint — the transport's retention reap walks everything under its
+  own prefix, and `services/s3.py` deliberately never deletes at all. Do not
+  default the transport's prefix; a default would land on the storage service's.
+- **Only the receive path may say an envelope was consumed.** `receive_envelope`
+  returns that answer and `make_receive_callback` passes it to the transport.
+  Returning without raising is not the answer: a sibling daemon holding the
+  claim, and a released claim after a failed delivery, both return normally and
+  both mean the message is still owed an attempt. A transport that deletes on
+  acknowledgement deletes on the answer alone. One that never deletes on receive
+  ignores it, and the `OnMessage` contract lets a callback give no answer at
+  all.
+- **Consumed means an inbox holds it.** Only a path that answers `True` appends
+  to `seen-ids`, because the ring suppresses every later attempt: recording an
+  id whose write failed converts a disk that was full for a minute into a
+  message nobody ever receives. An envelope addressed to a name this cluster
+  does not hold is the exception and answers `True` — no retry can make it
+  deliverable, and a wire that kept it would offer it again every poll forever.
+- **A deferred attachment download holds its claim and leaves the wire copy
+  alone.** Between the decision to wait and the inbox write, the only complete
+  copy of the envelope is a closure on a pool thread, so the message is not
+  acknowledged and the claim is not released until the last deferred recipient
+  finishes. One thread per process re-stamps every claim that covers deferred
+  work, because `storage_receive_wait_seconds` outlasts `CLAIM_STALE_SECONDS`
+  by design and a job can also wait in a four-worker pool for that long. One
+  thread, not one per delivery: a thread per recipient per message ends in
+  `can't start new thread` inside the bookkeeping that protects the message.
+  It is a thread of this process and no more, so killing the process stops the
+  stamping and the claims lapse on schedule.
+- **A deferred delivery that is recorded as owed must always be settled.**
+  `_deferred_in_flight` turns away every redelivery of an id still owed, so a
+  debt that is never paid silences that id for the life of the process while
+  the wire ages out the only copy. Everything between `_begin_deferred` and
+  the worker's `finally` runs under a guard, and the settle is one-shot
+  because `submit` can queue the job and still raise.
 - **Storage option names fold dashes to underscores** (`--base-url` and
   `--base_url` are one option), and `a8s storage` builds the service before
   writing config so a bad option fails at the CLI rather than as a silently
@@ -181,7 +221,12 @@ Read [a8s.md](a8s.md) first for concept and usage.
   a gate on delivery: if the claims directory cannot be written, deliver and
   accept the duplicate. A claim expires after `CLAIM_STALE_SECONDS`, and
   `sweep_stale_claims` runs at daemon startup, so a process killed mid-delivery
-  cannot turn a duplicate-delivery bug into a lost-message bug.
+  cannot turn a duplicate-delivery bug into a lost-message bug. Taking over an
+  expired claim is *not* exclusive — two receivers racing one expiry can both
+  conclude they won — and that is deliberate. The cost is a duplicate delivery,
+  which this mechanism already accepts whenever the claims directory cannot be
+  written; unlinking the dead file and re-taking it exclusively is two
+  operations, so a slow racer deletes a live claim and both still win.
 - **`settings.json` is the stable operator config.** `a8s config set` persists
   machine-wide keys; `a8s config` (no args) catalogs every knob including
   definition, registry, and network fields. Env vars apply only when a key
@@ -257,6 +302,6 @@ numbering overlaps, so the prefix is what tells them apart.
 
 | # | State | Topic |
 |---|---|---|
-| bin#63 | partial | Multi-cluster routing. MQTT in, mini-MQTT/HTTPS/TCP/encryption still open. |
+| bin#63 | partial | Multi-cluster routing. MQTT, folder and s3 in; mini-MQTT/TCP/encryption still open. |
 | bin#72 | open | Mailbox file format discussion. |
 | bin#93 | open | Grok CLI as tool kind. |

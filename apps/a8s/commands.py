@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,6 +85,7 @@ from network import (
     put_spec_secrets,
     save_network_config,
     split_secret_keys,
+    transport_deps_group_for,
 )
 from registry import (
     _scan_for_markers,
@@ -2648,11 +2650,13 @@ def _remote_usage() -> int:
         "usage: a8s remote                                          # list all\n"
         "       a8s remote <name>                                   # show one\n"
         "       a8s remote <name> <folder> [--<k> <v> ...]          # folder remote\n"
+        "       a8s remote <name> s3://<bucket>/<prefix> [--<k> <v> ...]  # s3 remote\n"
         "       a8s remote <name> <broker> <topic> [--<k> <v> ...]  # broker remote\n"
         "       a8s unremote <name>                                 # remove\n"
         "\n"
         'e.g.   a8s remote box "G:/My Drive/A8S"                    # quote the path\n'
         "       a8s remote hub mqtt://broker.example:1883 a8s/team\n"
+        "       a8s remote bucket s3://my-bucket/a8s-mail --region us-west-2\n"
         "\n"
         "A folder remote carries envelopes through a directory some sync client\n"
         "already watches; give a second machine the same folder and the messages\n"
@@ -2664,6 +2668,12 @@ def _remote_usage() -> int:
         "machine joined the folder at; envelopes named below it are the backlog\n"
         "it is not owed. It is written, never typed, and `a8s unremote` plus a\n"
         "fresh `a8s remote` is how a machine re-joins at a new cutoff.\n"
+        "\n"
+        "An s3 remote carries envelopes through a bucket, for a machine that\n"
+        "can reach HTTPS on 443 and nothing else. The prefix is required and\n"
+        "must be one no storage service writes under — the transport deletes\n"
+        "what it delivers. It takes --poll-seconds (10), --retain-days (3),\n"
+        "--region, --profile, --endpoint-url and --timeout-s.\n"
         "\n"
         "Any option past the broker and topic is passed verbatim to the\n"
         "transport (e.g. --user / --pass for mqtt). Either spelling works,\n"
@@ -2681,6 +2691,9 @@ def _format_remote_summary(spec: dict) -> str:
     if kind == "folder":
         line = f"folder {spec.get('path', '?')}"
         consumed = {"transport", "path", "joined"}
+    elif kind == "s3":
+        line = f"s3 s3://{spec.get('bucket', '?')}/{spec.get('prefix', '?')}"
+        consumed = {"transport", "bucket", "prefix"}
     else:
         line = f"{kind} {spec.get('broker', '?')} topic={spec.get('topic', '?')}"
         consumed = {"transport", "broker", "topic"}
@@ -2721,11 +2734,13 @@ def cmd_remote(args: list[str]) -> int:
       a8s remote                                          list all
       a8s remote <name>                                   show one
       a8s remote <name> <folder> [--<k> <v> ...]          folder remote
+      a8s remote <name> s3://<bucket>/<prefix> [--<k> ...] s3 remote
       a8s remote <name> <broker> <topic> [--<k> <v> ...]  broker remote
       a8s unremote <name>                                 remove (see `cmd_unremote`)
 
-    The two set forms are told apart by how many positional words precede the
-    first option: a folder is one place, a broker and a topic are two.
+    The set forms are told apart by how many positional words precede the
+    first option: a folder and a bucket are one place, a broker and a topic
+    are two. Among the one-place forms the scheme decides.
     """
     positionals, opt_tokens = _split_remote_positionals(args)
     if len(positionals) >= 3:
@@ -2734,6 +2749,8 @@ def cmd_remote(args: list[str]) -> int:
             positionals[3:] + opt_tokens,
         )
     if len(positionals) == 2:
+        if _is_s3_url(positionals[1]):
+            return _cmd_remote_set_s3(positionals[0], positionals[1], opt_tokens)
         return _cmd_remote_set_folder(positionals[0], positionals[1], opt_tokens)
     if opt_tokens:
         return _remote_usage()
@@ -2778,6 +2795,7 @@ def _cmd_remote_show(name: str) -> int:
 
 
 _BROKER_SCHEMES = ("mqtt", "mqtts")
+_S3_SCHEME = "s3"
 
 
 def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -> int:
@@ -2799,6 +2817,13 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
         )
         return 2
     if scheme.lower() not in _BROKER_SCHEMES:
+        if scheme.lower() == _S3_SCHEME:
+            print(
+                "an s3 remote is one place, not two — the prefix is the path "
+                f"in the URL (a8s remote {name} {broker})",
+                file=sys.stderr,
+            )
+            return 2
         print(
             f"unsupported broker scheme {scheme!r} "
             f"(expected {' or '.join(_BROKER_SCHEMES)})",
@@ -2815,12 +2840,207 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
     public, secrets = split_secret_keys(
         {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
     )
+    _forget_secrets_of_prior_kind("remotes", name, "mqtt")
     cfg["remotes"][name] = public
     save_network_config(cfg)
     put_remote_secrets(name, secrets)
     verb = "updated" if overwriting else "added"
     print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
     return 0
+
+
+def _is_s3_url(place: str) -> bool:
+    return place.strip().lower().startswith(f"{_S3_SCHEME}://")
+
+
+# Which field in a `network.json` entry names its kind, per section.
+_KIND_KEY = {"remotes": "transport", "services": "service"}
+
+
+def _forget_secrets_of_prior_kind(section: str, name: str, kind: str) -> None:
+    """Drop `name`'s stored secrets when it is being redefined as another kind.
+
+    A secret is vocabulary: `pass` names a broker credential and means nothing
+    to a bucket. Registering replaces the public spec wholesale but merges into
+    the stored secrets, so a mqtt remote redefined as an s3 one keeps a `pass`
+    that the s3 transport then rejects as an unknown option — the remote is
+    silently skipped at every daemon start, while the command that caused it
+    printed success. Call this before the new spec is saved, since the config
+    on disk is what says which kind the entry is leaving.
+    """
+    prior = load_network_config()[section].get(name)
+    if not isinstance(prior, dict):
+        return
+    if str(prior.get(_KIND_KEY[section]) or "").strip().lower() != kind:
+        delete_spec_secrets(section, name)
+
+
+def _cmd_remote_set_s3(name: str, url: str, opt_tokens: list[str]) -> int:
+    if not _REMOTE_NAME_RE.match(name):
+        print(f"remote name must be alphanumeric (with -, _, .): {name!r}", file=sys.stderr)
+        return 2
+    parsed = urllib.parse.urlsplit(url.strip())
+    bucket = (parsed.netloc or "").strip()
+    prefix = (parsed.path or "").strip("/")
+    if not bucket:
+        print(
+            f"{url!r} names no bucket (a8s remote {name} s3://my-bucket/a8s-mail)",
+            file=sys.stderr,
+        )
+        return 2
+    if not prefix:
+        # The transport deletes what it delivers, so it may not share a prefix
+        # with anything else in the bucket — including the `a8s storage` s3
+        # service, whose own default prefix is `a8s`. Defaulting would pick
+        # that fight silently; asking for a prefix cannot.
+        print(
+            f"{url!r} names no key prefix. An s3 remote deletes every envelope "
+            "it delivers, so it needs a prefix nothing else writes under "
+            f"(a8s remote {name} s3://{bucket}/a8s-mail)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        extras = parse_option_tokens(opt_tokens)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return _remote_usage()
+    if "prefix" in extras:
+        print(
+            "--prefix is the path in the URL, not an option "
+            f"(a8s remote {name} s3://{bucket}/{extras['prefix'].strip('/')})",
+            file=sys.stderr,
+        )
+        return 2
+    endpoint = _s3_endpoint(extras)
+    collision = _s3_storage_collision(bucket, prefix, endpoint)
+    if collision is not None:
+        print(
+            f"storage {collision} already writes under s3://{bucket}/{prefix}. "
+            "An s3 remote deletes what it delivers and would take that "
+            "service's objects with it; give one of them its own prefix",
+            file=sys.stderr,
+        )
+        return 2
+    spec: dict = {"transport": "s3", "bucket": bucket, "prefix": prefix, **extras}
+    # Build it now so a typo'd option fails here rather than as a skipped
+    # remote at daemon start.
+    try:
+        build_transport(name, spec)
+    except (ValueError, TypeError) as e:
+        print(f"invalid remote config: {e}", file=sys.stderr)
+        return 2
+    group = transport_deps_group_for("s3")
+    if group is not None:
+        try:
+            require_group(group, reason="s3 remote")
+        except Exception as e:
+            print(f"installing {group} for the s3 remote failed: {e}", file=sys.stderr)
+            return 1
+    public, secrets = split_secret_keys(spec)
+    cfg = load_network_config()
+    overwriting = name in cfg["remotes"]
+    _forget_secrets_of_prior_kind("remotes", name, "s3")
+    cfg["remotes"][name] = public
+    save_network_config(cfg)
+    put_remote_secrets(name, secrets)
+    verb = "updated" if overwriting else "added"
+    print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
+    # A remote with nowhere for its attachments to go is a trap the operator
+    # only springs on the first `FILE:`. Unlike a folder, a bucket cannot
+    # carry both under one prefix, so this names the second command instead
+    # of running it.
+    if not any(
+        isinstance(svc, dict)
+        and svc.get("service") == "s3"
+        and urllib.parse.urlsplit(str(svc.get("url") or "").strip()).netloc.strip()
+        == bucket
+        for svc in cfg["services"].values()
+    ):
+        free = _free_s3_storage_prefix(bucket, endpoint)
+        if free is not None:
+            print(
+                "attachments need their own service: "
+                f"a8s storage {name}-files s3://{bucket}/{free}"
+            )
+        else:
+            print(
+                "attachments need their own service, and every prefix in "
+                f"{bucket} is already owned by an s3 remote"
+            )
+    return 0
+
+
+def _s3_service_prefix(spec: dict, url_path: str) -> str:
+    """Where an s3 storage service's objects land, read the way it reads it."""
+    from services import resolve_prefix
+    from services.s3 import DEFAULT_PREFIX
+
+    return resolve_prefix(spec, (url_path or "").strip("/") or DEFAULT_PREFIX)
+
+
+def _prefixes_overlap(a: str, b: str) -> bool:
+    """True when one key prefix covers the other. An empty prefix is the bucket
+    root, which covers everything."""
+    if not a or not b:
+        return True
+    return f"{a}/".startswith(f"{b}/") or f"{b}/".startswith(f"{a}/")
+
+
+def _s3_endpoint(spec: dict) -> str:
+    """Which S3-compatible service a spec addresses, in comparable form. Empty
+    is AWS itself. Two buckets of the same name at different endpoints are two
+    different object stores, and nothing either one deletes can reach the
+    other — so a prefix rule that ignored this would refuse a config that is
+    fine, and the operator cannot rename a bucket somebody else owns."""
+    return str(spec.get("endpoint_url") or "").strip().rstrip("/").lower()
+
+
+def _s3_storage_collision(bucket: str, prefix: str, endpoint: str) -> str | None:
+    """The name of a configured s3 storage service whose keys this prefix would
+    cover, or None. One prefix containing the other is enough: the transport's
+    retention reap walks everything under its own prefix."""
+    for svc_name, spec in load_network_config()["services"].items():
+        if not isinstance(spec, dict) or spec.get("service") != "s3":
+            continue
+        parsed = urllib.parse.urlsplit(str(spec.get("url") or "").strip())
+        if (parsed.netloc or "").strip() != bucket:
+            continue
+        if _s3_endpoint(spec) != endpoint:
+            continue
+        if _prefixes_overlap(prefix, _s3_service_prefix(spec, parsed.path)):
+            return svc_name
+    return None
+
+
+def _s3_remote_collision(bucket: str, prefix: str, endpoint: str) -> str | None:
+    """The name of a configured s3 remote whose prefix covers these keys."""
+    if not bucket:
+        return None
+    for remote_name, spec in load_network_config()["remotes"].items():
+        if not isinstance(spec, dict) or spec.get("transport") != "s3":
+            continue
+        if str(spec.get("bucket") or "").strip() != bucket:
+            continue
+        if _s3_endpoint(spec) != endpoint:
+            continue
+        if _prefixes_overlap(prefix, str(spec.get("prefix") or "").strip("/")):
+            return remote_name
+    return None
+
+
+def _free_s3_storage_prefix(bucket: str, endpoint: str) -> str | None:
+    """A key prefix in `bucket` that no s3 remote owns, or None if none is.
+
+    What this feeds is a command the operator pastes, so it has to survive the
+    collision rule `a8s storage` applies to it — a remote registered at
+    `a8s-files` is exactly the case where the printed suggestion refused
+    itself.
+    """
+    for candidate in ("a8s-files", *(f"a8s-files-{n}" for n in range(2, 20))):
+        if _s3_remote_collision(bucket, candidate, endpoint) is None:
+            return candidate
+    return None
 
 
 def _cmd_remote_set_folder(name: str, folder: str, opt_tokens: list[str]) -> int:
@@ -2874,6 +3094,7 @@ def _cmd_remote_set_folder(name: str, folder: str, opt_tokens: list[str]) -> int
         print(f"invalid remote config: {e}", file=sys.stderr)
         return 2
     public, secrets = split_secret_keys(spec)
+    _forget_secrets_of_prior_kind("remotes", name, "folder")
     cfg["remotes"][name] = public
     save_network_config(cfg)
     put_remote_secrets(name, secrets)
@@ -3252,6 +3473,23 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
         )
         return 2
     spec: dict = {"service": kind, "url": url, **extras}
+    if kind == "s3":
+        # Same foot-gun as `a8s remote`'s, reached from the other side: an s3
+        # remote deletes every object under its prefix, so a storage service
+        # that lands inside it loses attachments to somebody else's retention.
+        parsed = urllib.parse.urlsplit(url.strip())
+        collision = _s3_remote_collision(
+            (parsed.netloc or "").strip(),
+            _s3_service_prefix(spec, parsed.path),
+            _s3_endpoint(spec),
+        )
+        if collision is not None:
+            print(
+                f"remote {collision} already owns that prefix, and an s3 remote "
+                "deletes everything under its own prefix; give one of them its own",
+                file=sys.stderr,
+            )
+            return 2
     # Build it now so a typo'd option or a missing --base-url fails here rather
     # than as a skipped service at daemon start.
     try:
@@ -3272,6 +3510,7 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     public, secrets = split_secret_keys(spec)
     cfg = load_network_config()
     overwriting = name in cfg["services"]
+    _forget_secrets_of_prior_kind("services", name, kind)
     cfg["services"][name] = public
     save_network_config(cfg)
     put_spec_secrets("services", name, secrets)

@@ -17,9 +17,9 @@ config; an a8s install with no remotes never imports paho-mqtt or any
 other transport library.
 
 `_build_transport` forwards every key past `transport`/`broker`/`topic`/
-`path` to the transport constructor as `**opts`, so adding a new transport
-option doesn't require touching this dispatcher — only the transport's
-own option-bag handling.
+`path`/`bucket` to the transport constructor as `**opts`, so adding a new
+transport option doesn't require touching this dispatcher — only the
+transport's own option-bag handling.
 """
 from __future__ import annotations
 
@@ -269,7 +269,22 @@ def delete_remote_secrets(name: str) -> None:
 
 # Top-level keys in a network.json entry that are not transport options
 # (they're consumed by the dispatcher itself before forwarding the rest).
-_RESERVED_SPEC_KEYS = {"transport", "broker", "topic", "path"}
+_RESERVED_SPEC_KEYS = {"transport", "broker", "topic", "path", "bucket"}
+
+# Transport kind -> the tier-2 `ar3 deps` group its module needs, so `a8s
+# remote` can install it at the verb instead of leaving the first real use to
+# fail. A kind absent here needs nothing beyond stdlib and the vendored tier.
+# Separate from the storage map of the same shape: the two dispatchers have
+# different kind vocabularies, and `s3` naming the same group in both is a
+# coincidence of the package, not a shared rule.
+_TRANSPORT_DEPS_GROUP = {
+    "s3": "a8s-s3",
+}
+
+
+def transport_deps_group_for(kind: str) -> str | None:
+    """The `ar3 deps` group `kind`'s transport module needs, or `None`."""
+    return _TRANSPORT_DEPS_GROUP.get(kind)
 
 
 def _build_transport(name: str, spec: dict) -> Transport:
@@ -279,7 +294,8 @@ def _build_transport(name: str, spec: dict) -> Transport:
     aliases (e.g. `user` → `username`), and rejects unknowns.
 
     Each kind states its own required fields: a broker and a topic name a
-    server, a path names a folder, and neither is a requirement of the other."""
+    server, a path names a folder, a bucket and a prefix name the keys an s3
+    remote owns, and none is a requirement of any other."""
     kind = (spec.get("transport") or "").strip().lower()
     opts = {k: v for k, v in spec.items() if k not in _RESERVED_SPEC_KEYS}
     if kind == "mqtt":
@@ -299,6 +315,15 @@ def _build_transport(name: str, spec: dict) -> Transport:
         from transports.folder import FolderTransport
 
         return FolderTransport(remote_id=name, path=path, **opts)
+    if kind == "s3":
+        bucket = spec.get("bucket")
+        if not bucket or not spec.get("prefix"):
+            raise ValueError(
+                f"remote {name!r}: an s3 transport requires `bucket` and `prefix`"
+            )
+        from transports.s3 import S3Transport
+
+        return S3Transport(remote_id=name, bucket=bucket, **opts)
     raise ValueError(f"remote {name!r}: unsupported transport {kind!r}")
 
 
@@ -557,14 +582,41 @@ def claim_message(ulid: str) -> bool:
         return True  # vanished between the two calls: the holder finished
     if age <= CLAIM_STALE_SECONDS:
         return False
-    # The holder is gone. Re-stamp before taking over so that two processes
-    # racing an expiry do not both conclude they won.
+    # The holder is gone, so somebody should take over. Re-stamp first, which
+    # turns away every arrival after this one.
+    #
+    # Two receivers racing the same expiry can still both get here and both
+    # conclude they won, and that is tolerated rather than fixed: the failure
+    # is a duplicate delivery, which this whole mechanism already accepts
+    # whenever the claims directory cannot be written, and the inbox write is
+    # idempotent. Removing the dead file and re-taking it with an exclusive
+    # create looks like the fix and is worse — unlink and create are two
+    # operations, so a slow racer's unlink deletes the fast racer's live claim
+    # and both still win, having destroyed custody of a delivery in progress.
+    # Making this genuinely exclusive needs a held lock rather than a file
+    # that exists, which is a larger change than the fault justifies.
     try:
         prior = path.stat().st_mtime
         os.utime(path, None)
         return path.stat().st_mtime != prior
     except OSError:
         return False
+
+
+def hold_claim(ulid: str) -> None:
+    """Keep a claim from going stale while the work it covers is still running.
+
+    A claim is stamped once and expires 300 seconds later, which covers one
+    delivery attempt. Deferred attachment delivery runs far longer than that —
+    `storage_receive_wait_seconds` defaults to 900 — so the thread doing that
+    work re-stamps its own claim as it goes. It has to be that thread: a
+    heartbeat from anywhere else would keep a dead holder's claim alive and
+    the message would never be redelivered.
+    """
+    try:
+        os.utime(_claims_dir() / ulid, None)
+    except OSError:
+        pass
 
 
 def release_claim(ulid: str) -> None:
@@ -695,12 +747,20 @@ def receive_envelope(
     services: list[StorageService] | None = None,
     publish_control: Callable[[bytes], None] | None = None,
     remote_id: str = "remote",
-) -> None:
+) -> bool:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
     inbox. Unknown local destinations emit bounded, rate-limited diagnostics;
     malformed or duplicate envelopes drop silently. Nothing should crash the
     subscriber thread.
+
+    Returns whether this call finished with the envelope. True says the
+    network is done with it here — delivered and recorded in the seen-ids
+    ring, already in that ring, or rejected for good (malformed, or addressed
+    to nobody this node holds). False says it is still owed an attempt: a
+    sibling receiver holds the claim, or delivery raised and the claim was
+    released precisely so somebody can try again. A transport that keeps no
+    copy of its own must not destroy the envelope on a False.
 
     `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
@@ -716,17 +776,19 @@ def receive_envelope(
             raise ValueError("envelope is not a JSON object")
     except (ValueError, UnicodeDecodeError) as e:
         out(f"WARN: dropped malformed envelope ({e})")
-        return
+        return True
     msg_id = msg.get("id", "")
     if not isinstance(msg_id, str) or not is_ulid(msg_id):
         out(f"WARN: envelope without valid id; dropping (id={msg_id!r})")
-        return
+        return True
     if seen_id_contains(msg_id):
-        return  # already delivered — silent dedup
+        return True  # already delivered — silent dedup
     if not claim_message(msg_id):
-        return  # a sibling receiver has it in flight — same silent dedup
+        # A sibling receiver has it in flight — the same silent dedup, but the
+        # message is that receiver's to finish, not this one's to write off.
+        return False
     try:
-        _deliver_claimed_envelope(
+        return _deliver_claimed_envelope(
             msg, msg_id, all_agents, services, publish_control, remote_id
         )
     except BaseException:
@@ -743,21 +805,37 @@ def _deliver_claimed_envelope(
     services: list[StorageService] | None,
     publish_control: Callable[[bytes], None] | None,
     remote_id: str,
-) -> None:
+) -> bool:
     """The body of `receive_envelope`, run while holding the claim on `msg_id`.
 
-    Every path out of here either records the message in the seen-ids ring and
-    releases the claim, or releases the claim so somebody can try again.
+    The answer is whether this node is finished with the envelope, and a
+    transport that can redeliver reads it as permission to drop its own copy.
+    True means the message reached every recipient's inbox, or that it never
+    could — a name this cluster does not hold is as finished as a delivery.
+    False means the work is unfinished and the copy on the wire is still the
+    only one worth having.
+
+    Only a path that answers True records the id in the seen-ids ring, because
+    the ring suppresses every later attempt: appending it for work that failed
+    turns a disk that was full for a minute into a message nobody ever gets.
+    Local routing already draws the line in this place — `_process_pending`
+    appends only once at least one inbox write has committed.
     """
     if is_control_envelope(msg):
         _receive_control_envelope(msg, all_agents, remote_id)
         seen_id_append(msg_id)
         release_claim(msg_id)
-        return
+        return True
+    if _deferred_in_flight(msg_id):
+        # Reachable only when the claims directory cannot be written, where
+        # `claim_message` waves everything through rather than gate delivery
+        # on a directory. A worker in this process already holds this message;
+        # doing the fan-out again would double every receipt it will send.
+        return False
     recipient_name = (msg.get("to") or "").strip()
     if not recipient_name:
         release_claim(msg_id)
-        return  # malformed; nothing to filter on
+        return True  # malformed; no retry will ever make it addressable
     by_name = {p.name.lower(): p for p in all_agents}
     try:
         kind, member_names = resolve_name(recipient_name)
@@ -767,7 +845,7 @@ def _deliver_claimed_envelope(
             original=msg, publish_control=publish_control,
         )
         release_claim(msg_id)
-        return
+        return True  # not ours; redelivering it here changes nothing
     recipients: list[Participant] = []
     for m in member_names:
         rp = by_name.get(m.lower())
@@ -786,7 +864,7 @@ def _deliver_claimed_envelope(
             publish_control=publish_control,
         )
         release_claim(msg_id)
-        return
+        return True  # not ours; redelivering it here changes nothing
     txlog.log(
         "RESOLVED_REMOTE",
         msg_id=msg_id,
@@ -822,6 +900,7 @@ def _deliver_claimed_envelope(
     delivered_names: list[str] = []
     delivered_envelopes: list[dict] = []
     deferred: list[Participant] = []
+    failed = False
     for recipient in recipients:
         # Per-recipient download: each recipient has its own `.files/`, so
         # the bytes land in the right place even on alias fan-out. Imported
@@ -852,6 +931,11 @@ def _deliver_claimed_envelope(
             _report_attachment_outcome(
                 msg, msg_for_recipient, recipient, publish_control, remote_id
             )
+        else:
+            # The inbox would not take it — a full disk, a directory that is
+            # not writable. That is a condition somebody repairs, so the
+            # message has to still be there when they do.
+            failed = True
     if delivered_names:
         import convo
 
@@ -864,15 +948,28 @@ def _deliver_claimed_envelope(
             _worst_attachment_outcome(delivered_envelopes),
             recipients=delivered_names,
         )
-    seen_id_append(msg_id)
-    release_claim(msg_id)
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
-    for recipient in deferred:
-        _submit_deferred_delivery(
-            msg, recipient, services or [], msg_id, sender_label, preview,
-            remote_id, publish_control,
-        )
+    if deferred:
+        # The claim stays held and the ring stays empty until the last
+        # deferred recipient is done. Held, because a sibling daemon reading
+        # the same mailbox would otherwise start the same download again;
+        # empty, because the only full copy of this envelope is now a closure
+        # in a pool thread, and the copy on the wire is what a restart has to
+        # find. `False` is what keeps that copy there.
+        _begin_deferred(msg_id, len(deferred), failed)
+        for recipient in deferred:
+            _submit_deferred_delivery(
+                msg, recipient, services or [], msg_id, sender_label, preview,
+                remote_id, publish_control,
+            )
+        return False
+    if failed:
+        release_claim(msg_id)
+        return False
+    seen_id_append(msg_id)
+    release_claim(msg_id)
+    return True
 
 
 def _attachment_outcomes(delivered: dict) -> tuple[list[str], list[tuple[str, str]]]:
@@ -1076,6 +1173,91 @@ _ATTACHMENT_RETRY_WORKERS = 4
 _attachment_pool: "ThreadPoolExecutor | None" = None
 _attachment_pool_lock = threading.Lock()
 _attachment_futures: list = []
+# Deferred deliveries still owed per message id, and the ids whose fan-out has
+# already lost a recipient. Both are read and written under the pool lock.
+_deferred_owed: dict[str, int] = {}
+_deferred_failed: set[str] = set()
+# How often the claims covering deferred work are re-stamped. A third of the
+# expiry leaves room for two missed beats before a live holder looks dead.
+CLAIM_HEARTBEAT_SECONDS = CLAIM_STALE_SECONDS / 3
+_claim_holder: "threading.Thread | None" = None
+
+
+def _begin_deferred(msg_id: str, owed: int, failed: bool) -> None:
+    """Record that `owed` deferred deliveries have to finish before this
+    message is done with. Called before the first one is submitted, so no
+    worker can reach zero while the rest are still being queued."""
+    with _attachment_pool_lock:
+        _deferred_owed[msg_id] = _deferred_owed.get(msg_id, 0) + owed
+        if failed:
+            _deferred_failed.add(msg_id)
+        _start_claim_holder()
+
+
+def _start_claim_holder() -> None:
+    """Keep every claim covering deferred work fresh, from one thread.
+
+    Called with `_attachment_pool_lock` held. One thread for the whole
+    process, not one per delivery: a thread per deferred recipient is a thread
+    per recipient per message, all of them alive for as long as a download may
+    run, and the way that ends is `RuntimeError: can't start new thread` in
+    the middle of the bookkeeping that is supposed to be protecting the
+    message.
+
+    Failing to start it costs freshness, not custody. The claims lapse, a
+    sibling takes the work over, and the message is delivered twice — which is
+    what this whole mechanism already accepts when it cannot write a claim at
+    all."""
+    global _claim_holder
+    if _claim_holder is not None and _claim_holder.is_alive():
+        return
+    try:
+        _claim_holder = threading.Thread(
+            target=_hold_deferred_claims, name="a8s-claims", daemon=True
+        )
+        _claim_holder.start()
+    except RuntimeError as e:
+        _claim_holder = None
+        out(f"WARN: cannot hold claims for deferred attachments ({e})")
+
+
+def _hold_deferred_claims() -> None:
+    global _claim_holder
+    while True:
+        time.sleep(CLAIM_HEARTBEAT_SECONDS)
+        with _attachment_pool_lock:
+            owed = list(_deferred_owed)
+            if not owed:
+                _claim_holder = None
+                return
+        for msg_id in owed:
+            hold_claim(msg_id)
+
+
+def _deferred_in_flight(msg_id: str) -> bool:
+    with _attachment_pool_lock:
+        return msg_id in _deferred_owed
+
+
+def _end_deferred(msg_id: str, ok: bool) -> None:
+    """One deferred delivery finished. The last one out settles the message.
+
+    Settling means the same thing it means everywhere else: the ring records
+    an id only when every recipient got a copy, and the claim is released only
+    once nothing is still working under it."""
+    with _attachment_pool_lock:
+        if not ok:
+            _deferred_failed.add(msg_id)
+        owed = _deferred_owed.get(msg_id, 0) - 1
+        if owed > 0:
+            _deferred_owed[msg_id] = owed
+            return
+        _deferred_owed.pop(msg_id, None)
+        clean = msg_id not in _deferred_failed
+        _deferred_failed.discard(msg_id)
+    if clean:
+        seen_id_append(msg_id)
+    release_claim(msg_id)
 
 
 def _get_attachment_pool() -> ThreadPoolExecutor:
@@ -1125,7 +1307,55 @@ def _submit_deferred_delivery(
 
     The message is held out of the inbox until its files resolve — an agent
     woken for a file it cannot open burns tokens hunting for it — but the
-    waiting happens off the subscriber worker so unrelated mail flows."""
+    waiting happens off the subscriber worker so unrelated mail flows.
+
+    `_begin_deferred` has already recorded this delivery as owed, so nothing
+    here may return without settling it. A debt that is never paid is not a
+    lost attachment but a lost message: `_deferred_in_flight` turns away every
+    redelivery of an id that is still owed, so one leak silences that id for
+    the life of the process while the wire quietly ages the only copy out.
+    That is why the whole body runs under a guard and the settle is one-shot —
+    `submit` can queue `finish` and still raise, in which case both paths run
+    and only the first may count."""
+    settle_lock = threading.Lock()
+    settled = False
+
+    def settle(ok: bool) -> None:
+        nonlocal settled
+        with settle_lock:
+            if settled:
+                return
+            settled = True
+        _end_deferred(msg_id, ok)
+
+    try:
+        _queue_deferred_delivery(
+            msg, recipient, services, msg_id, sender_label, preview,
+            remote_id, publish_control, settle,
+        )
+    except BaseException as e:
+        try:
+            out_agent(
+                recipient.name,
+                f"WARN deferred attachment delivery for id={msg_id} "
+                f"could not be started: {e}",
+            )
+        except BaseException:
+            pass  # the reason it failed may be the reason this fails too
+        settle(False)
+
+
+def _queue_deferred_delivery(
+    msg: dict,
+    recipient: Participant,
+    services: list[StorageService],
+    msg_id: str,
+    sender_label: str,
+    preview: str,
+    remote_id: str,
+    publish_control: Callable[[bytes], None] | None,
+    settle: Callable[[bool], None],
+) -> None:
     out_agent(
         recipient.name,
         f"attachment(s) for id={msg_id} not ready; retrying in the background",
@@ -1157,12 +1387,14 @@ def _submit_deferred_delivery(
     def finish() -> None:
         from mailbox import _download_files_to_recipient
 
+        ok = False
         try:
             resolved = _download_files_to_recipient(msg, recipient, services)
             if not _write_to_inbox(
                 resolved, recipient, msg_id, sender_label, preview, remote_id
             ):
                 return
+            ok = True
             import convo
 
             # `resolved`, not `msg`: this path exists because the first
@@ -1192,6 +1424,8 @@ def _submit_deferred_delivery(
                 recipient.name,
                 f"WARN deferred attachment delivery failed for id={msg_id}: {e}",
             )
+        finally:
+            settle(ok)
 
     future = _get_attachment_pool().submit(finish)
     with _attachment_pool_lock:
@@ -1322,11 +1556,16 @@ def make_receive_callback(
     daemon that has been up for days must be able to download an attachment
     through a service configured this morning. Passing an explicit list
     pins it instead, which is what the tests want. `publish_control` enables
-    content-free delivery receipts on that same transport."""
+    content-free delivery receipts on that same transport.
 
-    def callback(envelope: bytes) -> None:
+    The callback passes `receive_envelope`'s answer back to the transport, so
+    a wire whose acknowledgement is a delete knows whether this node actually
+    finished with the envelope. A raise is the same answer as a released
+    claim: nobody consumed it."""
+
+    def callback(envelope: bytes) -> bool:
         try:
-            receive_envelope(
+            return receive_envelope(
                 envelope,
                 get_participants(),
                 services=load_services() if services is None else services,
@@ -1335,6 +1574,7 @@ def make_receive_callback(
             )
         except Exception as e:
             out(f"WARN: receive_envelope raised: {e}")
+            return False
 
     return callback
 
