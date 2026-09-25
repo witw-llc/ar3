@@ -10,7 +10,145 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
-## Unreleased
+## 0.1.96 — 2026-09-25
+
+### Added
+
+- **The version gate refuses a changelog with no heading for its VERSION.**
+  `tools/changelog-heading.py` fails the per-PR `version` job when
+  `CHANGELOG.md` has no `## <VERSION>` heading, or still carries entries
+  under `## Unreleased` — the rename that shipped late three times because it
+  was a human step at merge time. `tools/changelog-closes.py` reads a
+  released version's `Closes #N` lines back out; `release.yml`'s `publish`
+  job now closes each issue it names after the tag ships, since a squash
+  merge does not honour `Closes #N` in a commit body. Closes #246
+- **The version gate enforces the `major.minor.build` shape.**
+  `tools/version-bump.py` fails a PR whose `VERSION` is not exactly one of
+  the three moves from `main`'s: the build bumps on every merge, the minor
+  bumps with build reset to 0 when a phase closes, and the major bumps at
+  the 1.0 hand-off. `AGENTS.md` states the scheme in the same terms.
+  Closes #272
+
+### Changed
+
+- **The cursor preset defaults to `composer-2.5`, not `auto`.** `agent` reuses
+  the last `--model` used on the machine when the flag is omitted, so an
+  unpinned rig inherited whatever frontier model the CLI last ran — spending a
+  subscription on it instead of the cheap default. `r4t rig add`/`swap` from
+  the `cursor` preset now pin `composer-2.5`; an explicit `--model` still
+  wins. `r4t engine cursor run` rides the same preset default, so an
+  `engine-cursor` a8s node with `MODEL` unset now spends on `composer-2.5`
+  too — the definitions' descriptions say so. A rig added before this fix
+  baked `auto` straight into its invoke, which the preset change alone does
+  not reach; `r4t rig list`/`r4t rig detect` now name any such rig and the
+  one-line fix (`r4t rig set <rig> model composer-2.5`). Closes #282
+- **`docs/ar3-1.0.md`'s gate is the walk, not a checklist.** Section 2 held
+  six criteria that pointed at issues now on the private idea backlog rather
+  than launch gates. It now states that the walk in §3 is the 1.0 gate, lists
+  the milestone's seven open issues as what the walk waits on, and names the
+  six backlog directions in one paragraph. The attestation table in §3 says
+  what each party attests in words, where it cited retired gate codes.
+
+### Fixed
+
+- **A delivery receipt survives the receiver's stop and a broker blip.** An
+  MQTT node stopped right after it took a message, as `ar3 update` does to
+  every node, disconnected before its worker sent the receipt, and a receipt
+  made while the link was down was dropped at once. `stop()` now drains: it
+  leaves new arrivals unacknowledged for the broker to replay, lets the worker
+  finish its queue and send its receipts, and only then disconnects. A receipt
+  made while the link is down is held, up to 256, and sent in order on the
+  next connection; the `WARN` line appears only when that list overflows or a
+  stop ends with the link still down, and it says how many receipts it
+  dropped. The remote test suites wait for each transport's link before they
+  act, where two of them slept a fixed 0.8 seconds. An MQTT node now
+  acknowledges a message only once the receive path has finished with it:
+  mail it could not take yet, such as while the registry will not read, is
+  offered again from 1 second to every 30 while the node runs. Whatever is still owed when the
+  node stops or the link drops stays with the broker, which redelivers it on
+  the next session.
+- **`a8s health` fails an MQTT remote whose broker does not answer.** The
+  transport had no `is_connected()`, so health read every MQTT remote as `OK`
+  once `start()` returned, and `start()` never raises for a broker that is
+  down. `MqttTransport.is_connected()` now reports the CONNACK and paho's own
+  link state, and health prints `remote <name>: FAIL (not connected)` and
+  exits nonzero. Closes #170
+- **A pid reused after a reboot no longer reads as a running node.** A node
+  now stamps its process start beside its pid file (`pid.start`): the boot id
+  and start tick from `/proc` on Linux, the `ps -o lstart` start time on macOS.
+  `a8s ls`, `stop`, `start` and every other liveness check compare the stamp
+  with the live process and read a mismatch as `stopped`, and clear both
+  files. The `ar3` front door reads a node as attached by the same rule, and
+  leaves the files alone. Windows has no start reader yet and still checks
+  the pid alone. Closes #210
+- **`a8s tx` shows this node's own traffic by default.** On a shared remote
+  every node logs `NOT_LOCAL`, and publishes a `no_local_recipient` receipt,
+  for each message it does not own, and those rows buried a node's own
+  delivery trail. `a8s tx` now shows the rows about messages this node routed,
+  published or received, the receipts for them, and its lifecycle rows;
+  `--all` adds the rest, and `--msg <ULID>` always shows the whole envelope.
+  Closes #209
+- **Retention no longer drops a name from the remote address book.** `a8s ls`
+  read remote-only names out of the event log's `RECEIVED_REMOTE` rows, so
+  `a8s update` pruning that log to `txlog_max_rows` removed a reachable remote
+  whenever other traffic had been busy. Each arrival now also updates a
+  one-row-per-name `remote_last_heard` table in `transactions.sqlite3` that
+  retention never touches; names fold by case, and the newest arrival supplies
+  the stamp and the spelling. The 0.1.76 caveat no longer applies. A store
+  from an earlier version gets the table on its next write, and lists no
+  remote names until a remote speaks again. Closes #224
+- **`a8s start`, `stop` and `restart` take several names.** `a8s start a b c`
+  was refused with a usage error, and a restart script that swallowed the
+  error started nothing. Each name is now acted on in order, one process per
+  name for `start`, with a line per name; a failed name does not stop the
+  others, and the exit code is nonzero if any failed. Closes #147
+- **A truncated attachment download no longer counts as a success.**
+  `http_get_url_to_path()` read the response in chunks until `read()`
+  returned empty, then renamed the partial file into place — an early FIN
+  from the peer looks exactly like a clean EOF, so a connection cut mid-file
+  delivered a truncated attachment and the caller never retried. The bytes
+  written are now compared against the response's `Content-Length` (when
+  present and uncompressed), and `http.client.IncompleteRead` is caught; both
+  raise `StorageError` and remove the partial file instead of keeping it.
+  Closes #306
+- **An s3 remote gives every machine a copy, as MQTT does.** A name that
+  lives on two machines received each message on one of them only. The first
+  machine to read an envelope deleted it, so the second machine never saw
+  it. Now no reader deletes. Each machine records what it consumed in its
+  own ledger under the config home, as a folder remote does, and skips those
+  envelopes without fetching them. Mail leaves the bucket only when
+  `--retain-days` runs out: the reap removes every envelope, read or not,
+  once its ULID time and its `LastModified` are both past the window. A
+  publish to a name this node also holds now goes into the bucket too, as it
+  does on MQTT, and the seen-ids ring collapses this node's own copy.
+  Registration stamps a `joined` cutoff, so a machine that joins is not
+  handed the mail other machines already had. Set a bucket lifecycle rule on
+  the prefix with the same window as the durable backstop. Closes #305
+- **A node told to stop says which signal and who its parent was.** A
+  signal reached a node and its log showed only `detached`: the line naming
+  the signal went to stderr, which `a8s start` discards. The node now writes
+  the signal name and number, its parent pid and the parent's command line
+  into its own log when the signal lands, and `RUN_STOP` carries the same,
+  e.g. `stop-signal SIGTERM (15) from ppid 1 (systemd)` for a host
+  shutdown. Outbox mail staged while a node is down publishes on its next
+  start with no other step, and `docs/a8s.md` says how to start a node at
+  boot, since nothing does that today. See #307
+- **A node no longer detaches when it reads the registry mid-write.**
+  `a8s.json` was written in place, and a read that landed during a write, or
+  met a passing permission error, came back as a registry with no agents: the
+  node dropped every name it handled and exited with `nothing left to
+  handle`. The registry, `network.json` and `settings.json` are now written
+  to a temp file and renamed into place. A read that fails is retried on the
+  node's next pass, with one line in its log, and `a8s ls`, `convo` and the
+  other commands name the unreadable file instead of saying nothing is
+  registered. A heartbeat setting that does not read or parse no longer ends
+  the loop either.
+- **Mail for another machine waits while its remote is down.** When every
+  configured remote failed to start, a message to a name this node does not
+  hold had no path, and the node trashed it as an unknown recipient. It now
+  stays pending on the retry schedule, with one line in the sender's log,
+  and publishes once the remote starts on the node's next start. With no
+  remote configured, an unknown name is still refused at once.
 
 ## 0.1.95 — 2026-09-24
 

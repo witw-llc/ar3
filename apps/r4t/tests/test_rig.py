@@ -968,13 +968,15 @@ class TestModelSplice:
         for preset in ("claude", "codex", "opencode", "agy"):
             assert build_preset_invoke(preset) == HARNESS_PRESETS[preset]["invoke"]
 
-    def test_cursor_pins_auto_when_no_model_is_given(self):
+    def test_cursor_pins_composer_when_no_model_is_given(self):
         # `agent` reuses the last --model used on the machine when the flag is
-        # omitted, so the bare preset must still name one (#275).
+        # omitted, so the bare preset must still name one (#275). It names
+        # Cursor's cheap default rather than `auto`, which spends on the
+        # newest frontier model (#282).
         argv = build_preset_invoke("cursor")
-        assert argv[:3] == ["agent", "--model", "auto"]
+        assert argv[:3] == ["agent", "--model", "composer-2.5"]
         assert argv[-1] == "{prompt}"
-        assert format_preset_invoke("cursor").startswith("agent --model auto")
+        assert format_preset_invoke("cursor").startswith("agent --model composer-2.5")
 
     def test_claude_splices_after_executable(self):
         argv = build_preset_invoke("claude", model="sonnet")
@@ -991,11 +993,11 @@ class TestModelSplice:
         assert argv[:3] == ["agent", "--model", "sonnet-4-thinking"]
         assert "auto" not in argv
 
-    def test_cursor_add_without_model_records_the_auto_pin(self, tmp_path):
+    def test_cursor_add_without_model_records_the_composer_pin(self, tmp_path):
         path = tmp_path / "rigs.json"
         add_preset_rig(path, "solo", "cursor")
         assert load_rig_config(path).rigs["solo"].invoke[:3] == [
-            "agent", "--model", "auto",
+            "agent", "--model", "composer-2.5",
         ]
         add_preset_rig(path, "pinned", "cursor", model="sonnet-4-thinking")
         assert load_rig_config(path).rigs["pinned"].invoke[:3] == [
@@ -1066,6 +1068,31 @@ class TestModelSplice:
         raw = json.loads(path.read_text(encoding="utf-8"))
         assert "model_resolver" not in raw["worker"]
         assert "model" not in raw["worker"]
+
+
+class TestStaleCursorAuto:
+    """A cursor rig added before the preset default changed (composer-2.5
+    over `auto`, #282) baked `auto` into its invoke at `rig add` time, and
+    nothing rewrites it in place — `rig ls` names it and the one-line fix."""
+
+    def test_resolved_model_reads_the_baked_auto(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "old", "cursor", model="auto")
+        assert load_rig_config(path).rigs["old"].resolved_model == "auto"
+
+    def test_fresh_cursor_rig_is_not_flagged(self, tmp_path):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "fresh", "cursor")
+        assert load_rig_config(path).rigs["fresh"].resolved_model == "composer-2.5"
+
+    def test_rig_ls_flags_it_with_the_fix(self, tmp_path, capsys):
+        path = tmp_path / "rigs.json"
+        add_preset_rig(path, "old", "cursor", model="auto")
+        add_preset_rig(path, "fresh", "cursor")
+        assert r4t_main(["rig", "ls", "--rig-config", str(path)]) == 0
+        out = capsys.readouterr().out
+        assert "old: r4t rig set old model composer-2.5" in out
+        assert "fresh: r4t rig set fresh model composer-2.5" not in out
 
 
 class TestFuzzyMatchModel:

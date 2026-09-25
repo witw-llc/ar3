@@ -105,6 +105,49 @@ def test_a8s_panel_ignores_a_stale_pid_file(homes):
     assert _row(ar3.a8s_rows(), "router")[0] is False
 
 
+def _attached_one(homes, stamp=None):
+    (homes["a8s"] / "a8s.json").write_text(
+        json.dumps({"agents": {"one": {"root": "/x"}}}), encoding="utf-8"
+    )
+    pid_dir = homes["a8s"] / "agents" / "one"
+    pid_dir.mkdir(parents=True)
+    (pid_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    if stamp is not None:
+        (pid_dir / "pid.start").write_text(stamp, encoding="utf-8")
+    return pid_dir
+
+
+def test_a8s_panel_reads_a_recycled_pid_as_stopped(homes, monkeypatch):
+    # The pid is alive, but its start differs from the one a8s stamped at
+    # claim time: the OS gave the number to another process after a reboot.
+    pid_dir = _attached_one(homes, stamp="boot-1 start-3")
+    monkeypatch.setattr(ar3, "process_start_token", lambda pid: "boot-2 start-9")
+    assert _row(ar3.a8s_rows(), "router") == (
+        False, "router", "no agent attached", "a8s start <agent>"
+    )
+    # The front door reads; it never cleans up a8s's files.
+    assert (pid_dir / "pid").is_file()
+    assert (pid_dir / "pid.start").is_file()
+
+
+def test_a8s_panel_reads_a_matching_stamp_as_attached(homes, monkeypatch):
+    _attached_one(homes, stamp="boot-1 start-3")
+    monkeypatch.setattr(ar3, "process_start_token", lambda pid: "boot-1 start-3")
+    assert _row(ar3.a8s_rows(), "router") == (True, "router", "attached: one", None)
+
+
+def test_a8s_panel_falls_back_to_liveness_without_a_token(homes, monkeypatch):
+    _attached_one(homes, stamp="boot-1 start-3")
+    monkeypatch.setattr(ar3, "process_start_token", lambda pid: None)
+    assert _row(ar3.a8s_rows(), "router") == (True, "router", "attached: one", None)
+
+
+def test_a8s_panel_falls_back_to_liveness_without_a_stamp(homes, monkeypatch):
+    _attached_one(homes)
+    monkeypatch.setattr(ar3, "process_start_token", lambda pid: "boot-2 start-9")
+    assert _row(ar3.a8s_rows(), "router") == (True, "router", "attached: one", None)
+
+
 def test_a8s_panel_flags_an_unreadable_registry(homes):
     (homes["a8s"] / "a8s.json").write_text("{ broken", encoding="utf-8")
     ok, _name, state, _hint = _row(ar3.a8s_rows(), "registry")

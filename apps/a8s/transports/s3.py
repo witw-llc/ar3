@@ -20,48 +20,53 @@ A poll is therefore one `list_objects_v2` per mailbox with a `/` delimiter —
 no filtering, and no attachment object in the answer — and ULIDs sort
 lexically, so the listing already comes back in send order.
 
-**A mailbox has one owner, and the owner is a node.** The node whose registry
-holds a name is the node that polls `<prefix>/<name>/`, and it is the only one:
-two nodes polling one prefix would race to delete each other's mail. That is
-also why a publish to a name this node already answers for writes nothing — the
-routing pass delivers it locally, and putting it in the bucket would only hand
-this node its own message back. The owner set is every agent, alias and
-namespace prefix in the local registry, read fresh on every poll so `a8s add`
-needs no restart.
+**Every machine that holds a name gets a copy, as MQTT gives every
+subscriber one.** A name may live on several machines. Each machine whose
+registry holds a name polls `<prefix>/<name>/`, and none of them deletes what it
+reads: the first reader cannot know how many others are still offline. So each
+machine keeps its own ledger of consumed ULIDs under its config home
+(`transports/ledger.py`, shared with the folder transport), a poll skips every
+ULID the ledger names without fetching it, and the object stays on the wire
+for everyone else. The mailbox set is every agent, alias and namespace prefix
+in the local registry, read fresh on every poll so `a8s add` needs no restart.
+
+A publish goes on the wire whatever this node holds. The routing pass has
+already delivered to a local recipient and recorded the ULID in the seen-ids
+ring, exactly as it has before an MQTT publish; this node's own poll then
+meets the object the way an MQTT client meets the broker's echo, the receive
+path answers from the ring, and the ledger takes the ULID.
 
 A node is not a process. Every daemon on the machine runs its own subscriber
 over the same registry, so `a8s run alice` and `a8s run bob` each poll every
-mailbox this node owns. That fan-out is the model, not a mistake, and
-`network.claim_message` is what arbitrates it.
+mailbox this node holds, and `network.claim_message` arbitrates which of them
+delivers. Only the receive path's answer stamps the ledger: a sibling daemon
+holding the claim, or a released claim after a failed delivery, answers False,
+and the envelope is offered again on the next poll. The wire is at-least-once,
+and `claim_message` plus the seen-ids ring collapse the repeats.
 
-**Delete is the acknowledgement, and only a delivery earns one.** An envelope
-is deleted once the receive path reports it consumed — delivered here, or
-already in the seen-ids ring. When the answer is no, the object stays: a
-sibling daemon holding the claim is mid-delivery, and a released claim exists
-so somebody can try again. Both would be destroyed by a delete keyed on
-nothing more than the callback returning. Leaving it makes the wire
-at-least-once — a node that dies between the delivery and the delete sees the
-message again — which is what `claim_message` and the seen-ids ring already
-collapse for every other transport. The transport owns its own key prefix,
-separate from any `a8s storage` prefix in the same bucket, so a lifecycle rule
-pointed at one cannot eat the other.
+A machine that joins is owed the mail sent after it joined, as a new MQTT
+session is owed nothing published before it existed. `a8s remote` stamps a
+`joined` ULID into the spec, and an envelope minted more than
+`JOIN_SKEW_GRACE_MS` below it is somebody else's history — the same cutoff,
+and the same clock allowance, as the folder transport's.
 
-Retention is the bucket's job: a lifecycle rule survives a node that never
-comes back, which nothing in this process does. `retain_days` covers the
-narrower case the rule cannot see — an object under this node's own prefix that
-is not this transport's mail at all, because the key is not an envelope or the
-envelope is not the one its name claims. A well-formed envelope addressed to
-this node is never swept, however long it has failed to land: it is mail, and a
-node that cannot take it today may take it tomorrow. What is swept goes only
-when both the ULID mint time and the object's `LastModified` clear the window,
-the same two clocks the folder transport requires, so a delayed send never
-sweeps itself.
+**Mail leaves the wire by time, never because somebody read it.** The reap
+sweeps every object in a mailbox this node polls — a consumed envelope, one
+nobody took, junk — once both the ULID mint time and the object's
+`LastModified` clear `retain_days` (default 3; `0` keeps forever). Both clocks,
+as the folder transport requires: `LastModified` alone can be pushed forward by
+a rewrite, and mint time alone would call a delayed send expired the moment a
+backoff retry republished it. A key carrying no ULID has only the object clock
+to offer. A bucket lifecycle rule on the prefix is the durable backstop: it
+survives every node going away, which nothing in this process does, and it
+covers a mailbox no node polls any more. The transport owns its own key
+prefix, separate from any `a8s storage` prefix in the same bucket, because the
+reap deletes under it.
 
 `services/s3.py` deliberately never deletes: a storage service that reaches
 back into a bucket to remove objects is a foot nuke, and S3 has lifecycle
-rules for expiry. A transport is the opposite case — an unacknowledged
-envelope is not archived, it is redelivered — so this one deletes, and the
-asymmetry is why the two must not share a prefix.
+rules for expiry. The transport's reap is the one delete in this module, and it
+is why the two must not share a prefix.
 
 boto3 is lazy and tier-2 (`requirements/a8s-s3.txt`), exactly as the storage
 service has it: `a8s remote` installs the group the moment an `s3` remote is
@@ -73,14 +78,19 @@ a8s never reads, stores, or logs a credential.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from core import canonical_name, out
+from core import canonical_name, out, s3_ledger_path
 from delivery_receipt import parse_delivery_receipt
 from registry import load_aliases, load_namespaces, load_registry
 from transports import OnMessage, Transport, TransportError
+from transports.folder import JOIN_SKEW_GRACE_MS
+from transports.ledger import ConsumedLedger
+from ar3 import clock
 from ar3.ulid import is_ulid, new as new_ulid, parse as parse_ulid
 
 
@@ -97,6 +107,7 @@ _KNOWN_OPTS: set[str] = {
     "endpoint_url",
     "timeout_s",
     "probe",
+    "joined",
     "node_tag",
     "client_id",
     "clean_session",
@@ -120,10 +131,17 @@ DEFAULT_TIMEOUT_S = 60
 # offline spends far more than the mail it is failing to fetch is worth.
 CLIENT_RETRY_SECONDS = 600.0
 
-# One page per mailbox per poll. The poll deletes what it consumes, so a
-# backlog drains over successive polls instead of turning one interval into an
-# unbounded run of GETs on a network that is slow by assumption.
+# One page per mailbox per poll, and the page moves: the next poll resumes where
+# this one stopped, and the end of the listing starts the mailbox over. A
+# consumed envelope costs its share of the LIST and no GET, so a mailbox holding
+# N retained objects shows new mail within ceil((N + 1) / PAGE_SIZE) polls, at
+# one LIST per poll whatever N is.
 PAGE_SIZE = 1000
+
+# How often compaction may list every mailbox to learn which consumed ULIDs
+# still have an object. With `retain_days 0` nothing ever leaves, the ledger
+# stays over its cap, and every consumption would otherwise walk the bucket.
+COMPACT_INTERVAL_SECONDS = 3600.0
 
 
 class S3Transport(Transport):
@@ -133,12 +151,15 @@ class S3Transport(Transport):
         remote_id: stable name from `network.json`.
         bucket: the bucket both nodes address.
         **opts: per-remote options forwarded from `network.json`. Recognized:
-            prefix (required — the key prefix this transport owns, which must
-            not be the one an `a8s storage` service writes under), poll_seconds
-            (default 10, floored at 1), retain_days (default 3, `0` keeps
-            forever), region / profile / endpoint_url / timeout_s (the
-            `services/s3.py` vocabulary, same meanings), probe (a reachability
-            check instead of a poll thread; see `start`).
+            prefix (required — the key prefix this transport reaps under,
+            which must not be the one an `a8s storage` service writes under),
+            poll_seconds (default 10, floored at 1), retain_days (default 3,
+            `0` keeps forever), region / profile / endpoint_url / timeout_s
+            (the `services/s3.py` vocabulary, same meanings), probe (a
+            reachability check instead of a poll thread; see `start`), joined
+            (the ULID `a8s remote` stamped at registration — envelopes minted
+            before it are somebody else's history; absent means consume
+            whatever is there).
     """
 
     def __init__(self, remote_id: str, *, bucket: str, **opts: Any) -> None:
@@ -148,14 +169,19 @@ class S3Transport(Transport):
                 f"remote {remote_id!r}: unknown option(s) {sorted(unknown)} "
                 f"(known: {sorted(_KNOWN_OPTS)})"
             )
+        seps = {os.sep, os.altsep or os.sep, "/"}
+        if any(sep in remote_id for sep in seps):
+            raise ValueError(
+                f"remote {remote_id!r}: name cannot contain a path separator"
+            )
         name = (bucket or "").strip()
         if not name:
             raise ValueError(f"remote {remote_id!r}: bucket is required")
         prefix = str(opts.get("prefix") or "").strip().strip("/")
         if not prefix:
             raise ValueError(
-                f"remote {remote_id!r}: an s3 remote requires a key prefix it "
-                f"owns alone, e.g. s3://{name}/a8s-mail"
+                f"remote {remote_id!r}: an s3 remote requires a key prefix "
+                f"nothing else writes under, e.g. s3://{name}/a8s-mail"
             )
 
         self._remote_id = remote_id
@@ -171,6 +197,10 @@ class S3Transport(Transport):
         if self._timeout_s < 1:
             raise ValueError(f"remote {remote_id!r}: timeout_s must be positive")
         self._probe = bool(opts.get("probe", False))
+        self._joined = self._resolve_joined(remote_id, opts)
+        self._cutoff_ms = (
+            parse_ulid(self._joined)[0] - JOIN_SKEW_GRACE_MS if self._joined else 0
+        )
         self._client_cache: Any = None
         # Where the next LIST of each mailbox resumes. Without it a poll that
         # cannot consume its first page attempts that same page forever, and
@@ -180,6 +210,13 @@ class S3Transport(Transport):
         self._client_error: str | None = None
         self._client_error_at = 0.0
         self._warned: set[str] = set()
+        self._last_compact = 0.0
+        self._ledger = ConsumedLedger(
+            s3_ledger_path(remote_id),
+            remote_id=remote_id,
+            warn=self._warn_once,
+            present=self._present_ids,
+        )
         self._on_message: Optional[OnMessage] = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -209,6 +246,16 @@ class S3Transport(Transport):
         if days < 0:
             raise ValueError(f"remote {remote_id!r}: retain_days cannot be negative")
         return days
+
+    @staticmethod
+    def _resolve_joined(remote_id: str, opts: dict) -> str:
+        raw = opts.get("joined")
+        if raw is None or str(raw).strip() == "":
+            return ""
+        value = str(raw).strip().upper()
+        if not is_ulid(value):
+            raise ValueError(f"remote {remote_id!r}: joined must be a ULID")
+        return value
 
     @property
     def id(self) -> str:
@@ -265,14 +312,14 @@ class S3Transport(Transport):
         return self._client_cache
 
     def _mailboxes(self) -> list[str]:
-        """The names this node answers for, and therefore the prefixes it owns.
+        """The names this node answers for, and therefore the mailboxes it reads.
 
         Every agent, alias and namespace prefix in the local registry: each one
         is a recipient a sender on another cluster may address, and each one
-        resolves here and nowhere else. Read on every poll rather than captured
-        at start, for the reason `make_receive_callback` re-reads participants —
-        a daemon runs for days, and an agent added this morning must become
-        reachable without a restart.
+        resolves here, whatever other machine also holds it. Read on every poll
+        rather than captured at start, for the reason `make_receive_callback`
+        re-reads participants — a daemon runs for days, and an agent added this
+        morning must become reachable without a restart.
         """
         names: set[str] = set()
         for source in (load_registry(), load_aliases(), load_namespaces()):
@@ -364,17 +411,6 @@ class S3Transport(Transport):
             raise TransportError(
                 f"{self._remote_id}: envelope names no addressable recipient"
             )
-        if mailbox in self._mailboxes():
-            # This node owns that prefix and polls it. Publishing here would
-            # put the message in the bucket for this node to hand back to
-            # itself, after the routing pass has already delivered it locally.
-            self._warn_once(
-                f"local:{mailbox}",
-                f"remote {self._remote_id}: {mailbox} is registered on this "
-                f"node — envelopes for it are delivered locally and never "
-                f"published to s3",
-            )
-            return
         key = f"{self._prefix}/{mailbox}/{msg['id']}.json"
         try:
             self._client().put_object(
@@ -411,18 +447,19 @@ class S3Transport(Transport):
             self._drain(mailbox)
 
     def _drain(self, mailbox: str) -> None:
-        """One LIST page against one mailbox, then deliver in ULID order and
-        delete what the receive path says it consumed.
+        """One LIST page against one mailbox: reap what has expired, skip what
+        this machine already consumed, and deliver the rest in ULID order.
 
         The page is where the last one stopped. A poll is bounded to one page
         so a large mailbox cannot monopolise the worker, but the bound has to
-        move: anything this transport leaves behind — a delivery that failed,
-        an object it could not fetch, junk inside its retention window, and on
+        move: nothing leaves the mailbox until it expires, so its front holds
+        every envelope this machine already read, a delivery that failed, an
+        object it could not fetch, junk inside the retention window, and on
         AWS a `CommonPrefixes` entry, which spends the key budget the same as
-        an object does — otherwise holds the front of the listing and hides
-        every envelope after it. At the end of the listing the cursor is
-        dropped, so the next poll starts over and revisits both the retries
-        and whatever arrived meanwhile."""
+        an object does. A cursor that did not move would stop at the first
+        page of old mail and hide every envelope after it. At the end of the
+        listing the cursor is dropped, so the next poll starts over and
+        revisits both the retries and whatever arrived meanwhile."""
         client = self._client()
         prefix = f"{self._prefix}/{mailbox}/"
         token = self._cursor.get(mailbox)
@@ -458,8 +495,15 @@ class S3Transport(Transport):
             key = str(item.get("Key") or "")
             name = key[len(prefix):]
             stem = name[:-5] if name.endswith(".json") else ""
+            if self._expired(stem, item, cutoff):
+                self._drop(key)
+                continue
             if not is_ulid(stem):
-                self._reap(key, stem, item, cutoff)
+                continue
+            if stem in self._ledger:
+                continue
+            if self._cutoff_ms and parse_ulid(stem)[0] < self._cutoff_ms:
+                self._warn_backlog()
                 continue
             try:
                 body = client.get_object(Bucket=self._bucket, Key=key)["Body"].read()
@@ -480,7 +524,6 @@ class S3Transport(Transport):
                     f"WARN: remote {self._remote_id}: {key} is not the envelope "
                     f"its name claims; leaving it",
                 )
-                self._reap(key, stem, item, cutoff)
                 continue
             cb = self._on_message
             if cb is None:
@@ -498,54 +541,95 @@ class S3Transport(Transport):
                     f"({type(e).__name__}: {e}); retrying",
                 )
             if not consumed:
-                # Deliberately left where it is. A sibling daemon on this
-                # machine polls the same mailbox and may hold the claim right
-                # now; deleting here would destroy the only copy of a message
-                # it is still delivering. The wire is at-least-once by design,
-                # and `claim_message` plus the seen-ids ring collapse the
-                # redelivery on the next poll. Not a `_reap` candidate either:
-                # this is a well-formed envelope addressed to this node, which
-                # is mail, and only the bucket's lifecycle rule removes mail.
+                # Not recorded. A sibling daemon on this machine polls the same
+                # mailbox and may hold the claim right now, and a ledger entry
+                # would skip this object on every later poll: if that sibling
+                # dies mid-delivery, nobody on this machine reads it again.
                 continue
-            try:
-                client.delete_object(Bucket=self._bucket, Key=key)
-            except Exception as e:
-                # The message is delivered and the object is still there, so it
-                # is delivered again on the next poll. `claim_message` and the
-                # seen-ids ring absorb that; a delete that never succeeds does
-                # it forever, which is worth a line.
-                self._warn_once(
-                    f"delete:{type(e).__name__}",
-                    f"WARN: remote {self._remote_id}: deleting {key} failed "
-                    f"({type(e).__name__}: {e}); it will be redelivered",
-                )
+            self._ledger.record(stem)
 
-    def _reap(self, key: str, stem: str, item: dict, cutoff: float) -> None:
-        """Drop an object that is not this transport's mail, once it is old.
+    def _expired(self, stem: str, item: dict, cutoff: float) -> bool:
+        """Whether an object has outlived `retain_days` on both clocks.
 
-        Everything reachable here is either not an envelope at all or not the
-        envelope its own name claims, so nothing else will ever remove it from
-        a prefix only this node reads. An envelope that is well-formed and
-        addressed here never arrives: that is mail, and a node that cannot take
-        it today may take it tomorrow, so the bucket's lifecycle rule owns that
-        case and this does not. Both clocks must agree, exactly as the folder
-        transport requires: `LastModified` alone can be rewritten forward by a
-        rewrite, and the ULID's mint time alone would call a delayed send
-        expired the moment it landed. A key with no ULID in it has only the one
-        clock to offer.
+        `LastModified` alone can be pushed forward by a rewrite, and the ULID's
+        mint time alone would call a delayed send expired the moment a backoff
+        retry republished it. A key with no ULID in it has only the one clock
+        to offer.
         """
         if not cutoff:
-            return
+            return False
         stamped = item.get("LastModified")
         if stamped is None or stamped.timestamp() >= cutoff:
-            return
+            return False
         if is_ulid(stem) and parse_ulid(stem)[0] >= cutoff * 1000:
-            return
+            return False
+        return True
+
+    def _drop(self, key: str) -> None:
+        """Delete an expired object. A refusal is left for the next pass over
+        this key, which asks again; every other machine holding the mailbox
+        asks too, and a delete of a key already gone succeeds."""
         try:
             self._client().delete_object(Bucket=self._bucket, Key=key)
         except Exception:
             return
         out(f"remote {self._remote_id}: dropped {key} past retain_days")
+
+    def _present_ids(self) -> set[str] | None:
+        """Every envelope ULID still in a mailbox this node reads, for the
+        ledger's compaction; None when the bucket cannot answer or was asked
+        within the last `COMPACT_INTERVAL_SECONDS`.
+
+        A ULID in a mailbox this node no longer holds is not listed, and may
+        be forgotten: nothing here polls that mailbox to redeliver it.
+        """
+        now = time.time()
+        if now - self._last_compact < COMPACT_INTERVAL_SECONDS:
+            return None
+        self._last_compact = now
+        present: set[str] = set()
+        try:
+            client = self._client()
+            for mailbox in self._mailboxes():
+                prefix = f"{self._prefix}/{mailbox}/"
+                params: dict[str, Any] = {
+                    "Bucket": self._bucket,
+                    "Prefix": prefix,
+                    "Delimiter": "/",
+                    "MaxKeys": PAGE_SIZE,
+                }
+                while True:
+                    page = client.list_objects_v2(**params)
+                    for item in page.get("Contents") or []:
+                        name = str(item.get("Key") or "")[len(prefix):]
+                        if name.endswith(".json") and is_ulid(name[:-5]):
+                            present.add(name[:-5])
+                    token = page.get("NextContinuationToken")
+                    if not (page.get("IsTruncated") and token):
+                        break
+                    params["ContinuationToken"] = token
+        except Exception:
+            return None
+        return present
+
+    def _warn_backlog(self) -> None:
+        """Say once that a cutoff is hiding mail.
+
+        A clock that ran fast at registration stamps a `joined` no peer can
+        reach, and every envelope is then skipped as history. This line is the
+        one thing in `a8s logs` that shows it.
+        """
+        joined_local = clock.stamp(
+            datetime.fromtimestamp(parse_ulid(self._joined)[0] / 1000, tz=timezone.utc),
+            seconds=True,
+        )
+        self._warn_once(
+            "backlog",
+            f"WARN: remote {self._remote_id}: ignoring envelopes minted before "
+            f"this machine joined ({self._joined} = {joined_local}) as backlog — "
+            f"if that time is in the future, the clock was ahead at "
+            f"registration; a8s unremote + re-add re-joins at now",
+        )
 
     def _warn_once(self, key: str, message: str) -> None:
         """Say it the first time and never again for the same `key`.

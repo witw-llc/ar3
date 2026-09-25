@@ -15,6 +15,11 @@ resolve it, `pid` itself stands in as the pgid — true whenever `pid` names a
 `spawn`-started leader, since `start_new_session` makes a new session's pgid
 equal to its own pid by construction — and only a `killpg` failure on that
 guess falls back further, to a plain kill of the pid itself.
+
+`pid_alive` and `process_start_token` are the two halves of reading a pid
+file: the first says a process holds the number, the second says which one,
+so a pid the OS handed to another process after a reboot does not read as
+the one that wrote the file.
 """
 from __future__ import annotations
 
@@ -131,3 +136,47 @@ def terminate_group(proc: subprocess.Popen | int, *, grace_seconds: float = 0.5)
     _signal_pgid(pgid, pid, signal.SIGTERM)
     time.sleep(grace_seconds)
     _signal_pgid(pgid, pid, signal.SIGKILL)
+
+
+def _linux_start_token(stat: str, boot_id: str) -> str | None:
+    """`<boot id> <starttime>` from the text of `/proc/<pid>/stat`. starttime
+    is field 22, in clock ticks since boot, so the boot id carries it across
+    a reboot. `comm` (field 2) may hold spaces and parentheses, so the count
+    starts after its last `)`."""
+    fields = stat[stat.rfind(")") + 1:].split()
+    if len(fields) < 20:
+        return None
+    return f"{boot_id} {fields[19]}"
+
+
+def process_start_token(pid: int) -> str | None:
+    """A string that names one process start: two reads agree only for the
+    same process, so a pid the OS recycled after a reboot reads differently.
+
+    Linux reads `/proc/<pid>/stat` and the kernel boot id. Other POSIX
+    systems ask `ps -o lstart=` in UTC, which has one-second resolution; a
+    pid recycled within the same second as the first start goes unnoticed.
+    Windows returns None: there is no reader here yet, and the pid-only
+    liveness check stands. None also means the process is gone or the read
+    failed, and the caller then falls back to liveness alone."""
+    if os.name == "nt":
+        return None
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.parent.parent.is_dir() and Path("/proc/self/stat").exists():
+        try:
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return _linux_start_token(stat.read_text(), boot_id)
+        except OSError:
+            return None
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    started = " ".join(result.stdout.split())
+    return started if result.returncode == 0 and started else None

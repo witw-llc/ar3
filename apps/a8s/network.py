@@ -174,10 +174,7 @@ def load_network_config() -> dict:
 
 
 def save_network_config(cfg: dict) -> None:
-    p = network_config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    atomic_write_text(network_config_path(), json.dumps(cfg, indent=2))
 
 
 def load_secrets_config() -> dict:
@@ -759,8 +756,8 @@ def receive_envelope(
     ring, already in that ring, or rejected for good (malformed, or addressed
     to nobody this node holds). False says it is still owed an attempt: a
     sibling receiver holds the claim, or delivery raised and the claim was
-    released precisely so somebody can try again. A transport that keeps no
-    copy of its own must not destroy the envelope on a False.
+    released precisely so somebody can try again. A transport that records
+    what it consumed must not record the envelope on a False.
 
     `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
@@ -1513,7 +1510,7 @@ def _receive_control_envelope(
 def _publish_delivery_receipt(
     original: dict,
     delivered_names: list[str],
-    publish_control: Callable[[bytes], None],
+    publish_control: Callable[[bytes], bool | None],
     remote_id: str,
     *,
     stage: str = "inbox_write",
@@ -1526,21 +1523,25 @@ def _publish_delivery_receipt(
     if receipt is None:
         return
     try:
-        publish_control(json.dumps(receipt).encode("utf-8"))
-        txlog.log(
-            "RECEIPT_PUBLISHED",
-            msg_id=original["id"],
-            sender=original.get("from") or "?",
-            recipient=",".join(delivered_names),
-            remote=remote_id,
-            files=files or None,
-            detail=f"{stage}; receipt_id={receipt['id']}",
-        )
+        sent = publish_control(json.dumps(receipt).encode("utf-8"))
     except Exception as e:
         out(
-            f"WARN remote {remote_id} delivery receipt publish failed "
-            f"(fire-and-forget, not retried) id={original.get('id', '?')}: {e}"
+            f"WARN remote {remote_id} delivery receipt publish failed; "
+            f"dropped 1 receipt id={original.get('id', '?')}: {e}"
         )
+        return
+    # A transport whose link is down holds the receipt and sends it on the
+    # next connection; the row says so rather than claiming it is out.
+    held = "; held until the link is back" if sent is False else ""
+    txlog.log(
+        "RECEIPT_PUBLISHED",
+        msg_id=original["id"],
+        sender=original.get("from") or "?",
+        recipient=",".join(delivered_names),
+        remote=remote_id,
+        files=files or None,
+        detail=f"{stage}; receipt_id={receipt['id']}{held}",
+    )
 
 
 def make_receive_callback(
@@ -1558,10 +1559,9 @@ def make_receive_callback(
     pins it instead, which is what the tests want. `publish_control` enables
     content-free delivery receipts on that same transport.
 
-    The callback passes `receive_envelope`'s answer back to the transport, so
-    a wire whose acknowledgement is a delete knows whether this node actually
-    finished with the envelope. A raise is the same answer as a released
-    claim: nobody consumed it."""
+    The callback passes `receive_envelope`'s answer back to the transport,
+    which acknowledges only what that answer reports consumed. A raise is the
+    same answer as a released claim: nobody consumed it."""
 
     def callback(envelope: bytes) -> bool:
         try:
@@ -1600,12 +1600,15 @@ def start_remotes(
             cb = make_receive_callback(
                 get_participants,
                 services=services,
-                publish_control=r.publish,
+                publish_control=r.publish_control,
                 remote_id=r.id,
             )
             r.start(cb)
             started.append(r)
-            out(f"remote {r.id}: subscriber started")
+            if r.is_connected():
+                out(f"remote {r.id}: subscriber started")
+            else:
+                out(f"remote {r.id}: subscriber started; link not up yet")
         except Exception as e:
             out(f"WARN: remote {r.id} failed to start: {e}")
     return started

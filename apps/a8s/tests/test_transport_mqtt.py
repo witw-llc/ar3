@@ -324,6 +324,368 @@ def test_publish_ack_wait_uses_ack_timeout_not_connect_timeout(mqtt_broker):
         t.stop()
 
 
+# ---------- held control publishes ----------
+
+
+def _sever(t: MqttTransport) -> None:
+    sock = t._client.socket()
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 3.0
+    while t._client.is_connected() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not t._client.is_connected()
+
+
+def test_is_connected_follows_the_link(mqtt_broker):
+    t = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-is-connected",
+        client_id="a8s-test-is-connected",
+    )
+    assert t.is_connected() is False
+    t.start(lambda _b: None)
+    try:
+        assert t.is_connected() is True
+        _sever(t)
+        assert t.is_connected() is False
+        deadline = time.monotonic() + 8.0
+        while not t.is_connected() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert t.is_connected() is True
+    finally:
+        t.stop()
+    assert t.is_connected() is False
+
+
+def test_is_connected_is_false_when_no_broker_answers():
+    t = MqttTransport(
+        remote_id="dead", broker=f"mqtt://127.0.0.1:{_free_port()}",
+        topic="a8s/test-dead-link", client_id="a8s-test-dead-link",
+        connect_timeout_s=0.2,
+    )
+    t.start(lambda _b: None)
+    try:
+        assert t.is_connected() is False
+    finally:
+        t.stop()
+
+
+def test_held_control_publishes_go_out_in_order_after_reconnect(mqtt_broker):
+    got: list[bytes] = []
+    three = threading.Event()
+
+    def on_msg(payload: bytes) -> None:
+        got.append(payload)
+        if len(got) == 3:
+            three.set()
+
+    observer = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-held-order",
+        client_id="a8s-test-held-order-obs",
+    )
+    t = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-held-order",
+        client_id="a8s-test-held-order",
+    )
+    observer.start(on_msg)
+    t.start(lambda _b: None)
+    try:
+        _sever(t)
+        assert [t.publish_control(p) for p in (b"one", b"two", b"three")] == [False] * 3
+        assert three.wait(timeout=8.0), f"held publishes never arrived: {got}"
+        assert got == [b"one", b"two", b"three"]
+        deadline = time.monotonic() + 3.0
+        while t._pending_control and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not t._pending_control
+    finally:
+        t.stop()
+        observer.stop()
+
+
+def test_control_publish_sends_at_once_when_connected(mqtt_broker):
+    t = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-control-now",
+        client_id="a8s-test-control-now",
+    )
+    t.start(lambda _b: None)
+    try:
+        assert t.publish_control(b"now") is True
+        assert not t._pending_control
+    finally:
+        t.stop()
+
+
+def test_stop_with_link_down_says_how_many_receipts_it_dropped(monkeypatch):
+    import transports.mqtt as mqtt_mod
+
+    lines: list[str] = []
+    monkeypatch.setattr(mqtt_mod, "out", lines.append)
+    t = MqttTransport(
+        remote_id="dead", broker=f"mqtt://127.0.0.1:{_free_port()}",
+        topic="a8s/test-dead-held", client_id="a8s-test-dead-held",
+        connect_timeout_s=0.2,
+    )
+    t.start(lambda _b: None)
+    assert t.publish_control(b"a") is False
+    assert t.publish_control(b"b") is False
+    assert lines == []
+    t.stop()
+    assert len(lines) == 1
+    assert "dropped 2 held delivery receipt(s)" in lines[0]
+
+
+def test_held_list_overflow_drops_the_oldest_and_says_so(monkeypatch):
+    import transports.mqtt as mqtt_mod
+
+    lines: list[str] = []
+    monkeypatch.setattr(mqtt_mod, "out", lines.append)
+    monkeypatch.setattr(mqtt_mod, "_PENDING_CONTROL_MAX", 2)
+    t = MqttTransport(
+        remote_id="dead", broker=f"mqtt://127.0.0.1:{_free_port()}",
+        topic="a8s/test-dead-full", client_id="a8s-test-dead-full",
+        connect_timeout_s=0.2,
+    )
+    t.start(lambda _b: None)
+    try:
+        for payload in (b"1", b"2", b"3"):
+            t.publish_control(payload)
+        assert list(t._pending_control) == [b"2", b"3"]
+        assert len(lines) == 1
+        assert "dropped 1 delivery receipt" in lines[0]
+    finally:
+        t.stop()
+
+
+def test_stop_leaves_late_arrivals_unacknowledged_for_redelivery(mqtt_broker):
+    """A message that lands while `stop()` drains is neither handled nor
+    acknowledged, so the broker offers it again to the same session."""
+    handled: list[bytes] = []
+    t = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-late-arrival",
+        client_id="a8s-test-late-arrival",
+    )
+    t.start(handled.append)
+    t._stopping = True
+    pub = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-late-arrival",
+        client_id="a8s-test-late-arrival-pub",
+    )
+    pub.start(lambda _b: None)
+    try:
+        pub.publish(b"late")
+        time.sleep(0.3)
+    finally:
+        pub.stop()
+        t.stop()
+    assert handled == []
+
+    again: list[bytes] = []
+    arrived = threading.Event()
+    t2 = MqttTransport(
+        remote_id="hub", broker=mqtt_broker, topic="a8s/test-late-arrival",
+        client_id="a8s-test-late-arrival",
+    )
+    t2.start(lambda b: (again.append(b), arrived.set()))
+    try:
+        assert arrived.wait(timeout=3.0)
+        assert again == [b"late"]
+    finally:
+        t2.stop()
+
+
+# ---------- acknowledge only what the receive path consumed ----------
+
+
+def _spy_acks(t: MqttTransport, events: list) -> None:
+    real = t._client.ack
+
+    def ack(mid, qos):
+        events.append(("ack", mid))
+        return real(mid, qos)
+
+    t._client.ack = ack  # type: ignore[method-assign]
+
+
+def _publish_one(broker: str, topic: str, payload: bytes) -> None:
+    pub = MqttTransport(
+        remote_id="hub", broker=broker, topic=topic,
+        client_id=f"{topic.replace('/', '-')}-pub", clean_session=True,
+    )
+    pub.start(lambda _b: None)
+    try:
+        pub.publish(payload)
+    finally:
+        pub.stop()
+
+
+def _redelivered(broker: str, topic: str, client_id: str, wait_s: float) -> list[bytes]:
+    """Reconnect under `client_id` with a consuming callback and return what
+    the broker hands the session within `wait_s`."""
+    got: list[bytes] = []
+    arrived = threading.Event()
+
+    def consume(payload: bytes) -> bool:
+        got.append(payload)
+        arrived.set()
+        return True
+
+    again = MqttTransport(
+        remote_id="hub", broker=broker, topic=topic, client_id=client_id,
+    )
+    again.start(consume)
+    try:
+        arrived.wait(timeout=wait_s)
+        time.sleep(0.2)
+    finally:
+        again.stop()
+    return got
+
+
+def test_a_refused_message_is_offered_again_and_acked_once_consumed(
+    mqtt_broker, monkeypatch,
+):
+    import transports.mqtt as mqtt_mod
+
+    monkeypatch.setattr(mqtt_mod, "_RETRY_FIRST_S", 0.1)
+    topic, cid = "a8s/test-retry-then-consume", "a8s-test-retry-then-consume"
+    events: list = []
+    answers = iter([False, True])
+    done = threading.Event()
+
+    def on_msg(payload: bytes) -> bool:
+        answer = next(answers)
+        events.append(("cb", payload, answer))
+        if answer:
+            done.set()
+        return answer
+
+    t = MqttTransport(remote_id="hub", broker=mqtt_broker, topic=topic, client_id=cid)
+    _spy_acks(t, events)
+    t.start(on_msg)
+    try:
+        _publish_one(mqtt_broker, topic, b"once")
+        assert done.wait(timeout=5.0), f"never re-offered: {events}"
+        deadline = time.monotonic() + 2.0
+        while events[-1][0] != "ack" and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        t.stop()
+    assert [e[:3] if e[0] == "cb" else e[0] for e in events] == [
+        ("cb", b"once", False), ("cb", b"once", True), "ack",
+    ]
+    assert _redelivered(mqtt_broker, topic, cid, wait_s=1.0) == []
+
+
+def test_a_message_never_consumed_is_redelivered_to_the_next_session(mqtt_broker):
+    topic, cid = "a8s/test-never-consumed", "a8s-test-never-consumed"
+    offered = threading.Event()
+    events: list = []
+
+    def refuse(payload: bytes) -> bool:
+        offered.set()
+        return False
+
+    t = MqttTransport(remote_id="hub", broker=mqtt_broker, topic=topic, client_id=cid)
+    _spy_acks(t, events)
+    t.start(refuse)
+    try:
+        _publish_one(mqtt_broker, topic, b"owed")
+        assert offered.wait(timeout=3.0)
+    finally:
+        t.stop()
+    assert events == []
+    assert _redelivered(mqtt_broker, topic, cid, wait_s=3.0) == [b"owed"]
+
+
+def test_a_consumed_message_is_acked_at_once_and_not_redelivered(mqtt_broker):
+    topic, cid = "a8s/test-consumed-at-once", "a8s-test-consumed-at-once"
+    events: list = []
+    acked = threading.Event()
+
+    t = MqttTransport(remote_id="hub", broker=mqtt_broker, topic=topic, client_id=cid)
+    _spy_acks(t, events)
+    t.start(lambda _b: True)
+    try:
+        _publish_one(mqtt_broker, topic, b"done")
+        deadline = time.monotonic() + 3.0
+        while not events and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        t.stop()
+    assert [e[0] for e in events] == ["ack"]
+    assert _redelivered(mqtt_broker, topic, cid, wait_s=1.0) == []
+
+
+def test_a_link_drop_hands_unconsumed_messages_back_to_the_broker(
+    mqtt_broker, monkeypatch,
+):
+    """A retry from a connection that ended is never acked on the next one:
+    the transport forgets it and the broker offers it again."""
+    import transports.mqtt as mqtt_mod
+
+    monkeypatch.setattr(mqtt_mod, "_RETRY_FIRST_S", 30.0)
+    topic, cid = "a8s/test-retry-link-drop", "a8s-test-retry-link-drop"
+    accept = threading.Event()
+    offers: list[bytes] = []
+    consumed = threading.Event()
+
+    def on_msg(payload: bytes) -> bool:
+        offers.append(payload)
+        if accept.is_set():
+            consumed.set()
+            return True
+        return False
+
+    t = MqttTransport(remote_id="hub", broker=mqtt_broker, topic=topic, client_id=cid)
+    t.start(on_msg)
+    try:
+        _publish_one(mqtt_broker, topic, b"handed-back")
+        deadline = time.monotonic() + 3.0
+        while not offers and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert offers == [b"handed-back"]
+        accept.set()
+        _sever(t)
+        assert consumed.wait(timeout=8.0), "the broker never offered it again"
+        time.sleep(0.1)
+        assert not t._retry
+    finally:
+        t.stop()
+    assert offers == [b"handed-back", b"handed-back"]
+    assert _redelivered(mqtt_broker, topic, cid, wait_s=1.0) == []
+
+
+def test_retry_list_overflow_drops_the_oldest_and_says_how_many(
+    mqtt_broker, monkeypatch,
+):
+    import transports.mqtt as mqtt_mod
+
+    lines: list[str] = []
+    monkeypatch.setattr(mqtt_mod, "out", lines.append)
+    monkeypatch.setattr(mqtt_mod, "_RETRY_MAX", 2)
+    topic, cid = "a8s/test-retry-overflow", "a8s-test-retry-overflow"
+    offered: list[bytes] = []
+    t = MqttTransport(remote_id="hub", broker=mqtt_broker, topic=topic, client_id=cid)
+    t.start(lambda b: offered.append(b) or False)
+    try:
+        for payload in (b"1", b"2", b"3"):
+            _publish_one(mqtt_broker, topic, payload)
+        deadline = time.monotonic() + 3.0
+        while len(offered) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.1)
+        assert [p for p, *_ in t._retry] == [b"2", b"3"]
+    finally:
+        t.stop()
+    warns = [ln for ln in lines if "retry list" in ln]
+    assert len(warns) == 1
+    assert "dropped 1" in warns[0]
+
+
 # ---------- option-bag handling ----------
 
 # These don't need a broker — the constructor's option vocabulary lives

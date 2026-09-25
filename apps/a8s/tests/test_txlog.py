@@ -414,6 +414,123 @@ class TestReadRecent:
         assert read_recent() == []
 
 
+class TestRemoteAddressBook:
+    """`last_heard` is an address book. Retention prunes the event log by row
+    count, which says nothing about whether a remote is still reachable, so
+    the book lives in its own table that retention never touches."""
+
+    @staticmethod
+    def _at(monkeypatch, stamp: str) -> None:
+        import txlog
+
+        monkeypatch.setattr(txlog, "_ts", lambda: stamp)
+
+    def test_prune_to_one_keeps_the_name(self, fake_home):
+        from txlog import last_heard
+
+        log("RECEIVED_REMOTE", msg_id="01A", sender="remote-one", recipient="Bob", remote="hub")
+        log("ROUTED", msg_id="01B", sender="Alice", recipient="Bob")
+        assert set(last_heard()) == {"remote-one"}
+        prune_transactions(1)
+        assert set(last_heard()) == {"remote-one"}
+
+    def test_the_book_does_not_read_the_event_rows(self, fake_home):
+        from txlog import last_heard
+
+        log("RECEIVED_REMOTE", msg_id="01A", sender="remote-one", recipient="Bob", remote="hub")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("DELETE FROM transactions")
+        assert set(last_heard()) == {"remote-one"}
+
+    def test_mixed_case_arrivals_are_one_row_and_the_newest_spells_it(
+        self, fake_home, monkeypatch,
+    ):
+        from txlog import last_heard
+
+        self._at(monkeypatch, "2026-09-01T00:00:00.000Z")
+        log("RECEIVED_REMOTE", sender="Relay", recipient="Bob", remote="hub")
+        self._at(monkeypatch, "2026-09-02T00:00:00.000Z")
+        log("RECEIVED_REMOTE", sender="relay", recipient="Bob", remote="hub")
+        assert last_heard() == {"relay": "2026-09-02T00:00:00.000Z"}
+        with sqlite3.connect(transactions_path()) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM remote_last_heard").fetchone()[0] == 1
+
+    def test_an_older_stamp_never_overwrites_a_newer_one(self, fake_home, monkeypatch):
+        from txlog import last_heard
+
+        self._at(monkeypatch, "2026-09-03T00:00:00.000Z")
+        log("RECEIVED_REMOTE", sender="Relay", recipient="Bob", remote="hub")
+        self._at(monkeypatch, "2026-09-01T00:00:00.000Z")
+        log("RECEIVED_REMOTE", sender="RELAY", recipient="Bob", remote="hub")
+        assert last_heard() == {"Relay": "2026-09-03T00:00:00.000Z"}
+
+    def test_only_arrival_writes_the_book(self, fake_home):
+        from txlog import last_heard
+
+        log("PUBLISHED", msg_id="01A", sender="Alice", recipient="ghost", remote="hub")
+        log("NOT_LOCAL", msg_id="01B", sender="stranger", recipient="Other", remote="hub")
+        assert last_heard() == {}
+
+
+class TestTransactionsNodeScope:
+    """On a shared topic every node logs NOT_LOCAL, and publishes a
+    no_local_recipient receipt, for each message it does not own. Those rows
+    are about other nodes' traffic; `a8s tx` hides them unless asked."""
+
+    @pytest.fixture
+    def mixed(self, fake_home):
+        # A message this node sent: routed out, heard back on the topic.
+        log("PUBLISHED", msg_id="01OWNSENT", sender="Alice", recipient="Remote", remote="hub")
+        log("NOT_LOCAL", msg_id="01OWNSENT", sender="Alice", recipient="Remote", remote="hub")
+        log("DELIVERY_RECEIPT", msg_id="01OWNSENT", sender="Alice", recipient="Remote",
+            remote="hub", detail="inbox_write; receipt_id=01R1")
+        # A message this node received, and the receipt it sent for it.
+        log("RECEIVED_REMOTE", msg_id="01OWNRCVD", sender="Far", recipient="Bob", remote="hub")
+        log("RECEIPT_PUBLISHED", msg_id="01OWNRCVD", sender="Far", recipient="Bob",
+            remote="hub", detail="inbox_write; receipt_id=01R2")
+        # Another node's traffic, heard on the shared topic.
+        log("NOT_LOCAL", msg_id="01FOREIGN", sender="Far", recipient="Other", remote="hub")
+        log("RECEIPT_PUBLISHED", msg_id="01FOREIGN", sender="Far", recipient="Other",
+            remote="hub", detail="no_local_recipient; receipt_id=01R3")
+        log("DISCARDED", msg_id="01FOREIGN2", sender="Far", recipient="Other", remote="hub",
+            detail="unsupported or malformed a8s control envelope")
+        # Local-only rows: routing and lifecycle.
+        log("ROUTED", msg_id="01LOCAL", sender="Alice", recipient="Bob")
+        log("RUN_START", sender="Alice", detail="agents=Alice")
+
+    def test_default_shows_only_this_nodes_messages(self, mixed, capsys):
+        assert cmd_transactions(["--limit", "50"]) == 0
+        out = capsys.readouterr().out
+        for own in ("01OWNSENT", "01OWNRCVD", "01LOCAL", "RUN_START"):
+            assert own in out
+        assert out.count("01OWNSENT") == 3
+        assert out.count("01OWNRCVD") == 2
+        assert "01FOREIGN" not in out
+
+    def test_all_shows_every_row(self, mixed, capsys):
+        assert cmd_transactions(["--limit", "50", "--all"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("01FOREIGN") == 3
+        assert "01OWNSENT" in out
+
+    def test_msg_shows_a_foreign_envelope_whole(self, mixed, capsys):
+        assert cmd_transactions(["--msg", "01FOREIGN"]) == 0
+        assert capsys.readouterr().out.count("01FOREIGN") == 2
+
+    def test_limit_counts_shown_rows_only(self, mixed, capsys):
+        log("NOT_LOCAL", msg_id="01FOREIGN3", sender="Far", recipient="Other", remote="hub")
+        assert cmd_transactions(["--limit", "1"]) == 0
+        out = capsys.readouterr().out
+        assert "RUN_START" in out
+        assert "01FOREIGN3" not in out
+
+    def test_an_all_foreign_log_says_what_it_hid(self, fake_home, capsys):
+        log("NOT_LOCAL", msg_id="01FOREIGN", sender="Far", recipient="Other", remote="hub")
+        assert cmd_transactions([]) == 1
+        err = capsys.readouterr().err
+        assert "--all" in err
+
+
 class TestCmdTransactions:
     def test_prints_recent_rows(self, fake_home, capsys):
         log("ROUTED", msg_id="01A", sender="Alice", recipient="Bob", detail="hello")

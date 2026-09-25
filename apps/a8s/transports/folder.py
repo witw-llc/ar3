@@ -61,8 +61,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from core import MAX_SEEN_IDS, folder_ledger_path, out
+from core import folder_ledger_path, out
 from transports import OnMessage, Transport, TransportError
+from transports.ledger import ConsumedLedger
 from ar3 import clock
 from ar3.fsio import (
     REPLACE_ATTEMPTS,
@@ -110,15 +111,6 @@ SWEEP_INTERVAL_SECONDS = 3600
 # through, while a discarded envelope is gone — so the window is generously
 # wider than any clock two consumer machines are likely to disagree by.
 JOIN_SKEW_GRACE_MS = 3_600_000
-
-# Cross-process ledger mutex. `a8s start` runs a handler process per agent and
-# every one of them appends to this remote's single ledger, so a compaction in
-# one process can otherwise `os.replace` away an append from another. Mirrors
-# `network.claim_message`: one atomic exclusive create names one winner, and a
-# holder that died mid-write is broken by the lock's own age.
-LEDGER_LOCK_WAIT_SECONDS = 2.0
-LEDGER_LOCK_POLL_SECONDS = 0.02
-LEDGER_LOCK_STALE_SECONDS = 30.0
 
 
 def _unlink_with_retry(path: Path) -> None:
@@ -199,13 +191,13 @@ class FolderTransport(Transport):
             parse_ulid(self._joined)[0] - JOIN_SKEW_GRACE_MS if self._joined else 0
         )
         self._probe = bool(opts.get("probe", False))
-        self._ledger_path = folder_ledger_path(remote_id)
-        self._lock_path = self._ledger_path.with_suffix(
-            self._ledger_path.suffix + ".lock"
-        )
-        self._ledger_lock = threading.Lock()
-        self._consumed = self._read_ledger()
         self._warned: set[str] = set()
+        self._ledger = ConsumedLedger(
+            folder_ledger_path(remote_id),
+            remote_id=remote_id,
+            warn=self._warn_once,
+            present=self._present_ids,
+        )
         self._on_message: Optional[OnMessage] = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -253,134 +245,12 @@ class FolderTransport(Transport):
 
     # ---------- ledger ----------
 
-    def _read_ledger(self) -> set[str]:
-        try:
-            text = self._ledger_path.read_text(encoding="utf-8")
-        except OSError:
-            return set()
-        return {line.strip() for line in text.splitlines() if line.strip()}
-
-    def _ledger_lines(self) -> list[str]:
-        try:
-            text = self._ledger_path.read_text(encoding="utf-8")
-        except OSError:
-            return []
-        return [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    def _acquire_ledger_lock(self) -> bool:
-        """Take the sidecar mutex, or answer False after a bounded wait.
-
-        Never raises and never blocks for long: a caller that loses the race
-        degrades rather than stalling delivery, so failing to acquire has to be
-        as cheap as acquiring.
-        """
-        path = self._lock_path
-        deadline = time.monotonic() + LEDGER_LOCK_WAIT_SECONDS
-        while True:
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                os.close(
-                    os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                )
-                return True
-            except FileExistsError:
-                pass
-            except OSError:
-                return False
-            try:
-                held_for = time.time() - path.stat().st_mtime
-            except OSError:
-                held_for = 0.0  # released between the two calls; go round again
-            if held_for > LEDGER_LOCK_STALE_SECONDS:
-                # The holder died mid-write. Re-stamp before taking over so two
-                # processes racing the same expiry do not both think they won.
-                try:
-                    prior = path.stat().st_mtime
-                    os.utime(path, None)
-                    if path.stat().st_mtime != prior:
-                        return True
-                except OSError:
-                    pass
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(LEDGER_LOCK_POLL_SECONDS)
-
-    def _release_ledger_lock(self) -> None:
-        try:
-            self._lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def _record_consumed(self, *ulids: str) -> None:
-        fresh = [u for u in ulids if u not in self._consumed]
-        if not fresh:
-            return
-        self._consumed.update(fresh)
-        with self._ledger_lock:
-            held = self._acquire_ledger_lock()
-            try:
-                p = self._ledger_path
-                try:
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    with p.open("a", encoding="utf-8") as f:
-                        f.write("".join(u + "\n" for u in fresh))
-                except OSError as e:
-                    # An unwritable ledger redelivers every envelope on every
-                    # restart, forever, and the folder looks fine while it does.
-                    self._warn_once(
-                        f"ledger:{type(e).__name__}",
-                        f"WARN: remote {self._remote_id}: ledger write failed "
-                        f"({e}); envelopes will be redelivered",
-                    )
-                    return
-                # An append that lost the race still writes: a lost append
-                # costs one redelivered envelope, and blocking on the ledger
-                # would cost delivery itself. A compaction that lost the race
-                # waits instead — it is opportunistic, and rewriting the file
-                # while a sibling appends to it is what the mutex is for.
-                if not held:
-                    return
-                if len(self._ledger_lines()) > MAX_SEEN_IDS:
-                    self._compact()
-            finally:
-                if held:
-                    self._release_ledger_lock()
-
-    def _compact(self) -> None:
-        """Rewrite the ledger as the IDs whose envelopes are still in the folder.
-
-        Called with the sidecar lock held. The cap is a trigger, not a bound.
-        Nothing deletes an envelope on receive, so forgetting a ULID whose file
-        is still there hands that envelope back to the receive path at the next
-        restart — a duplicate inbox write and a duplicate wake. Only the entries
-        whose file is gone may go, and if that leaves the ledger above the cap
-        it stays above the cap.
-        """
+    def _present_ids(self) -> set[str] | None:
         if not self._base.is_dir():
             # An unmounted folder lists as empty, which would read as "every
             # envelope is gone" and erase the whole record.
-            return
-        present = {p.stem for p in self._all_envelopes()}
-        # Read last, and inside the lock: listing a synced folder can take a
-        # while, and whatever a sibling process appended in that time is in the
-        # file rather than in a list this call read on the way in.
-        lines = self._ledger_lines()
-        kept: list[str] = []
-        keep_set: set[str] = set()
-        for u in lines:
-            if u in present and u not in keep_set:
-                keep_set.add(u)
-                kept.append(u)
-        p = self._ledger_path
-        tmp = p.with_suffix(p.suffix + f".{os.getpid()}.tmp")
-        try:
-            tmp.write_text("".join(u + "\n" for u in kept), encoding="utf-8")
-            os.replace(str(tmp), str(p))
-        except OSError:
-            return
-        # Drop only what the rewrite dropped: a publish on another thread may
-        # have appended an ID after `lines` was read, and it is still recorded.
-        self._consumed.difference_update(set(lines) - keep_set)
+            return None
+        return {p.stem for p in self._all_envelopes()}
 
     def touch_ledger(self) -> None:
         """Create the ledger file, empty, when `a8s remote` registers this one.
@@ -389,11 +259,7 @@ class FolderTransport(Transport):
         `joined` cutoff in the spec, not this file; the file marks that this
         node has been registered and has read nothing yet.
         """
-        try:
-            self._ledger_path.parent.mkdir(parents=True, exist_ok=True)
-            self._ledger_path.touch(exist_ok=True)
-        except OSError:
-            pass
+        self._ledger.touch()
 
     # ---------- folder ----------
 
@@ -571,7 +437,7 @@ class FolderTransport(Transport):
             ) from e
         # We publish into the folder we read from, so our own envelope is
         # consumed the moment it is written.
-        self._record_consumed(msg_id)
+        self._ledger.record(msg_id)
         self._sweep()
 
     # ---------- poll ----------
@@ -587,7 +453,7 @@ class FolderTransport(Transport):
         self._sweep()
         for path in self._listing():
             stem = path.stem
-            if stem in self._consumed:
+            if stem in self._ledger:
                 continue
             try:
                 raw = path.read_bytes()
@@ -634,7 +500,7 @@ class FolderTransport(Transport):
                     f"retrying until it is taken",
                 )
                 continue
-            self._record_consumed(stem)
+            self._ledger.record(stem)
 
     def _warn_once(self, key: str, message: str) -> None:
         """Say it the first time and never again for the same `key`.

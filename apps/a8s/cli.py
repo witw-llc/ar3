@@ -8,6 +8,7 @@ from pathlib import Path
 
 from core import version_line
 import settings as sm
+from registry import RegistryUnreadable
 from commands import (
     cmd_add,
     cmd_alias,
@@ -64,11 +65,11 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("namespace", "[<prefix> [<agent>] [--opaque]]", "Bind an address prefix to one agent (`tell <prefix>:<sub> ...`); `--opaque` conceals member attribution outward."),
     ("unnamespace", "<prefix>",               "Remove a namespace binding."),
     ("namespaces", "",                        "List namespace prefixes and their bound agents."),
-    ("start",    "<name>",                    "Run an agent in the background."),
+    ("start",    "<name>...",                 "Run agents in the background, one process per name."),
     ("run",      "<name> [--drain <sec>]",     "Run an agent in the foreground."),
     ("step",     "<name>",                    "Run an agent for one pass and exit."),
-    ("stop",     "<name> [--force]",          "Stop a node; wait until detached (finish current wake unless --force)."),
-    ("restart",  "<name> [--force]",          "Stop (wait) then start a node."),
+    ("stop",     "<name>... [--force]",       "Stop nodes; wait until detached (finish current wake unless --force)."),
+    ("restart",  "<name>... [--force]",       "Stop (wait) then start each node."),
     ("update",   "[--force]",                 "Restart all running nodes (refresh handlers after git pull)."),
     ("kill",     "<name>",                    "Force-stop a running agent."),
     ("exit",     "",                          "Stop every running agent."),
@@ -207,7 +208,11 @@ def main(argv: list[str]) -> int:
     interval = args.interval if args.interval is not None else sm.get_float("loop_interval")
 
     if args.command in KNOWN_COMMANDS:
-        return dispatch(args.command, args.rest, interval)
+        try:
+            return dispatch(args.command, args.rest, interval)
+        except RegistryUnreadable as e:
+            print(f"a8s: {e}", file=sys.stderr)
+            return 1
 
     print(f"unknown command: {args.command!r}", file=sys.stderr)
     return 2

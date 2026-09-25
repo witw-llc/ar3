@@ -20,7 +20,7 @@ import pytest
 
 from conftest import set_home
 
-from mqtt_cluster import write_network_json
+from mqtt_cluster import wait_connected, write_network_json
 
 pytest.importorskip("paho.mqtt.client")
 
@@ -61,6 +61,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     # Step 1: warm-up — connect, register the persistent session, disconnect.
     from network import load_remotes, start_remotes, stop_remotes
     warmup = start_remotes(load_remotes(), lambda: [target_p])
+    wait_connected(warmup)
     stop_remotes(warmup)
 
     # Step 2: cluster A publishes via attached_loop.
@@ -83,6 +84,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     core.PRINT_LOCK = None
     rx_remotes = start_remotes(load_remotes(), lambda: [target_p])
     try:
+        wait_connected(rx_remotes)
         deadline = time.time() + 5.0
         files: list[Path] = []
         while time.time() < deadline:
@@ -104,6 +106,7 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
     core.PRINT_LOCK = None
     receipt_remotes = start_remotes(load_remotes(), lambda: [sender_p])
     try:
+        wait_connected(receipt_remotes)
         from txlog import read_events
 
         deadline = time.time() + 5.0
@@ -184,6 +187,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         )
         b_services = load_services()
         warmup = start_remotes(load_remotes(), lambda: [target_p], services=b_services)
+        wait_connected(warmup)
         stop_remotes(warmup)
 
         # Cluster A: write a FILE: outbox, run attached_loop to publish.
@@ -213,6 +217,7 @@ def test_remote_round_trip_with_file_via_storage(tmp_path, mqtt_broker, monkeypa
         b_services = load_services()
         rx_remotes = start_remotes(load_remotes(), lambda: [target_p], services=b_services)
         try:
+            wait_connected(rx_remotes)
             deadline = time.time() + 5.0
             files: list[Path] = []
             while time.time() < deadline:

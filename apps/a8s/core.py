@@ -45,6 +45,7 @@ except ImportError:
 from ar3 import envseam  # noqa: E402
 from ar3.home import app_home  # noqa: E402
 from ar3.proc import pid_alive as ar3_pid_alive  # noqa: E402
+from ar3.proc import process_start_token  # noqa: E402,F401
 
 # ---------- constants ----------
 
@@ -173,6 +174,12 @@ def agent_log_path(name: str) -> Path:
 
 def pid_path(name: str) -> Path:
     return agent_dir(name) / "pid"
+
+
+def pid_start_path(name: str) -> Path:
+    """The start token of the process named in `pid_path`, written beside it
+    so a reader can tell that process from a later one given the same pid."""
+    return agent_dir(name) / "pid.start"
 
 
 def detach_request_path(name: str) -> Path:
@@ -466,6 +473,17 @@ def folder_ledger_path(remote_id: str) -> Path:
     return _a8s_dir() / "folder-remotes" / f"{remote_id}.consumed"
 
 
+def s3_ledger_path(remote_id: str) -> Path:
+    """Per-remote record of which s3 envelopes this machine has read.
+
+    Every machine that holds a name reads that name's mailbox, so nobody
+    deletes on receive, exactly as with a folder remote. The record stays on
+    this machine: in the bucket it would cost a PUT per message and tell every
+    other reader what this one has seen.
+    """
+    return _a8s_dir() / "s3-remotes" / f"{remote_id}.consumed"
+
+
 # Receive-side dedup ring cap. 26 chars per ULID + newline = 27 bytes per row;
 # 10k rows ≈ 270 KiB, comfortably below any sane filesystem block budget.
 MAX_SEEN_IDS = 10000
@@ -614,6 +632,15 @@ def out(text: str = "", end: str = "\n") -> None:
             _emit_supervisor(line)
     else:
         _emit_supervisor(line)
+
+
+def log_agent_unlocked(name: str, text: str) -> None:
+    """One line into an agent's log, with no stdout and no `PRINT_LOCK`.
+
+    For a signal handler. It runs on the main thread between bytecodes, and
+    that thread may already hold the lock `out_agent` takes, so taking it
+    again would hang the process that was just told to stop."""
+    _append(agent_log_path(name), f"{_ts()} {text}\n")
 
 
 def out_agent(name: str, text: str = "", end: str = "\n") -> None:

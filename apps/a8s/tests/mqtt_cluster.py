@@ -199,6 +199,32 @@ def wait_agent_log(
     raise AssertionError(f"log line {substring!r} not found for {agent!r} within {timeout}s")
 
 
+def wait_connected(remotes: list, *, timeout: float = 5.0) -> None:
+    """Block until every started remote reports its link up — the ready
+    signal a test waits on before it publishes or expects a delivery."""
+    assert remotes, "no remote started"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if all(r.is_connected() for r in remotes):
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"remotes not connected within {timeout}s")
+
+
+def wait_node_ready(a8s_home: Path, *, remote: str = "hub", timeout: float = 8.0) -> None:
+    """Block until a node subprocess logs its remote connected."""
+    path = a8s_home / "log.txt"
+    ready = f"remote {remote}: subscriber started"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if path.is_file() and any(
+            line.endswith(ready) for line in path.read_text().splitlines()
+        ):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"node under {a8s_home} not connected within {timeout}s")
+
+
 def start_attached_loop(a8s_home: Path, agent: str, *, drain_seconds: float = 0.0) -> subprocess.Popen:
     env = os.environ.copy()
     env["A8S_HOME"] = str(a8s_home)

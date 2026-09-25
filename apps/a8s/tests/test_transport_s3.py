@@ -2,8 +2,8 @@
 
 No bucket, no credentials and no network: every test drives an in-memory fake
 injected into the transport's client cache, the way the S3 storage service's
-tests do. That keeps the suite about our own logic — key layout, mailbox
-ownership, deliver-then-delete, retention — without pretending to test AWS.
+tests do. That keeps the suite about our own logic — key layout, fan-out,
+the consumed ledger, retention — without pretending to test AWS.
 """
 from __future__ import annotations
 
@@ -210,19 +210,28 @@ class TestPublish:
         assert bucket.keys() == [f"{PREFIX}/target/{msg_id}.json"]
         assert bucket.objects[f"{PREFIX}/target/{msg_id}.json"][0] == raw
 
-    def test_a_name_this_node_answers_for_is_never_published(self, fake_home, capsys):
+    def test_a_name_this_node_answers_for_is_published_too(self, fake_home, capsys):
+        """The same name may live on another machine, and it is owed a copy.
+
+        MQTT publishes to the shared topic whatever the routing pass already
+        delivered here, and the broker's echo is collapsed by the seen-ids
+        ring. The bucket does the same: the object goes on the wire, and this
+        node's own poll is the echo.
+        """
         _register("target")
         t, bucket = _transport()
-        t.publish(_envelope(new_ulid(), to="TARGET"))
-        assert bucket.keys() == []
-        assert "delivered locally" in capsys.readouterr().out
+        msg_id = new_ulid()
+        t.publish(_envelope(msg_id, to="TARGET"))
+        assert bucket.keys() == [f"{PREFIX}/target/{msg_id}.json"]
+        assert "delivered locally" not in capsys.readouterr().out
 
-    def test_an_alias_this_node_holds_is_never_published(self, fake_home):
+    def test_an_alias_this_node_holds_is_published_too(self, fake_home):
         _register("target")
         save_aliases({"team": ["target"]})
         t, bucket = _transport()
-        t.publish(_envelope(new_ulid(), to="team"))
-        assert bucket.keys() == []
+        msg_id = new_ulid()
+        t.publish(_envelope(msg_id, to="team"))
+        assert bucket.keys() == [f"{PREFIX}/team/{msg_id}.json"]
 
     def test_a_namespace_address_is_filed_under_its_prefix(self, fake_home):
         _register("local")
@@ -231,12 +240,13 @@ class TestPublish:
         t.publish(_envelope(msg_id, to="acme:ops:example-agent"))
         assert bucket.keys() == [f"{PREFIX}/acme/{msg_id}.json"]
 
-    def test_a_bound_namespace_prefix_is_never_published(self, fake_home):
+    def test_a_bound_namespace_prefix_is_published_too(self, fake_home):
         _register("local")
         save_namespaces({"acme": "local"})
         t, bucket = _transport()
-        t.publish(_envelope(new_ulid(), to="acme:ops:example-agent"))
-        assert bucket.keys() == []
+        msg_id = new_ulid()
+        t.publish(_envelope(msg_id, to="acme:ops:example-agent"))
+        assert bucket.keys() == [f"{PREFIX}/acme/{msg_id}.json"]
 
     def test_a_receipt_is_filed_under_the_sender_it_reports_to(self, fake_home):
         _register("local")
@@ -285,18 +295,52 @@ class TestPoll:
         t._poll_once()
         assert [json.loads(raw)["id"] for raw in seen] == [first, second]
 
-    def test_delivery_deletes_the_object(self, fake_home):
+    def test_delivery_leaves_the_object_for_every_other_machine(self, fake_home):
         _register("target")
         t, bucket = _transport()
         msg_id = new_ulid()
-        bucket.put_object(
-            Bucket=BUCKET, Key=f"{PREFIX}/target/{msg_id}.json", Body=_envelope(msg_id)
-        )
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
         _arm(t, lambda _raw: True)
         t._poll_once()
-        assert bucket.keys() == []
+        assert bucket.keys() == [key]
+        assert not any(verb == "delete" for verb, _key in bucket.calls)
+        assert msg_id in t._ledger
 
-    def test_a_receive_path_with_no_answer_is_still_an_acknowledgement(
+    def test_a_consumed_envelope_is_not_offered_again_on_this_machine(
+        self, fake_home
+    ):
+        _register("target")
+        t, bucket = _transport()
+        msg_id = new_ulid()
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
+        seen: list[bytes] = []
+        _arm(t, lambda raw: seen.append(raw) or True)
+        t._poll_once()
+        bucket.calls.clear()
+        t._poll_once()
+        assert len(seen) == 1
+        assert ("get", key) not in bucket.calls, "the ledger answers without a GET"
+
+    def test_the_ledger_survives_a_restart(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        msg_id = new_ulid()
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+
+        restarted = S3Transport(remote_id="hub", bucket=BUCKET, prefix=PREFIX)
+        restarted._client_cache = bucket
+        seen: list[bytes] = []
+        _arm(restarted, seen.append)
+        restarted._poll_once()
+        assert seen == []
+        assert bucket.keys() == [key]
+
+    def test_a_receive_path_with_no_answer_is_still_a_consumption(
         self, fake_home
     ):
         # A callback that reports nothing is a receive path this transport
@@ -309,7 +353,35 @@ class TestPoll:
         )
         _arm(t, lambda _raw: None)
         t._poll_once()
-        assert bucket.keys() == []
+        assert msg_id in t._ledger
+
+    def test_the_echo_of_a_local_delivery_is_collapsed_by_the_ring(
+        self, fake_home, tmp_path
+    ):
+        """What MQTT does with the broker's echo of its own publish.
+
+        The routing pass delivered the message here and recorded it in the
+        seen-ids ring before publishing it. This node's poll then meets its
+        own object: the real receive callback answers from the ring, nothing
+        is written twice, and the ledger takes the ULID so the next poll does
+        not fetch it again.
+        """
+        from core import Participant, inbox_dir
+        from network import make_receive_callback, seen_id_append
+
+        root = tmp_path / "target"
+        root.mkdir()
+        save_registry({"target": {"root": str(root)}})
+        t, bucket = _transport()
+        msg_id = new_ulid()
+        seen_id_append(msg_id)
+        t.publish(_envelope(msg_id, to="target"))
+        participants = [Participant("target", root)]
+        _arm(t, make_receive_callback(lambda: participants, services=[]))
+        t._poll_once()
+        assert not inbox_dir("target").is_dir()
+        assert msg_id in t._ledger
+        assert bucket.keys() == [f"{PREFIX}/target/{msg_id}.json"]
 
     def test_only_this_node_s_prefixes_are_listed(self, fake_home):
         _register("target")
@@ -387,8 +459,9 @@ class TestPoll:
         t._poll_once()
         assert bucket.keys() == [key]
         assert not any(verb == "delete" for verb, _key in bucket.calls)
+        assert msg_id not in t._ledger
 
-    def test_an_unconsumed_envelope_is_redelivered_until_somebody_takes_it(
+    def test_an_unconsumed_envelope_is_offered_until_somebody_takes_it(
         self, fake_home
     ):
         _register("target")
@@ -398,35 +471,27 @@ class TestPoll:
             Bucket=BUCKET, Key=f"{PREFIX}/target/{msg_id}.json", Body=_envelope(msg_id)
         )
         answers = [False, False, True]
-        _arm(t, lambda _raw: answers.pop(0))
-        t._poll_once()
-        t._poll_once()
-        assert bucket.keys() != []
-        t._poll_once()
-        assert bucket.keys() == []
+        offered: list[bytes] = []
 
-    def test_mail_is_never_swept_however_long_it_fails_to_land(self, fake_home):
-        """`retain_days` sweeps what is not this transport's mail. A
-        well-formed envelope addressed to this node is mail: a node that
-        cannot take it today may take it tomorrow, and the bucket's lifecycle
-        rule owns the case where it never can."""
+        def cb(raw: bytes) -> bool:
+            offered.append(raw)
+            return answers.pop(0)
+
+        _arm(t, cb)
+        t._poll_once()
+        t._poll_once()
+        assert msg_id not in t._ledger
+        t._poll_once()
+        assert msg_id in t._ledger
+        t._poll_once()
+        assert len(offered) == 3
+
+    def test_a_delivery_that_raises_is_not_recorded(self, fake_home, capsys):
         _register("target")
         t, bucket = _transport()
-        old = _ulid_at_ms(int((time.time() - 10 * 86400) * 1000))
-        key = f"{PREFIX}/target/{old}.json"
-        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
-        bucket.age(key, 10)
-        _arm(t, lambda _raw: False)
-        t._poll_once()
-        assert bucket.keys() == [key]
-
-    def test_a_delivery_that_raises_is_mail_too(self, fake_home, capsys):
-        _register("target")
-        t, bucket = _transport()
-        old = _ulid_at_ms(int((time.time() - 10 * 86400) * 1000))
-        key = f"{PREFIX}/target/{old}.json"
-        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
-        bucket.age(key, 10)
+        msg_id = new_ulid()
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
 
         def explode(_raw: bytes) -> None:
             raise RuntimeError("inbox is full")
@@ -434,22 +499,7 @@ class TestPoll:
         _arm(t, explode)
         t._poll_once()
         assert bucket.keys() == [key]
-        assert "past retain_days" not in capsys.readouterr().out
-
-    def test_a_failed_delete_says_so_once(self, fake_home, capsys):
-        _register("target")
-        t, bucket = _transport()
-        msg_id = new_ulid()
-        bucket.put_object(
-            Bucket=BUCKET, Key=f"{PREFIX}/target/{msg_id}.json", Body=_envelope(msg_id)
-        )
-        bucket.fail.add("delete")
-        seen: list[bytes] = []
-        _arm(t, seen.append)
-        t._poll_once()
-        t._poll_once()
-        assert len(seen) == 2
-        assert capsys.readouterr().out.count("will be redelivered") == 1
+        assert msg_id not in t._ledger
 
     def test_an_object_that_is_not_the_envelope_it_names_is_left(
         self, fake_home, capsys
@@ -537,6 +587,107 @@ class TestLifecycle:
 
 
 class TestRetention:
+    """Mail leaves the wire by time, never because somebody read it.
+
+    Every machine that holds a name reads that mailbox, and none of them can
+    know how many others are still offline. So the reap sweeps every object
+    once both its ULID mint time and its `LastModified` clear `retain_days`:
+    consumed or not, well-formed or junk.
+    """
+
+    def _old(self) -> str:
+        return _ulid_at_ms(int((time.time() - 10 * 86400) * 1000))
+
+    def test_an_expired_consumed_envelope_is_reaped(self, fake_home, capsys):
+        _register("target")
+        t, bucket = _transport()
+        old = self._old()
+        key = f"{PREFIX}/target/{old}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
+        t._ledger.record(old)
+        bucket.age(key, 10)
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+        assert bucket.keys() == []
+        assert "past retain_days" in capsys.readouterr().out
+
+    def test_an_expired_envelope_nobody_took_is_reaped_unread(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        old = self._old()
+        key = f"{PREFIX}/target/{old}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
+        bucket.age(key, 10)
+        seen: list[bytes] = []
+        _arm(t, seen.append)
+        t._poll_once()
+        assert bucket.keys() == []
+        assert seen == []
+        assert ("get", key) not in bucket.calls
+
+    def test_a_fresh_envelope_is_left(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        msg_id = new_ulid()
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
+        _arm(t, lambda _raw: False)
+        t._poll_once()
+        assert bucket.keys() == [key]
+
+    def test_a_consumed_but_fresh_envelope_is_left(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        msg_id = new_ulid()
+        key = f"{PREFIX}/target/{msg_id}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id))
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+        t._poll_once()
+        assert msg_id in t._ledger
+        assert bucket.keys() == [key]
+
+    def test_a_delayed_send_of_an_old_envelope_is_delivered(self, fake_home):
+        """A backoff retry republishes the original envelope, ULID and all, so
+        an old mint time on a fresh object is a late message, not an old one."""
+        _register("target")
+        t, bucket = _transport()
+        old = self._old()
+        key = f"{PREFIX}/target/{old}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
+        seen: list[bytes] = []
+        _arm(t, lambda raw: seen.append(raw) or True)
+        t._poll_once()
+        assert len(seen) == 1
+        assert bucket.keys() == [key]
+
+    def test_retain_days_zero_keeps_mail_forever(self, fake_home):
+        _register("target")
+        t, bucket = _transport(retain_days=0)
+        old = _ulid_at_ms(int((time.time() - 400 * 86400) * 1000))
+        key = f"{PREFIX}/target/{old}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
+        t._ledger.record(old)
+        bucket.age(key, 400)
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+        assert bucket.keys() == [key]
+
+    def test_a_refused_reap_is_tried_again(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        old = self._old()
+        key = f"{PREFIX}/target/{old}.json"
+        bucket.put_object(Bucket=BUCKET, Key=key, Body=_envelope(old))
+        bucket.age(key, 10)
+        bucket.fail.add("delete")
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+        assert bucket.keys() == [key]
+        bucket.fail.discard("delete")
+        t._poll_once()
+        assert bucket.keys() == []
+
     def test_an_undeliverable_object_is_dropped_once_both_clocks_agree(
         self, fake_home, capsys
     ):
@@ -780,7 +931,7 @@ def test_delivered_mail_crosses_two_nodes(fake_home, monkeypatch, tmp_path):
     finally:
         receiver.stop()
     assert [json.loads(raw)["id"] for raw in arrived] == [msg_id]
-    assert shared.keys() == []
+    assert shared.keys() == [f"{PREFIX}/target/{msg_id}.json"]
 
     receipt = build_delivery_receipt(json.loads(arrived[0]), ["target"])
     node(receiver_home).publish(json.dumps(receipt).encode("utf-8"))
@@ -794,7 +945,7 @@ def test_delivered_mail_crosses_two_nodes(fake_home, monkeypatch, tmp_path):
     finally:
         sender.stop()
     assert [json.loads(raw)["id"] for raw in back] == [receipt["id"]]
-    assert shared.keys() == []
+    assert f"{PREFIX}/example-sender/{receipt['id']}.json" in shared.keys()
 
 
 def test_every_address_shape_reaches_the_node_that_holds_it(
@@ -854,7 +1005,7 @@ def test_every_address_shape_reaches_the_node_that_holds_it(
     _arm(receiver, lambda raw: arrived.append(raw) or True)
     receiver._poll_once()
     assert sorted(json.loads(raw)["to"] for raw in arrived) == sorted(shapes)
-    assert shared.keys() == []
+    assert len(shared.keys()) == len(shapes)
 
 
 def test_a_sibling_daemon_s_claim_does_not_cost_the_message(fake_home, tmp_path):
@@ -863,8 +1014,8 @@ def test_a_sibling_daemon_s_claim_does_not_cost_the_message(fake_home, tmp_path)
 
     Every daemon on a machine runs its own subscriber over the same registry,
     so `a8s run alice` and `a8s run bob` both poll this mailbox. One wins the
-    claim; the other is handed an envelope it did not consume and must leave
-    it where it is.
+    claim; the other is handed an envelope it did not consume and must not
+    record it, or a sibling that dies mid-delivery costs the message.
     """
     from core import Participant, inbox_dir
     from network import claim_message, make_receive_callback, release_claim
@@ -888,18 +1039,12 @@ def test_a_sibling_daemon_s_claim_does_not_cost_the_message(fake_home, tmp_path)
     # ring, and this node's next poll is the redelivery the wire promises.
     release_claim(msg_id)
     t._poll_once()
-    assert bucket.keys() == []
+    assert msg_id in t._ledger
     assert [p.name for p in inbox_dir("target").iterdir()] == [f"{msg_id}.json"]
 
 
-def test_a_month_old_bucket_is_not_a_backlog_this_node_must_refuse(fake_home):
-    """No join cutoff, unlike the folder transport, and on purpose.
-
-    A folder keeps every envelope every machine ever sent, so a machine that
-    joins one is not owed its history. A mailbox here is emptied by the one
-    node that reads it, so whatever is in it when that node comes back is mail
-    addressed to it while it was away.
-    """
+def test_a_remote_with_no_join_cutoff_consumes_what_is_there(fake_home):
+    """A spec written by hand carries no `joined`, so nothing is backlog."""
     _register("target")
     t, bucket = _transport()
     old = _ulid_at_ms(int((time.time() - 30 * 86400) * 1000))
@@ -921,9 +1066,8 @@ def test_an_inbox_that_would_not_take_it_leaves_the_object_on_the_wire(
     """The real callback, the real writer, and a disk that says no.
 
     An envelope this node cannot file is not an envelope this node is done
-    with. Deleting it here is the one irreversible step in the whole path:
-    repair the disk afterwards and there is nothing left to redeliver, and
-    the seen-ids ring would turn away a republished copy of the same bytes.
+    with. Stamping the ledger here would skip the object on every later poll:
+    repair the disk afterwards and this machine never reads it again.
     """
     import network
     from core import Participant, inbox_dir
@@ -942,24 +1086,52 @@ def test_an_inbox_that_would_not_take_it_leaves_the_object_on_the_wire(
     real_write = network._write_to_inbox
     monkeypatch.setattr(network, "_write_to_inbox", lambda *a, **k: False)
     t._poll_once()
-    assert bucket.keys() == [key], "the only copy of the message"
+    assert msg_id not in t._ledger, "not consumed, so offered again"
     assert seen_id_contains(msg_id) is False, "a failure is not a receipt"
 
     monkeypatch.setattr(network, "_write_to_inbox", real_write)
     t._poll_once()
-    assert bucket.keys() == []
+    assert msg_id in t._ledger
     assert [p.name for p in inbox_dir("target").iterdir()] == [f"{msg_id}.json"]
 
 
 class TestPaging:
     """One poll reads one page, and the page has to move.
 
-    Everything this transport declines to delete stays at the front of its
-    mailbox: a delivery the receive path refused, an object that would not
-    fetch, junk still inside the retention window, and on AWS a CommonPrefix,
-    which spends the key budget an object would. A poll that always asks for
-    the first page therefore stops at the first thing it cannot clear.
+    Nothing leaves a mailbox until it expires, so its front holds every
+    envelope this machine already consumed, a delivery the receive path
+    refused, an object that would not fetch, junk still inside the retention
+    window, and on AWS a CommonPrefix, which spends the key budget an object
+    would. A poll that always asks for the first page therefore stops at the
+    first page of mail it has already read.
     """
+
+    def test_consumed_mail_at_the_front_costs_one_list_and_no_get(self, fake_home):
+        _register("target")
+        t, bucket = _transport()
+        ids = sorted(new_ulid() for _ in range(PAGE_SIZE))
+        for msg_id in ids:
+            bucket.put_object(
+                Bucket=BUCKET,
+                Key=f"{PREFIX}/target/{msg_id}.json",
+                Body=_envelope(msg_id),
+            )
+        t._ledger.record(*ids)
+        seen: list[str] = []
+        _arm(t, lambda raw: seen.append(json.loads(raw)["id"]) or True)
+        bucket.calls.clear()
+        t._poll_once()
+        assert [verb for verb, _key in bucket.calls] == ["list"]
+
+        fresh = new_ulid()
+        bucket.put_object(
+            Bucket=BUCKET, Key=f"{PREFIX}/target/{fresh}.json", Body=_envelope(fresh)
+        )
+        bucket.calls.clear()
+        t._poll_once()
+        t._poll_once()
+        assert seen == [fresh], "the second page is where the new mail is"
+        assert [verb for verb, _key in bucket.calls].count("get") == 1
 
     def test_retained_envelopes_do_not_pin_the_mail_behind_them(self, fake_home):
         _register("target")
@@ -985,7 +1157,7 @@ class TestPaging:
         assert last not in attempted, "a full page of mail comes before it"
         t._poll_once()
         assert last in attempted
-        assert f"{PREFIX}/target/{last}.json" not in bucket.keys()
+        assert last in t._ledger
 
     def test_a_page_of_only_prefixes_does_not_pin_the_listing(self, fake_home):
         _register("target")
@@ -1092,3 +1264,204 @@ class TestPaging:
         t._poll_once()
         assert "target" not in t._cursor
 
+
+
+def test_a_name_on_two_machines_gets_a_copy_on_each(fake_home, monkeypatch, tmp_path):
+    """The owner's case: one name, two machines, one bucket.
+
+    MQTT hands every subscriber on the topic a copy, and each node filters by
+    its own registry. The bucket has to match: the first machine to read the
+    envelope leaves it for the second, and each one records the read in its
+    own ledger under its own config home.
+    """
+    from conftest import set_home
+
+    shared = FakeBucket()
+    homes = [tmp_path / "machine-a", tmp_path / "machine-b"]
+    for home in homes:
+        (home / ".a8s").mkdir(parents=True)
+    msg_id = new_ulid()
+    key = f"{PREFIX}/target/{msg_id}.json"
+    shared.put_object(Bucket=BUCKET, Key=key, Body=_envelope(msg_id, to="target"))
+
+    arrived: dict[str, list[str]] = {}
+    for home in homes:
+        set_home(monkeypatch, home)
+        _register("target")
+        t = S3Transport(remote_id="hub", bucket=BUCKET, prefix=PREFIX)
+        t._client_cache = shared
+        got = arrived.setdefault(home.name, [])
+        _arm(t, lambda raw, got=got: got.append(json.loads(raw)["id"]) or True)
+        t._poll_once()
+        t._poll_once()
+    assert arrived == {"machine-a": [msg_id], "machine-b": [msg_id]}
+    assert shared.keys() == [key]
+
+
+class TestJoined:
+    """A machine that joins is owed the mail sent after it joined, as MQTT
+    gives a new session nothing published before it existed."""
+
+    def test_mail_minted_before_the_join_is_not_delivered(self, fake_home):
+        from transports.s3 import JOIN_SKEW_GRACE_MS
+
+        _register("target")
+        now_ms = int(time.time() * 1000)
+        joined = _ulid_at_ms(now_ms)
+        t, bucket = _transport(joined=joined)
+        history = _ulid_at_ms(now_ms - JOIN_SKEW_GRACE_MS - 60_000)
+        late = _ulid_at_ms(now_ms - JOIN_SKEW_GRACE_MS + 60_000)
+        for msg_id in (history, late):
+            bucket.put_object(
+                Bucket=BUCKET,
+                Key=f"{PREFIX}/target/{msg_id}.json",
+                Body=_envelope(msg_id),
+            )
+        seen: list[str] = []
+        _arm(t, lambda raw: seen.append(json.loads(raw)["id"]) or True)
+        t._poll_once()
+        assert seen == [late], "inside the skew grace is current mail"
+        assert ("get", f"{PREFIX}/target/{history}.json") not in bucket.calls
+        assert len(bucket.keys()) == 2
+
+    def test_joined_must_be_a_ulid(self):
+        with pytest.raises(ValueError, match="joined must be a ULID"):
+            _transport(joined="yesterday")
+
+
+class TestLedgerCompaction:
+    """The ledger cap compacts to what is still in the bucket."""
+
+    def test_ids_whose_object_is_gone_are_forgotten(self, fake_home, monkeypatch):
+        import transports.ledger as ledger_mod
+
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
+        _register("target")
+        t, bucket = _transport()
+        ids = sorted(new_ulid() for _ in range(3))
+        for msg_id in ids:
+            bucket.put_object(
+                Bucket=BUCKET,
+                Key=f"{PREFIX}/target/{msg_id}.json",
+                Body=_envelope(msg_id),
+            )
+        _arm(t, lambda _raw: True)
+        t._poll_once()
+        assert sorted(t._ledger.ids) == ids, "all three are still in the bucket"
+        bucket.delete_object(Bucket=BUCKET, Key=f"{PREFIX}/target/{ids[0]}.json")
+        t._last_compact = 0.0
+        t._ledger.record(new_ulid())
+        assert ids[0] not in t._ledger
+        assert set(ids[1:]) <= t._ledger.ids
+
+    def test_a_failed_listing_keeps_the_whole_ledger(self, fake_home, monkeypatch):
+        import transports.ledger as ledger_mod
+
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
+        _register("target")
+        t, bucket = _transport()
+        ids = sorted(new_ulid() for _ in range(3))
+        bucket.fail.add("list")
+        t._ledger.record(*ids)
+        assert sorted(t._ledger.ids) == ids
+
+    def test_compaction_lists_the_bucket_at_most_once_an_hour(
+        self, fake_home, monkeypatch
+    ):
+        """With `retain_days 0` nothing ever leaves, so the ledger stays over
+        the cap and every consumption would otherwise walk every mailbox."""
+        import transports.ledger as ledger_mod
+
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 1)
+        _register("target")
+        t, bucket = _transport()
+        t._ledger.record(new_ulid(), new_ulid())
+        t._ledger.record(new_ulid())
+        t._ledger.record(new_ulid())
+        assert [verb for verb, _key in bucket.calls].count("list") == 1
+
+
+class TestOutboxAcrossARestart:
+    """Mail a node could not send while it was down goes out when it starts
+    again, with nobody touching it: `a8s start` runs this same resident loop.
+
+    A host restart is the case — the node is told to stop, the network goes
+    with it, and whatever sat in the outbox waits for the next start."""
+
+    def _run_until(self, monkeypatch, transport, done, timeout: float = 10.0) -> None:
+        import threading
+
+        import daemon as daemon_mod
+        from daemon import attached_loop
+
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        monkeypatch.setattr(daemon_mod, "load_remotes", lambda node=None: [transport])
+
+        def stop_when_done() -> None:
+            deadline = time.monotonic() + timeout
+            while daemon_mod._STOP_EVENT is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            while not done() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            stop = daemon_mod._STOP_EVENT
+            if stop is not None:
+                stop.set()
+
+        watcher = threading.Thread(target=stop_when_done, daemon=True)
+        watcher.start()
+        assert attached_loop(["sender"], 0.01, single_pass=False) == 0
+        watcher.join(timeout=1.0)
+
+    def _sender(self, tmp_path):
+        root = tmp_path / "sender"
+        root.mkdir()
+        save_registry({"sender": {"root": str(root)}})
+        return root
+
+    def test_mail_written_while_the_node_was_down_publishes_on_start(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        from mailbox import _write_outbox
+
+        root = self._sender(tmp_path)
+        msg_id = _write_outbox("sender", root, "far-agent", "sent while down", []).stem
+        key = f"{PREFIX}/far-agent/{msg_id}.json"
+        t, bucket = _transport()
+
+        self._run_until(monkeypatch, t, lambda: key in bucket.objects)
+
+        assert key in bucket.objects
+        assert json.loads(bucket.objects[key][0])["content"] == "sent while down"
+
+    def test_mail_whose_publish_failed_before_the_stop_publishes_on_start(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        """The last run tried, the bucket refused, and the node stopped with
+        the message parked for a backoff retry. The next start retries it
+        once that backoff is due; the first step is 30 seconds."""
+        import mailbox as mailbox_mod
+        from core import pending_dir
+        from daemon import attached_loop
+        from mailbox import _write_outbox
+
+        root = self._sender(tmp_path)
+        msg_id = _write_outbox("sender", root, "far-agent", "parked", []).stem
+        key = f"{PREFIX}/far-agent/{msg_id}.json"
+
+        down, down_bucket = _transport()
+        down_bucket.fail.add("put")
+        monkeypatch.setattr(mailbox_mod, "BACKOFF_SCHEDULE", [0] * 9)
+        import daemon as daemon_mod
+
+        monkeypatch.setattr(daemon_mod, "load_remotes", lambda node=None: [down])
+        assert attached_loop(["sender"], 0.01, single_pass=True) == 0
+        assert key not in down_bucket.objects
+        sidecars = list(pending_dir("sender").glob("*.retry"))
+        assert len(sidecars) == 1
+        assert json.loads(sidecars[0].read_text())["attempts"] == 1
+
+        t, bucket = _transport()
+        self._run_until(monkeypatch, t, lambda: key in bucket.objects)
+
+        assert key in bucket.objects
+        assert not list(pending_dir("sender").iterdir())

@@ -609,7 +609,10 @@ my-bare-node set MODEL qwen3.6` after the fact). The three `ollama-*`
 definitions require it, since the launcher has no default model of its own;
 the rest carry it as `--model=$MODEL?`, an optional reference (see
 [docs/a8s.md](a8s.md)) — set, the turn pins that model, unset, the flag drops
-and the engine picks its own default.
+and the engine picks its own default. For cursor that default is
+`composer-2.5`, not the CLI's own `auto`: `auto` reuses the last `--model`
+run on the machine, which spends the subscription on the newest model
+instead (#282).
 
 Every one also carries `--timeout=$TIMEOUT?` on all three wakes:
 `a8s vars my-bare-node set TIMEOUT 1800` raises the turn timeout

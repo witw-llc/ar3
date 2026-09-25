@@ -2268,3 +2268,44 @@ class TestWorstAttachmentOutcome:
         ok = {"files": [{"filename": "doc.txt"}]}
         _worst_attachment_outcome([ok, {"files": [{"filename": "doc.txt", "error": "E"}]}])
         assert "error" not in ok["files"][0]
+
+
+class TestRemoteThatFailedToStart:
+    """Mail for a name this node does not hold goes to the remotes. When a
+    configured remote failed to start, that mail waits for it instead of
+    being trashed as an unknown recipient."""
+
+    def _alice(self, tmp_path):
+        a_root = tmp_path / "a"
+        a_root.mkdir()
+        save_registry({"A": {"root": str(a_root)}})
+        alice = Participant("A", a_root)
+        ensure_mailboxes(alice)
+        return alice, a_root
+
+    def test_mail_for_a_remote_name_parks_while_the_remote_is_down(self, fake_home, tmp_path):
+        from core import pending_dir, trash_dir
+        from mailbox import _write_outbox
+
+        alice, a_root = self._alice(tmp_path)
+        _write_outbox("A", a_root, "far-away", "hello", [])
+        route_outboxes(
+            [alice], all_agents=[alice],
+            configured_remote_ids=[], unstarted_remote_ids=["broker"],
+        )
+        parked = list(pending_dir("A").glob("*.json"))
+        assert len(parked) == 1
+        sidecar = json.loads(parked[0].with_name(parked[0].name + ".retry").read_text())
+        assert sidecar["attempts"] == 1
+        assert sidecar["next_attempt"]
+        assert not list(trash_dir("A").glob("*.json"))
+
+    def test_with_no_remote_configured_unknown_mail_is_still_trashed(self, fake_home, tmp_path):
+        from core import pending_dir, trash_dir
+        from mailbox import _write_outbox
+
+        alice, a_root = self._alice(tmp_path)
+        _write_outbox("A", a_root, "far-away", "hello", [])
+        route_outboxes([alice], all_agents=[alice], configured_remote_ids=[])
+        assert not list(pending_dir("A").glob("*.json"))
+        assert len(list(trash_dir("A").glob("*.json"))) == 1

@@ -73,6 +73,17 @@ class TestBuildArgv:
         assert "--model" in argv
         assert argv[argv.index("--model") + 1] == "opus"
 
+    def test_cursor_defaults_model_to_composer_when_unset(self, tmp_path):
+        # `a8s vars <name> set MODEL ...` is optional, so an idle engine-cursor
+        # node runs this with model=None — the same unpinned turn that used to
+        # spend on the CLI's own `auto` (#282). It rides the cursor preset's
+        # `model_default`, the same fix `r4t rig add cursor` already gets.
+        argv = engine_run.build_argv(
+            "cursor", "go", model=None, timeout=900, workdir=tmp_path
+        )
+        assert "--model" in argv
+        assert argv[argv.index("--model") + 1] == "composer-2.5"
+
     def test_copilot_gets_no_ask_user_and_takes_a_model(self, tmp_path):
         argv = engine_run.build_argv(
             "copilot", "go", model=None, timeout=900, workdir=tmp_path

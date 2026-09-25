@@ -27,12 +27,13 @@ from typing import Callable, Optional
 #
 # The callback may answer whether this node finished with the envelope. `False`
 # says it did not — a sibling receiver holds it, or delivery failed and the
-# message was deliberately left deliverable — so a transport whose
-# acknowledgement destroys its only copy (`s3`) must leave that envelope on the
-# wire. `None` is no answer at all, which is what a transport gets from any
-# receive path it cannot interrogate, and it reads as a plain delivery. A
-# transport that never deletes on receive (`mqtt`, `folder`) ignores the answer
-# entirely.
+# message was deliberately left deliverable. A transport acknowledges only what
+# the receive path reports consumed: `folder` and `s3` leave the file or object
+# unrecorded and offer it again on the next poll, and `mqtt` withholds the
+# PUBACK, re-offers the message on a backoff while it runs, and leaves the rest
+# for the broker to redeliver on the next session. `None` is no answer at all,
+# which is what a transport gets from any receive path it cannot interrogate,
+# and it reads as a plain delivery.
 OnMessage = Callable[[bytes], Optional[bool]]
 
 
@@ -60,11 +61,12 @@ class Transport(ABC):
 
         `False` means the receive path did not finish with the envelope: a
         sibling holds the claim, an inbox would not take it, or a download is
-        still running. A transport that holds the only copy — an object in a
-        bucket, a file in a folder — must keep it and offer it again. `None`
-        and `True` are both consent to drop it. A transport whose wire has
-        already acknowledged the message by the time it reaches here, as MQTT
-        has, can only ignore the answer."""
+        still running. The transport must not acknowledge it. A transport that
+        polls a wire it shares — an object in a bucket, a file in a folder —
+        leaves it unrecorded and offers it again; MQTT withholds the PUBACK,
+        offers it again while it runs, and leaves it for the broker to
+        redeliver on the next session. `None` and `True` are both consent to
+        acknowledge it."""
 
     @abstractmethod
     def stop(self) -> None:
@@ -73,3 +75,17 @@ class Transport(ABC):
     @abstractmethod
     def publish(self, envelope: bytes) -> None:
         """Send one envelope. Raises `TransportError` on failure."""
+
+    def is_connected(self) -> bool:
+        """Whether the link is up now. A transport with no link to lose is
+        always connected."""
+        return True
+
+    def publish_control(self, envelope: bytes) -> bool:
+        """Send one control envelope (a delivery receipt). Returns True when
+        it went out, False when the transport holds it to send once its link
+        is back. Raises `TransportError` when it can do neither.
+
+        A transport with no link to lose sends it the same way as `publish`."""
+        self.publish(envelope)
+        return True

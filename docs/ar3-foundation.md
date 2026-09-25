@@ -16,7 +16,8 @@ app is relocated away from the repo (the isolation container copies
 `apps/r4t` alone). The shared modules are
 `ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`,
 `atomic_write_bytes`),
-`ar3.proc` (`spawn` / `terminate_group`), `ar3.envseam` (the reserved-env
+`ar3.proc` (`spawn` / `terminate_group`, and `pid_alive` / `process_start_token`
+for reading a pid file), `ar3.envseam` (the reserved-env
 contract), and `ar3.vendor` (the vendoring hook). Beyond stdlib there are exactly
 two tiers: **tier 1** is `ar3/_vendor/`, unmodified PyPI releases pinned with
 verified sha256 in `ar3/_vendor/vendor.txt`; **tier 2** is the foundation's deps
@@ -69,6 +70,9 @@ learned the grammar of all of them, including the ones that do not exist yet.
   the process.
 - **One timeout convention**, with `124` as its exit code.
 - No app writes its own kill sequence.
+- **One pid-file liveness rule**: a pid file is live when `pid_alive` holds
+  and the start token stamped beside it (`pid.start`) matches
+  `process_start_token`. A pid the OS reused reads as stopped.
 
 ## 5. Integration
 
@@ -89,7 +93,9 @@ learned the grammar of all of them, including the ones that do not exist yet.
 - **Frontmatter is the skill gate.** A `docs/*.md` page beginning `---` installs
   as a skill; deep pages do not grow frontmatter.
 - **Quoted YAML scalars** in skill frontmatter, always.
-- **One suite `VERSION`**, bumped on every merge to `main`.
+- **One suite `VERSION`**, shaped `major.minor.build`. The build bumps on
+  every merge to `main`; the minor bumps, build reset to 0, when the owner
+  closes a phase; the major bumps at the 1.0 hand-off.
 - **A merge to `main` is the release.** There is no second switch.
 - **Changelog discipline**: user-visible changes land under `Unreleased` in the
   same PR.

@@ -118,23 +118,28 @@ Read [a8s.md](a8s.md) first for concept and usage.
   only if bytes are missing does it hand that recipient's delivery to a bounded
   pool, which retries, writes the inbox, and sends the receipt. Ordering is
   preserved for everything that downloads first try.
-- **An s3 remote's prefix has one owner and deletes what it consumes.** The
-  node whose registry holds a name is the only node that may poll
-  `<prefix>/<name>/`, because deletion is the acknowledgement: a second reader
-  on the same prefix deletes mail the first one was owed. That is why a publish
-  addressed to a name the publishing node already answers for writes nothing,
-  and why `a8s remote` and `a8s storage` each refuse a prefix the other owns at
-  the same endpoint — the transport's retention reap walks everything under its
-  own prefix, and `services/s3.py` deliberately never deletes at all. Do not
-  default the transport's prefix; a default would land on the storage service's.
+- **An s3 remote fans out, and only time removes its mail.** Every node whose
+  registry holds a name polls `<prefix>/<name>/`, and a name may live on
+  several machines; each one gets a copy, as each MQTT subscriber does. Never
+  delete an envelope on receive: record its ULID in this machine's ledger
+  (`core.s3_ledger_path`, `transports/ledger.py`) and leave the object for the
+  other machines. Publish every envelope, including one addressed to a name
+  this node holds — the routing pass has already delivered it and written
+  `seen-ids`, as it does before an MQTT publish, and the receive path collapses
+  the echo. Delete an object only in the retention reap, and only when both its
+  ULID mint time and its `LastModified` clear `retain_days`. Keep the refusal
+  in `a8s remote` and `a8s storage` of a prefix the other uses at the same
+  endpoint: the reap deletes under the transport's prefix, and
+  `services/s3.py` never deletes at all. Do not default the transport's prefix;
+  a default would land on the storage service's.
 - **Only the receive path may say an envelope was consumed.** `receive_envelope`
   returns that answer and `make_receive_callback` passes it to the transport.
   Returning without raising is not the answer: a sibling daemon holding the
   claim, and a released claim after a failed delivery, both return normally and
-  both mean the message is still owed an attempt. A transport that deletes on
-  acknowledgement deletes on the answer alone. One that never deletes on receive
-  ignores it, and the `OnMessage` contract lets a callback give no answer at
-  all.
+  both mean the message is still owed an attempt. A transport acknowledges only
+  what the receive path reports consumed: MQTT redelivers the rest on the next
+  session, and s3 and folder leave the object or file. The `OnMessage`
+  contract lets a callback give no answer at all, which reads as consumed.
 - **Consumed means an inbox holds it.** Only a path that answers `True` appends
   to `seen-ids`, because the ring suppresses every later attempt: recording an
   id whose write failed converts a disk that was full for a minute into a
@@ -173,6 +178,18 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.
+- **MQTT acknowledges a message only when the callback reports it consumed**
+  (`manual_ack`). A refused message waits in a worker-only retry list (256,
+  oldest dropped with a WARN) and is offered again from 1 s, doubling to 30 s.
+  Never ack a message from an earlier connection: a packet id belongs to its
+  session, so the broker redelivers it instead. `stop()` drains: new arrivals
+  and unconsumed retries stay unacknowledged for the broker to replay, the
+  worker finishes its queue and sends its receipts, and only then does the
+  client disconnect. Don't move `disconnect()` ahead of the worker join.
+- **A receipt never waits on the link.** `publish_control` holds a receipt
+  while the link is down and the worker sends the held list on the next
+  CONNACK. The flush never runs on paho's network thread: a QoS-1 publish
+  there waits for a PUBACK that same thread has to read.
 - **Per-message backoff retry.** BACKOFF_SCHEDULE drives `.retry` sidecars.
 - **Exit 0 is the only delivery ack.** Any other wake outcome — nonzero exit,
   timeout kill, failed spawn, unexpanded vars — moves the envelopes back into
@@ -238,9 +255,12 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **`transactions.sqlite3` holds routing breadcrumbs, not bodies.** Several rows
   per message, written concurrently by the router, wake handlers, and receive
   loops. `txlog.log` never raises; `a8s trace <ULID>` and `a8s transactions`
-  read it, `a8s ls` reads the remote names heard through it, and `a8s update`
-  retains `txlog_max_rows`. Both stores share the WAL/busy-retry discipline in
-  `sqlite_store.py`.
+  read it, and `a8s update` retains `txlog_max_rows`. The remote address book
+  `a8s ls` reads is the `remote_last_heard` table in the same file, one row per
+  folded name, written by `txlog.log` in the same transaction as each
+  `RECEIVED_REMOTE` row. Retention never touches it; do not derive the book
+  from the event rows again. Both stores share the WAL/busy-retry discipline
+  in `sqlite_store.py`.
 - **A reader never reports "no rows" for a store it could not open, and never
   creates one.** Missing and unreadable are both errors naming the path
   (`a8s: cannot read <path>: <reason>`, `no conversation store at <path>`),

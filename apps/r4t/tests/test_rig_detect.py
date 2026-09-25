@@ -16,6 +16,7 @@ import detect
 import engines
 from engines import check as engine_check
 from r4t import main as r4t_main
+from rig import add_preset_rig
 
 
 def report(preset: str, *, installed=True, version="1.0.0", verdict=engine_check.ACCEPTED, detail=""):
@@ -151,6 +152,27 @@ class TestTable:
         assert presets["claude"]["detected"] is True
         assert presets["claude"]["fuel"] == 0.5
         assert presets["codex"]["detected"] is False
+
+    def test_flags_a_cursor_rig_still_pinned_to_auto(self, monkeypatch, tmp_path, capsys):
+        # A rig added before the cursor preset's default changed to
+        # composer-2.5 (#282) baked `auto` into its invoke — `rig detect`
+        # reads the existing config too, not just what is installed.
+        config_path = tmp_path / "rigs.json"
+        add_preset_rig(config_path, "old", "cursor", model="auto")
+        stub_probes(monkeypatch, {})
+        code = r4t_main(["rig", "detect", "--dir", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert code == 1  # nothing installed on this stubbed machine
+        assert "old: r4t rig set old model composer-2.5" in out
+
+    def test_json_carries_stale_cursor_rigs(self, monkeypatch, tmp_path, capsys):
+        config_path = tmp_path / "rigs.json"
+        add_preset_rig(config_path, "old", "cursor", model="auto")
+        stub_probes(monkeypatch, {})
+        code = r4t_main(["rig", "detect", "--json", "--dir", str(tmp_path)])
+        payload = json.loads(capsys.readouterr().out)
+        assert code == 1
+        assert payload["stale_cursor_rigs"] == ["old"]
 
 
 class TestAdd:

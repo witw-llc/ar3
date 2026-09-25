@@ -98,6 +98,49 @@ class TestRunStartStop:
         assert "mode=run" in starts[-1][1]["detail"]
         assert stops[-1][1]["detail"] == "stop-signal"
 
+    def test_a_stop_signal_names_itself_and_the_parent_it_found(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        """A node that detaches on a signal says which one and who its
+        parent was, in its own log and in RUN_STOP: a host shutdown shows
+        the init system there, and nothing else in the record would."""
+        import signal
+
+        import daemon as daemon_mod
+        from core import agent_log_path
+
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        _register(tmp_path, fixtures_dir)
+        monkeypatch.setattr(os, "getppid", lambda: 1)
+        monkeypatch.setattr(
+            daemon_mod, "_process_command", lambda pid: "systemd" if pid == 1 else ""
+        )
+
+        def deliver_sigterm(self, timeout=None):
+            # The handler attached_loop installed, called as the interpreter
+            # would call it — no real signal, so the test runs on Windows too.
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(deliver_sigterm))
+        rc = attached_loop(["A"], 0.01, single_pass=False)
+        assert rc == 0
+
+        cause = f"SIGTERM ({int(signal.SIGTERM)}) from ppid 1 (systemd)"
+        stops = txlog.read_recent(events=["RUN_STOP"], limit=10)
+        assert stops[-1][1]["detail"] == f"stop-signal {cause}"
+        log = agent_log_path("A").read_text()
+        assert f"[a8s] A: received {cause}; detaching after current wake" in log
+        assert log.index("received SIGTERM") < log.index("[a8s] A: detached")
+
+    def test_the_parent_command_is_read_from_the_system(self):
+        from daemon import _process_command
+
+        if os.name == "nt":
+            assert isinstance(_process_command(os.getpid()), str)
+            return
+        assert "python" in _process_command(os.getpid()).lower()
+
 
 class TestWakeStartReturn:
     def test_single_wake_rows_carry_the_envelope_stem(self, fake_home, tmp_path, fixtures_dir):

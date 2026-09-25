@@ -43,7 +43,7 @@ cold behavior, cross-directory scope probe.
 |---|---|---|---|---|
 | `claude` | `claude … -p {prompt}` with `--permission-mode dontAsk` | `--continue`, but graded **poor** — a roster may not use it | `claude-flag` | |
 | `codex` | `codex exec --sandbox workspace-write … {prompt}` | `resume --last --include-non-interactive` after `exec` | `codex-config` | Optional `[SESSION_ID]` is the bin#256 pin path |
-| `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `auto` |
+| `cursor` | `agent -p --trust --force --approve-mcps {prompt}` | `--continue` | `cursor-file` (opt-in) | Default model pinned to `composer-2.5`, Cursor's cheap default — an unpinned invoke otherwise reuses the last `--model` used on the machine, which spent a subscription on a frontier model (#282) |
 | `opencode` | `opencode run --auto --dir {workdir} {prompt}` | `--continue` | `opencode-env` | `{workdir}` is absolute (bin#273) |
 | `muse` | `muse exec --approval-mode never --user-input-auto-resolve {prompt}` | **no** | none | Meta Muse; `--yolo` is bypass. Quota via `muse serve` MSP `usage/read` — a fresh host observes nothing until its first turn, so a live read mints one; only `r4t engine muse quota` pays that |
 | `devin` | `devin --permission-mode dangerous --respect-workspace-trust false -p {prompt}` | `--continue` (directory-scoped; help-verified, not live-verified) | `devin-file` (opt-in) | Every permission mode below `dangerous` still prompts for exec and writes — the floor is bypass. No quota verb — `/usage` and `/session-stats` are in-session views |

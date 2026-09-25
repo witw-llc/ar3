@@ -4,6 +4,7 @@ Presigned S3 URLs and similar links are fetched with a normal GET; no service-
 specific credentials on the receiver."""
 from __future__ import annotations
 
+import http.client
 import os
 import shutil
 import urllib.error
@@ -100,18 +101,42 @@ def http_get_url_to_path(
             tmp = dest.with_name(dest.name + ".part")
             dest.parent.mkdir(parents=True, exist_ok=True)
             written = 0
-            with tmp.open("wb") as out:
-                while True:
-                    chunk = resp.read(_CHUNK)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if max_bytes is not None and written > max_bytes:
-                        tmp.unlink(missing_ok=True)
-                        raise StorageError(
-                            f"download exceeded max_file_bytes ({max_bytes})"
-                        )
-                    out.write(chunk)
+            try:
+                with tmp.open("wb") as out:
+                    while True:
+                        chunk = resp.read(_CHUNK)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if max_bytes is not None and written > max_bytes:
+                            tmp.unlink(missing_ok=True)
+                            raise StorageError(
+                                f"download exceeded max_file_bytes ({max_bytes})"
+                            )
+                        out.write(chunk)
+            except http.client.IncompleteRead as e:
+                tmp.unlink(missing_ok=True)
+                raise StorageError(
+                    f"download truncated for {url}: {e}"
+                ) from e
+            content_length = resp.headers.get("Content-Length")
+            content_encoding = resp.headers.get("Content-Encoding")
+            if content_length is not None and not content_encoding:
+                try:
+                    expected = int(content_length)
+                except ValueError:
+                    expected = None
+                # A short read closes cleanly — no exception, just fewer
+                # bytes than promised. The chunked loop above only raises on
+                # a malformed chunked stream, so a plain Content-Length body
+                # cut off mid-transfer needs this explicit check, or the
+                # partial file gets renamed into place as if it were whole.
+                if expected is not None and written != expected:
+                    tmp.unlink(missing_ok=True)
+                    raise StorageError(
+                        f"download truncated for {url}: expected "
+                        f"{expected} bytes, got {written}"
+                    )
             os.replace(str(tmp), str(dest))
     except StorageError:
         raise

@@ -119,6 +119,27 @@ _SCHEMA = (
     CREATE INDEX IF NOT EXISTS transactions_msg_id
         ON transactions(msg_id, seq)
     """,
+    # The remote address book: one row per name ever heard, folded the way
+    # the registry folds names. Retention prunes `transactions` by row count
+    # and never touches this table.
+    """
+    CREATE TABLE IF NOT EXISTS remote_last_heard (
+        name TEXT PRIMARY KEY COLLATE NOCASE,
+        timestamp TEXT NOT NULL,
+        spelling TEXT NOT NULL
+    )
+    """,
+)
+
+# The newest table in `_SCHEMA`: a store without it gets the schema run again,
+# and every statement there is idempotent.
+_SCHEMA_PROBE = "remote_last_heard"
+
+_HEARD_UPSERT = (
+    "INSERT INTO remote_last_heard(name, timestamp, spelling) VALUES (?, ?, ?) "
+    "ON CONFLICT(name) DO UPDATE SET "
+    "timestamp = excluded.timestamp, spelling = excluded.spelling "
+    "WHERE excluded.timestamp >= remote_last_heard.timestamp"
 )
 
 
@@ -127,7 +148,7 @@ class TransactionLogError(RuntimeError):
 
 
 def _connect() -> sqlite3.Connection:
-    return sqlite_store.connect(transactions_path(), _SCHEMA, table="transactions")
+    return sqlite_store.connect(transactions_path(), _SCHEMA, table=_SCHEMA_PROBE)
 
 
 def hold_open() -> sqlite3.Connection:
@@ -215,6 +236,8 @@ def log(
                     f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     row,
                 )
+                if event == "RECEIVED_REMOTE" and sender:
+                    conn.execute(_HEARD_UPSERT, (sender, row[0], sender))
 
         sqlite_store.retry_busy(insert)
     except (OSError, sqlite3.Error):
@@ -234,6 +257,19 @@ def read_events(msg_id: str) -> list[dict[str, str]]:
     return [dict(zip(FIELDS, row)) for row in rows]
 
 
+# Rows a node writes about a message it may not own: a shared topic makes
+# every node log NOT_LOCAL, and publish a no_local_recipient receipt, for
+# every envelope addressed to somebody else, and a remote discard is about
+# whatever arrived. Every other row is this node's own routing or lifecycle.
+_MAYBE_FOREIGN = (
+    "(event IN ('NOT_LOCAL', 'RECEIPT_PUBLISHED') OR (event = 'DISCARDED' AND remote != ''))"
+)
+_LOCAL_ONLY = (
+    f"NOT ({_MAYBE_FOREIGN} AND msg_id NOT IN "
+    f"(SELECT msg_id FROM transactions WHERE msg_id != '' AND NOT {_MAYBE_FOREIGN}))"
+)
+
+
 def read_recent(
     *,
     limit: int = 20,
@@ -242,14 +278,21 @@ def read_recent(
     recipients: list[str] | None = None,
     msg_id: str = "",
     after_seq: int | None = None,
+    local_only: bool = False,
 ) -> list[tuple[int, dict[str, str]]]:
     """Return `(seq, event)` pairs in chronological order, newest `limit` last.
 
     With `after_seq` the limit does not apply: every matching row after that
     cursor comes back, which is what `a8s transactions -f` polls for.
+
+    `local_only` keeps the rows about this node's own messages — ones it
+    routed, published, received or holds a receipt for — and its lifecycle,
+    and drops what it logged about other nodes' traffic on a shared topic.
     """
     where: list[str] = []
     params: list[object] = []
+    if local_only:
+        where.append(_LOCAL_ONLY)
     for column, values in (
         ("event", events),
         ("sender", senders),
@@ -284,46 +327,34 @@ def read_recent(
 def last_heard() -> dict[str, str]:
     """Newest arrival per remote sender: `{name: utc_stamp}`.
 
-    Arrival is the only evidence this log can offer about a remote being
-    alive. `PUBLISHED` records that we handed a message to the transport, not
-    that anything on the far side read it — a remote that is down and a remote
-    that is fine produce the same row. `RECEIVED_REMOTE` cannot be written
-    unless the far side actually spoke.
+    Arrival is the only evidence this node has about a remote being alive.
+    `PUBLISHED` records that we handed a message to the transport, not that
+    anything on the far side read it — a remote that is down and a remote
+    that is fine produce the same row. A `RECEIVED_REMOTE` row cannot be
+    written unless the far side actually spoke, and `log` updates the address
+    book in the same transaction.
 
-    Names fold case-insensitively, matching how the registry resolves them:
-    `Robin` and `robin` are one remote, stamped by whichever spoke last and
-    spelled the way that newest arrival spelled it.
+    The book is its own table, one row per name, so retention of the event
+    log never drops a name. Names fold case-insensitively, matching how the
+    registry resolves them: `Robin` and `robin` are one remote, stamped by
+    whichever spoke last and spelled the way that newest arrival spelled it.
 
-    This reads the transaction log, so it sees only what retention has kept.
-    A remote whose rows have aged out of `txlog_max_rows` drops off the list
-    until it speaks again — the log is an event record, not a roster.
-
-    Alone among the readers here, this one still answers `{}` for a log it
+    Alone among the readers here, this one still answers `{}` for a store it
     cannot open. Its caller is `a8s ls`, whose answer is the registry; the
     heard remotes are a supplement to it. Failing that command over a
     supplement, or printing a warning on every `ls` of a fresh install where
-    the log legitimately does not exist yet, both cost more than they buy.
+    the store legitimately does not exist yet, both cost more than they buy.
     A reader whose whole output is the log — `transactions`, `trace` — says so
     instead.
     """
     try:
         with closing(open_for_read()) as conn:
             rows = conn.execute(
-                "SELECT sender, MAX(timestamp) FROM transactions "
-                "WHERE event = 'RECEIVED_REMOTE' AND sender != '' "
-                "GROUP BY sender"
+                "SELECT spelling, timestamp FROM remote_last_heard"
             ).fetchall()
     except (OSError, sqlite3.Error, TransactionLogError):
         return {}
-    heard: dict[str, tuple[str, str]] = {}
-    for sender, ts in rows:
-        if not sender or not ts:
-            continue
-        key = str(sender).lower()
-        newest = heard.get(key)
-        if newest is None or str(ts) > newest[1]:
-            heard[key] = (str(sender), str(ts))
-    return {name: stamp for name, stamp in heard.values()}
+    return {str(name): str(stamp) for name, stamp in rows if name and stamp}
 
 
 def prune_transactions(max_rows: int | None = None) -> int:

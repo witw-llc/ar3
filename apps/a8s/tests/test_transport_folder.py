@@ -223,10 +223,10 @@ class TestPoll:
         t = _transport(folder)
         t._on_message = cb
         t._poll_once()
-        assert msg_id not in t._consumed, "nobody took it"
+        assert msg_id not in t._ledger.ids, "nobody took it"
         t._poll_once()
         assert seen == [msg_id, msg_id], "offered again"
-        assert msg_id in t._consumed
+        assert msg_id in t._ledger.ids
         t._poll_once()
         assert seen == [msg_id, msg_id], "and now it is done"
         assert capsys.readouterr().out.count("delivery unfinished") == 1
@@ -248,7 +248,7 @@ class TestPoll:
         assert printed.count("delivery failed") == 1
         assert "inbox is read-only" in printed
         # Not recorded: the envelope is retried, not lost.
-        assert msg_id not in t._consumed
+        assert msg_id not in t._ledger.ids
 
     def test_an_unwritable_ledger_says_so_once(
         self, fake_home, folder, monkeypatch, capsys
@@ -261,8 +261,8 @@ class TestPoll:
             raise PermissionError("read-only config home")
 
         monkeypatch.setattr(Path, "open", no_open)
-        t._record_consumed(new_ulid())
-        t._record_consumed(new_ulid())
+        t._ledger.record(new_ulid())
+        t._ledger.record(new_ulid())
         assert capsys.readouterr().out.count("ledger write failed") == 1
 
     def test_missing_folder_is_tolerated(self, fake_home, tmp_path):
@@ -410,9 +410,9 @@ class TestLedgerRotation:
     def test_rotation_keeps_every_envelope_still_in_the_folder(
         self, fake_home, folder, monkeypatch
     ):
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "MAX_SEEN_IDS", 2)
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
         ids = sorted(new_ulid() for _ in range(3))
         for msg_id in ids:
             (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
@@ -433,9 +433,9 @@ class TestLedgerRotation:
     def test_rotation_drops_ids_whose_envelope_is_gone(
         self, fake_home, folder, monkeypatch
     ):
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "MAX_SEEN_IDS", 2)
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
         ids = sorted(new_ulid() for _ in range(3))
         for msg_id in ids:
             (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
@@ -447,17 +447,17 @@ class TestLedgerRotation:
         remaining = set(folder_ledger_path("box").read_text().split())
         assert ids[0] not in remaining
         assert remaining == {p.stem for p in folder.glob("*.json")}
-        assert t._consumed == remaining
+        assert t._ledger.ids == remaining
 
     def test_rotation_keeps_the_ledger_when_the_folder_is_unmounted(
         self, fake_home, tmp_path, monkeypatch
     ):
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "MAX_SEEN_IDS", 2)
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
         t = FolderTransport(remote_id="box", path=str(tmp_path / "gone"))
         ids = sorted(new_ulid() for _ in range(3))
-        t._record_consumed(*ids)
+        t._ledger.record(*ids)
         assert sorted(folder_ledger_path("box").read_text().split()) == ids
 
 
@@ -466,9 +466,9 @@ class TestLedgerLock:
     so the mutex around it has to be the filesystem's, not this process's."""
 
     def _fill(self, folder, monkeypatch, count: int = 3):
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "MAX_SEEN_IDS", 2)
+        monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 2)
         ids = sorted(new_ulid() for _ in range(count))
         for msg_id in ids:
             (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
@@ -504,20 +504,20 @@ class TestLedgerLock:
         """Degradation is availability-safe by construction: the append is what
         keeps an envelope from being delivered twice, so it never waits on a
         lock; the compaction is opportunistic, so it always may."""
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "LEDGER_LOCK_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(ledger_mod, "LEDGER_LOCK_WAIT_SECONDS", 0.05)
         t, ids = self._fill(folder, monkeypatch)
         (folder / f"{ids[0]}.json").unlink()
-        t._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        t._lock_path.touch()
+        t._ledger.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        t._ledger.lock_path.touch()
 
         published = new_ulid()
         t.publish(_envelope(published))
         recorded = folder_ledger_path("box").read_text().split()
         assert published in recorded
         assert ids[0] in recorded  # compaction waited for a free lock
-        assert t._lock_path.is_file()  # and did not release somebody else's
+        assert t._ledger.lock_path.is_file()  # and did not release somebody else's
 
     def test_a_lock_left_by_a_dead_process_is_broken(
         self, fake_home, folder, monkeypatch
@@ -525,19 +525,19 @@ class TestLedgerLock:
         import os
         import time
 
-        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
 
-        monkeypatch.setattr(folder_mod, "LEDGER_LOCK_WAIT_SECONDS", 0.05)
+        monkeypatch.setattr(ledger_mod, "LEDGER_LOCK_WAIT_SECONDS", 0.05)
         t, ids = self._fill(folder, monkeypatch)
         (folder / f"{ids[0]}.json").unlink()
-        t._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        t._lock_path.touch()
-        dead = time.time() - 10 * folder_mod.LEDGER_LOCK_STALE_SECONDS
-        os.utime(t._lock_path, (dead, dead))
+        t._ledger.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        t._ledger.lock_path.touch()
+        dead = time.time() - 10 * ledger_mod.LEDGER_LOCK_STALE_SECONDS
+        os.utime(t._ledger.lock_path, (dead, dead))
 
         t.publish(_envelope(new_ulid()))
         assert ids[0] not in folder_ledger_path("box").read_text().split()
-        assert not t._lock_path.exists()
+        assert not t._ledger.lock_path.exists()
 
     def test_the_rewrite_temp_name_is_process_unique(
         self, fake_home, folder, monkeypatch

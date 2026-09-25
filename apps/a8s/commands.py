@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from core import (
     out,
     out_agent,
     pid_path,
+    s3_ledger_path,
     trash_dir,
     unique_path,
     user_definitions_dir,
@@ -1348,14 +1350,27 @@ def cmd_run(args: list[str], interval: float) -> int:
     return attached_loop(members, interval, drain_seconds=drain_seconds)
 
 
+def _each_name(names: list[str], act: Callable[[str], int]) -> int:
+    """Act on every name in order, whatever the others did; the first failure
+    code is the command's."""
+    rc = 0
+    for name in names:
+        rc = act(name) or rc
+    return rc
+
+
 def cmd_start(args: list[str]) -> int:
-    """`a8s start <name>` — spawn ONE detached background process. The child
-    runs `a8s run <name>` and (if <name> is an alias) handles every member in
-    a single process. Returns the child's PID."""
-    if len(args) != 1:
-        print("usage: a8s start <name>", file=sys.stderr)
+    """`a8s start <name> [<name> ...]` — spawn one detached background process
+    per name, in order. The child runs `a8s run <name>` and (if <name> is an
+    alias) handles every member in a single process. Prints each child's PID;
+    exits nonzero when any name failed to start."""
+    if not args:
+        print("usage: a8s start <name> [<name> ...]", file=sys.stderr)
         return 2
-    name = args[0]
+    return _each_name(args, _start_one)
+
+
+def _start_one(name: str) -> int:
     # Validate (resolve_name raises if unknown / cycle).
     try:
         _, members = resolve_name(name)
@@ -1623,8 +1638,18 @@ def _wait_handlers_stopped(
 
 
 def cmd_stop(args: list[str]) -> int:
-    """`a8s stop <name> [--force]` — SIGTERM the handler(s), then wait until
-    they have actually detached.
+    """`a8s stop <name> [<name> ...] [--force]` — stop each name in order, as
+    `_stop_one` does; exits nonzero when any of them failed."""
+    rest, force = _split_force_flag(args)
+    if not rest:
+        print("usage: a8s stop <name> [<name> ...] [--force]", file=sys.stderr)
+        return 2
+    return _each_name(rest, lambda name: _stop_one(name, force))
+
+
+def _stop_one(name: str, force: bool) -> int:
+    """SIGTERM the handler(s) of one name, then wait until they have actually
+    detached.
 
     Like Ctrl+C on `a8s run`: the first signal asks for a graceful detach
     after the current wake. Idle nodes stop immediately; a busy wake finishes
@@ -1634,11 +1659,7 @@ def cmd_stop(args: list[str]) -> int:
     One handler may serve multiple alias members; we dedupe by PID so each
     unique handler is signaled once. Detaches the WHOLE handler.
     """
-    rest, force = _split_force_flag(args)
-    if len(rest) != 1:
-        print("usage: a8s stop <name> [--force]", file=sys.stderr)
-        return 2
-    members = _expand_to_agents(rest[0])
+    members = _expand_to_agents(name)
     if members is None:
         return 1
     seen_pids: dict[int, str] = {}
@@ -1688,28 +1709,29 @@ def cmd_stop(args: list[str]) -> int:
 
 
 def cmd_restart(args: list[str]) -> int:
-    """`a8s restart <name> [--force]` — stop (wait until detached) then start.
+    """`a8s restart <name> [<name> ...] [--force]` — for each name in order,
+    stop (wait until detached) then start.
 
-    If the node is not running, skip straight to start. ``--force`` is passed
-    through to stop so an in-flight wake is interrupted.
+    A name that is not running goes straight to start. ``--force`` is passed
+    through to stop so an in-flight wake is interrupted. Exits nonzero when
+    any name failed.
     """
     rest, force = _split_force_flag(args)
-    if len(rest) != 1:
-        print("usage: a8s restart <name> [--force]", file=sys.stderr)
+    if not rest:
+        print("usage: a8s restart <name> [<name> ...] [--force]", file=sys.stderr)
         return 2
-    name = rest[0]
+    return _each_name(rest, lambda name: _restart_one(name, force))
+
+
+def _restart_one(name: str, force: bool) -> int:
     members = _expand_to_agents(name)
     if members is None:
         return 1
-    any_running = any(_read_handler_pid(n) is not None for n in members)
-    if any_running:
-        stop_args = [name]
-        if force:
-            stop_args.append("--force")
-        rc = cmd_stop(stop_args)
+    if any(_read_handler_pid(n) is not None for n in members):
+        rc = _stop_one(name, force)
         if rc != 0:
             return rc
-    return cmd_start([name])
+    return _start_one(name)
 
 
 def _running_nodes_by_pid() -> dict[int, list[str]]:
@@ -2321,8 +2343,9 @@ def _format_tx(event: dict[str, str], *, show_id: bool = True) -> str:
 
 
 def cmd_transactions(args: list[str]) -> int:
-    """`a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID]`
-    — recent routing events across every message."""
+    """`a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID] [--all]`
+    — recent routing events about this node's messages; `--all` adds what it
+    logged about other nodes' traffic on a shared remote."""
     import argparse
     import time
 
@@ -2337,7 +2360,11 @@ def cmd_transactions(args: list[str]) -> int:
             "examples:\n"
             "  a8s tx --limit 40\n"
             "  a8s tx -f --event DISCARDED --event FILE_UPLOAD_FAILED\n"
-            "  a8s tx --from my-phone --to iris\n\n"
+            "  a8s tx --from my-phone --to iris\n"
+            "  a8s tx --all --event NOT_LOCAL\n\n"
+            "By default only rows about this node's own messages show; --all adds\n"
+            "the NOT_LOCAL rows and receipts every node logs for other nodes'\n"
+            "traffic on a shared remote. --msg always shows the whole envelope.\n\n"
             "`a8s trace <ULID>` follows one envelope end to end; this is the view\n"
             "for when you do not have a ULID yet. Retention is `txlog_max_rows`.\n"
         ),
@@ -2361,6 +2388,10 @@ def cmd_transactions(args: list[str]) -> int:
         help="only messages addressed to NAME (repeat for several)",
     )
     parser.add_argument("--msg", default="", metavar="ULID", help="only this envelope")
+    parser.add_argument(
+        "--all", dest="all_rows", action="store_true",
+        help="include rows about other nodes' traffic on a shared remote",
+    )
     try:
         parsed = parser.parse_args(args)
     except SystemExit as e:
@@ -2385,11 +2416,13 @@ def cmd_transactions(args: list[str]) -> int:
         "recipients": parsed.recipients,
         "msg_id": msg_id,
     }
+    local_only = not (parsed.all_rows or msg_id)
     # "no matching transaction events" is a claim about the log's contents.
     # A log that could not be opened supports no such claim, so it says which
     # file and why instead.
     try:
-        rows = read_recent(limit=parsed.limit, **filters)
+        rows = read_recent(limit=parsed.limit, local_only=local_only, **filters)
+        hidden = local_only and not rows and bool(read_recent(limit=1, **filters))
     except TransactionLogError as e:
         print(f"a8s: {e}", file=sys.stderr)
         return 1
@@ -2398,10 +2431,17 @@ def cmd_transactions(args: list[str]) -> int:
     if not parsed.follow:
         if not rows:
             narrowed = any(filters.values())
-            print(
-                "no matching transaction events" if narrowed else "no transaction events",
-                file=sys.stderr,
-            )
+            if hidden:
+                print(
+                    "no transaction events about this node's messages "
+                    "(--all shows other nodes' traffic)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "no matching transaction events" if narrowed else "no transaction events",
+                    file=sys.stderr,
+                )
             return 1
         return 0
 
@@ -2415,7 +2455,7 @@ def cmd_transactions(args: list[str]) -> int:
             cursor = newest[-1][0] if newest else 0
         while True:
             time.sleep(1.0)
-            fresh = read_recent(after_seq=cursor, **filters)
+            fresh = read_recent(after_seq=cursor, local_only=local_only, **filters)
             for seq, event in fresh:
                 print(_format_tx(event), flush=True)
                 cursor = seq
@@ -2670,10 +2710,12 @@ def _remote_usage() -> int:
         "fresh `a8s remote` is how a machine re-joins at a new cutoff.\n"
         "\n"
         "An s3 remote carries envelopes through a bucket, for a machine that\n"
-        "can reach HTTPS on 443 and nothing else. The prefix is required and\n"
-        "must be one no storage service writes under — the transport deletes\n"
-        "what it delivers. It takes --poll-seconds (10), --retain-days (3),\n"
-        "--region, --profile, --endpoint-url and --timeout-s.\n"
+        "can reach HTTPS on 443 and nothing else. Every machine that holds a\n"
+        "name gets its own copy, and mail leaves the bucket when --retain-days\n"
+        "runs out. The prefix is required and must be one no storage service\n"
+        "writes under, because that reap deletes under it. It takes\n"
+        "--poll-seconds (10), --retain-days (3), --region, --profile,\n"
+        "--endpoint-url and --timeout-s, and stamps `joined` as a folder does.\n"
         "\n"
         "Any option past the broker and topic is passed verbatim to the\n"
         "transport (e.g. --user / --pass for mqtt). Either spelling works,\n"
@@ -2693,7 +2735,7 @@ def _format_remote_summary(spec: dict) -> str:
         consumed = {"transport", "path", "joined"}
     elif kind == "s3":
         line = f"s3 s3://{spec.get('bucket', '?')}/{spec.get('prefix', '?')}"
-        consumed = {"transport", "bucket", "prefix"}
+        consumed = {"transport", "bucket", "prefix", "joined"}
     else:
         line = f"{kind} {spec.get('broker', '?')} topic={spec.get('topic', '?')}"
         consumed = {"transport", "broker", "topic"}
@@ -2704,7 +2746,7 @@ def _format_remote_summary(spec: dict) -> str:
     )
     if extras:
         line += f" {extras}"
-    if kind == "folder" and spec.get("joined"):
+    if kind in ("folder", "s3") and spec.get("joined"):
         line += f" joined={_joined_display(str(spec['joined']))}"
     return line
 
@@ -2712,7 +2754,7 @@ def _format_remote_summary(spec: dict) -> str:
 def _joined_display(joined: str) -> str:
     """The join cutoff as the ULID plus the moment it names.
 
-    The cutoff is the one thing that can make a folder remote deaf — a clock
+    The cutoff is the one thing that can make a remote deaf — a clock
     an hour fast at registration stamps a future one — and a bare ULID hides
     exactly the digits that would show it. It is also not an option anybody
     types, so it is not printed as one.
@@ -2889,14 +2931,14 @@ def _cmd_remote_set_s3(name: str, url: str, opt_tokens: list[str]) -> int:
         )
         return 2
     if not prefix:
-        # The transport deletes what it delivers, so it may not share a prefix
-        # with anything else in the bucket — including the `a8s storage` s3
-        # service, whose own default prefix is `a8s`. Defaulting would pick
-        # that fight silently; asking for a prefix cannot.
+        # The transport's retention reap deletes under its prefix, so it may
+        # not share one with anything else in the bucket — including the
+        # `a8s storage` s3 service, whose own default prefix is `a8s`.
+        # Defaulting would pick that fight silently; asking for a prefix cannot.
         print(
-            f"{url!r} names no key prefix. An s3 remote deletes every envelope "
-            "it delivers, so it needs a prefix nothing else writes under "
-            f"(a8s remote {name} s3://{bucket}/a8s-mail)",
+            f"{url!r} names no key prefix. An s3 remote deletes what it holds "
+            "once --retain-days runs out, so it needs a prefix nothing else "
+            f"writes under (a8s remote {name} s3://{bucket}/a8s-mail)",
             file=sys.stderr,
         )
         return 2
@@ -2917,12 +2959,27 @@ def _cmd_remote_set_s3(name: str, url: str, opt_tokens: list[str]) -> int:
     if collision is not None:
         print(
             f"storage {collision} already writes under s3://{bucket}/{prefix}. "
-            "An s3 remote deletes what it delivers and would take that "
-            "service's objects with it; give one of them its own prefix",
+            "An s3 remote deletes what it holds once --retain-days runs out and "
+            "would take that service's objects with it; give one of them its "
+            "own prefix",
             file=sys.stderr,
         )
         return 2
     spec: dict = {"transport": "s3", "bucket": bucket, "prefix": prefix, **extras}
+    # This machine joins the mailbox set now, as with a folder remote. An
+    # option change on the same bucket, prefix and endpoint keeps the cutoff:
+    # a fresh one would skip mail that arrived but was not yet polled.
+    prior = load_network_config()["remotes"].get(name)
+    if (
+        isinstance(prior, dict)
+        and (prior.get("transport") or "").strip().lower() == "s3"
+        and str(prior.get("bucket") or "").strip() == bucket
+        and str(prior.get("prefix") or "").strip("/") == prefix
+        and _s3_endpoint(prior) == endpoint
+        and prior.get("joined")
+    ):
+        spec.setdefault("joined", prior["joined"])
+    spec.setdefault("joined", new_ulid())
     # Build it now so a typo'd option fails here rather than as a skipped
     # remote at daemon start.
     try:
@@ -2999,7 +3056,7 @@ def _s3_endpoint(spec: dict) -> str:
 def _s3_storage_collision(bucket: str, prefix: str, endpoint: str) -> str | None:
     """The name of a configured s3 storage service whose keys this prefix would
     cover, or None. One prefix containing the other is enough: the transport's
-    retention reap walks everything under its own prefix."""
+    retention reap deletes under its own prefix."""
     for svc_name, spec in load_network_config()["services"].items():
         if not isinstance(spec, dict) or spec.get("service") != "s3":
             continue
@@ -3264,10 +3321,10 @@ def cmd_unremote(args: list[str]) -> int:
         return 1
     spec = cfg["remotes"][name]
     del cfg["remotes"][name]
-    is_folder = (
-        isinstance(spec, dict)
-        and (spec.get("transport") or "").strip().lower() == "folder"
+    kind = (
+        (spec.get("transport") or "").strip().lower() if isinstance(spec, dict) else ""
     )
+    is_folder = kind == "folder"
     # The service `a8s remote` created goes with the remote that created it.
     # Left behind it points attachments at a folder nothing reads any more,
     # and it blocks a clean re-add under the same name.
@@ -3278,10 +3335,12 @@ def cmd_unremote(args: list[str]) -> int:
         del cfg["services"][name]
     save_network_config(cfg)
     delete_remote_secrets(name)
+    # The ledger records what this machine already read from the wire.
+    # Keeping it would silence mail if the remote is added back.
     if is_folder:
-        # The ledger records what this machine already read from the folder.
-        # Keeping it would silence the backlog if the remote is added back.
         folder_ledger_path(name).unlink(missing_ok=True)
+    elif kind == "s3":
+        s3_ledger_path(name).unlink(missing_ok=True)
     print(f"removed remote {name}")
     if unpaired:
         print(f"removed storage {name}")
@@ -3475,8 +3534,8 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     spec: dict = {"service": kind, "url": url, **extras}
     if kind == "s3":
         # Same foot-gun as `a8s remote`'s, reached from the other side: an s3
-        # remote deletes every object under its prefix, so a storage service
-        # that lands inside it loses attachments to somebody else's retention.
+        # remote's retention reap deletes under its prefix, so a storage
+        # service that lands inside it loses attachments to that reap.
         parsed = urllib.parse.urlsplit(url.strip())
         collision = _s3_remote_collision(
             (parsed.netloc or "").strip(),
@@ -3485,8 +3544,9 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
         )
         if collision is not None:
             print(
-                f"remote {collision} already owns that prefix, and an s3 remote "
-                "deletes everything under its own prefix; give one of them its own",
+                f"remote {collision} already reaps that prefix: an s3 remote "
+                "deletes what it holds once --retain-days runs out; give one of "
+                "them its own",
                 file=sys.stderr,
             )
             return 2
@@ -3566,12 +3626,12 @@ def cmd_health() -> int:
         name = t.id
         try:
             t.start(lambda *_: None)
-            connected = t.is_connected() if hasattr(t, "is_connected") else True
+            connected = t.is_connected()
             t.stop()
             if connected:
                 print(f"remote {name}: OK")
             else:
-                print(f"remote {name}: FAIL (connected but is_connected=False)")
+                print(f"remote {name}: FAIL (not connected)")
                 errors += 1
         except Exception as e:
             print(f"remote {name}: FAIL ({e})")

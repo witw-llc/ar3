@@ -182,3 +182,53 @@ suite is wired. Deleting the last line is the win condition.
 the classifier over a fixture suite, and the tool, its allowlist and that test
 are all routed into the per-PR `a8s` job, so a change to any of the three runs
 it.
+
+## `changelog-heading.py`
+
+Fails if `CHANGELOG.md` has no `## <VERSION>` heading, or still has entries
+under `## Unreleased`. 0.1.80, 0.1.81 and 0.1.82 each merged with their notes
+still under `Unreleased`; the rename was a human step at merge time, and merge
+time is exactly when nobody is looking at the changelog (#246).
+
+```bash
+tools/changelog-heading.py 0.1.96              # reads CHANGELOG.md
+tools/changelog-heading.py 0.1.96 --changelog PATH
+```
+
+Exit 0 and silent when the changelog is ready to ship that version. Exit 1
+with a one-line message naming the fix otherwise. The per-PR `version` job
+runs this against `VERSION` on every PR, before merge, at no cost beyond the
+job it already runs in.
+
+## `changelog-closes.py`
+
+Prints the issue numbers a `CHANGELOG.md` version section closes, parsed from
+its `Closes #N` lines. A squash merge does not honour a `Closes #N` written in
+a commit body, so the changelog entry is the only durable record of what a
+release closes; `release.yml`'s `publish` job reads this after a release ships
+and closes each issue it names.
+
+```bash
+tools/changelog-closes.py 0.1.96              # reads CHANGELOG.md
+tools/changelog-closes.py 0.1.96 --changelog PATH
+```
+
+Prints one issue number per line, ascending, de-duplicated. Exit 0 always — a
+release with nothing to close is not a failure.
+
+## `version-bump.py`
+
+Enforces the suite's version-bump shape: `major.minor.build`, where exactly
+one digit moves from `main`'s `VERSION` to the PR's. The build increments on
+every merge; the minor bumps with build reset to 0 when the owner closes a
+phase; the major bumps at the 1.0 hand-off (ruled 2026-09-25, #272).
+
+```bash
+tools/version-bump.py 0.1.95 0.1.96      # main's version, then the PR's
+tools/version-bump.py 0.1.95 0.2.0
+tools/version-bump.py 0.1.95 1.0.0
+```
+
+Exit 0 and silent when the PR's version is one of the three allowed next
+versions. Exit 1 with a one-line message naming all three otherwise. The
+per-PR `version` job runs this against `main`'s `VERSION` on every PR.

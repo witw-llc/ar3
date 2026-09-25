@@ -11,6 +11,8 @@ This module owns the runtime engine:
 Module-level mutable state used by signal handlers:
   _STOP_EVENT          — set on 1st signal; checked in the loop body
   _SIGNAL_COUNT        — incremented per signal; 2 triggers force-kill
+  _STOP_CAUSE          — the 1st signal's name and the parent it found; the
+                         RUN_STOP detail carries it
   _CURRENT_WAKE_PROC   — the currently-running wake subprocess (or None)
   _WAKE_*              — in-flight wake timing / completion callback
   _WAKE_STDOUT_*       — the reader thread + queue draining that wake's stdout
@@ -52,8 +54,9 @@ from pathlib import Path
 
 import core
 from ar3 import clock
+from ar3.fsio import atomic_write_text
 from ar3.proc import terminate_group
-from settings import get_float, get_setting
+from settings import DEFAULTS, get_float, get_setting
 from core import (
     MAX_WAKE_ATTEMPTS,
     Participant,
@@ -65,8 +68,11 @@ from core import (
     detach_request_path,
     inbox_dir,
     kill_request_path,
+    log_agent_unlocked,
     out_agent,
     pid_path,
+    pid_start_path,
+    process_start_token,
     clear_inbox_waiting_since,
     clear_wake_retry,
     read_inbox_waiting_since,
@@ -104,6 +110,7 @@ from mailbox import (
     route_outboxes,
 )
 from network import (
+    configured_remote_ids as remote_ids_in_config,
     load_remotes,
     load_services,
     make_publish_remotes,
@@ -111,7 +118,7 @@ from network import (
     sweep_stale_claims,
     stop_remotes,
 )
-from registry import participants_from_registry, unresolved_mailboxes
+from registry import RegistryUnreadable, participants_from_registry, unresolved_mailboxes
 import convo
 import txlog
 
@@ -148,6 +155,16 @@ _STUCK_WAKE_READERS: list[tuple[threading.Thread, str, float]] = []
 def _wake_in_flight() -> bool:
     proc = _CURRENT_WAKE_PROC
     return proc is not None and proc.poll() is None
+
+
+def _seconds_setting(key: str) -> float:
+    """A seconds knob where 0 means off, read at use time. A value that does
+    not parse (a hand-edited settings file, a bad env var) reads as the knob's
+    default instead of raising inside a loop that must not end on it."""
+    try:
+        return float(get_setting(key))
+    except (TypeError, ValueError):
+        return float(DEFAULTS[key])
 
 
 def _heartbeat_detail() -> str:
@@ -940,7 +957,12 @@ def _read_handler_pid(name: str) -> int | None:
     pid files. Treats empty / non-int / non-positive contents as stale (the
     O_CREAT|O_EXCL window allows a partial-write to leave an empty pid file
     if the writer dies before `os.write`; non-positive values don't refer to
-    any real process — `os.kill(0, ...)` would target the whole process group)."""
+    any real process — `os.kill(0, ...)` would target the whole process group).
+
+    A live pid is the handler only when its start token matches the one
+    stamped at claim time. After a reboot the OS hands the number to some
+    other process; a mismatch reads as stopped. With no stamp, or no token on
+    this platform, liveness alone decides."""
     p = pid_path(name)
     if not p.is_file():
         return None
@@ -949,18 +971,39 @@ def _read_handler_pid(name: str) -> int | None:
         if pid <= 0:
             raise ValueError("non-positive pid")
     except (OSError, ValueError):
+        _unlink_pid_files(name)
+        return None
+    if _pid_alive(pid) and not _pid_recycled(name, pid):
+        return pid
+    _unlink_pid_files(name)
+    return None
+
+
+def _pid_recycled(name: str, pid: int) -> bool:
+    try:
+        stamped = pid_start_path(name).read_text().strip()
+    except OSError:
+        return False
+    current = process_start_token(pid)
+    return bool(stamped) and current is not None and current != stamped
+
+
+def _unlink_pid_files(name: str) -> None:
+    for path in (pid_path(name), pid_start_path(name)):
         try:
-            p.unlink()
+            path.unlink()
         except OSError:
             pass
-        return None
-    if _pid_alive(pid):
-        return pid
+
+
+def _stamp_pid_start(name: str, pid: int) -> None:
+    token = process_start_token(pid)
+    if token is None:
+        return
     try:
-        p.unlink()
+        atomic_write_text(pid_start_path(name), token)
     except OSError:
         pass
-    return None
 
 
 def _try_atomic_claim(name: str, pid: int) -> bool:
@@ -1093,6 +1136,7 @@ def acquire(name: str) -> None:
     deadline: float | None = None
     while True:
         if _try_atomic_claim(name, me):
+            _stamp_pid_start(name, me)
             # If the pending request was OURS (we placed it earlier in this
             # call), clear it — it's been satisfied. Leave foreign requests
             # alone: those belong to whichever process placed them, and our
@@ -1131,7 +1175,7 @@ def release(name: str) -> None:
         if p.is_file():
             pid = int(p.read_text().strip())
             if pid == os.getpid():
-                p.unlink()
+                _unlink_pid_files(name)
     except (OSError, ValueError):
         pass
     _clear_detach_request(name)
@@ -1142,6 +1186,9 @@ def release(name: str) -> None:
 # Set when an attached loop is running. The signal handler closes over them.
 _STOP_EVENT: threading.Event | None = None
 _SIGNAL_COUNT = 0
+# What the first stop signal was and who the parent was when it landed, e.g.
+# `SIGTERM (15) from ppid 1 (systemd)`. None when the loop was stopped some other way.
+_STOP_CAUSE: str | None = None
 
 
 def _kill_wake_subprocess_group() -> None:
@@ -1326,7 +1373,7 @@ def _watchdog_loop(names: list[str], label: str) -> None:
         return
     suppressed_until = 0.0
     while True:
-        wedge_seconds = float(get_setting("watchdog_wedge_seconds"))
+        wedge_seconds = _seconds_setting("watchdog_wedge_seconds")
         if wedge_seconds <= 0:
             return
         poll_interval = min(10.0, max(wedge_seconds / 4, 0.05))
@@ -1345,15 +1392,56 @@ def _watchdog_loop(names: list[str], label: str) -> None:
         suppressed_until = _time.monotonic() + wedge_seconds
 
 
-def _make_signal_handler(label: str):
+def _process_command(pid: int) -> str:
+    """`pid`'s command line, or "" when this platform will not say.
+
+    Linux answers from `/proc`; macOS has no `/proc`, so `ps` answers there.
+    The name is cut short: it is a clue in a log line, not a record."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        cmd = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        try:
+            done = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=2,
+            )
+            cmd = done.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            cmd = ""
+    return cmd[:120]
+
+
+def _describe_stop_signal(signum: int) -> str:
+    """`SIGTERM (15) from ppid 1 (systemd)` — the signal and the parent at
+    the moment it landed.
+
+    A signal does not name its sender to a Python handler. The parent is the
+    nearest witness: a host shutdown shows the init system there, and a
+    harness that owns the node shows itself. A parent that has since died
+    shows whatever adopted the node."""
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = f"signal {signum}"
+    ppid = os.getppid()
+    cmd = _process_command(ppid)
+    return f"{name} ({signum}) from ppid {ppid}" + (f" ({cmd})" if cmd else "")
+
+
+def _make_signal_handler(label: str, names: list[str]):
     def handle(signum, _frame):
-        global _SIGNAL_COUNT
+        global _SIGNAL_COUNT, _STOP_CAUSE
         _SIGNAL_COUNT += 1
         if _SIGNAL_COUNT == 1:
-            sys.stderr.write(
-                f"[a8s] {label}: received signal {signum}; detaching after current wake\n"
-            )
+            _STOP_CAUSE = _describe_stop_signal(signum)
+            line = f"received {_STOP_CAUSE}; detaching after current wake"
+            sys.stderr.write(f"[a8s] {label}: {line}\n")
             sys.stderr.flush()
+            # Logged here, not by the loop: the loop may be inside a network
+            # call that outlasts the grace an init system gives before SIGKILL.
+            for n in list(names):
+                log_agent_unlocked(n, f"[a8s] {n}: {line}")
             if _STOP_EVENT is not None:
                 _STOP_EVENT.set()
         else:
@@ -1472,10 +1560,11 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     `a8s stop` / `a8s kill`; per-agent take-over for `a8s start`/`run`/`step`
     against an already-attached agent goes through the detach-request file
     instead, leaving siblings handled — no orphans."""
-    global _STOP_EVENT, _SIGNAL_COUNT, _LOOP_BEAT_MONO, _LOOP_BEAT_WALL
+    global _STOP_EVENT, _SIGNAL_COUNT, _STOP_CAUSE, _LOOP_BEAT_MONO, _LOOP_BEAT_WALL
     core.PRINT_LOCK = threading.Lock()
     _STOP_EVENT = threading.Event()
     _SIGNAL_COUNT = 0
+    _STOP_CAUSE = None
 
     if not names:
         print("attached_loop: empty names list", file=sys.stderr)
@@ -1495,7 +1584,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         return 1
 
     label = names[0] if len(names) == 1 else f"[{', '.join(names)}]"
-    handler = _make_signal_handler(label)
+    handler = _make_signal_handler(label, names)
     prev_sigterm = signal.signal(signal.SIGTERM, handler)
     prev_sigint = signal.signal(signal.SIGINT, handler)
     prev_sigusr1 = (
@@ -1526,6 +1615,9 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     )
     publish_remotes = make_publish_remotes(started_remotes) if started_remotes else None
     configured_remote_ids = [r.id for r in started_remotes]
+    unstarted_remote_ids = [
+        rid for rid in remote_ids_in_config() if rid not in configured_remote_ids
+    ]
     deadline = _time.monotonic() + drain_seconds if drain_seconds > 0 else 0
     async_wake = not single_pass
     # Round-robin wake start across attached-loop iterations so a busy early
@@ -1537,12 +1629,13 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     mode = "drain" if drain_seconds > 0 else ("step" if single_pass else "run")
     stop_reason: str | None = None
     watchdog_thread: threading.Thread | None = None
-    if not single_pass and drain_seconds == 0 and float(get_setting("watchdog_wedge_seconds")) > 0:
+    if not single_pass and drain_seconds == 0 and _seconds_setting("watchdog_wedge_seconds") > 0:
         watchdog_thread = threading.Thread(
             target=_watchdog_loop, args=(names, label), daemon=True
         )
         watchdog_thread.start()
     last_heartbeat_mono = _time.monotonic()
+    registry_unreadable_logged = False
     held_stores = _hold_stores(label)
     try:
         txlog.log(
@@ -1553,12 +1646,15 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         while True:
             _LOOP_BEAT_MONO = _time.monotonic()
             _LOOP_BEAT_WALL = datetime.now(timezone.utc)
-            hb_seconds = float(get_setting("txlog_heartbeat_seconds"))
-            if hb_seconds > 0 and _LOOP_BEAT_MONO - last_heartbeat_mono >= hb_seconds:
-                last_heartbeat_mono = _LOOP_BEAT_MONO
-                txlog.log("HEARTBEAT", sender=label, detail=_heartbeat_detail())
+            try:
+                hb_seconds = _seconds_setting("txlog_heartbeat_seconds")
+                if hb_seconds > 0 and _LOOP_BEAT_MONO - last_heartbeat_mono >= hb_seconds:
+                    last_heartbeat_mono = _LOOP_BEAT_MONO
+                    txlog.log("HEARTBEAT", sender=label, detail=_heartbeat_detail())
+            except Exception as e:
+                out_agent(label, f"[a8s] {label}: heartbeat error: {e}")
             if _STOP_EVENT.is_set() and not _wake_in_flight():
-                stop_reason = "stop-signal"
+                stop_reason = "stop-signal" + (f" {_STOP_CAUSE}" if _STOP_CAUSE else "")
                 break
             if deadline and _time.monotonic() >= deadline:
                 _STOP_EVENT.set()
@@ -1591,6 +1687,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         names.remove(name)
 
                 all_agents = participants_from_registry()
+                registry_unreadable_logged = False
                 handled: list[Participant] = []
                 for name in list(names):
                     p = next((q for q in all_agents if q.name == name), None)
@@ -1624,6 +1721,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         all_agents=all_agents,
                         publish_remotes=publish_remotes,
                         configured_remote_ids=configured_remote_ids,
+                        unstarted_remote_ids=unstarted_remote_ids,
                         services=load_services(),
                     )
                 _service_in_flight_wake()
@@ -1715,6 +1813,12 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                 break
                         except Exception as e:
                             out_agent(p.name, f"[{p.name}] idle check error: {e}")
+            except RegistryUnreadable as e:
+                # A read that lands mid-write, or a permission error that
+                # clears. Nothing is dropped; the next pass reads again.
+                if not registry_unreadable_logged:
+                    out_agent(label, f"[a8s] {label}: {e}; retrying next pass")
+                    registry_unreadable_logged = True
             except Exception as e:
                 out_agent(label, f"[a8s] {label}: iteration error: {e}")
             if single_pass and not _wake_in_flight():

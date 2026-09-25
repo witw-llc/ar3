@@ -57,3 +57,29 @@ def test_update_dispatches(monkeypatch):
     monkeypatch.setattr(cli, "cmd_update", lambda args: calls.append(args) or 0)
     assert cli.dispatch("update", ["--force"], interval=1.0) == 0
     assert calls == [["--force"]]
+
+
+class TestUnreadableRegistry:
+    """A registry that exists but does not parse is named as such. Reading it
+    as empty made `ls` say nothing was registered and `convo` say the agent
+    did not exist."""
+
+    def _tear(self):
+        from core import registry_path
+
+        registry_path().parent.mkdir(parents=True, exist_ok=True)
+        registry_path().write_text('{"agents": {"alice": {"root"')
+
+    def test_ls_names_the_unreadable_registry(self, fake_home, capsys):
+        self._tear()
+        assert cli.main(["ls"]) == 1
+        captured = capsys.readouterr()
+        assert "registry unreadable" in captured.err
+        assert "no nodes registered" not in captured.out
+
+    def test_convo_does_not_claim_the_agent_is_missing(self, fake_home, capsys):
+        self._tear()
+        assert cli.main(["convo", "alice"]) == 1
+        err = capsys.readouterr().err
+        assert "registry unreadable" in err
+        assert "no agent named" not in err

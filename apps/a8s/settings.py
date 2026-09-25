@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ar3.fsio import atomic_write_text
 from core import BACKOFF_SCHEDULE, MAX_WAKE_ATTEMPTS, WAKE_RETRY_SCHEDULE, _a8s_dir
 
 Group = Literal["machine", "definition", "registry", "network", "env", "constant"]
@@ -247,10 +248,8 @@ def load_settings_file() -> dict[str, Any]:
 
 
 def save_settings_file(data: dict[str, Any]) -> None:
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     cleaned = {k: data[k] for k in sorted(data) if k in _WRITABLE}
-    path.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(settings_path(), json.dumps(cleaned, indent=2) + "\n")
 
 
 def _coerce(key: str, raw: str) -> Any:

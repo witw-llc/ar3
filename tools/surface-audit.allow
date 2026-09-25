@@ -13,7 +13,6 @@ cli:a8s:drain  # documented, but no test names it — a rename would not fail
 cli:a8s:exit  # documented, but no test names it — a rename would not fail
 cli:a8s:logs  # documented, but no test names it — a rename would not fail
 cli:a8s:ps  # documented, but no test names it — a rename would not fail
-cli:a8s:start  # documented, but no test names it — a rename would not fail
 cli:a8s:step  # documented, but no test names it — a rename would not fail
 cli:a8s:transactions  # documented, but no test names it — a rename would not fail
 cli:a8s:unalias  # documented, but no test names it — a rename would not fail

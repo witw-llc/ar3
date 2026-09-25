@@ -829,6 +829,7 @@ def _process_pending(
     publish_remotes: Optional[PublishRemotes],
     configured_remote_ids: list[str],
     services: Optional[list[StorageService]] = None,
+    unstarted_remote_ids: Optional[list[str]] = None,
 ) -> int:
     """Phase 2: iterate `~/.config/a8s/agents/<sender>/pending/`, deliver each
     pending file locally and/or publish to not-yet-succeeded remotes. The
@@ -1035,6 +1036,22 @@ def _process_pending(
             and not sidecar["local_delivered"]
             and not configured_remote_ids
         )
+        if no_path_at_all and unstarted_remote_ids:
+            down = ", ".join(unstarted_remote_ids)
+            if sidecar["attempts"] == 0:
+                out_agent(
+                    sender.name,
+                    f"{recipient_name!r} is not local and remote {down} did not start; "
+                    f"holding {f.name} for retry",
+                )
+            _schedule_retry(
+                f, sidecar, sender,
+                msg_id=msg.get("id", ""),
+                recipient=recipient_name,
+                files=msg_files,
+                reason=f"not local; remote {down} did not start",
+            )
+            continue
         if no_path_at_all:
             out_agent(sender.name, f"unknown recipient {recipient_name!r} in {f.name}; trashing")
             txlog.log("DROPPED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, detail="unknown recipient")
@@ -1085,6 +1102,7 @@ def route_outboxes(
     publish_remotes: Optional[PublishRemotes] = None,
     configured_remote_ids: Optional[list[str]] = None,
     services: Optional[list[StorageService]] = None,
+    unstarted_remote_ids: Optional[list[str]] = None,
 ) -> int:
     """Two-phase routing pass:
 
@@ -1108,7 +1126,12 @@ def route_outboxes(
     `services` is the storage-service hook for cross-cluster `FILE:`
     payloads. When set and a message has files, each service uploads its
     bytes and the wire envelope carries `files[i].storage = [...]`. None /
-    empty falls back to the v1 limitation (files local-only, remote skip)."""
+    empty falls back to the v1 limitation (files local-only, remote skip).
+
+    `unstarted_remote_ids` names configured remotes that failed to start.
+    With none started, mail for a name this node does not hold would have no
+    path at all; while any configured remote is down it parks on the retry
+    schedule instead of being trashed as an unknown recipient."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}
@@ -1122,6 +1145,7 @@ def route_outboxes(
     for sender in process.values():
         routed += _process_pending(
             sender, by_name, publish_remotes, configured_remote_ids, services,
+            unstarted_remote_ids or [],
         )
     return routed
 

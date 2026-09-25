@@ -250,9 +250,11 @@ HARNESS_PRESETS: dict[str, dict] = {
         # `agent` reuses the LAST --model it was given when the flag is
         # omitted, so an unpinned invoke inherits invisible machine-global
         # state — a rig founded "modelless" kept riding a usage-limited
-        # frontier model. `auto` is the CLI's own way to say "the
-        # subscription default", so pin it; an explicit --model still wins.
-        "model_default": "auto",
+        # frontier model. `auto` pins that state to the CLI's own newest-model
+        # default, which spent a subscription on a frontier model instead of
+        # composer-2.5 (#282). composer-2.5 is Cursor's cheap, fast default;
+        # an explicit --model still wins.
+        "model_default": "composer-2.5",
         "continue_argv": ["--continue"],
         "no_prior_conversation": r"no previous chats found",
     },
@@ -1316,6 +1318,25 @@ class Rig:
         conversation here to continue — the one failure worth retrying cold."""
         pattern = HARNESS_PRESETS.get(self.preset or "", {}).get("no_prior_conversation")
         return bool(pattern) and re.search(pattern, output, re.IGNORECASE) is not None
+
+    @property
+    def resolved_model(self) -> str:
+        """What this rig actually runs. An explicit `model` setting wins;
+        otherwise read the token after --model/-m, which is where a
+        preset-built invoke carries it. A preset bakes its `model_default`
+        into the invoke at `rig add` time, so a rig added before a preset's
+        default changed (composer-2.5 over `auto`, #282) keeps running the
+        old value until something writes over it — this is how `rig list`
+        and `rig detect` notice."""
+        if self.model:
+            return self.model
+        argv = next(iter(self.pool()), [])
+        for flag in ("--model", "-m"):
+            if flag in argv:
+                at = argv.index(flag) + 1
+                if at < len(argv):
+                    return argv[at]
+        return "-"
 
     def pool(self) -> list[list[str]]:
         """`invoke` is one argv (list of str) or a pool (list of argvs) —

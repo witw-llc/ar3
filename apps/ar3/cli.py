@@ -52,7 +52,7 @@ except ImportError:
 
 from ar3 import deps as ar3_deps  # noqa: E402
 from ar3.home import app_home  # noqa: E402
-from ar3.proc import pid_alive  # noqa: E402
+from ar3.proc import pid_alive, process_start_token  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -154,11 +154,24 @@ def a8s_home() -> Path:
 
 
 def _live_pid(path: Path) -> int | None:
+    """The pid in an a8s pid file when that process is still the one that
+    claimed it. a8s stamps the claimer's start token in `pid.start` beside
+    the file; a live pid whose start differs was reused by the OS and reads
+    as stopped. No stamp, or no token on this platform, leaves liveness to
+    decide. The same rule as a8s's own read, without its cleanup: the front
+    door never changes another product's files."""
     try:
         pid = int(path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
-    return pid if pid_alive(pid) else None
+    if not pid_alive(pid):
+        return None
+    try:
+        stamped = path.with_name("pid.start").read_text(encoding="utf-8").strip()
+    except OSError:
+        return pid
+    current = process_start_token(pid) if stamped else None
+    return None if current is not None and current != stamped else pid
 
 
 def a8s_rows() -> list[Row]:

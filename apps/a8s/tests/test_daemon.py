@@ -84,6 +84,84 @@ class TestAtomicClaim:
         assert pid_path("X").read_text() == "1"
 
 
+class TestPidReuse:
+    """A pid file outlives a reboot, and the OS hands its number to some other
+    process. The start token stamped beside the pid tells the two apart."""
+
+    @staticmethod
+    def _stamp(name: str, pid: int, token: str) -> None:
+        pid_path(name).parent.mkdir(parents=True, exist_ok=True)
+        pid_path(name).write_text(str(pid))
+        (pid_path(name).parent / "pid.start").write_text(token)
+
+    def test_a_recycled_pid_reads_stopped(self, fake_home, tmp_path, monkeypatch, capsys):
+        import daemon
+        from commands import cmd_ls
+
+        monkeypatch.setattr(daemon, "process_start_token", lambda pid: "boot-2 start-9", raising=False)
+        root = tmp_path / "x"; root.mkdir()
+        save_registry({"X": {"root": str(root)}})
+        self._stamp("X", os.getpid(), "boot-1 start-3")
+        assert _read_handler_pid("X") is None
+        assert not pid_path("X").exists()
+        assert not (pid_path("X").parent / "pid.start").exists()
+        assert cmd_ls([]) == 0
+        assert "stopped" in capsys.readouterr().out
+
+    def test_a_matching_stamp_reads_running(self, fake_home, monkeypatch):
+        import daemon
+
+        monkeypatch.setattr(daemon, "process_start_token", lambda pid: "boot-1 start-3", raising=False)
+        self._stamp("X", os.getpid(), "boot-1 start-3")
+        assert _read_handler_pid("X") == os.getpid()
+
+    def test_an_unreadable_start_falls_back_to_liveness(self, fake_home, monkeypatch):
+        import daemon
+
+        monkeypatch.setattr(daemon, "process_start_token", lambda pid: None, raising=False)
+        self._stamp("X", os.getpid(), "boot-1 start-3")
+        assert _read_handler_pid("X") == os.getpid()
+
+    def test_acquire_stamps_and_release_clears(self, fake_home, monkeypatch):
+        import daemon
+
+        monkeypatch.setattr(daemon, "process_start_token", lambda pid: "boot-1 start-3", raising=False)
+        acquire("X")
+        stamp = pid_path("X").parent / "pid.start"
+        assert stamp.read_text() == "boot-1 start-3"
+        assert _read_handler_pid("X") == os.getpid()
+        release("X")
+        assert not pid_path("X").exists()
+        assert not stamp.exists()
+
+    @pytest.mark.skipif(os.name == "nt", reason="Windows reads no start token")
+    def test_the_real_token_is_stable_and_tells_processes_apart(self):
+        import subprocess
+
+        from daemon import process_start_token
+
+        mine = process_start_token(os.getpid())
+        assert mine
+        assert process_start_token(os.getpid()) == mine
+        # `ps -o lstart` resolves to the second: start the child in a later one.
+        time.sleep(1.1)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            theirs = process_start_token(child.pid)
+            assert theirs and theirs != mine
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_the_linux_stat_parse_survives_a_hostile_comm(self):
+        from ar3.proc import _linux_start_token
+
+        # Field 22 is starttime; `comm` (field 2) may hold spaces and parens.
+        rest = " ".join(str(n) for n in range(3, 60))
+        stat = f"4242 (a) b (c)) {rest}"
+        assert _linux_start_token(stat, "boot-id") == "boot-id 22"
+
+
 class TestReadHandlerPid:
     def test_no_pid_file(self, fake_home):
         assert _read_handler_pid("X") is None
@@ -1766,3 +1844,152 @@ class TestSharedHandlerWakeFairness:
 
         assert len(woke) >= 4
         assert woke[:4] == ["A", "A", "B", "A"]
+
+
+class TestLoopSurvivesTransientErrors:
+    """A resident loop outlives a registry it cannot read this pass and a
+    setting it cannot parse this pass. Either one ending the loop detaches
+    every agent it handled."""
+
+    def _register(self, tmp_path, fixtures_dir):
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": str(fixtures_dir / "mock.json")}})
+        ensure_mailboxes(Participant("A", d))
+
+    def _run(self, monkeypatch, waits: int, on_wait=None):
+        import daemon as daemon_mod
+
+        calls = 0
+
+        def scripted(self, timeout=None):
+            nonlocal calls
+            calls += 1
+            if on_wait is not None:
+                on_wait(calls)
+            if calls >= waits:
+                daemon_mod._STOP_EVENT.set()
+            return True
+
+        monkeypatch.setattr(threading.Event, "wait", _main_thread_only(scripted))
+        rc = attached_loop(["A"], 0.01, single_pass=False)
+        return rc, calls
+
+    def _stop_reason(self):
+        import txlog
+
+        return txlog.read_recent(events=["RUN_STOP"], limit=1)[0][1]["detail"]
+
+    def test_torn_registry_is_retried_not_dropped(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        from core import registry_path
+
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        self._register(tmp_path, fixtures_dir)
+        whole = registry_path().read_text()
+        registry_path().write_text(whole[: len(whole) // 2])
+
+        def restore(n):
+            if n == 3:
+                registry_path().write_text(whole)
+
+        rc, calls = self._run(monkeypatch, 5, restore)
+        assert rc == 0
+        assert calls == 5
+        log = _read_log("A")
+        assert "removed from registry" not in log
+        assert "nothing left to handle" not in log
+        assert log.count("registry unreadable") == 1
+        assert self._stop_reason().startswith("stop-signal")
+
+    def test_transient_permission_error_is_retried_not_dropped(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        from core import registry_path
+
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        self._register(tmp_path, fixtures_dir)
+        real_read_text = Path.read_text
+        denied = {"left": 2}
+
+        def flaky(self, *a, **kw):
+            if self == registry_path() and denied["left"] > 0:
+                denied["left"] -= 1
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", flaky)
+        rc, calls = self._run(monkeypatch, 4)
+        assert rc == 0
+        assert calls == 4
+        log = _read_log("A")
+        assert "removed from registry" not in log
+        assert log.count("registry unreadable") == 1
+        assert self._stop_reason().startswith("stop-signal")
+
+    def test_heartbeat_setting_that_raises_once_does_not_end_the_loop(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        self._register(tmp_path, fixtures_dir)
+        real_get_setting = daemon_mod.get_setting
+        armed = {"once": True}
+
+        def raises_once(key):
+            if key == "txlog_heartbeat_seconds" and armed["once"]:
+                armed["once"] = False
+                raise RuntimeError("settings read failed")
+            return real_get_setting(key)
+
+        monkeypatch.setattr(daemon_mod, "get_setting", raises_once)
+        rc, calls = self._run(monkeypatch, 3)
+        assert rc == 0
+        assert calls == 3
+        assert not armed["once"]
+        assert self._stop_reason().startswith("stop-signal")
+
+    def test_unparseable_heartbeat_setting_does_not_end_the_loop(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        monkeypatch.setenv("A8S_WATCHDOG_WEDGE_SECONDS", "0")
+        monkeypatch.setenv("A8S_TXLOG_HEARTBEAT_SECONDS", "soon")
+        self._register(tmp_path, fixtures_dir)
+        rc, calls = self._run(monkeypatch, 3)
+        assert rc == 0
+        assert calls == 3
+        assert self._stop_reason().startswith("stop-signal")
+
+
+class TestRemoteThatFailedToStart:
+    def test_mail_for_a_remote_name_parks_instead_of_trashing(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        import daemon as daemon_mod
+        from core import pending_dir
+
+        class DeadRemote:
+            id = "broker"
+            publish_control = None
+
+            def start(self, on_message):
+                raise RuntimeError("broker unreachable")
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr(daemon_mod, "load_remotes", lambda node=None: [DeadRemote()])
+        monkeypatch.setattr(daemon_mod, "remote_ids_in_config", lambda: ["broker"])
+        d = tmp_path / "a"
+        d.mkdir()
+        save_registry({"A": {"root": str(d), "definition": str(fixtures_dir / "mock.json")}})
+        ensure_mailboxes(Participant("A", d))
+        _write_outbox("A", d, "far-away", "hello", [])
+
+        assert attached_loop(["A"], 0.01, single_pass=True) == 0
+
+        assert len(list(pending_dir("A").glob("*.json"))) == 1
+        assert not list(trash_dir("A").glob("*.json"))
+        assert "unknown recipient" not in _read_log("A")

@@ -363,21 +363,6 @@ def _print_table(
         print(fmt(row))
 
 
-def _rig_model(rig) -> str:
-    """What this rig actually runs. An explicit `model` setting wins; otherwise
-    read the token after --model/-m, which is where a preset-built invoke
-    carries it."""
-    if rig.model:
-        return rig.model
-    argv = next(iter(rig.pool()), [])
-    for flag in ("--model", "-m"):
-        if flag in argv:
-            at = argv.index(flag) + 1
-            if at < len(argv):
-                return argv[at]
-    return "-"
-
-
 def _print_rig_table(config, indent: str, wide: bool) -> None:
     rigs = [(n, config.rigs[n]) for n in sorted(config.rigs) if not config.rigs[n].error]
     show_rig_budget = any(r.rig_budget_max is not None for _, r in rigs)
@@ -389,8 +374,12 @@ def _print_rig_table(config, indent: str, wide: bool) -> None:
         headers.append("INVOKE")
 
     rows: list[tuple[str, ...]] = []
+    stale_cursor: list[str] = []
     for name, rig in rigs:
-        row = [name, rig.preset or "-", _rig_model(rig)]
+        model = rig.resolved_model
+        if rig.preset == "cursor" and model == "auto":
+            stale_cursor.append(name)
+        row = [name, rig.preset or "-", model]
         row += [
             f"{rig.timeout_seconds:g}s",
             str(rig.max_sends_per_turn),
@@ -419,6 +408,11 @@ def _print_rig_table(config, indent: str, wide: bool) -> None:
         for name, rig in invalid:
             print(f"{indent}  {name}: {rig.error}")
         print(f"{indent}  (try: edit {config.path})")
+    if stale_cursor:
+        print()
+        print(f"{indent}cursor rigs still pinned to auto (spends on the newest model):")
+        for name in stale_cursor:
+            print(f"{indent}  {name}: r4t rig set {name} model composer-2.5")
 
 
 def _print_roster_table(config, roster_path: Path, indent: str) -> None:
@@ -1739,7 +1733,7 @@ def _rig_pinned_model(rig) -> str | None:
     the live-resolver presets (agy) record `model` as a setting; every other
     preset bakes the value into the invoke at `rig add --model` time, so the
     argv is the second place to look and `-` means the CLI's own default."""
-    found = _rig_model(rig)
+    found = rig.resolved_model
     return None if found == "-" else found
 
 
@@ -2048,6 +2042,7 @@ def cmd_rig_detect(args: argparse.Namespace) -> int:
     found = [r for r in rows if r.detected]
     config_path = _detect_config_path(args)
     added = detect_mod.add_detected(config_path, rows) if args.add and found else []
+    stale = detect_mod.stale_cursor_rigs(config_path)
 
     if args.as_json:
         print(json.dumps(
@@ -2058,6 +2053,7 @@ def cmd_rig_detect(args: argparse.Namespace) -> int:
                 "added": [
                     {"preset": p, "outcome": o, "detail": d} for p, o, d in added
                 ],
+                "stale_cursor_rigs": stale,
             },
             indent=2,
         ))
@@ -2066,6 +2062,11 @@ def cmd_rig_detect(args: argparse.Namespace) -> int:
     print("r4t rig detect — the harnesses this machine already has")
     print()
     print(detect_mod.format_text(rows))
+    if stale:
+        print()
+        print(f"cursor rigs in {config_path} still pinned to auto (spends on the newest model):")
+        for name in stale:
+            print(f"  {name}: r4t rig set {name} model composer-2.5")
     if not found:
         print()
         print(detect_mod.install_hint(rows))

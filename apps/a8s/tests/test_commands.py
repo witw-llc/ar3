@@ -767,6 +767,67 @@ class TestCmdStopAndRestart:
         assert "started claude as PID 42" in capsys.readouterr().out
 
 
+class TestSeveralNames:
+    """`a8s start a b c` is what two operators typed independently. Each name
+    is acted on in order and reported on its own; one failure fails the
+    command without stopping the others."""
+
+    @pytest.fixture
+    def three(self, fake_home, tmp_path):
+        reg = {}
+        for name in ("a1", "b2", "c3"):
+            root = tmp_path / name
+            root.mkdir()
+            reg[name] = {"root": str(root)}
+        save_registry(reg)
+
+    @staticmethod
+    def _spawns(monkeypatch) -> list[list[str]]:
+        spawned: list[list[str]] = []
+
+        class FakeProc:
+            def __init__(self, cmd):
+                self.pid = 1000 + len(spawned)
+                spawned.append(cmd)
+
+        monkeypatch.setattr("commands.subprocess.Popen", lambda cmd, **_k: FakeProc(cmd))
+        return spawned
+
+    def test_start_takes_several_names_in_order(self, three, monkeypatch, capsys):
+        spawned = self._spawns(monkeypatch)
+        assert cmd_start(["a1", "b2", "c3"]) == 0
+        assert [cmd[-1] for cmd in spawned] == ["a1", "b2", "c3"]
+        out = capsys.readouterr().out
+        for name in ("a1", "b2", "c3"):
+            assert f"started {name} as PID" in out
+
+    def test_start_reports_each_failure_and_starts_the_rest(self, three, monkeypatch, capsys):
+        spawned = self._spawns(monkeypatch)
+        assert cmd_start(["a1", "nope", "c3"]) == 1
+        assert [cmd[-1] for cmd in spawned] == ["a1", "c3"]
+        assert "no agent or alias named 'nope'" in capsys.readouterr().err
+
+    def test_start_with_no_name_is_a_usage_error(self, three, capsys):
+        assert cmd_start([]) == 2
+        assert "usage: a8s start <name> [<name> ...]" in capsys.readouterr().err
+
+    def test_stop_takes_several_names(self, three, monkeypatch, capsys):
+        stopped: list[tuple[str, bool]] = []
+
+        def fake_stop_one(name, force):
+            stopped.append((name, force))
+            return 1 if name == "b2" else 0
+
+        monkeypatch.setattr("commands._stop_one", fake_stop_one)
+        assert cmd_stop(["a1", "b2", "c3", "--force"]) == 1
+        assert stopped == [("a1", True), ("b2", True), ("c3", True)]
+
+    def test_restart_takes_several_names(self, three, monkeypatch, capsys):
+        spawned = self._spawns(monkeypatch)
+        assert cmd_restart(["a1", "c3"]) == 0
+        assert [cmd[-1] for cmd in spawned] == ["a1", "c3"]
+
+
 class TestCmdUpdate:
     def test_no_nodes_running(self, fake_home, capsys):
         assert cmd_update([]) == 0
@@ -902,21 +963,14 @@ class TestCmdLs:
 
 
 def _heard(sender: str, stamp: str) -> None:
-    """Insert a RECEIVED_REMOTE row with a chosen timestamp. `txlog.log` stamps
+    """Record an arrival from `sender` at a chosen time. `txlog.log` stamps
     with now, which cannot express "last heard six days ago"."""
-    import sqlite3
-    from txlog import _COLUMNS, transactions_path, log
+    from unittest import mock
 
-    log("RECEIVED_REMOTE", sender=sender, remote="broker")  # ensures the schema
-    with sqlite3.connect(transactions_path()) as conn:
-        conn.execute(
-            f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (stamp, "RECEIVED_REMOTE", "", sender, "", "", "broker", ""),
-        )
-        conn.execute(
-            "DELETE FROM transactions WHERE timestamp != ? AND sender = ?",
-            (stamp, sender),
-        )
+    import txlog
+
+    with mock.patch.object(txlog, "_ts", lambda: stamp):
+        txlog.log("RECEIVED_REMOTE", sender=sender, remote="broker")
 
 
 class TestCmdLsRemotes:
@@ -988,20 +1042,24 @@ class TestCmdLsRemotes:
 
     def test_newest_arrival_wins(self, fake_home, capsys):
         from ar3 import clock
-        import sqlite3
-        from txlog import _COLUMNS, transactions_path
 
         save_registry({})
         _heard("robin", "2026-08-20T01:00:00.000Z")
-        with sqlite3.connect(transactions_path()) as conn:
-            conn.execute(
-                f"INSERT INTO transactions({_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ("2026-08-26T17:00:00.000Z", "RECEIVED_REMOTE", "", "robin", "", "", "b", ""),
-            )
+        _heard("robin", "2026-08-26T17:00:00.000Z")
         assert cmd_ls([]) == 0
         out = capsys.readouterr().out
         assert clock.stamp("2026-08-26T17:00:00.000Z") in out
         assert clock.stamp("2026-08-20T01:00:00.000Z") not in out
+
+    def test_retention_does_not_drop_a_heard_name(self, fake_home, capsys):
+        from txlog import log, prune_transactions
+
+        save_registry({})
+        _heard("my-phone", "2026-08-24T05:08:45.222Z")
+        log("ROUTED", msg_id="01A", sender="a", recipient="b")
+        prune_transactions(1)
+        assert cmd_ls([]) == 0
+        assert "my-phone" in capsys.readouterr().out
 
     def test_quiet_includes_remotes(self, fake_home, tmp_path, capsys):
         a = tmp_path / "a"; a.mkdir()
@@ -2348,15 +2406,39 @@ class TestCmdRemoteS3:
     def test_registers_the_bucket_and_prefix(self, fake_home, capsys):
         rc = cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "--region", "us-west-2"])
         assert rc == 0
-        assert load_network_config()["remotes"]["bucket"] == {
+        spec = dict(load_network_config()["remotes"]["bucket"])
+        joined = spec.pop("joined")
+        assert spec == {
             "transport": "s3",
             "bucket": "my-bucket",
             "prefix": "a8s-mail",
             "region": "us-west-2",
         }
         out = capsys.readouterr().out
-        assert "added remote bucket (s3 s3://my-bucket/a8s-mail --region=us-west-2)" in out
+        assert (
+            "added remote bucket (s3 s3://my-bucket/a8s-mail --region=us-west-2 "
+            f"joined={joined} (" in out
+        )
         assert "attachments need their own service" in out
+
+    def test_registration_stamps_the_join(self, fake_home):
+        from ar3.ulid import is_ulid
+
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        assert is_ulid(load_network_config()["remotes"]["bucket"]["joined"])
+
+    def test_an_option_change_keeps_the_join(self, fake_home):
+        # Re-joining here would skip mail that arrived but was not yet polled.
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        joined = load_network_config()["remotes"]["bucket"]["joined"]
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail", "--poll-seconds", "30"]) == 0
+        assert load_network_config()["remotes"]["bucket"]["joined"] == joined
+
+    def test_a_new_mailbox_is_a_new_join(self, fake_home):
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        joined = load_network_config()["remotes"]["bucket"]["joined"]
+        assert cmd_remote(["bucket", "s3://my-bucket/other-mail"]) == 0
+        assert load_network_config()["remotes"]["bucket"]["joined"] != joined
 
     def test_no_storage_service_is_created(self, fake_home):
         assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
@@ -2409,7 +2491,7 @@ class TestCmdRemoteS3:
         assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
         rc = cmd_storage(["files", "s3://my-bucket/a8s-mail/files"])
         assert rc == 2
-        assert "remote bucket already owns that prefix" in capsys.readouterr().err
+        assert "remote bucket already reaps that prefix" in capsys.readouterr().err
         assert "files" not in load_network_config()["services"]
 
     def test_the_default_storage_prefix_counts(self, fake_home, capsys):
@@ -2439,7 +2521,9 @@ class TestCmdRemoteS3:
     def test_overwrite_replaces_the_spec(self, fake_home, capsys):
         assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
         assert cmd_remote(["bucket", "s3://other-bucket/mail", "--poll-seconds", "30"]) == 0
-        assert load_network_config()["remotes"]["bucket"] == {
+        spec = dict(load_network_config()["remotes"]["bucket"])
+        spec.pop("joined")
+        assert spec == {
             "transport": "s3",
             "bucket": "other-bucket",
             "prefix": "mail",
@@ -2451,6 +2535,15 @@ class TestCmdRemoteS3:
         assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
         assert cmd_unremote(["bucket"]) == 0
         assert "bucket" not in load_network_config()["remotes"]
+
+    def test_unremote_drops_the_ledger(self, fake_home):
+        from core import s3_ledger_path
+
+        assert cmd_remote(["bucket", "s3://my-bucket/a8s-mail"]) == 0
+        s3_ledger_path("bucket").parent.mkdir(parents=True, exist_ok=True)
+        s3_ledger_path("bucket").write_text("01ARZ3NDEKTSV4RRFFQ69G5FAV\n")
+        assert cmd_unremote(["bucket"]) == 0
+        assert not s3_ledger_path("bucket").exists()
 
     def test_the_suggested_storage_command_is_one_that_works(self, fake_home, capsys):
         # The remote takes `a8s-files` itself, so the suggestion cannot be
@@ -2507,7 +2600,7 @@ class TestCmdRemoteS3:
             ]
         )
         assert rc == 2
-        assert "remote bucket already owns that prefix" in capsys.readouterr().err
+        assert "remote bucket already reaps that prefix" in capsys.readouterr().err
 
     def test_health_installs_a_missing_group_instead_of_warning(
         self, fake_home, capsys, monkeypatch
@@ -3209,3 +3302,37 @@ class TestCmdTrace:
         err = capsys.readouterr().err
         assert "no transaction log at" in err
         assert str(transactions_path()) in err
+
+
+class TestHealthMqtt:
+    """`a8s health` reports an MQTT remote by its link, not by the absence of
+    an exception: `start()` never raises for a broker that does not answer."""
+
+    @pytest.fixture
+    def hub(self, fake_home):
+        def configure(port: int) -> None:
+            assert cmd_remote(["hub", f"mqtt://127.0.0.1:{port}", "a8s/test-health"]) == 0
+            cfg = load_network_config()
+            cfg["remotes"]["hub"]["connect_timeout_s"] = "0.5"
+            save_network_config(cfg)
+
+        return configure
+
+    def test_health_reports_ok_when_the_broker_answers(self, hub, mqtt_broker, capsys):
+        from commands import cmd_health
+
+        hub(mqtt_broker)
+        capsys.readouterr()
+        assert cmd_health() == 0
+        assert "remote hub: OK" in capsys.readouterr().out
+
+    def test_health_fails_when_the_broker_is_down(self, hub, capsys):
+        from commands import cmd_health
+        from mqtt_cluster import free_port
+
+        hub(free_port())
+        capsys.readouterr()
+        assert cmd_health() == 1
+        output = capsys.readouterr().out
+        assert "remote hub: FAIL (not connected)" in output
+        assert "remote hub: OK" not in output

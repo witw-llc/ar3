@@ -133,3 +133,17 @@ class TestCmdConfig:
     def test_unknown_setting(self, fake_home, capsys):
         assert cmd_config(["get", "bogus"]) == 1
         assert "unknown setting" in capsys.readouterr().err
+
+
+def test_settings_save_is_atomic(fake_home, monkeypatch):
+    # A resident loop reads settings every pass; a torn read there falls
+    # back to defaults for that pass.
+    calls = []
+    real = sm.atomic_write_text
+    monkeypatch.setattr(
+        sm, "atomic_write_text",
+        lambda path, text, **kw: calls.append(path) or real(path, text, **kw),
+    )
+    sm.set_setting("txlog_heartbeat_seconds", 0)
+    assert calls == [sm.settings_path()]
+    assert sm.get_setting("txlog_heartbeat_seconds") == 0

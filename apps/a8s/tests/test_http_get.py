@@ -1,6 +1,7 @@
 """Tests for plain HTTP(S) storage downloads."""
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import pytest
@@ -184,3 +185,159 @@ class TestHttpGetUrlToPath:
         finally:
             server.shutdown()
             server.server_close()
+
+
+def _truncating_server(full_body: bytes, sent_len: int):
+    """A server that always declares `len(full_body)` via Content-Length.
+
+    `/full` writes the whole body and closes cleanly (positive control).
+    `/short` writes only the first `sent_len` bytes and then drops the
+    connection — an early FIN that looks exactly like a clean EOF to a
+    reader that never checks Content-Length against bytes received."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    port = free_port()
+    declared = len(full_body)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            return
+
+        def do_GET(self):
+            if self.path == "/full":
+                self.send_response(200)
+                self.send_header("Content-Length", str(declared))
+                self.end_headers()
+                self.wfile.write(full_body)
+                return
+            if self.path == "/short":
+                self.send_response(200)
+                self.send_header("Content-Length", str(declared))
+                self.end_headers()
+                self.wfile.write(full_body[:sent_len])
+                self.wfile.flush()
+                try:
+                    self.connection.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                self.close_connection = True
+                return
+            if self.path == "/chunked":
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                mid = declared // 2
+                for piece in (full_body[:mid], full_body[mid:]):
+                    self.wfile.write(
+                        ("%x\r\n" % len(piece)).encode() + piece + b"\r\n"
+                    )
+                self.wfile.write(b"0\r\n\r\n")
+                return
+            if self.path == "/chunked-short":
+                # Declares a chunk far larger than what follows, then drops
+                # the connection mid-chunk — the malformed-stream case that
+                # http.client itself detects and raises IncompleteRead for,
+                # as opposed to the plain Content-Length case above where a
+                # short amt-sized read returns silently.
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                chunk_len = max(declared, sent_len + 1000)
+                self.wfile.write(("%x\r\n" % chunk_len).encode())
+                self.wfile.write(full_body[:sent_len])
+                self.wfile.flush()
+                try:
+                    self.connection.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+                self.close_connection = True
+                return
+            self.send_error(404)
+
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{port}"
+
+
+class TestTruncatedDownloadsAreRejected:
+    """A cut connection must not deliver a partial file as if it were whole.
+
+    `http_get_url_to_path` reads in 64 KB chunks until `read()` returns
+    empty; an early FIN from the peer looks exactly like a clean EOF, and
+    the loop used to rename the partial file into place and return True.
+    """
+
+    FULL_LEN = 500_000
+    SENT_LEN = 200_000
+
+    def _body(self):
+        import random
+
+        rng = random.Random(1234567)
+        return bytes(rng.getrandbits(8) for _ in range(self.FULL_LEN))
+
+    def test_short_read_raises_and_leaves_nothing_at_dest(self, tmp_path):
+        body = self._body()
+        server, base = _truncating_server(body, self.SENT_LEN)
+        try:
+            dest = tmp_path / "out.bin"
+            with pytest.raises(StorageError, match="truncated"):
+                http_get_url_to_path(f"{base}/short", dest)
+            assert not dest.exists()
+            assert not dest.with_name(dest.name + ".part").exists()
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_full_body_is_the_positive_control(self, tmp_path):
+        body = self._body()
+        server, base = _truncating_server(body, self.SENT_LEN)
+        try:
+            dest = tmp_path / "out.bin"
+            assert http_get_url_to_path(f"{base}/full", dest) is True
+            assert dest.read_bytes() == body
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_chunked_response_with_no_content_length_is_accepted(self, tmp_path):
+        body = self._body()
+        server, base = _truncating_server(body, self.SENT_LEN)
+        try:
+            dest = tmp_path / "out.bin"
+            assert http_get_url_to_path(f"{base}/chunked", dest) is True
+            assert dest.read_bytes() == body
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_incomplete_read_from_a_malformed_chunk_raises(self, tmp_path):
+        body = self._body()
+        server, base = _truncating_server(body, self.SENT_LEN)
+        try:
+            dest = tmp_path / "out.bin"
+            with pytest.raises(StorageError, match="truncated"):
+                http_get_url_to_path(f"{base}/chunked-short", dest)
+            assert not dest.exists()
+            assert not dest.with_name(dest.name + ".part").exists()
+            assert list(tmp_path.iterdir()) == []
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_short_read_is_stable_across_repeats(self, tmp_path):
+        """Guards against a flaky pass: run the truncation case several
+        times in one process, not just once."""
+        body = self._body()
+        for i in range(20):
+            server, base = _truncating_server(body, self.SENT_LEN)
+            try:
+                dest = tmp_path / f"out{i}.bin"
+                with pytest.raises(StorageError, match="truncated"):
+                    http_get_url_to_path(f"{base}/short", dest)
+                assert not dest.exists()
+            finally:
+                server.shutdown()
+                server.server_close()

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ar3.fsio import atomic_write_text
 from core import (
     MARKER_FILES,
     NAME_RE,
@@ -47,16 +48,30 @@ def _empty_registry() -> dict:
     return {section: {} for section in _REGISTRY_SECTIONS}
 
 
+class RegistryUnreadable(OSError):
+    """The registry file exists but cannot be read or parsed this time.
+
+    Never read as "no agents": a node that did so dropped every name it
+    handled. A torn read or a transient permission error clears on the next
+    attempt, so a caller retries or reports. An OSError, so callers that
+    already treat a failed registry read as "no readable registry" (`tell`
+    and `tells` in a sandbox) keep that behavior."""
+
+
 def _load_raw_registry() -> dict:
     p = registry_path()
-    if not p.is_file():
-        return _empty_registry()
     try:
-        data = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError):
+        text = p.read_text()
+    except FileNotFoundError:
         return _empty_registry()
+    except OSError as e:
+        raise RegistryUnreadable(f"registry unreadable: {p}: {e}") from e
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RegistryUnreadable(f"registry unreadable: {p}: not valid JSON ({e})") from e
     if not isinstance(data, dict):
-        return _empty_registry()
+        raise RegistryUnreadable(f"registry unreadable: {p}: top level is not an object")
     raw = {}
     for section in _REGISTRY_SECTIONS:
         value = data.get(section)
@@ -66,7 +81,7 @@ def _load_raw_registry() -> dict:
 
 def _save_raw_registry(data: dict) -> None:
     payload = {section: data.get(section) or {} for section in _REGISTRY_SECTIONS}
-    registry_path().write_text(json.dumps(payload, indent=2, sort_keys=True))
+    atomic_write_text(registry_path(), json.dumps(payload, indent=2, sort_keys=True))
 
 
 def load_registry() -> dict:

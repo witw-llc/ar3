@@ -870,8 +870,8 @@ class TestDeliveryClaim:
         self, two_local_agents
     ):
         # The claim is the whole point: another daemon is delivering it right
-        # now. A wire holding the only copy must not read "returned without
-        # raising" as "consumed" and destroy it.
+        # now. A wire that records what it consumed must not read "returned
+        # without raising" as "consumed" and skip it from then on.
         msg_id = new_ulid()
         assert network.claim_message(msg_id) is True
         assert receive_envelope(self._envelope(msg_id), two_local_agents) is False
@@ -1217,3 +1217,18 @@ class TestClaimHolding:
         _os.utime(network._claims_dir() / msg_id, (old, old))
         network.hold_claim(msg_id)
         assert network.claim_message(msg_id) is False
+
+
+def test_network_config_save_is_atomic(fake_home, monkeypatch):
+    # A node reads network.json at start; a torn read there starts no remotes.
+    from core import network_config_path
+
+    calls = []
+    real = network.atomic_write_text
+    monkeypatch.setattr(
+        network, "atomic_write_text",
+        lambda path, text, **kw: calls.append(path) or real(path, text, **kw),
+    )
+    save_network_config({"remotes": {"r": {"transport": "folder"}}, "services": {}})
+    assert calls == [network_config_path()]
+    assert json.loads(network_config_path().read_text())["remotes"] == {"r": {"transport": "folder"}}

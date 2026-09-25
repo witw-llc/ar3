@@ -20,6 +20,7 @@ from mqtt_cluster import (
     stop_attached_loop,
     using_a8s_home,
     wait_agent_log,
+    wait_node_ready,
     wait_convo,
     write_outbox,
 )
@@ -62,7 +63,8 @@ class TestDualClusterRemote:
         alice_proc = start_attached_loop(alice_a8s, "ALICE")
         bob_proc = start_attached_loop(bob_a8s, "BOB")
         try:
-            time.sleep(0.8)
+            wait_node_ready(alice_a8s)
+            wait_node_ready(bob_a8s)
 
             write_outbox(alice_a8s, "ALICE", alice_root, "BOB", "hello from alice")
             wait_agent_log(alice_a8s, "ALICE", "remote hub: published -> BOB: hello from alice")
@@ -153,7 +155,8 @@ class TestDualClusterRemote:
         alice_proc = start_attached_loop(alice_a8s, "ALICE")
         bob_proc = start_attached_loop(bob_a8s, "BOB")
         try:
-            time.sleep(0.8)
+            wait_node_ready(alice_a8s)
+            wait_node_ready(bob_a8s)
             write_outbox(alice_a8s, "ALICE", alice_root, "BOB", "wrong topic")
 
             with using_a8s_home(bob_a8s):

@@ -48,6 +48,7 @@ __all__ = [
     "Detection",
     "detect",
     "add_detected",
+    "stale_cursor_rigs",
     "format_text",
 ]
 
@@ -215,6 +216,28 @@ def add_detected(path: Path, rows: list[Detection]) -> list[tuple[str, str, str]
         invoke = " ".join(build_preset_invoke(row.preset))
         results.append((row.preset, "added", invoke))
     return results
+
+
+def stale_cursor_rigs(path: Path) -> list[str]:
+    """Cursor rigs in this config still running `--model auto` — baked into
+    their invoke at `rig add` time, before the cursor preset's default
+    changed to composer-2.5 (#282). The preset fix reaches a new rig, never
+    an existing one, so this is the only place that notices the old one is
+    still spending on the newest model. Best-effort: a missing or invalid
+    config answers no rigs rather than raising."""
+    try:
+        config = load_rig_config(path)
+    except RigError:
+        return []
+    if config.missing:
+        return []
+    return [
+        name
+        for name in sorted(config.rigs)
+        if not config.rigs[name].error
+        and config.rigs[name].preset == "cursor"
+        and config.rigs[name].resolved_model == "auto"
+    ]
 
 
 def install_hint(rows: list[Detection]) -> str:

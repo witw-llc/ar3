@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+import registry as registry_mod
 from registry import (
+    RegistryUnreadable,
     _load_raw_registry,
     _scan_for_markers,
     find_participant,
@@ -111,13 +113,64 @@ class TestRegistryIO:
         save_registry({"X": {"root": "/r"}})
         assert load_namespaces() == {"acme": "X"}
 
-    def test_corrupt_file_returns_empty(self, fake_home):
-        registry_path().write_text("not json")
-        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}, "namespace_options": {}}
+    def test_torn_file_is_unreadable_not_empty(self, fake_home):
+        # A reader that lands mid-write sees a prefix of the JSON. Reading
+        # that as "no agents" is what made a node drop every name it handled.
+        save_registry({"A": {"root": "/r"}})
+        whole = registry_path().read_text()
+        registry_path().write_text(whole[: len(whole) // 2])
+        with pytest.raises(RegistryUnreadable):
+            _load_raw_registry()
+        with pytest.raises(RegistryUnreadable):
+            load_registry()
 
-    def test_non_dict_top_level_returns_empty(self, fake_home):
+    def test_non_dict_top_level_is_unreadable(self, fake_home):
         registry_path().write_text("[1, 2, 3]")
-        assert _load_raw_registry() == {"agents": {}, "aliases": {}, "namespaces": {}, "namespace_options": {}}
+        with pytest.raises(RegistryUnreadable):
+            _load_raw_registry()
+
+    def test_transient_permission_error_is_unreadable(self, fake_home, monkeypatch):
+        save_registry({"A": {"root": "/r"}})
+        real_read_text = Path.read_text
+
+        def denied(self, *a, **kw):
+            if self == registry_path():
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+        with pytest.raises(RegistryUnreadable):
+            load_registry()
+        monkeypatch.setattr(Path, "read_text", real_read_text)
+        assert load_registry() == {"A": {"root": "/r"}}
+
+    def test_unreadable_is_an_oserror(self):
+        # tell and tells treat an OSError from a registry read as "no
+        # readable registry" and fall back; a sandboxed seat depends on that.
+        assert issubclass(RegistryUnreadable, OSError)
+
+    def test_save_does_not_overwrite_an_unreadable_registry(self, fake_home):
+        registry_path().write_text('{"agents": {"A": {"root"')
+        with pytest.raises(RegistryUnreadable):
+            save_aliases({"devs": ["A"]})
+        assert registry_path().read_text() == '{"agents": {"A": {"root"'
+
+    def test_save_is_atomic(self, fake_home, monkeypatch):
+        # The write goes to a temp file and is renamed into place, so no
+        # reader ever sees a partial registry.
+        calls = []
+        real = registry_mod.atomic_write_text
+
+        def spy(path, text, **kw):
+            calls.append(Path(path))
+            return real(path, text, **kw)
+
+        monkeypatch.setattr(registry_mod, "atomic_write_text", spy)
+        save_registry({"A": {"root": "/r"}})
+        assert calls == [registry_path()]
+        assert load_registry() == {"A": {"root": "/r"}}
+        leftovers = [p.name for p in registry_path().parent.iterdir() if p.name.endswith(".tmp")]
+        assert leftovers == []
 
     def test_missing_sections_default_empty(self, fake_home):
         # No migration code (pre-v1): a registry written before namespaces
