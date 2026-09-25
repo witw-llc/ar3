@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from ar3.fsio import atomic_write_text
+from ar3.fsio import atomic_write_bytes, atomic_write_text
 
 
 class TestBasics:
@@ -87,3 +87,34 @@ class TestFailureCleanup:
         assert not target.exists()
         leftovers = list((tmp_path / "sub").iterdir())
         assert leftovers == []
+
+
+class TestBytes:
+    def test_lands_byte_for_byte(self, tmp_path):
+        target = tmp_path / "copy.md"
+        data = b"- one\r\n- two\n- caf\xe9\r\n"  # mixed endings, not UTF-8
+        atomic_write_bytes(target, data)
+        assert target.read_bytes() == data
+
+    def test_text_writes_are_unchanged(self, tmp_path):
+        target = tmp_path / "file.md"
+        atomic_write_text(target, "a\nb\n")
+        assert target.read_text(encoding="utf-8") == "a\nb\n"
+
+    def test_tmp_file_removed_when_replace_fails(self, tmp_path, monkeypatch):
+        target = tmp_path / "sub" / "copy.md"
+
+        def failing_replace(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+        with pytest.raises(OSError):
+            atomic_write_bytes(target, b"content")
+        assert list((tmp_path / "sub").iterdir()) == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
+    def test_mode_is_applied(self, tmp_path):
+        target = tmp_path / "secret.bin"
+        atomic_write_bytes(target, b"\x00\r\n", mode=0o600)
+        assert (target.stat().st_mode & 0o777) == 0o600
+        assert target.read_bytes() == b"\x00\r\n"

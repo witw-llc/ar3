@@ -39,6 +39,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -64,13 +65,14 @@ from rig import (
 # The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
 # into a container with no repo root, so `ar3` is not always reachable there.
 try:
-    from ar3.fsio import atomic_write_text as _atomic_write
+    from ar3.fsio import atomic_write_bytes as _atomic_write_bytes
 except ImportError:
-    def _atomic_write(path: Path, text: str) -> None:
-        """Write `text` to `path` via a same-directory temp file + os.replace,
+    def _atomic_write_bytes(path: Path, data: bytes) -> None:
+        """Write `data` to `path` via a same-directory temp file + os.replace,
         so a killed turn never observes a half-written file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_bytes(data)
         os.replace(tmp, path)
 
 try:
@@ -116,6 +118,9 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "IDLE_MARKER_NAME",
     "LESSONS_CAP_LINES",
+    "LESSONS_CAP_BYTES",
+    "LESSONS_SOFT_CAP",
+    "LESSONS_ROTATE_MARKER",
     "LESSONS_ARCHIVE_NAME",
     "DEFAULT_IDLE_PROMPT",
     "RunError",
@@ -123,6 +128,7 @@ __all__ = [
     "git_identity_env",
     "scaffold_prompt",
     "rotate_lessons_if_oversized",
+    "prepare_lessons_fold",
     "execute",
 ]
 
@@ -133,7 +139,14 @@ RUN_ENGINES = frozenset({
 
 IDLE_MARKER_NAME = ".engine-idle"
 LESSONS_CAP_LINES = 200
+# Lines run past 1,000 characters in the field, so a line cap alone does not
+# bound what a turn reads.
+LESSONS_CAP_BYTES = 35 * 1024
+# Fraction of either cap past which a turn is told to fold before it appends.
+LESSONS_SOFT_CAP = 0.8
+LESSONS_ROTATE_MARKER = "<!-- rotate-below -->"
 LESSONS_ARCHIVE_NAME = "LESSONS-ARCHIVE.md"
+LESSONS_FOLD_DIR = "archive"
 TIMEOUT_EXIT_CODE = 124  # matches the `timeout(1)` convention
 
 DEFAULT_IDLE_PROMPT = (
@@ -157,12 +170,13 @@ _GIT_IDENT_REFUSED = ("\n", "\r", "\0", "<", ">")
 def git_identity_env(name: str | None, email: str | None) -> dict[str, str]:
     """The git environment names one turn commits under. `name` sets the
     author and committer name, `email` both emails, each independently. git's
-    environment beats every config file, so the names cover every commit the
-    turn makes in any repo, amends and rebases included. An unset or blank
-    value adds nothing and leaves git's own config in charge. A value with a
-    line break or NUL, or with `<` or `>`, is refused: git drops the ident
-    delimiters silently, so the commit would name something the operator
-    never typed."""
+    environment beats every config file in any repo, so a new commit the turn
+    makes names these as author and committer. `git commit --amend` and
+    `git rebase` keep a rewritten commit's original author and name these as
+    its committer only. An unset or blank value adds nothing and leaves git's
+    own config in charge. A value with a line break or NUL, or with `<` or
+    `>`, is refused: git drops the ident delimiters silently, so the commit
+    would name something the operator never typed."""
     identity: dict[str, str] = {}
     for (flag, names), value in zip(_GIT_IDENTITY_FLAGS, (name, email)):
         if value is None or not value.strip():
@@ -176,18 +190,38 @@ def git_identity_env(name: str | None, email: str | None) -> dict[str, str]:
     return identity
 
 
-def scaffold_prompt(dir_path: Path, message: str, *, agent: str | None) -> str:
-    """The fixed cold-boot prelude plus the volatile `message` last, so the
-    prelude stays byte-identical across runs in the same `dir_path` and the
-    prompt cache only ever misses on the routed input itself."""
+def scaffold_prompt(
+    dir_path: Path,
+    message: str,
+    *,
+    agent: str | None,
+    lessons_cap: int = LESSONS_CAP_LINES,
+    lessons_cap_bytes: int = LESSONS_CAP_BYTES,
+    fold: tuple[Path, Path] | None = None,
+) -> str:
+    """The fixed cold-boot prelude, then this turn's LESSONS.md note, then the
+    volatile `message` last. The prelude stays byte-identical across runs in
+    the same `dir_path`, so the prompt cache only ever misses on what follows
+    it. Its one conditional sentence, the archive pointer, turns on once in a
+    seat's life: rotation creates the archive and r4t never removes it. The
+    note changes turn to turn, so it sits after the prelude: the soft-cap
+    nudge when LESSONS.md is over the soft cap, or on an idle turn the fold
+    `prepare_lessons_fold` readied (`fold`), which replaces the nudge."""
     status = dir_path / "STATUS.md"
     agents_file = dir_path / "AGENTS.md"
     lessons = dir_path / "LESSONS.md"
-    steps = [
+    archive = dir_path / LESSONS_ARCHIVE_NAME
+    read_step = (
         f"1. Read {status}, then {agents_file} and {lessons} if present. Use "
         "these absolute paths even if your workspace root differs. They are "
-        "the durable source of truth; you have no transcript memory.",
-    ]
+        "the durable source of truth; you have no transcript memory."
+    )
+    try:
+        if archive.stat().st_size:
+            read_step += f" Older lessons: {archive} (grep it; do not read it whole)."
+    except OSError:
+        pass
+    steps = [read_step]
     if agent:
         steps.append(
             f"{len(steps) + 1}. Run `a8s convo {agent}` and reconcile the "
@@ -206,47 +240,292 @@ def scaffold_prompt(dir_path: Path, message: str, *, agent: str | None) -> str:
         "existing lessons. Never edit AGENTS.md."
     )
     prelude = "Smart cold boot:\n" + "\n".join(steps)
-    return f"{prelude}\n\nRouted input:\n{message}"
+    note = _lessons_note(dir_path, lessons_cap, lessons_cap_bytes, fold)
+    tail = f"\n\n{note}" if note else ""
+    return f"{prelude}{tail}\n\nRouted input:\n{message}"
 
 
-def rotate_lessons_if_oversized(dir_path: Path, cap: int = LESSONS_CAP_LINES) -> None:
-    """Option A — rotate, never merge; the file never meets a model. A
-    LESSONS.md strictly over `cap` lines has its oldest lines moved out,
-    whole lines only, so the live file lands at exactly `cap`. Moved lines
-    are appended in order to LESSONS-ARCHIVE.md (created if absent) before
-    LESSONS.md is rewritten, so a kill between the two writes can only
-    duplicate lines into the archive, never lose them — each file's own
-    write is atomic via temp file + os.replace, but the pair is not one
-    transaction. A missing or unreadable LESSONS.md is silently not-
-    oversized."""
+def _lf(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _lessons_text(data: bytes) -> str | None:
+    """LESSONS.md as text with LF line endings, or None when it is not UTF-8.
+    Every size r4t reports or caps counts LF endings, which is how rotation
+    writes the file."""
+    try:
+        return _lf(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _read_lessons(path: Path) -> str | None:
+    try:
+        return _lessons_text(path.read_bytes())
+    except OSError:
+        return None
+
+
+def _lessons_lines(text: str) -> list[str]:
+    lines = text.split("\n")
+    if text.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _lines_text(lines: list[str]) -> str:
+    return "".join(f"{line}\n" for line in lines)
+
+
+def _line_bytes(line: str) -> int:
+    return len(line.encode("utf-8")) + 1
+
+
+def _kb(size: int) -> str:
+    text = f"{size / 1024:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def _over_soft_cap(lines: int, size: int, cap: int, cap_bytes: int) -> bool:
+    return lines > cap * LESSONS_SOFT_CAP or size > cap_bytes * LESSONS_SOFT_CAP
+
+
+def _heading_level(line: str) -> int:
+    """The level of a markdown ATX heading (1-6), or 0 for any other line."""
+    level = len(line) - len(line.lstrip("#"))
+    if 1 <= level <= 6 and line[level:level + 1] in ("", " ", "\t"):
+        return level
+    return 0
+
+
+def _pinned_count(lines: list[str]) -> int:
+    """How many leading lines of LESSONS.md are its header, which never
+    rotates: through the first `<!-- rotate-below -->` line when there is one,
+    else every line above the first `## ` heading, else none."""
+    for index, line in enumerate(lines):
+        if line.strip() == LESSONS_ROTATE_MARKER:
+            return index + 1
+    for index, line in enumerate(lines):
+        if _heading_level(line) == 2:
+            return index
+    return 0
+
+
+def _push_heading(chain: list[tuple[int, str]], line: str) -> None:
+    level = _heading_level(line)
+    if level:
+        while chain and chain[-1][0] >= level:
+            chain.pop()
+        chain.append((level, line))
+
+
+def _carried(chain: list[tuple[int, str]], next_line: str | None) -> list[str]:
+    """The moved headings that still govern `next_line`, outermost first:
+    every open one before a plain line, only the shallower ones before a
+    heading, none when nothing is left after the cut."""
+    if next_line is None:
+        return []
+    level = _heading_level(next_line)
+    return [line for depth, line in chain if not level or depth < level]
+
+
+def _rotation_cut(
+    body: list[str], head: list[str], cap: int, cap_bytes: int
+) -> tuple[int, list[str]]:
+    """How many leading `body` lines move, and the headings the live file
+    repeats above the rest. The cut is the smallest one after which header,
+    repeated headings and remaining body fit both caps, then pushed past any
+    blank lines, which carry nothing and would open the kept text."""
+    head_bytes = sum(map(_line_bytes, head))
+    rest_bytes = sum(map(_line_bytes, body))
+    chain: list[tuple[int, str]] = []
+    cut = 0
+    while cut < len(body):
+        carry = _carried(chain, body[cut])
+        if (
+            len(head) + len(carry) + len(body) - cut <= cap
+            and head_bytes + sum(map(_line_bytes, carry)) + rest_bytes <= cap_bytes
+        ):
+            break
+        _push_heading(chain, body[cut])
+        rest_bytes -= _line_bytes(body[cut])
+        cut += 1
+    while cut < len(body) and not body[cut].strip():
+        cut += 1
+    return cut, _carried(chain, body[cut] if cut < len(body) else None)
+
+
+def rotate_lessons_if_oversized(
+    dir_path: Path,
+    cap: int = LESSONS_CAP_LINES,
+    cap_bytes: int = LESSONS_CAP_BYTES,
+) -> None:
+    """Rotate, never merge; no model touches either file. A LESSONS.md over
+    `cap` lines or `cap_bytes` bytes has its oldest lines moved out, whole
+    lines only, until the live file fits both caps. The header never moves
+    (`_pinned_count`). A cut inside a section repeats the headings still
+    governing the kept lines at the top of the live file, and the archive
+    keeps them in place, so neither file holds lines cut off from their
+    heading.
+
+    Moved lines are appended in order to LESSONS-ARCHIVE.md (created if
+    absent) before LESSONS.md is rewritten, so a kill between the two writes
+    can only duplicate lines into the archive, never lose them — each file's
+    own write is atomic via temp file + os.replace, but the pair is not one
+    transaction. Both files are written with LF line endings, whatever they
+    held before, so neither ends up with mixed endings and the byte cap holds
+    on disk. A header over a cap on its own is reported on stderr, since
+    nothing below it can bring the file under. A missing or unreadable
+    LESSONS.md is silently not-oversized; one that is not UTF-8 is left as it
+    is, with a stderr line."""
     lessons_path = dir_path / "LESSONS.md"
     try:
-        text = lessons_path.read_text(encoding="utf-8")
+        data = lessons_path.read_bytes()
     except OSError:
         return
-    trailing_newline = text.endswith("\n")
-    lines = text.split("\n")
-    if trailing_newline:
-        lines.pop()
-    if len(lines) <= cap:
+    text = _lessons_text(data)
+    if text is None:
+        print(
+            f"r4t engine: {lessons_path} is not UTF-8, so it is not rotated",
+            file=sys.stderr,
+        )
         return
-    overflow = len(lines) - cap
-    moved, kept = lines[:overflow], lines[overflow:]
+    lines = _lessons_lines(text)
+    if len(lines) <= cap and len(text.encode("utf-8")) <= cap_bytes:
+        return
+    pinned = _pinned_count(lines)
+    head, body = lines[:pinned], lines[pinned:]
+    cut, carried = _rotation_cut(body, head, cap, cap_bytes)
 
-    archive_path = dir_path / LESSONS_ARCHIVE_NAME
+    if cut:
+        archive_path = dir_path / LESSONS_ARCHIVE_NAME
+        try:
+            archive_prefix = _lf(archive_path.read_bytes())
+        except OSError:
+            archive_prefix = b""
+        if archive_prefix and not archive_prefix.endswith(b"\n"):
+            archive_prefix += b"\n"
+        moved = _lines_text(body[:cut]).encode("utf-8")
+        _atomic_write_bytes(archive_path, archive_prefix + moved)
+        _atomic_write_bytes(
+            lessons_path, _lines_text(head + carried + body[cut:]).encode("utf-8")
+        )
+        print(
+            f"r4t engine: rotated {cut} lines from {lessons_path} to {archive_path}",
+            file=sys.stderr,
+        )
+
+    head_bytes = sum(map(_line_bytes, head))
+    if pinned > cap or head_bytes > cap_bytes:
+        print(
+            f"r4t engine: the header of {lessons_path} is over the cap on its "
+            f"own ({pinned} lines, {head_bytes} bytes; cap {cap} lines, "
+            f"{cap_bytes} bytes); put {LESSONS_ROTATE_MARKER} higher in it",
+            file=sys.stderr,
+        )
+
+
+def _fold_day() -> str:
+    """The fold's date, UTC like every date in a filename: it names files
+    that sort, so it cannot move with the machine's zone."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def prepare_lessons_fold(
+    dir_path: Path,
+    *,
+    lessons_cap: int = LESSONS_CAP_LINES,
+    lessons_cap_bytes: int = LESSONS_CAP_BYTES,
+) -> tuple[Path, Path] | None:
+    """Ready an idle turn's fold of LESSONS.md. When the file is over the
+    soft cap and no fold has started today, copy its bytes to
+    archive/lessons-fold-<date>-source.md and return (that copy, the ledger
+    path the turn writes). The copy keeps the fold lossless: a line the model
+    merges or drops is still on disk, and the ledger's line numbers point into
+    it. So the fold, the only turn permitted to edit an existing line, is
+    granted only once the copy reads back equal to LESSONS.md. A copy is never
+    overwritten, which also holds a seat to one fold a day. None when no fold
+    is due or no verified copy exists; the turn then gets the append-only
+    nudge."""
+    lessons = dir_path / "LESSONS.md"
     try:
-        archive_prefix = archive_path.read_text(encoding="utf-8")
+        data = lessons.read_bytes()
     except OSError:
-        archive_prefix = ""
-    if archive_prefix and not archive_prefix.endswith("\n"):
-        archive_prefix += "\n"
-    _atomic_write(archive_path, archive_prefix + "\n".join(moved) + "\n")
-    _atomic_write(lessons_path, "\n".join(kept) + "\n")
+        return None
+    text = _lessons_text(data)
+    if text is None or not _over_soft_cap(
+        len(_lessons_lines(text)), len(text.encode("utf-8")),
+        lessons_cap, lessons_cap_bytes,
+    ):
+        return None
+    folds = dir_path / LESSONS_FOLD_DIR
+    day = _fold_day()
+    source = folds / f"lessons-fold-{day}-source.md"
+    if source.exists():
+        return None
+    try:
+        folds.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(source, data)
+        verified = source.read_bytes() == data == lessons.read_bytes()
+    except OSError as exc:
+        print(f"r4t engine: no fold this turn: {exc}", file=sys.stderr)
+        return None
+    if not verified:
+        print(
+            f"r4t engine: no fold this turn: {source} does not match {lessons}",
+            file=sys.stderr,
+        )
+        return None
+    return source, folds / f"lessons-fold-{day}.md"
 
-    print(
-        f"r4t engine: rotated {overflow} lines from {lessons_path} to {archive_path}",
-        file=sys.stderr,
+
+def _lessons_note(
+    dir_path: Path, cap: int, cap_bytes: int, fold: tuple[Path, Path] | None
+) -> str:
+    """This turn's LESSONS.md note: the fold when one is readied, else the
+    soft-cap nudge when the file is over the soft cap, else nothing. Only the
+    fold permits editing an existing line, because only the fold has a copy to
+    recover from; the nudge keeps the turn append-only."""
+    lessons = dir_path / "LESSONS.md"
+    text = _read_lessons(lessons)
+    if text is None:
+        return ""
+    lines = _lessons_lines(text)
+    size = len(text.encode("utf-8"))
+    figures = (
+        f"{lessons} is {len(lines)} lines / {_kb(size)} KB of {cap} lines / "
+        f"{_kb(cap_bytes)} KB"
     )
+    if fold is not None:
+        source, ledger = fold
+        rules = [
+            "- Merge each duplicate into the lesson it repeats.",
+            "- Drop a lesson only when a newer lesson supersedes it. Never "
+            "drop a live rule.",
+        ]
+        pinned = _pinned_count(lines)
+        if pinned:
+            span = "line 1" if pinned == 1 else f"lines 1-{pinned}"
+            rules.append(f"- Keep {span} (the header) unchanged.")
+        rules.append(
+            f"- Write {ledger} with one table row per line of the copy: "
+            "source line number; kept, merged-into or dropped-superseded; "
+            "target, the line of the new file that holds it, absorbed it or "
+            "supersedes it."
+        )
+        return "\n".join([
+            f"Idle fold: {figures}. Fold it in this pass. {source} is its "
+            "exact copy from before this turn.",
+            *rules,
+            "This fold is the one rewrite of LESSONS.md that the append-only "
+            "rule allows.",
+        ])
+    if _over_soft_cap(len(lines), size, cap, cap_bytes):
+        return (
+            f"{figures}. Do not append a lesson that repeats one already here; "
+            "the idle pass consolidates. Do not edit existing lines."
+        )
+    return ""
 
 
 def _run_extras(engine: str, base_invoke: list[str], timeout: int) -> list[str]:
@@ -499,6 +778,8 @@ def execute(
     scaffold: bool,
     echo: bool = False,
     lessons_cap: int = LESSONS_CAP_LINES,
+    lessons_cap_bytes: int = LESSONS_CAP_BYTES,
+    idle: bool = False,
     continue_conversation: bool = False,
     permissions: str | None = None,
     allowed_tools: str | None = None,
@@ -531,11 +812,16 @@ def execute(
     way. A roster turn arms the same instruments through the same helper —
     see `dispatch.run_harness`. `git_name` / `git_email` put the agent's git
     identity on the child's environment, over any inherited value (see
-    `git_identity_env`); a bad value is refused before anything is touched."""
+    `git_identity_env`); a bad value is refused before anything is touched.
+    `idle` marks the turn as the quiet-tick pass: with the scaffold on and
+    LESSONS.md over the soft cap, it carries the fold (`prepare_lessons_fold`)
+    whatever its routed input says."""
     identity = git_identity_env(git_name, git_email)
     if scaffold:
-        rotate_lessons_if_oversized(dir_path, lessons_cap)
-        prompt = scaffold_prompt(dir_path, message, agent=agent)
+        rotate_lessons_if_oversized(dir_path, lessons_cap, lessons_cap_bytes)
+        caps = {"lessons_cap": lessons_cap, "lessons_cap_bytes": lessons_cap_bytes}
+        fold = prepare_lessons_fold(dir_path, **caps) if idle else None
+        prompt = scaffold_prompt(dir_path, message, agent=agent, fold=fold, **caps)
     else:
         prompt = message
     memory_turn = None

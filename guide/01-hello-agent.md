@@ -337,7 +337,7 @@ STATUS.md
 ```
 
 Three files, and you wrote one of them. `LESSONS.md` grows append-only; past
-a line cap (`--lessons-cap`, 200 by default) the oldest lines rotate into
+a cap (200 lines or 35 KB by default) the oldest lines rotate into
 `LESSONS-ARCHIVE.md` before the turn starts, so the file never quietly turns
 into the whole context window.
 

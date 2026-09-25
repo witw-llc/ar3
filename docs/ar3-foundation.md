@@ -14,7 +14,8 @@ site-packages, so an installed package named `ar3` cannot answer the import —
 then imports `ar3.<module>`, with import sites degrading gracefully when one
 app is relocated away from the repo (the isolation container copies
 `apps/r4t` alone). The shared modules are
-`ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`),
+`ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`,
+`atomic_write_bytes`),
 `ar3.proc` (`spawn` / `terminate_group`), `ar3.envseam` (the reserved-env
 contract), and `ar3.vendor` (the vendoring hook). Beyond stdlib there are exactly
 two tiers: **tier 1** is `ar3/_vendor/`, unmodified PyPI releases pinned with

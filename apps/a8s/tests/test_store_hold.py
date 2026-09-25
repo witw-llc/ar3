@@ -169,15 +169,35 @@ class TestRunningNode:
             )
 
     @staticmethod
-    def _wait_for_side_files(home: Path, timeout: float = 15.0) -> None:
+    def _run_start_senders() -> list[str]:
+        return [e["from"] for _seq, e in txlog.read_recent(events=["RUN_START"])]
+
+    @classmethod
+    def _wait_for_the_node(cls, home: Path, timeout: float = 15.0) -> None:
+        """Wait for the side files of both stores and the node's RUN_START row.
+
+        The side files appear when the node opens its holds. The RUN_START row
+        lands after that, and the transaction schema can still be uncommitted
+        while its side files already exist, so a read in that gap is "not
+        yet". Reads happen only while the directory is writable; the test's
+        own reads after the chmod get no retry.
+        """
         deadline = time.time() + timeout
+        last_error: TransactionLogError | None = None
         while time.time() < deadline:
             with using_a8s_home(home):
                 stores = [conversations_path(), transactions_path()]
                 if all(len(_side_files(s)) == 2 for s in stores):
-                    return
+                    try:
+                        if cls._run_start_senders():
+                            return
+                    except TransactionLogError as e:
+                        last_error = e
             time.sleep(0.05)
-        raise AssertionError(f"no WAL side files under {home} within {timeout}s")
+        raise AssertionError(
+            f"no WAL side files and RUN_START row under {home} within "
+            f"{timeout}s (last read error: {last_error})"
+        )
 
     def test_the_node_holds_both_stores_while_it_runs(
         self, tmp_path, unwritable_dir
@@ -186,10 +206,10 @@ class TestRunningNode:
         self._register(home, tmp_path / "AG")
         proc = start_attached_loop(home, "AG")
         try:
-            self._wait_for_side_files(home)
+            self._wait_for_the_node(home)
             with using_a8s_home(home):
                 unwritable_dir(home)
-                assert txlog.read_recent(limit=5)
+                assert self._run_start_senders() == ["AG"]
                 # The archive holds no rows here — nothing was delivered — but
                 # opening it at all is what the sandboxed seat could not do.
                 assert convo.load_entries() == []

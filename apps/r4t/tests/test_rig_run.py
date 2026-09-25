@@ -338,6 +338,30 @@ class TestEngineFlagsPassThrough:
         assert (tmp_path / "LESSONS.md").read_text().count("\n") == 3
         assert (tmp_path / "LESSONS-ARCHIVE.md").is_file()
 
+    def test_lessons_rotate_at_the_flags_byte_cap(self, r4t_home, tmp_path, preset):
+        (tmp_path / "LESSONS.md").write_text(
+            "".join(f"- lesson {i} {'x' * 90}\n" for i in range(10)), encoding="utf-8"
+        )
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--lessons-cap-bytes", "500") == 0
+        assert len((tmp_path / "LESSONS.md").read_bytes()) <= 500
+        assert (tmp_path / "LESSONS-ARCHIVE.md").is_file()
+
+    def test_an_idle_rig_turn_over_the_soft_cap_asks_for_a_fold(
+        self, r4t_home, tmp_path, preset
+    ):
+        # The fold rides the scaffold, so `rig run` carries it exactly as
+        # `engine run` does.
+        (tmp_path / "LESSONS.md").write_text(
+            "".join(f"- lesson {i}\n" for i in range(9)), encoding="utf-8"
+        )
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--idle", "--lessons-cap", "10", prompt=None) == 0
+        prompt = only_call(preset)["argv"][-1]
+        assert "Idle fold: " in prompt
+        [source] = (tmp_path / "archive").glob("lessons-fold-*-source.md")
+        assert str(source) in prompt
+
     def test_prompt_required_without_idle(self, r4t_home, tmp_path, capsys):
         config = write_rigs(tmp_path, claude_rig())
         assert run_rig(tmp_path, config, prompt=None) == 2

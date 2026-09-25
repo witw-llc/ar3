@@ -1715,6 +1715,8 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             scaffold=not args.no_scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
+            lessons_cap_bytes=args.lessons_cap_bytes,
+            idle=args.idle,
             continue_conversation=args.continue_conversation,
             permissions=args.permissions,
             allowed_tools=args.allowed_tools,
@@ -1939,6 +1941,8 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             scaffold=not args.no_scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
+            lessons_cap_bytes=args.lessons_cap_bytes,
+            idle=args.idle,
             continue_conversation=args.continue_conversation,
             permissions=resolve_override(args.permissions, rig.permissions),
             allowed_tools=resolve_override(args.allowed_tools, rig.allowed_tools),
@@ -2874,7 +2878,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(roster_check_p, with_node=True)
     roster_check_p.set_defaults(func=cmd_roster_check)
 
-    from engines.run import LESSONS_CAP_LINES
+    from engines.run import LESSONS_CAP_BYTES, LESSONS_CAP_LINES
 
     rig_p = sub.add_parser(
         "rig",
@@ -3009,6 +3013,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="lessons_cap",
         help="Line cap before rotating oldest LESSONS.md lines to "
         f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_LINES}).",
+    )
+    rig_run_p.add_argument(
+        "--lessons-cap-bytes",
+        type=_positive_int,
+        default=LESSONS_CAP_BYTES,
+        dest="lessons_cap_bytes",
+        help="Byte cap before rotating oldest LESSONS.md lines to "
+        f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_BYTES}).",
     )
     rig_run_p.add_argument(
         "--echo",
@@ -3286,6 +3298,14 @@ def build_parser() -> argparse.ArgumentParser:
         f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_LINES}).",
     )
     engine_p.add_argument(
+        "--lessons-cap-bytes",
+        type=_positive_int,
+        default=LESSONS_CAP_BYTES,
+        dest="lessons_cap_bytes",
+        help="run: byte cap before rotating oldest LESSONS.md lines to "
+        f"LESSONS-ARCHIVE.md (default: {LESSONS_CAP_BYTES}).",
+    )
+    engine_p.add_argument(
         "--echo",
         action="store_true",
         help="run: print the composed argv and prompt to stderr before running.",
@@ -3338,13 +3358,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--git-name",
         metavar="NAME",
         dest="git_name",
-        help="run: author and committer name for every commit the turn makes.",
+        help="run: author and committer name for each new commit the turn makes.",
     )
     engine_p.add_argument(
         "--git-email",
         metavar="EMAIL",
         dest="git_email",
-        help="run: author and committer email for every commit the turn makes.",
+        help="run: author and committer email for each new commit the turn makes.",
     )
     engine_p.set_defaults(func=cmd_engine)
 

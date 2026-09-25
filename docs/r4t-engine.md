@@ -18,6 +18,7 @@ echo "long prompt piped in" | r4t engine agy run -
 ```
 r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--timeout S]
                      [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
+                     [--lessons-cap-bytes N]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
                      [--git-name NAME] [--git-email EMAIL]
@@ -67,16 +68,17 @@ tool) plus this turn's own measurement flags (see
 - `--echo` — before spawning, print the composed argv and the exact prompt
   (scaffold prelude included) to stderr; the turn still runs, stdout still
   carries only the engine's own reply stream.
-- `--lessons-cap N` — the `LESSONS.md` rotation line cap for this turn
-  (default 200); see below.
+- `--lessons-cap N`, `--lessons-cap-bytes N` — the `LESSONS.md` caps for
+  this turn (default 200 lines and 35840 bytes, 35 KB); see
+  [`LESSONS.md` upkeep](#lessonsmd-upkeep).
 - `--session UUID` — pin this turn to one named conversation (copilot only);
   see [the copilot section](#copilot-officially-supported).
 - `--max-credits N` — cap this turn's AI credits (copilot only, minimum 30,
   and soft); see the same section.
 - `--continue`, `--permissions MODE`, `--allowed-tools SPEC` — the three
   translated parameters; see below.
-- `--git-name NAME`, `--git-email EMAIL` — the identity every commit the turn
-  makes carries; see [git identity](#git-identity).
+- `--git-name NAME`, `--git-email EMAIL` — the author and committer of each
+  new commit the turn makes; see [git identity](#git-identity).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -141,8 +143,10 @@ commit they make carries the same author. `--git-name NAME` and
 `--git-email EMAIL` give one turn its own. The turn's child environment gets
 `GIT_AUTHOR_NAME` and `GIT_COMMITTER_NAME` from the name, and
 `GIT_AUTHOR_EMAIL` and `GIT_COMMITTER_EMAIL` from the email. git reads these
-before any config file, so they cover every commit the turn makes in any repo
-or worktree, amends and rebases included.
+before any config file, in any repo or worktree. A new commit the turn makes
+names the agent as its author and committer. A commit the turn rewrites with
+`git commit --amend` or `git rebase` keeps its original author and names the
+agent as its committer.
 
 ```bash
 r4t engine claude run --git-name "Ada (agent)" --git-email ada@example.com "fix the lint errors"
@@ -410,15 +414,18 @@ adds retrieved knowledge and asynchronous learning across turns.
 
 ### The scaffold (default on; `--no-scaffold` sends `PROMPT` untouched)
 
-Prepended to `PROMPT`, with the fixed prelude byte-identical across runs in
-the same `--dir` (no timestamps, no counters) so the prompt cache never
-misses on anything but the routed input itself, which always comes last:
+Prepended to `PROMPT`. The prelude is byte-identical across runs in the same
+`--dir` (no timestamps, no counters), so the prompt cache misses only on what
+follows it: the `LESSONS.md` note when one applies, then the routed input,
+which always comes last:
 
 ```
 Smart cold boot:
 1. Read <DIR>/STATUS.md, then <DIR>/AGENTS.md and <DIR>/LESSONS.md if
    present. Use these absolute paths even if your workspace root differs.
    They are the durable source of truth; you have no transcript memory.
+   Older lessons: <DIR>/LESSONS-ARCHIVE.md (grep it; do not read it whole).
+                                     [only once the archive holds a line]
 2. Run `a8s convo NAME` and reconcile the newest routed messages with
    STATUS.md before acting.          [only with --agent NAME; steps renumber
                                        cleanly without it]
@@ -430,20 +437,98 @@ Smart cold boot:
    short bullet each, never rewrite or delete existing lessons. Never edit
    AGENTS.md.
 
+<LESSONS.md note>                    [only over the soft cap; see below]
+
 Routed input:
 <PROMPT>
 ```
 
-If `LESSONS.md` exists and is strictly over the line cap (`--lessons-cap`,
-default 200) when `run` starts, the oldest lines rotate out to
-`LESSONS-ARCHIVE.md` (created if absent, appended to in order) so the live
-file lands at exactly the cap — whole lines only, nothing deleted, no model
-ever touches either file. `run` prints one stderr line naming what moved:
-`r4t engine: rotated N lines from <DIR>/LESSONS.md to <DIR>/LESSONS-ARCHIVE.md`.
-
 r4t's own dispatcher (`dispatch.run_harness`) never uses this scaffold: it
 already builds the roster's own prompt, and stacking this one on top would
 double it. This is strictly the bare, roster-less path.
+
+### `LESSONS.md` upkeep
+
+`LESSONS.md` grows by appends, so every scaffolded turn bounds it before the
+turn starts and tells the turn when it is getting full. Nothing r4t does to
+the file loses a line.
+
+**Caps.** A file over 200 lines (`--lessons-cap`) or over 35 KB
+(`--lessons-cap-bytes`, 35840 bytes) rotates: its oldest lines below the
+header move, whole lines and in order, to the end of `LESSONS-ARCHIVE.md`
+(created if absent) until the live file fits both caps. No model touches
+either file. One stderr line names what moved:
+`r4t engine: rotated N lines from <DIR>/LESSONS.md to <DIR>/LESSONS-ARCHIVE.md`.
+
+**The header stays.** The header is every line above the first `## `
+heading. A line that reads `<!-- rotate-below -->` overrides that rule: the
+header is then every line down to and including the marker, above or below
+the first `## `. A file with neither rotates from its first line. A header
+that is over a cap on its own leaves nothing below it that can bring the
+file under; everything below it moves, and a second stderr line says so.
+
+**Headings stay with their lines.** When the cut falls inside a section,
+the headings that still govern the kept lines repeat at the top of the live
+file and stay in place in the archive. Blank lines at the cut move with it.
+
+**Lossless.** The archive is written before `LESSONS.md` is rewritten, and
+each write is atomic. A kill between the two leaves the moved lines in both
+files, and the next rotation archives them again: a line can be duplicated,
+not lost.
+
+**Line endings.** Rotation writes both files with LF line endings, whatever
+they held before, so neither file mixes endings. Every size a cap or a note
+counts is the file with LF endings, so the byte cap holds on disk. A
+`LESSONS.md` that is not UTF-8 is not rotated and gets no note; a stderr line
+says why.
+
+**Soft cap.** Over 80% of either cap (160 lines or 28 KB at the defaults),
+the scaffold carries one line after the prelude:
+
+```
+<DIR>/LESSONS.md is 172 lines / 30.1 KB of 200 lines / 35 KB. Do not append a
+lesson that repeats one already here; the idle pass consolidates. Do not edit
+existing lines.
+```
+
+The nudge keeps the turn append-only. An edit to an existing line is a
+rewrite of the file, and a rewrite killed partway loses every line after the
+point it reached. Only the idle fold edits existing lines, because only the
+idle fold has a copy to recover from. Under the soft cap the scaffold carries
+no note. The figures change from turn
+to turn, so the note sits after the prelude and the cached prefix stays the
+same.
+
+**Archive pointer.** Once `LESSONS-ARCHIVE.md` holds a line, step 1 of the
+prelude names it and says to grep it rather than read it whole. The pointer
+sits in the prelude because it does not change from turn to turn: rotation
+creates the archive and `run` never removes it, so the prelude changes once.
+
+**Idle fold.** On an `--idle` turn over the soft cap, the note is a fold in
+place of the nudge. First `run` copies the bytes of `LESSONS.md` to
+`<DIR>/archive/lessons-fold-<date>-source.md` and reads the copy back. Only
+when the copy equals `LESSONS.md` byte for byte is the turn told to rewrite
+`LESSONS.md` whole:
+
+- merge each duplicate into the lesson it repeats;
+- drop a lesson only when a newer lesson supersedes it, and never drop a
+  live rule;
+- keep the header unchanged, named by its line numbers;
+- write `<DIR>/archive/lessons-fold-<date>.md`, a ledger with one row per
+  line of the copy: source line number; kept, merged-into or
+  dropped-superseded; target line.
+
+The copy keeps the fold lossless: a line the model merges or drops, or a
+rewrite that dies partway loses, is still on disk, and the ledger's line
+numbers point into it. `<date>` is UTC, like every date in a filename. A copy
+is never overwritten, so a directory folds at most once a day. An idle turn
+gets the append-only nudge instead when there is no verified copy: the copy
+could not be written, it does not match, or today's fold already ran (that
+copy does not hold lines added since). The fold
+rides the scaffold, not the idle prompt: an `--idle` turn with its own
+`PROMPT` still carries it, and `--no-scaffold` drops it with the rest of the
+scaffold. Rotation at the caps stays the backstop for a fold that falls
+short.
 
 ### `--idle` — the Cody-pattern debounce
 
@@ -452,7 +537,8 @@ the wasted turn: if `<DIR>/.engine-idle` exists, `run` exits 0 printing
 nothing. Otherwise it creates the marker and runs one turn — the routed
 input is `PROMPT` if given, else the built-in idle consolidation prompt
 ("reconcile STATUS.md with reality, then append any new durable lessons").
-Any run *without* `--idle` removes the marker first — real work re-arms the
+Over the soft cap, the turn also carries the
+[idle fold](#lessonsmd-upkeep). Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
 ## `check` — does the installed CLI still accept this argv?

@@ -472,6 +472,593 @@ class TestLessonsRotation:
         assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
 
 
+# A seat's own header: its title, the rule it keeps about its size, and the
+# traps it re-reads every turn. These are the lines FIFO used to drop first.
+HEADER = [
+    "# LESSONS",
+    "Keep each lesson to one line; older lines rotate to LESSONS-ARCHIVE.md.",
+    "Standing traps: read STATUS.md before acting.",
+    "",
+]
+
+
+def write_lessons(dir_path: Path, lines: list[str]) -> Path:
+    path = dir_path / "LESSONS.md"
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    return path
+
+
+def lines_of(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def archive_of(dir_path: Path) -> list[str]:
+    return lines_of(dir_path / engine_run.LESSONS_ARCHIVE_NAME)
+
+
+def assert_lossless(original: list[str], live: list[str], archive: list[str]) -> None:
+    """Every original line is still on disk: the rotation may duplicate a line
+    into the archive, never lose one."""
+    from collections import Counter
+
+    missing = Counter(original) - (Counter(live) + Counter(archive))
+    assert not missing, f"lines lost: {sorted(missing)}"
+
+
+def byte_size(lines: list[str]) -> int:
+    return sum(len(line.encode("utf-8")) + 1 for line in lines)
+
+
+class TestLessonsPinnedHeader:
+    def test_lines_above_the_first_section_heading_never_rotate(self, tmp_path):
+        body = ["## Lessons", *(f"- lesson {i}" for i in range(250))]
+        lessons = write_lessons(tmp_path, HEADER + body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=200)
+        # The cut lands inside "## Lessons", so the heading stays on top of
+        # what is left of its section, and the archive keeps it in place.
+        assert lines_of(lessons) == (
+            HEADER + ["## Lessons"] + [f"- lesson {i}" for i in range(55, 250)]
+        )
+        assert archive_of(tmp_path) == (
+            ["## Lessons"] + [f"- lesson {i}" for i in range(55)]
+        )
+
+    def test_the_marker_pins_everything_above_it(self, tmp_path):
+        # The first `## ` heading is line 2, so without the marker only the
+        # title would be pinned and the standing traps would rotate first.
+        head = [
+            "# LESSONS",
+            "## Standing traps",
+            "- never push to main",
+            engine_run.LESSONS_ROTATE_MARKER,
+        ]
+        body = [f"- lesson {i}" for i in range(30)]
+        lessons = write_lessons(tmp_path, head + body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=20)
+        assert lines_of(lessons) == head + [f"- lesson {i}" for i in range(14, 30)]
+        assert archive_of(tmp_path) == [f"- lesson {i}" for i in range(14)]
+
+    def test_the_marker_overrides_the_heading_rule_when_it_sits_higher(self, tmp_path):
+        marker = engine_run.LESSONS_ROTATE_MARKER
+        body = ["- early note", "## Lessons", *(f"- lesson {i}" for i in range(20))]
+        lessons = write_lessons(tmp_path, [marker] + body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=12)
+        assert lines_of(lessons) == (
+            [marker, "## Lessons"] + [f"- lesson {i}" for i in range(10, 20)]
+        )
+        assert archive_of(tmp_path)[0] == "- early note"
+
+    def test_a_file_with_no_section_heading_and_no_marker_rotates_from_the_top(
+        self, tmp_path
+    ):
+        lessons = write_lessons(tmp_path, [f"- lesson {i}" for i in range(12)])
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10)
+        assert lines_of(lessons) == [f"- lesson {i}" for i in range(2, 12)]
+        assert archive_of(tmp_path) == ["- lesson 0", "- lesson 1"]
+
+    def test_a_title_with_no_section_heading_stays_on_top_of_what_is_left(
+        self, tmp_path
+    ):
+        body = ["# LESSONS", *(f"- lesson {i}" for i in range(12))]
+        lessons = write_lessons(tmp_path, body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10)
+        assert lines_of(lessons) == ["# LESSONS"] + [f"- lesson {i}" for i in range(3, 12)]
+        assert archive_of(tmp_path) == ["# LESSONS", "- lesson 0", "- lesson 1", "- lesson 2"]
+
+    def test_a_cut_inside_a_subsection_keeps_every_enclosing_heading(self, tmp_path):
+        body = ["## Tools", "### git", *(f"- git {i}" for i in range(10))]
+        lessons = write_lessons(tmp_path, body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=8)
+        assert lines_of(lessons) == (
+            ["## Tools", "### git"] + [f"- git {i}" for i in range(4, 10)]
+        )
+        assert archive_of(tmp_path) == (
+            ["## Tools", "### git"] + [f"- git {i}" for i in range(4)]
+        )
+
+    def test_a_cut_on_a_section_boundary_carries_no_heading(self, tmp_path):
+        body = ["## Old", "- old 0", "- old 1", "## New", "- new 0", "- new 1"]
+        lessons = write_lessons(tmp_path, body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=3)
+        assert lines_of(lessons) == ["## New", "- new 0", "- new 1"]
+        assert archive_of(tmp_path) == ["## Old", "- old 0", "- old 1"]
+
+    def test_blank_lines_at_the_cut_move_with_it(self, tmp_path):
+        lessons = write_lessons(tmp_path, ["- a", "- b", "", "", "- c", "- d"])
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=4)
+        assert lines_of(lessons) == ["- c", "- d"]
+        assert archive_of(tmp_path) == ["- a", "- b", "", ""]
+
+    def test_a_header_over_the_cap_on_its_own_moves_everything_below_it_and_says_so(
+        self, tmp_path, capsys
+    ):
+        head = [f"- rule {i}" for i in range(6)] + [engine_run.LESSONS_ROTATE_MARKER]
+        lessons = write_lessons(tmp_path, head + ["- new 0", "- new 1"])
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=5)
+        assert lines_of(lessons) == head
+        assert archive_of(tmp_path) == ["- new 0", "- new 1"]
+        err = capsys.readouterr().err.splitlines()
+        assert err[0].startswith("r4t engine: rotated 2 lines from ")
+        assert "header" in err[1] and "over" in err[1]
+
+    def test_an_all_header_file_over_the_cap_writes_no_archive(self, tmp_path, capsys):
+        head = [f"- rule {i}" for i in range(6)] + [engine_run.LESSONS_ROTATE_MARKER]
+        lessons = write_lessons(tmp_path, head)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=5)
+        assert lines_of(lessons) == head
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
+        assert "header" in capsys.readouterr().err
+
+
+class TestLessonsByteCap:
+    def test_a_byte_heavy_file_under_the_line_cap_rotates(self, tmp_path):
+        # 60 lessons of 1,000 characters: far under 200 lines, about 59 KB.
+        body = [f"- {i:03d} " + "x" * 994 for i in range(60)]
+        lessons = write_lessons(tmp_path, body)
+        engine_run.rotate_lessons_if_oversized(tmp_path)
+        assert (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
+        # 1,001 bytes a line against 35 * 1024: 35 lines fit, 36 do not.
+        assert lines_of(lessons) == body[25:]
+        assert archive_of(tmp_path) == body[:25]
+        assert len(lessons.read_bytes()) <= engine_run.LESSONS_CAP_BYTES
+
+    def test_both_caps_hold_and_no_line_moves_that_did_not_have_to(self, tmp_path):
+        body = [f"- short {i:02d}" for i in range(12)]
+        body += ["- long " + "x" * 50 + f" {i:02d}" for i in range(8)]
+        lessons = write_lessons(tmp_path, body)
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10, cap_bytes=400)
+        live, archive = lines_of(lessons), archive_of(tmp_path)
+        assert len(live) <= 10 and len(lessons.read_bytes()) <= 400
+        # The line cap alone would keep ten lines; the byte cap binds first.
+        assert len(live) < 10
+        # One line fewer moved would break a cap.
+        back = [archive[-1]] + live
+        assert len(back) > 10 or byte_size(back) > 400
+        assert live == body[len(archive):]
+
+    def test_a_single_line_over_the_byte_cap_empties_the_file_losslessly(self, tmp_path):
+        lessons = write_lessons(tmp_path, ["- " + "y" * 600])
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10, cap_bytes=500)
+        assert lessons.read_text(encoding="utf-8") == ""
+        assert archive_of(tmp_path) == ["- " + "y" * 600]
+
+
+class Killed(BaseException):
+    """A kill mid-rotation: nothing after the raising write runs."""
+
+
+class TestLessonsRotationIsLossless:
+    def test_a_kill_between_the_archive_write_and_the_live_rewrite_only_duplicates(
+        self, tmp_path, monkeypatch
+    ):
+        original = HEADER + ["## Lessons"] + [f"- lesson {i} " + "z" * 300 for i in range(150)]
+        lessons = write_lessons(tmp_path, original)
+        real_write = engine_run._atomic_write_bytes
+        order = []
+
+        def dies_on_the_live_rewrite(path, data):
+            order.append(path.name)
+            if path.name == "LESSONS.md":
+                raise Killed
+            real_write(path, data)
+
+        monkeypatch.setattr(engine_run, "_atomic_write_bytes", dies_on_the_live_rewrite)
+        with pytest.raises(Killed):
+            engine_run.rotate_lessons_if_oversized(tmp_path)
+        assert order == [engine_run.LESSONS_ARCHIVE_NAME, "LESSONS.md"]
+        assert lines_of(lessons) == original  # the live file is untouched
+        assert archive_of(tmp_path)  # and its oldest lines are already archived
+        assert_lossless(original, lines_of(lessons), archive_of(tmp_path))
+
+        # The next turn's rotation completes. The first attempt's lines sit in
+        # the archive twice; none is missing, and the header is still on top.
+        monkeypatch.setattr(engine_run, "_atomic_write_bytes", real_write)
+        engine_run.rotate_lessons_if_oversized(tmp_path)
+        assert_lossless(original, lines_of(lessons), archive_of(tmp_path))
+        assert lines_of(lessons)[:4] == HEADER
+
+    def test_a_kill_on_the_archive_write_changes_nothing(self, tmp_path, monkeypatch):
+        original = [f"- lesson {i}" for i in range(12)]
+        lessons = write_lessons(tmp_path, original)
+
+        def dies(path, data):
+            raise Killed
+
+        monkeypatch.setattr(engine_run, "_atomic_write_bytes", dies)
+        with pytest.raises(Killed):
+            engine_run.rotate_lessons_if_oversized(tmp_path, cap=10)
+        assert lines_of(lessons) == original
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
+
+    def test_random_files_rotate_losslessly_within_both_caps(self, tmp_path):
+        import random
+
+        rng = random.Random(300)
+        marker = engine_run.LESSONS_ROTATE_MARKER
+        for case in range(300):
+            seat = tmp_path / f"seat-{case}"
+            seat.mkdir()
+            lines = []
+            for _ in range(rng.randint(0, 80)):
+                roll = rng.random()
+                if roll < 0.08:
+                    lines.append("#" * rng.randint(1, 4) + f" section {len(lines)}")
+                elif roll < 0.15:
+                    lines.append("")
+                elif roll < 0.17:
+                    lines.append(marker)
+                else:
+                    lines.append(f"- {len(lines)} " + "w" * rng.randint(0, 120))
+            write_lessons(seat, lines)
+            cap, cap_bytes = rng.randint(1, 60), rng.randint(40, 4000)
+            engine_run.rotate_lessons_if_oversized(seat, cap=cap, cap_bytes=cap_bytes)
+            live, archive = lines_of(seat / "LESSONS.md"), archive_of(seat)
+            assert_lossless(lines, live, archive)
+            pinned = engine_run._pinned_count(lines)
+            assert live[:pinned] == lines[:pinned], f"case {case}: header moved"
+            if archive:
+                assert archive == lines[pinned:pinned + len(archive)]
+            if byte_size(lines[:pinned]) <= cap_bytes and pinned <= cap:
+                # A header that fits leaves room for the rest to fit.
+                assert len(live) <= cap and byte_size(live) <= cap_bytes, f"case {case}"
+
+
+class TestLessonsLineEndings:
+    """Rotation rewrites both files, so it writes one line ending throughout:
+    LF, on every platform, which also makes the byte cap exact on disk."""
+
+    def crlf(self, lines: list[str]) -> bytes:
+        return "".join(f"{line}\r\n" for line in lines).encode("utf-8")
+
+    def test_a_crlf_file_rotates_to_lf_in_both_files(self, tmp_path):
+        original = HEADER + ["## Lessons"] + [f"- lesson {i}" for i in range(20)]
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_bytes(self.crlf(original))
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=15)
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        assert b"\r" not in lessons.read_bytes()
+        assert b"\r" not in archive.read_bytes()
+        assert lines_of(lessons)[:4] == HEADER
+        assert_lossless(original, lines_of(lessons), archive_of(tmp_path))
+
+    @pytest.mark.parametrize("live_crlf", [True, False])
+    def test_live_and_archive_that_disagree_end_up_with_one_ending(
+        self, tmp_path, live_crlf
+    ):
+        live = [f"- new {i}" for i in range(12)]
+        old = [f"- old {i}" for i in range(3)]
+        lf = lambda lines: "".join(f"{line}\n" for line in lines).encode("utf-8")
+        (tmp_path / "LESSONS.md").write_bytes(self.crlf(live) if live_crlf else lf(live))
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        archive.write_bytes(lf(old) if live_crlf else self.crlf(old))
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10)
+        for path in (tmp_path / "LESSONS.md", archive):
+            assert b"\r" not in path.read_bytes(), path.name
+        assert archive_of(tmp_path) == old + ["- new 0", "- new 1"]
+
+    def test_the_byte_cap_holds_on_disk_for_a_crlf_file(self, tmp_path):
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_bytes(self.crlf([f"- {i} " + "x" * 60 for i in range(20)]))
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap_bytes=700)
+        assert len(lessons.read_bytes()) <= 700
+
+    def test_a_file_that_is_not_utf8_is_left_alone(self, tmp_path, capsys):
+        raw = "- café\n".encode("latin-1") * 250
+        lessons = tmp_path / "LESSONS.md"
+        lessons.write_bytes(raw)
+        engine_run.rotate_lessons_if_oversized(tmp_path)
+        assert lessons.read_bytes() == raw
+        assert not (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).exists()
+        assert "not UTF-8" in capsys.readouterr().err
+        assert scaffold_parts(engine_run.scaffold_prompt(tmp_path, "hi", agent=None))[1] == ""
+
+
+def scaffold_parts(prompt: str) -> tuple[str, str, str]:
+    """(prelude, this turn's lessons note, routed input) of a scaffold."""
+    head, _, routed = prompt.partition("\n\nRouted input:\n")
+    prelude, _, note = head.partition("\n\n")
+    return prelude, note, routed
+
+
+APPEND_ONLY = (
+    "Do not append a lesson that repeats one already here; the idle pass "
+    "consolidates. Do not edit existing lines."
+)
+
+
+def assert_append_only(prompt: str) -> None:
+    """The turn may append and nothing else: the nudge says so, and no line of
+    the prompt grants an edit to an existing lesson."""
+    _, note, _ = scaffold_parts(prompt)
+    assert note.endswith(APPEND_ONLY), note
+    assert "Idle fold" not in prompt
+    assert "allows" not in prompt
+
+
+class TestLessonsSoftCapNudge:
+    def test_under_the_soft_cap_the_scaffold_is_byte_identical(self, tmp_path):
+        bare = engine_run.scaffold_prompt(tmp_path, "hi", agent="bob")
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(160)])
+        assert engine_run.scaffold_prompt(tmp_path, "hi", agent="bob") == bare
+
+    def test_over_the_soft_cap_by_lines_one_line_follows_the_prelude(self, tmp_path):
+        bare_prelude, bare_note, _ = scaffold_parts(
+            engine_run.scaffold_prompt(tmp_path, "hi", agent="bob")
+        )
+        assert bare_note == ""
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(161)])
+        prompt = engine_run.scaffold_prompt(tmp_path, "hi", agent="bob")
+        prelude, note, routed = scaffold_parts(prompt)
+        assert prelude == bare_prelude  # the cached prefix does not move
+        assert prompt.startswith(bare_prelude + "\n\n" + note)
+        assert "\n" not in note
+        lessons = tmp_path / "LESSONS.md"
+        assert note.startswith(f"{lessons} is 161 lines / ")
+        assert "KB of 200 lines / 35 KB" in note
+        assert note.endswith(APPEND_ONLY)
+        assert_append_only(prompt)
+        assert routed == "hi"
+
+    def test_over_the_soft_cap_by_bytes_alone(self, tmp_path):
+        write_lessons(tmp_path, [f"- {i:03d} " + "x" * 994 for i in range(30)])
+        _, note, _ = scaffold_parts(engine_run.scaffold_prompt(tmp_path, "hi", agent=None))
+        assert f"{tmp_path / 'LESSONS.md'} is 30 lines / 29.3 KB of 200 lines / 35 KB" in note
+
+    def test_the_soft_cap_follows_the_caps_in_force(self, tmp_path):
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(8)])
+        quiet = engine_run.scaffold_prompt(tmp_path, "hi", agent=None, lessons_cap=10)
+        assert scaffold_parts(quiet)[1] == ""
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(9)])
+        loud = engine_run.scaffold_prompt(tmp_path, "hi", agent=None, lessons_cap=10)
+        assert "is 9 lines / " in scaffold_parts(loud)[1]
+        assert "of 10 lines / 35 KB" in scaffold_parts(loud)[1]
+        small = engine_run.scaffold_prompt(
+            tmp_path, "hi", agent=None, lessons_cap_bytes=100
+        )
+        assert "of 200 lines / 0.1 KB" in scaffold_parts(small)[1]
+
+    def test_the_cli_turn_carries_the_nudge(self, tmp_path, monkeypatch):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(9)])
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path), "--lessons-cap", "10", "do work",
+        )
+        assert code == 0
+        [call] = sorted(calls.iterdir())
+        import json as jsonlib
+        [prompt] = jsonlib.loads(call.read_text())
+        assert "is 9 lines / " in scaffold_parts(prompt)[1]
+
+
+class TestLessonsArchivePointer:
+    POINTER = "Older lessons: {} (grep it; do not read it whole)."
+
+    def test_no_archive_no_pointer(self, tmp_path):
+        assert "Older lessons" not in engine_run.scaffold_prompt(tmp_path, "hi", agent=None)
+
+    def test_an_empty_archive_earns_no_pointer(self, tmp_path):
+        bare = engine_run.scaffold_prompt(tmp_path, "hi", agent=None)
+        (tmp_path / engine_run.LESSONS_ARCHIVE_NAME).write_text("", encoding="utf-8")
+        assert engine_run.scaffold_prompt(tmp_path, "hi", agent=None) == bare
+
+    def test_a_non_empty_archive_is_named_in_the_read_step(self, tmp_path):
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        archive.write_text("- old\n", encoding="utf-8")
+        prelude, note, _ = scaffold_parts(
+            engine_run.scaffold_prompt(tmp_path, "hi", agent=None)
+        )
+        [read_step] = [line for line in prelude.splitlines() if line.startswith("1. ")]
+        assert read_step.endswith(self.POINTER.format(archive))
+        assert note == ""
+
+    def test_the_prelude_holds_still_while_the_archive_grows(self, tmp_path):
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        archive.write_text("- old\n", encoding="utf-8")
+        first = engine_run.scaffold_prompt(tmp_path, "message one", agent="bob")
+        archive.write_text("- old\n" * 500, encoding="utf-8")
+        second = engine_run.scaffold_prompt(tmp_path, "message two", agent="bob")
+        assert scaffold_parts(first)[0] == scaffold_parts(second)[0]
+
+    def test_a_rotation_turns_the_pointer_on_for_the_same_turn(self, tmp_path):
+        write_lessons(tmp_path, [f"- lesson {i}" for i in range(12)])
+        engine_run.rotate_lessons_if_oversized(tmp_path, cap=10)
+        prompt = engine_run.scaffold_prompt(tmp_path, "hi", agent=None)
+        archive = tmp_path / engine_run.LESSONS_ARCHIVE_NAME
+        assert self.POINTER.format(archive) in scaffold_parts(prompt)[0]
+
+
+FOLD_DAY = "2026-09-24"
+
+
+@pytest.fixture
+def fold_turn(tmp_path, monkeypatch):
+    """A recording claude preset and a fixed fold date. Returns a function that
+    runs one `engine run` turn and hands back the prompt it received."""
+    script, calls = fake_cli(tmp_path)
+    import json as jsonlib
+    import rig as rig_module
+
+    monkeypatch.setitem(
+        rig_module.HARNESS_PRESETS, "claude",
+        {**rig_module.HARNESS_PRESETS["claude"],
+         "invoke": [sys.executable, str(script), "{prompt}"]},
+    )
+    monkeypatch.setattr(engine_run, "_fold_day", lambda: FOLD_DAY)
+    seat = tmp_path / "seat"
+    seat.mkdir()
+
+    def turn(*args):
+        before = set(calls.iterdir())
+        assert engine_cli("claude", "run", "--dir", str(seat), *args) == 0
+        [call] = set(calls.iterdir()) - before
+        [prompt] = jsonlib.loads(call.read_text())
+        return prompt
+
+    turn.seat = seat
+    return turn
+
+
+class TestLessonsIdleFold:
+    def fold_paths(self, seat: Path) -> tuple[Path, Path]:
+        folds = seat / "archive"
+        return folds / f"lessons-fold-{FOLD_DAY}-source.md", folds / f"lessons-fold-{FOLD_DAY}.md"
+
+    def test_an_idle_turn_over_the_soft_cap_asks_for_a_fold(self, fold_turn):
+        seat = fold_turn.seat
+        original = HEADER + ["## Lessons"] + [f"- lesson {i}" for i in range(170)]
+        write_lessons(seat, original)
+        prompt = fold_turn("--idle")
+        source, ledger = self.fold_paths(seat)
+        assert lines_of(source) == original  # the fold's lossless copy
+        prelude, note, routed = scaffold_parts(prompt)
+        assert routed == engine_run.DEFAULT_IDLE_PROMPT
+        assert note.startswith(f"Idle fold: {seat / 'LESSONS.md'} is 175 lines / ")
+        assert str(source) in note and str(ledger) in note
+        assert "Keep lines 1-4" in note  # the header, by number
+        assert "Never drop a live rule." in note
+        assert "supersedes" in note
+        for outcome in ("kept", "merged-into", "dropped-superseded"):
+            assert outcome in note
+        # The fold replaces the nudge rather than joining it.
+        assert APPEND_ONLY not in prompt
+
+    def test_an_idle_turn_under_the_soft_cap_is_unchanged(self, fold_turn):
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(150)])
+        prompt = fold_turn("--idle")
+        assert prompt == engine_run.scaffold_prompt(
+            seat, engine_run.DEFAULT_IDLE_PROMPT, agent=None
+        )
+        assert not (seat / "archive").exists()
+
+    def test_a_routed_turn_over_the_soft_cap_is_append_only(self, fold_turn):
+        # No copy is made on a routed turn, so it may not edit a line.
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(170)])
+        assert_append_only(fold_turn("do work"))
+        assert not (seat / "archive").exists()
+
+    def test_an_idle_turn_whose_copy_cannot_be_written_is_append_only(
+        self, fold_turn, capsys
+    ):
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(170)])
+        (seat / "archive").write_text("a file where the fold directory goes\n")
+        assert_append_only(fold_turn("--idle"))
+        assert "no fold this turn" in capsys.readouterr().err
+
+    def test_an_idle_turn_whose_copy_does_not_match_is_append_only(
+        self, fold_turn, monkeypatch, capsys
+    ):
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(170)])
+
+        def short_copy(path, data):
+            path.write_bytes(data[:-10])
+
+        monkeypatch.setattr(engine_run, "_atomic_write_bytes", short_copy, raising=False)
+        assert_append_only(fold_turn("--idle"))
+        assert "does not match" in capsys.readouterr().err
+
+    def test_the_fold_copy_is_byte_for_byte(self, fold_turn):
+        seat = fold_turn.seat
+        original = "".join(f"- lesson {i}\r\n" for i in range(170)).encode("utf-8")
+        (seat / "LESSONS.md").write_bytes(original)
+        prompt = fold_turn("--idle")
+        source, _ = self.fold_paths(seat)
+        assert source.read_bytes() == original
+        assert scaffold_parts(prompt)[1].startswith("Idle fold: ")
+
+    def test_a_fold_killed_mid_rewrite_loses_nothing(self, tmp_path, monkeypatch):
+        # The rewrite a fold permits dies 20 bytes in; its copy holds every line.
+        script = tmp_path / "killed-rewrite.py"
+        script.write_text(
+            "import pathlib\n"
+            "lessons = pathlib.Path('LESSONS.md')\n"
+            "lessons.write_bytes(lessons.read_bytes()[:20])\n",
+            encoding="utf-8",
+        )
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        monkeypatch.setattr(engine_run, "_fold_day", lambda: FOLD_DAY)
+        original = HEADER + ["## Lessons"] + [f"- lesson {i}" for i in range(170)]
+        lessons = write_lessons(tmp_path, original)
+        assert engine_cli("claude", "run", "--dir", str(tmp_path), "--idle") == 0
+        assert len(lessons.read_bytes()) == 20
+        source, _ = self.fold_paths(tmp_path)
+        assert_lossless(original, lines_of(lessons), lines_of(source))
+
+    def test_a_custom_idle_prompt_keeps_the_fold(self, fold_turn):
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(170)])
+        prompt = fold_turn("--idle", "tidy the notes")
+        _, note, routed = scaffold_parts(prompt)
+        assert note.startswith("Idle fold: ")
+        assert routed == "tidy the notes"
+        # No header in this file, so no header clause to keep.
+        assert "Keep line" not in note
+
+    def test_no_scaffold_carries_no_fold(self, fold_turn):
+        seat = fold_turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(170)])
+        assert fold_turn("--idle", "--no-scaffold") == engine_run.DEFAULT_IDLE_PROMPT
+        assert not (seat / "archive").exists()
+
+    def test_one_fold_a_day_and_its_copy_is_never_overwritten(self, fold_turn):
+        seat = fold_turn.seat
+        original = [f"- lesson {i}" for i in range(170)]
+        lessons = write_lessons(seat, original)
+        assert scaffold_parts(fold_turn("--idle"))[1].startswith("Idle fold: ")
+        source, _ = self.fold_paths(seat)
+        # The model folded, but not far enough; a routed turn re-arms the latch.
+        write_lessons(seat, original[:165])
+        fold_turn("real work")
+        # Lines added since this morning's copy have no copy, so no edits.
+        again = fold_turn("--idle")
+        assert_append_only(again)
+        assert lines_of(source) == original
+        assert lines_of(lessons) == original[:165]
+
+    def test_the_marker_names_the_header_span(self, fold_turn):
+        seat = fold_turn.seat
+        head = ["# LESSONS", engine_run.LESSONS_ROTATE_MARKER]
+        write_lessons(seat, head + [f"- lesson {i}" for i in range(170)])
+        assert "Keep lines 1-2" in scaffold_parts(fold_turn("--idle"))[1]
+
+
+
 class TestExecuteAndSpawn:
     def test_no_scaffold_passes_prompt_untouched(self, tmp_path):
         script, calls = fake_cli(tmp_path)
@@ -804,6 +1391,39 @@ class TestEngineRunCli:
         assert code == 0
         assert len(list(calls.iterdir())) == 1
 
+    def test_lessons_cap_bytes_flag_reaches_execute(self, tmp_path, monkeypatch, capsys):
+        script, calls = fake_cli(tmp_path)
+        import rig as rig_module
+
+        monkeypatch.setitem(
+            rig_module.HARNESS_PRESETS, "claude",
+            {**rig_module.HARNESS_PRESETS["claude"],
+             "invoke": [sys.executable, str(script), "{prompt}"]},
+        )
+        body = [f"- {i} " + "x" * 96 for i in range(10)]  # 10 lines, ~1 KB
+        lessons = write_lessons(tmp_path, body)
+        code = engine_cli(
+            "claude", "run", "--dir", str(tmp_path),
+            "--lessons-cap-bytes", "500", "do work",
+        )
+        assert code == 0
+        assert len(list(calls.iterdir())) == 1
+        assert len(lessons.read_bytes()) <= 500
+        assert_lossless(body, lines_of(lessons), archive_of(tmp_path))
+        assert "rotated" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("bad_value", ["-1", "0"])
+    def test_lessons_cap_bytes_rejects_non_positive_values(
+        self, tmp_path, capsys, bad_value
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            engine_cli(
+                "claude", "run", "--dir", str(tmp_path),
+                "--lessons-cap-bytes", bad_value, "do work",
+            )
+        assert exc_info.value.code == 2
+        assert "must be a positive integer" in capsys.readouterr().err
+
 
 class TestEngineRunFlagsCli:
     def test_idle_and_continue_contradict(self, tmp_path, capsys):
@@ -1097,7 +1717,8 @@ class TestGitIdentity:
     """`--git-name` / `--git-email`: several engine seats under one Unix user
     otherwise all commit as the one shared git config identity. git's
     environment beats every config file, so the four names on the turn's
-    child environment cover every commit the turn makes, in any repo."""
+    child environment name the author and committer of each new commit the
+    turn makes, in any repo."""
 
     @pytest.fixture
     def child_envs(self, monkeypatch):
@@ -1313,32 +1934,35 @@ class TestGitIdentity:
         assert list(calls.iterdir()) == []
 
 
+@pytest.fixture
+def isolated_git(tmp_path, monkeypatch):
+    """HOME and GIT_CONFIG_GLOBAL point into tmp_path, so the configured
+    identity is the fixture's and the user's own git config is never read."""
+    home = tmp_path / "home"
+    home.mkdir()
+    gitconfig = tmp_path / "gitconfig"
+    gitconfig.write_text(
+        "[user]\n\tname = Configured Owner\n\temail = owner@example.com\n"
+        "[init]\n\tdefaultBranch = main\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in (*GIT_IDENTITY_NAMES, "EMAIL", "GIT_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
 class TestGitIdentityRealCommit:
     """The positive control: a turn's child runs a real `git commit`, and the
-    commit's author and committer are whatever the turn's environment says.
-    HOME and GIT_CONFIG_GLOBAL point into tmp_path, so the configured
-    identity is the fixture's and the user's own git config is never read."""
+    commit's author and committer are whatever the turn's environment says."""
 
     CONFIGURED = ["Configured Owner", "owner@example.com"] * 2
 
     @pytest.fixture
-    def committing_engine(self, tmp_path, monkeypatch):
+    def committing_engine(self, tmp_path, monkeypatch, isolated_git):
         import rig as rig_module
-
-        home = tmp_path / "home"
-        home.mkdir()
-        gitconfig = tmp_path / "gitconfig"
-        gitconfig.write_text(
-            "[user]\n\tname = Configured Owner\n\temail = owner@example.com\n"
-            "[init]\n\tdefaultBranch = main\n",
-            encoding="utf-8",
-        )
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
-        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-        for name in (*GIT_IDENTITY_NAMES, "EMAIL", "GIT_DIR", "GIT_WORK_TREE"):
-            monkeypatch.delenv(name, raising=False)
 
         script = tmp_path / "committing-engine.py"
         script.write_text(
@@ -1405,6 +2029,102 @@ class TestGitIdentityRealCommit:
         assert committing_engine(
             tmp_path / "over-inherited", f"--git-name={AGENT_NAME}",
         ) == [AGENT_NAME, "owner@example.com", AGENT_NAME, "owner@example.com"]
+
+
+ORIGINAL_AUTHOR = ["Original Author", "author@example.com"]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+class TestGitIdentityRewrittenCommit:
+    """A rewrite keeps its author. `git commit --amend` and `git rebase` carry
+    the commit's author over and record whoever rewrote it as the committer,
+    whatever `GIT_AUTHOR_*` says. So a turn's identity names the committer of
+    a commit it rewrites, and the original author stays."""
+
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        name, email = ORIGINAL_AUTHOR
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email,
+        }
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            env=env, capture_output=True, text=True, check=True,
+        ).stdout
+
+    @classmethod
+    def _commit_file(cls, repo: Path, name: str) -> None:
+        (repo / name).write_text(name, encoding="utf-8")
+        cls._git(repo, "add", name)
+        cls._git(repo, "commit", "-q", "-m", name)
+
+    @classmethod
+    def _repo(cls, path: Path) -> Path:
+        path.mkdir()
+        cls._git(path, "init", "-q")
+        cls._commit_file(path, "base")
+        return path
+
+    @pytest.fixture
+    def rewriting_engine(self, tmp_path, monkeypatch, isolated_git):
+        """Runs one turn that does `git -C <repo> <git_args>`, and returns
+        the head commit's subject, author and committer."""
+        import rig as rig_module
+
+        script = tmp_path / "rewriting-engine.py"
+
+        def rewrite(repo: Path, *git_args: str) -> list[str]:
+            script.write_text(
+                textwrap.dedent(
+                    f"""\
+                    import subprocess, sys
+                    subprocess.run(
+                        ["git", "-C", sys.argv[1], *{list(git_args)!r}], check=True
+                    )
+                    """
+                ),
+                encoding="utf-8",
+            )
+            monkeypatch.setitem(
+                rig_module.HARNESS_PRESETS, "claude",
+                {**rig_module.HARNESS_PRESETS["claude"],
+                 "invoke": [sys.executable, str(script), "{prompt}"]},
+            )
+            code = engine_cli(
+                "claude", "run", "--dir", str(tmp_path), "--no-scaffold",
+                f"--git-name={AGENT_NAME}", f"--git-email={AGENT_EMAIL}",
+                str(repo),
+            )
+            assert code == 0
+            return self._git(
+                repo, "log", "-1", "--format=%s%n%an%n%ae%n%cn%n%ce"
+            ).splitlines()
+
+        return rewrite
+
+    def test_an_amend_keeps_the_author_and_names_the_agent_committer(
+        self, tmp_path, rewriting_engine
+    ):
+        repo = self._repo(tmp_path / "amend")
+        assert rewriting_engine(repo, "commit", "-q", "--amend", "--no-edit") == [
+            "base", *ORIGINAL_AUTHOR, AGENT_NAME, AGENT_EMAIL,
+        ]
+
+    def test_a_rebase_keeps_the_author_and_names_the_agent_committer(
+        self, tmp_path, rewriting_engine
+    ):
+        repo = self._repo(tmp_path / "rebase")
+        trunk = self._git(repo, "symbolic-ref", "--short", "HEAD").strip()
+        self._git(repo, "checkout", "-q", "-b", "topic")
+        self._commit_file(repo, "topic")
+        self._git(repo, "checkout", "-q", trunk)
+        self._commit_file(repo, "trunk")
+        self._git(repo, "checkout", "-q", "topic")
+        assert rewriting_engine(repo, "rebase", "-q", trunk) == [
+            "topic", *ORIGINAL_AUTHOR, AGENT_NAME, AGENT_EMAIL,
+        ]
 
 
 class TestNoUserFacingStringNamesAToolOutsideTheSuite:

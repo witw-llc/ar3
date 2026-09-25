@@ -12,6 +12,55 @@ version when the batch is ready to merge.
 
 ## Unreleased
 
+## 0.1.95 — 2026-09-24
+
+### Fixed
+
+- **The git identity docs say what a rewrite keeps.** `--git-name` and
+  `--git-email` make the agent the author and committer of each new commit.
+  `git commit --amend` and `git rebase` keep the commit's original author and
+  name the agent as committer only. `docs/r4t-engine.md`, the
+  `git_identity_env` docstring and the 0.1.94 entry below now say this; they
+  said the identity covered amends and rebases, and a real-git test pins it.
+- **The running-node store test waits for the row it reads.** It waited for
+  the WAL side files, which appear when the node opens its holds, then read
+  the transaction log for a row the node writes after that; a fast reader on
+  a Linux release runner found it empty. The test now waits for the node's
+  `RUN_START` row as well, then reads that row back through the read-only
+  open, with the a8s home unwritable.
+- **`LESSONS.md` rotation keeps the file's own header.** Every line above the
+  first `## ` heading stays in place, or every line down to a
+  `<!-- rotate-below -->` marker when the file has one, so a seat's cap rule
+  and standing traps no longer rotate out first. A cut inside a section
+  repeats that section's headings at the top of the live file.
+- **A byte cap beside the line cap.** `LESSONS.md` also rotates past 35 KB
+  (`--lessons-cap-bytes`, on `r4t engine <id> run` and `r4t rig run`), so a
+  file of long lines cannot fill a turn's context under 200 lines. Rotation
+  moves lines until both caps hold, and it stays lossless: a kill mid-rotation
+  can duplicate a line into the archive, never lose one. Rotation writes both
+  files with LF endings, so a CRLF file cannot leave either one mixed, and a
+  `LESSONS.md` that is not UTF-8 no longer stops the turn.
+
+### Added
+
+- **A seat hears before its lessons file fills.** Over 80% of either cap, the
+  turn's scaffold carries one line with the file's size, telling the turn
+  not to append a lesson it already holds and not to edit existing lines.
+  Once `LESSONS-ARCHIVE.md` holds a line, the scaffold names it and says to
+  grep it. Under the soft cap the scaffold is unchanged, and the cached
+  prefix stays the same either way.
+- **The idle pass folds an over-full lessons file.** An `--idle` turn over
+  the soft cap asks the agent to merge duplicates, drop only superseded
+  lessons, keep the header, and write a one-row-per-line ledger under
+  `archive/`. r4t first copies the file's bytes there and grants the fold
+  only when the copy reads back equal, so a fold, even one killed partway,
+  loses nothing. The fold is the only turn that may edit an existing line.
+  One fold a day at most, and rotation at the caps stays the backstop.
+- **`ar3.fsio.atomic_write_bytes`**, the foundation's atomic write for bytes
+  that must land exactly as given.
+
+## 0.1.94 — 2026-09-24
+
 ### Added
 
 - **`r4t engine muse quota` answers.** Muse 1.3.0's `muse serve` speaks MSP
@@ -33,12 +82,13 @@ version when the batch is ready to merge.
 
 - **Each engine agent commits under its own name.** `r4t engine <id> run
   --git-name NAME --git-email EMAIL` sets `GIT_AUTHOR_*` and
-  `GIT_COMMITTER_*` on the turn's environment, so every commit the turn
-  makes, in any repo and including amends and rebases, names that agent
-  instead of the machine's shared git config. Each flag stands alone and wins
-  over an inherited value; unset leaves the environment as it was. Every
-  bundled `engine-*` definition carries both as optional slots, set per node
-  with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`.
+  `GIT_COMMITTER_*` on the turn's environment, so every new commit the turn
+  makes, in any repo, names that agent as author and committer instead of the
+  machine's shared git config. A commit the turn amends or rebases keeps its
+  original author and names the agent as committer. Each flag stands alone
+  and wins over an inherited value; unset leaves the environment as it was.
+  Every bundled `engine-*` definition carries both as optional slots, set per
+  node with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`.
 
 ### Changed
 

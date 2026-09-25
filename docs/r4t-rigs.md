@@ -106,14 +106,15 @@ r4t rig run cheap --idle          # the quiet-tick consolidation pass
 ```
 r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M] [--effort LEVEL]
                   [--agent NAME] [--timeout S] [--no-scaffold] [--idle]
-                  [--echo] [--lessons-cap N] [--continue]
+                  [--echo] [--lessons-cap N] [--lessons-cap-bytes N]
+                  [--continue]
                   [--permissions MODE] [--allowed-tools SPEC]
                   [--rig-config PATH] [--] PROMPT
 ```
 
 Same turn as [`r4t engine <id> run`](r4t-engine.md) — the same preset table,
 the same smart cold-boot scaffold, the same `--idle` latch, the same
-`LESSONS.md` rotation, the same exit code (the CLI's own, 124 on a timeout
+`LESSONS.md` upkeep (rotation, soft-cap nudge, idle fold), the same exit code (the CLI's own, 124 on a timeout
 kill) and the same stdout, which stays the engine's own reply stream byte for
 byte. `engine` is the bare metal; `rig` is that engine with the rig's tuning
 already on it and the rig's budget in front of it. No roster and no

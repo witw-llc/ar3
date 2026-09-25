@@ -54,17 +54,41 @@ def atomic_write_text(
     so a reader never observes a partial write and a killed writer never
     corrupts the target. Creates `path`'s parent directory if missing.
     """
-    path = Path(path)
+    _atomic_write(Path(path), text, fsync=fsync, mode=mode)
+
+
+def atomic_write_bytes(
+    path: Path,
+    data: bytes,
+    *,
+    fsync: bool = False,
+    mode: int | None = None,
+) -> None:
+    """`atomic_write_text` for bytes: `data` lands exactly as given, with no
+    encoding and no line-ending translation, for a copy that must match its
+    source byte for byte."""
+    _atomic_write(Path(path), data, fsync=fsync, mode=mode)
+
+
+def _atomic_write(
+    path: Path, payload: str | bytes, *, fsync: bool, mode: int | None
+) -> None:
+    binary = isinstance(payload, bytes)
+    how = {"mode": "wb"} if binary else {"mode": "w", "encoding": "utf-8"}
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{new_ulid()}.tmp")
     try:
         if mode is not None:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-            f = os.fdopen(fd, "w", encoding="utf-8")
+            # Windows opens a bare descriptor in text mode unless told not to.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if binary:
+                flags |= getattr(os, "O_BINARY", 0)
+            fd = os.open(tmp, flags, mode)
+            f = os.fdopen(fd, **how)
         else:
-            f = tmp.open("w", encoding="utf-8")
+            f = tmp.open(**how)
         try:
-            f.write(text)
+            f.write(payload)
             if fsync:
                 f.flush()
                 os.fsync(f.fileno())
