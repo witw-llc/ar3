@@ -10,6 +10,19 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.97 — 2026-09-25
+
+### Fixed
+
+- **A machine answers a shared-topic message it does not own with one
+  receipt, not one per daemon.** Since 0.1.96 a daemon that found a sibling
+  holding the claim left its copy unacknowledged, and its re-offer after the
+  claim was released ran the whole path again and published another
+  `no_local_recipient` receipt. The seen-ids ring now records "not ours"
+  before the claim is released, and a daemon that takes a claim checks the
+  ring again, so every later offer on the machine is answered without a
+  receipt.
+
 ## 0.1.96 — 2026-09-25
 
 ### Added

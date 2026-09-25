@@ -120,7 +120,11 @@ def _remote_not_local(
     receipt naming this node. A sender that collects one from every node and a
     delivery from none knows the message evaporated, which is the case
     `DROPPED` never covered because a configured remote made the publish
-    succeed."""
+    succeed.
+
+    The id then goes into the seen-ids ring, before the caller releases the
+    claim. Every daemon on the machine receives the same envelope, and the
+    ring is what turns the later ones away, so the machine answers once."""
     _remote_receive_diagnostic(
         msg_id, recipient, reason, remote_id, event="NOT_LOCAL", prefix="REMOTE_SKIP",
     )
@@ -133,6 +137,7 @@ def _remote_not_local(
             stage="no_local_recipient",
             detail=reason,
         )
+    seen_id_append(msg_id)
 
 
 def _remote_discarded(
@@ -754,10 +759,18 @@ def receive_envelope(
     Returns whether this call finished with the envelope. True says the
     network is done with it here — delivered and recorded in the seen-ids
     ring, already in that ring, or rejected for good (malformed, or addressed
-    to nobody this node holds). False says it is still owed an attempt: a
-    sibling receiver holds the claim, or delivery raised and the claim was
-    released precisely so somebody can try again. A transport that records
-    what it consumed must not record the envelope on a False.
+    to nobody this node holds, which the ring also records). False says it is
+    still owed an attempt: a sibling receiver holds the claim, or delivery
+    raised and the claim was released precisely so somebody can try again. A
+    transport that records what it consumed must not record the envelope on a
+    False.
+
+    A sibling's claim stays False because the folder and s3 transports keep
+    one consumed ledger per machine: a True here would stamp it for the
+    holder too, and a holder that then fails would never see the message
+    again. The re-offer that False buys is cheap, because the holder records
+    the id in the ring before it releases the claim, and the re-offer is
+    answered from the ring without a second receipt.
 
     `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
@@ -784,6 +797,11 @@ def receive_envelope(
         # A sibling receiver has it in flight — the same silent dedup, but the
         # message is that receiver's to finish, not this one's to write off.
         return False
+    if seen_id_contains(msg_id):
+        # A sibling finished and released between the ring read and the
+        # claim. Running the path again would send a second receipt.
+        release_claim(msg_id)
+        return True
     try:
         return _deliver_claimed_envelope(
             msg, msg_id, all_agents, services, publish_control, remote_id

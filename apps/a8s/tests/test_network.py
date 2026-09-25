@@ -834,8 +834,8 @@ class TestDeliveryClaim:
         assert not (_claims_dir() / msg_id).exists()
 
     def test_an_undeliverable_message_releases_its_claim(self, two_local_agents):
-        # Unknown recipient today can be a registered one tomorrow, and the
-        # ring never recorded it — so nothing may keep holding the claim.
+        # The ring records "not ours" so this machine answers once; the claim
+        # still has to go, or it would sit until the next sweep.
         from network import _claims_dir, claim_message
 
         msg_id = new_ulid()
@@ -916,6 +916,123 @@ class TestDeliveryClaim:
         network.sweep_stale_claims()
         assert (network._claims_dir() / fresh).exists()
         assert not (network._claims_dir() / dead).exists()
+
+
+class TestOneAnswerPerMachine:
+    """Every daemon on a machine subscribes to the same shared topic, so one
+    envelope reaches all of them. The machine answers it once: one delivery,
+    or one `no_local_recipient` receipt, never one per daemon."""
+
+    def _envelope(self, msg_id, to="NOBODY"):
+        return json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": to,
+            "content": "hello", "files": [],
+        }).encode()
+
+    @staticmethod
+    def _receipts(published):
+        return [
+            parse_delivery_receipt(json.loads(b)) for b in published
+        ]
+
+    def test_a_sibling_mid_delivery_and_its_re_offer_send_no_receipt(
+        self, two_local_agents
+    ):
+        from network import make_receive_callback
+
+        msg_id = new_ulid()
+        envelope = self._envelope(msg_id)
+        first_sent: list[bytes] = []
+        second_sent: list[bytes] = []
+        second = make_receive_callback(
+            lambda: two_local_agents, services=[],
+            publish_control=second_sent.append,
+        )
+        answers: list[bool] = []
+
+        def first_publish(receipt: bytes) -> None:
+            # The first daemon holds the claim while it publishes its receipt;
+            # the second daemon's subscriber is offered the same envelope now.
+            answers.append(second(envelope))
+            first_sent.append(receipt)
+
+        first = make_receive_callback(
+            lambda: two_local_agents, services=[], publish_control=first_publish,
+        )
+        assert first(envelope) is True
+        # Not consumed while the holder is mid-delivery: the machine-wide
+        # ledgers of the folder and s3 transports depend on that.
+        assert answers == [False]
+        # The re-offer after the holder released is answered from the ring.
+        assert second(envelope) is True
+        assert second_sent == []
+        receipts = self._receipts(first_sent)
+        assert [(r.for_id, r.stage) for r in receipts] == [
+            (msg_id, "no_local_recipient")
+        ]
+
+    def test_a_second_daemon_after_the_first_finished_sends_no_receipt(
+        self, two_local_agents
+    ):
+        msg_id = new_ulid()
+        first_sent: list[bytes] = []
+        second_sent: list[bytes] = []
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=first_sent.append,
+        ) is True
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=second_sent.append,
+        ) is True
+        assert len(first_sent) == 1
+        assert second_sent == []
+
+    def test_a_daemon_that_read_the_ring_just_before_it_was_written(
+        self, two_local_agents, monkeypatch
+    ):
+        # The ring is read before the claim is taken. A sibling can finish in
+        # between — record "not ours" and release — and the claim is then free.
+        msg_id = new_ulid()
+        first_sent: list[bytes] = []
+        second_sent: list[bytes] = []
+        real_claim = network.claim_message
+        raced: list[bool] = []
+
+        def claim_after_sibling_finished(ulid):
+            if not raced:
+                raced.append(True)
+                receive_envelope(
+                    self._envelope(msg_id), two_local_agents,
+                    publish_control=first_sent.append,
+                )
+            return real_claim(ulid)
+
+        monkeypatch.setattr(network, "claim_message", claim_after_sibling_finished)
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=second_sent.append,
+        ) is True
+        assert len(first_sent) == 1
+        assert second_sent == []
+        assert not (network._claims_dir() / msg_id).exists()
+
+    def test_an_unreadable_registry_is_still_not_consumed(
+        self, two_local_agents
+    ):
+        # Positive control: the case the acknowledgement rule exists for.
+        from network import make_receive_callback
+        from registry import participants_from_registry, registry_path
+
+        registry_path().write_text("{ not json")
+        sent: list[bytes] = []
+        callback = make_receive_callback(
+            participants_from_registry, services=[], publish_control=sent.append,
+        )
+        msg_id = new_ulid()
+        assert callback(self._envelope(msg_id, to="B")) is False
+        assert sent == []
+        assert seen_id_contains(msg_id) is False
 
 
 class TestDurableReceipt:
