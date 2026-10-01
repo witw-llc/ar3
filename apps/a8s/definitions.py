@@ -64,9 +64,10 @@ from core import (
     user_definitions_dir,
 )
 from registry import load_registry, resolve_recipient
-from settings import get_setting
+from settings import get_setting, merge_paths
 
 from ar3 import clock
+from ar3.proc import missing_interpreter
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
 ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "
@@ -826,9 +827,11 @@ def definition_env(definition: dict) -> dict[str, str]:
 def wake_env(definition: dict) -> dict[str, str]:
     """The environment a node declares, layered over the handler's own.
 
-    `definition.env` wins over what `a8s start`'s shell happened to carry; the
-    machine-wide `wake_path` fills in PATH for every node that does not name
-    one. An unset `wake_path` means inherit, which is the handler's PATH.
+    `definition.env` wins over what `a8s start`'s shell happened to carry. For
+    a node that names no PATH, the machine-wide `wake_path` is merged into the
+    handler's PATH (`merge_paths`): it adds what the start shell lacks and
+    never removes what that shell has. An unset `wake_path` means inherit,
+    which is the handler's PATH.
 
     Routing variables are NOT in here. a8s injects those on top of this layer
     so a definition cannot point its own outbox somewhere else.
@@ -836,10 +839,30 @@ def wake_env(definition: dict) -> dict[str, str]:
     env = definition_env(definition)
     if "PATH" in env:
         return env
-    fallback = str(get_setting("wake_path") or "").strip()
-    if not fallback:
+    recorded = str(get_setting("wake_path") or "").strip()
+    if not recorded:
         return env
-    return {"PATH": fallback, **env}
+    return {"PATH": merge_paths(os.environ.get("PATH", ""), recorded), **env}
+
+
+def wake_path_source(definition: dict) -> str:
+    """Where the PATH of this node's wakes comes from, in the operator's
+    words — what a failed wake names so the fix has an address."""
+    if "PATH" in definition_env(definition):
+        return "`definition.env`"
+    if str(get_setting("wake_path") or "").strip():
+        return "the start shell's PATH and the terminals a8s has run in"
+    return "the start shell's PATH"
+
+
+def wake_path_repair(member: str, definition: dict, program: str) -> str:
+    """The one step that repairs a wake that cannot find `program`."""
+    if "PATH" in definition_env(definition):
+        return (
+            f"This node declares its own PATH: add the directory that holds "
+            f"{program} to `definition.env`."
+        )
+    return f"Run `a8s retry {member}` from a terminal where {program} runs."
 
 
 def wake_shell(definition: dict) -> str | None:
@@ -947,6 +970,20 @@ def harness_program(argv: list[str]) -> str | None:
     return None
 
 
+def _harness_path(
+    program: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> Path | None:
+    if not program:
+        return None
+    if os.sep in program or (os.altsep and os.altsep in program):
+        p = Path(program)
+        if not p.is_absolute() and cwd is not None:
+            p = Path(cwd) / p
+        return p if os.access(p, os.X_OK) else None
+    found = shutil.which(program, path=(env or os.environ).get("PATH"))
+    return Path(found) if found else None
+
+
 def harness_is_resolvable(
     program: str, env: dict[str, str] | None = None, cwd: Path | None = None
 ) -> bool:
@@ -960,15 +997,21 @@ def harness_is_resolvable(
     which is exactly what `a8s start` hands the node — that equivalence is
     the whole point of probing here rather than at first wake.
     """
-    if not program:
-        return False
-    if os.sep in program or (os.altsep and os.altsep in program):
-        p = Path(program)
-        if not p.is_absolute() and cwd is not None:
-            p = Path(cwd) / p
-        return os.access(p, os.X_OK)
-    path = (env or os.environ).get("PATH")
-    return shutil.which(program, path=path) is not None
+    return _harness_path(program, env, cwd) is not None
+
+
+def harness_missing_interpreter(
+    program: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> tuple[Path, str] | None:
+    """`(script, interpreter)` when `program` resolves to a script whose `#!`
+    interpreter the wake's PATH cannot run; None otherwise, and None for a
+    program that does not resolve at all (`harness_is_resolvable` owns that).
+    """
+    path = _harness_path(program, env, cwd)
+    if path is None:
+        return None
+    missing = missing_interpreter(path, (env or os.environ).get("PATH"))
+    return (path, missing) if missing else None
 
 
 def _autodiscover_definition(root: Path) -> tuple[str, str]:

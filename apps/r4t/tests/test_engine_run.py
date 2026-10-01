@@ -1117,6 +1117,35 @@ class TestExecuteAndSpawn:
         assert recorded[0].startswith("Smart cold boot:")
         assert recorded[0].endswith("raw prompt text")
 
+    @pytest.mark.skipif(os.name != "posix", reason="`#!` lines are POSIX")
+    def test_exit_127_names_the_interpreter_the_engine_lacks(
+        self, tmp_path, monkeypatch, capfd
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        exe = bin_dir / "fake-node-cli"
+        exe.write_text("#!/usr/bin/env r4t-no-such-node\n", encoding="utf-8")
+        exe.chmod(0o755)
+        monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]))
+        import rig as rig_module
+
+        original = dict(rig_module.HARNESS_PRESETS.get("claude", {}))
+        rig_module.HARNESS_PRESETS["claude"] = {
+            **original, "invoke": ["fake-node-cli", "{prompt}"],
+        }
+        try:
+            code = engine_run.execute(
+                "claude", "raw prompt text",
+                dir_path=tmp_path, model=None, agent=None, timeout=30,
+                scaffold=False,
+            )
+        finally:
+            rig_module.HARNESS_PRESETS["claude"] = original
+        assert code == 127
+        err = capfd.readouterr().err
+        assert f"fake-node-cli is {exe}" in err
+        assert "r4t-no-such-node is not on PATH" in err
+
     def test_timeout_kills_the_process_group(self, tmp_path):
         script = tmp_path / "sleepy.py"
         script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")

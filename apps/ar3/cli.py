@@ -482,9 +482,9 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         print()
         print(
             f"note: {', '.join(unseen)} not visible from this shell. `a8s start` "
-            "here would hand\n      the same PATH to every wake — give a8s a PATH "
-            "of its own from a shell that\n      does see them "
-            "(`a8s config set wake_path \"$PATH\"`), or set `definition.env`."
+            "here would hand\n      the same PATH to every wake. Run `a8s start` "
+            "from a terminal that does see\n      them: a8s remembers that "
+            "terminal's PATH for every later wake."
         )
     print()
     if failed:

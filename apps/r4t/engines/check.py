@@ -34,7 +34,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from engines.run import RUN_ENGINES, RunError, _build_argv_template, resolve_argv0
+from engines.run import (
+    RUN_ENGINES, RunError, _build_argv_template, interpreter_gap, resolve_argv0,
+)
 
 __all__ = ["PROBES", "EngineReport", "check_engine", "check_all", "format_text"]
 
@@ -135,6 +137,7 @@ class EngineReport:
     detail: str = ""
     argv: list[str] = field(default_factory=list)
     method: str = ""
+    runnable: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -142,6 +145,7 @@ class EngineReport:
             "binary": self.binary,
             "version": self.version,
             "installed": self.installed,
+            "runnable": self.runnable,
             "verdict": self.verdict,
             "detail": self.detail,
             "method": self.method,
@@ -239,7 +243,13 @@ def check_engine(
     probe = PROBES[engine]
     report.installed = shutil.which(report.binary) is not None
     if not report.installed:
+        report.runnable = False
         report.detail = f"{report.binary} is not on PATH"
+        return report
+    gap = interpreter_gap(report.binary)
+    if gap:
+        report.runnable = False
+        report.detail = gap
         return report
     report.version = _version(report.binary)
 

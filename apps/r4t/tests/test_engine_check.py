@@ -207,6 +207,24 @@ class TestUnverifiable:
         assert report.installed is False
         assert "not on PATH" in report.detail
 
+    @pytest.mark.skipif(os.name != "posix", reason="`#!` lines are POSIX")
+    def test_a_script_without_its_interpreter_is_installed_and_not_runnable(
+        self, bin_dir
+    ):
+        exe = bin_dir / "codex"
+        exe.write_text("#!/usr/bin/env r4t-no-such-node\n", encoding="utf-8")
+        exe.chmod(0o755)
+        report = engine_check.check_engine("codex")
+        assert report.verdict == engine_check.UNVERIFIABLE
+        assert report.installed is True
+        assert report.runnable is False
+        assert report.as_dict()["runnable"] is False
+        assert str(exe) in report.detail
+        assert "r4t-no-such-node is not on PATH" in report.detail
+
+    def test_a_missing_binary_is_not_runnable(self, bin_dir):
+        assert engine_check.check_engine("claude").runnable is False
+
     def test_a_launcher_without_the_wrapped_cli_is_unverifiable(self, bin_dir):
         fake_binary(bin_dir, "ollama", flags=["--model"])
         report = engine_check.check_engine("ollama-claude")

@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from ar3.proc import spawn, terminate_group
+from ar3.proc import missing_interpreter, spawn, terminate_group
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -135,3 +135,44 @@ class TestTerminateGroup:
             assert not _pid_is_alive(grandchild_pid)
         finally:
             proc.wait(timeout=5)
+
+
+class TestMissingInterpreter:
+    def _script(self, tmp_path, first_line):
+        exe = tmp_path / "cli"
+        exe.write_bytes(first_line.encode() + b"\nbody\n")
+        exe.chmod(0o755)
+        return exe
+
+    def test_an_env_interpreter_off_the_path_is_named(self, tmp_path):
+        exe = self._script(tmp_path, "#!/usr/bin/env ar3-no-such-node")
+        assert missing_interpreter(exe, "/usr/bin:/bin") == "ar3-no-such-node"
+
+    def test_an_env_interpreter_on_the_path_is_no_gap(self, tmp_path):
+        exe = self._script(tmp_path, "#!/usr/bin/env sh")
+        assert missing_interpreter(exe, "/usr/bin:/bin") is None
+
+    def test_env_options_and_assignments_are_not_the_interpreter(self, tmp_path):
+        exe = self._script(tmp_path, "#!/usr/bin/env -S LANG=C ar3-no-such-node --flag")
+        assert missing_interpreter(exe, "/usr/bin:/bin") == "ar3-no-such-node"
+
+    def test_an_absolute_interpreter_is_checked_where_it_is(self, tmp_path):
+        assert missing_interpreter(self._script(tmp_path, "#!/bin/sh"), "") is None
+        exe = self._script(tmp_path, "#! /ar3/no/such/interpreter -x")
+        assert missing_interpreter(exe, "/usr/bin") == "/ar3/no/such/interpreter"
+
+    def test_a_binary_or_an_unreadable_file_is_no_gap(self, tmp_path):
+        binary = tmp_path / "bin"
+        binary.write_bytes(b"\xcf\xfa\xed\xfe\x07\x00")
+        assert missing_interpreter(binary, "/usr/bin") is None
+        assert missing_interpreter(tmp_path / "absent", "/usr/bin") is None
+
+    def test_none_reads_this_processes_path(self, tmp_path, monkeypatch):
+        exe = self._script(tmp_path, "#!/usr/bin/env ar3-probe-node")
+        node = tmp_path / "ar3-probe-node"
+        node.write_text("#!/bin/sh\n")
+        node.chmod(0o755)
+        monkeypatch.setenv("PATH", "/usr/bin")
+        assert missing_interpreter(exe) == "ar3-probe-node"
+        monkeypatch.setenv("PATH", str(tmp_path))
+        assert missing_interpreter(exe) is None

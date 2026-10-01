@@ -257,6 +257,39 @@ def _flaky_def(fixtures_dir: Path, **extra) -> dict:
     }
 
 
+class TestExit127NamesThePath:
+    def test_the_log_names_the_path_and_where_it_came_from(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin:/usr/bin")
+        p = _register(tmp_path, {"invoke": ["x", "$MESSAGE"]})
+        _settle_wake(p, [_in_trash("A", "needs node")], 127)
+        log = _read_log("A")
+        assert "exit 127 means a program was not found" in log
+        assert "the terminals a8s has run in: /machine/bin:/usr/bin" in log
+        assert "Run `a8s retry A` from a terminal where the program runs." in log
+
+    def test_a_declared_path_is_named_as_the_source(self, fake_home, tmp_path):
+        p = _register(
+            tmp_path, {"invoke": ["x", "$MESSAGE"], "env": {"PATH": "/node/bin"}}
+        )
+        _settle_wake(p, [_in_trash("A", "needs node")], 127)
+        log = _read_log("A")
+        assert "came from `definition.env`: /node/bin" in log
+        assert "a8s retry" not in log
+
+    def test_a_login_shell_node_names_the_rc_files(self, fake_home, tmp_path):
+        p = _register(tmp_path, {"invoke": ["x", "$MESSAGE"], "wake_shell": "login"})
+        _settle_wake(p, [_in_trash("A", "needs node")], 127)
+        assert "login shell" in _read_log("A")
+
+    def test_another_exit_code_says_nothing_about_the_path(self, fake_home, tmp_path):
+        p = _register(tmp_path, {"invoke": ["x", "$MESSAGE"]})
+        _settle_wake(p, [_in_trash("A", "plain failure")], 3)
+        assert "exit 127" not in _read_log("A")
+
+
 class TestFailureModesKeepMailDeliverable:
     def test_nonzero_exit_requeues_the_message(self, fake_home, tmp_path, fixtures_dir):
         _register(tmp_path, _flaky_def(fixtures_dir))

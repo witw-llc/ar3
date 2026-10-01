@@ -76,6 +76,12 @@ except ImportError:
         os.replace(tmp, path)
 
 try:
+    from ar3.proc import missing_interpreter
+except ImportError:
+    def missing_interpreter(program: Path | str, path: str | None = None) -> str | None:
+        return None
+
+try:
     from ar3.proc import spawn as _proc_spawn, terminate_group as _terminate_group
 except ImportError:
     def _proc_spawn(
@@ -739,6 +745,23 @@ def resolve_argv0(argv: list[str]) -> list[str]:
     return [resolved, *argv[1:]] if resolved else argv
 
 
+def interpreter_gap(program: str, path: str | None = None) -> str | None:
+    """One sentence naming the interpreter `program` cannot start without,
+    when `program` resolves on `path` to a script and its interpreter does
+    not. None when the launch is whole, or when `program` does not resolve —
+    a missing binary has its own message."""
+    resolved = program if os.sep in program else shutil.which(program, path=path)
+    if not resolved:
+        return None
+    missing = missing_interpreter(resolved, path)
+    if missing is None:
+        return None
+    return (
+        f"{program} is {resolved}, a script that runs under {missing}, "
+        f"and {missing} is not on PATH"
+    )
+
+
 def _spawn(
     argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
 ) -> int:
@@ -896,6 +919,10 @@ def execute(
                 memory_turn.finish(output, exit_code)
             except (OSError, ValueError) as exc:
                 engine_memory.note(f"capture or worker failed: {exc}")
+        if exit_code == 127:
+            gap = interpreter_gap(argv[0], env.get("PATH"))
+            if gap:
+                print(f"r4t engine: exit 127: {gap}", file=sys.stderr)
         measured, lines = instruments.measure()
         for line in lines:
             print(f"r4t engine: {line}", file=sys.stderr)

@@ -441,7 +441,7 @@ def test_doctor_links_an_invisible_harness_to_the_node_spawn_env(monkeypatch, ca
     out = capsys.readouterr().out
     assert "claude, codex not visible from this shell" in out
     assert "a8s start" in out
-    assert "wake_path" in out
+    assert "a8s remembers that terminal's PATH" in out
 
 
 def test_a_harness_that_answered_badly_is_not_a_path_note(monkeypatch, capsys):

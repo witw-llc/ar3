@@ -1571,15 +1571,33 @@ class TestHarnessWarningAtStart:
         _warn_unresolvable_harnesses(["no-such-agent"])
         assert capsys.readouterr().err == ""
 
-    def test_the_warning_names_the_knobs_that_fix_it(
+    def test_the_warning_names_the_one_command_that_fixes_it(
         self, fake_home, agent_root, tmp_path, capsys
     ):
         self._register(agent_root, tmp_path, ["a8s-no-such-harness-xyz"])
         capsys.readouterr()
         _warn_unresolvable_harnesses(["probe"])
         err = capsys.readouterr().err
-        assert "definition.env" in err
-        assert "wake_path" in err
+        assert "Searched PATH:" in err
+        assert (
+            "Run `a8s retry probe` from a terminal where "
+            "a8s-no-such-harness-xyz runs." in err
+        )
+
+    def test_a_node_that_declares_its_path_is_sent_to_its_definition(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        path = tmp_path / "probe.json"
+        path.write_text(json.dumps({
+            "invoke": ["a8s-no-such-harness-xyz", "$MESSAGE"],
+            "env": {"PATH": str(tmp_path)},
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert "`definition.env`" in err
+        assert "a8s retry" not in err
 
     def test_a_declared_path_that_resolves_it_ends_the_warning(
         self, fake_home, agent_root, tmp_path, capsys
@@ -1618,6 +1636,28 @@ class TestHarnessWarningAtStart:
         set_setting("wake_path", str(harness_dir))
         _warn_unresolvable_harnesses(["probe"])
         assert capsys.readouterr().err == ""
+
+    @pytest.mark.skipif(os.name != "posix", reason="`#!` lines are POSIX")
+    def test_a_harness_whose_interpreter_is_off_the_path_warns(
+        self, fake_home, agent_root, tmp_path, capsys
+    ):
+        harness_dir = tmp_path / "bin"
+        harness_dir.mkdir()
+        exe = harness_dir / "a8s-probe-harness"
+        exe.write_text("#!/usr/bin/env a8s-no-such-node\n")
+        exe.chmod(0o755)
+        path = tmp_path / "probe.json"
+        path.write_text(json.dumps({
+            "invoke": ["a8s-probe-harness", "-p", "$MESSAGE"],
+            "env": {"PATH": str(harness_dir)},
+        }))
+        assert cmd_add(["probe", str(agent_root), str(path)]) == 0
+        capsys.readouterr()
+        _warn_unresolvable_harnesses(["probe"])
+        err = capsys.readouterr().err
+        assert str(exe) in err
+        assert "a8s-no-such-node" in err
+        assert str(harness_dir) in err
 
     def test_a_login_shell_node_is_not_second_guessed(
         self, fake_home, agent_root, tmp_path, capsys
@@ -1758,27 +1798,35 @@ class TestWakeShellAtStart:
 
 
 class TestWakePathCapture:
-    """`a8s add` runs in the operator's own working shell, so that shell's PATH
-    is correct by construction at exactly that moment. Recording it there is
-    what stops the *start* shell's provenance from mattering (#121)."""
+    """`a8s add` makes the first recording from any start. Every later change
+    to it comes from a terminal (see `TestWakePathLearning`)."""
+
+    def _dirs(self, base, name):
+        d = base.parent / name
+        d.mkdir(exist_ok=True)
+        return str(d)
 
     def test_the_first_add_records_this_shells_path(
         self, fake_home, agent_root, monkeypatch
     ):
         from settings import get_setting
 
-        monkeypatch.setenv("PATH", "/operator/bin:/usr/bin")
+        operator = self._dirs(agent_root, "operator")
+        monkeypatch.setenv("PATH", f"{operator}:/usr/bin:/a8s/no/such/dir")
         assert cmd_add(["alpha", str(agent_root)]) == 0
-        assert get_setting("wake_path") == "/operator/bin:/usr/bin"
+        assert get_setting("wake_path") == f"{operator}:/usr/bin"
 
-    def test_a_later_add_never_overwrites(self, fake_home, agent_root, monkeypatch):
+    def test_a_later_add_away_from_a_terminal_changes_nothing(
+        self, fake_home, agent_root, monkeypatch
+    ):
         from settings import get_setting
 
-        monkeypatch.setenv("PATH", "/operator/bin")
+        operator, cron = self._dirs(agent_root, "operator"), self._dirs(agent_root, "cron")
+        monkeypatch.setenv("PATH", operator)
         assert cmd_add(["alpha", str(agent_root)]) == 0
-        monkeypatch.setenv("PATH", "/some/cron/path")
+        monkeypatch.setenv("PATH", cron)
         assert cmd_add(["beta", str(agent_root)]) == 0
-        assert get_setting("wake_path") == "/operator/bin"
+        assert get_setting("wake_path") == operator
 
     def test_an_operator_set_value_outranks_the_capture(
         self, fake_home, agent_root, monkeypatch
@@ -1790,6 +1838,109 @@ class TestWakePathCapture:
         assert cmd_add(["alpha", str(agent_root)]) == 0
         assert "wake_path" not in load_settings_file()
         assert get_setting("wake_path") == "/chosen/bin"
+
+
+class TestWakePathLearning:
+    """The operator's terminal is where the harness already runs, so the verbs
+    that set a node going fold its PATH into the recording."""
+
+    def _dir(self, tmp_path, name):
+        d = tmp_path / name
+        d.mkdir()
+        return str(d)
+
+    @pytest.fixture
+    def terminal(self, monkeypatch):
+        monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+        monkeypatch.delenv("A8S_TURN_RECIPIENT", raising=False)
+
+    def test_a_verb_at_a_terminal_adds_the_directories_it_lacks(
+        self, fake_home, tmp_path, monkeypatch, capsys, terminal
+    ):
+        from cli import dispatch
+        from settings import get_setting, set_setting
+
+        old, new = self._dir(tmp_path, "old"), self._dir(tmp_path, "new")
+        set_setting("wake_path", f"{old}:/usr/bin")
+        monkeypatch.setenv("PATH", f"{new}:{old}:/usr/bin")
+        dispatch("retry", ["nobody"], 1.0)
+        assert get_setting("wake_path") == f"{new}:{old}:/usr/bin"
+        assert f"a8s: wakes now also search {new}" in capsys.readouterr().out
+
+    def test_a_directory_the_operator_wrote_is_never_removed(
+        self, fake_home, tmp_path, monkeypatch, terminal
+    ):
+        from cli import dispatch
+        from settings import get_setting, set_setting
+
+        set_setting("wake_path", "/operator/wrote/this:/usr/bin")
+        monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
+        dispatch("retry", ["nobody"], 1.0)
+        assert "/operator/wrote/this" in get_setting("wake_path").split(":")
+
+    def test_a_verb_away_from_a_terminal_learns_nothing(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        from cli import dispatch
+        from settings import get_setting, set_setting
+
+        set_setting("wake_path", "/usr/bin")
+        monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
+        monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+        dispatch("retry", ["nobody"], 1.0)
+        assert get_setting("wake_path") == "/usr/bin"
+
+    def test_a_command_inside_a_wake_learns_nothing(
+        self, fake_home, tmp_path, monkeypatch, terminal
+    ):
+        from cli import dispatch
+        from settings import get_setting, set_setting
+
+        set_setting("wake_path", "/usr/bin")
+        monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
+        monkeypatch.setenv("A8S_TURN_RECIPIENT", "alpha")
+        dispatch("retry", ["nobody"], 1.0)
+        assert get_setting("wake_path") == "/usr/bin"
+
+    def test_a_read_only_verb_learns_nothing(
+        self, fake_home, tmp_path, monkeypatch, terminal
+    ):
+        from cli import dispatch
+        from settings import get_setting, set_setting
+
+        set_setting("wake_path", "/usr/bin")
+        monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
+        dispatch("ps", [], 1.0)
+        assert get_setting("wake_path") == "/usr/bin"
+
+    def test_a_path_the_operator_chose_in_the_environment_is_left_alone(
+        self, fake_home, tmp_path, monkeypatch, terminal
+    ):
+        from cli import dispatch
+        from settings import load_settings_file
+
+        monkeypatch.setenv("A8S_WAKE_PATH", "/chosen/bin")
+        monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
+        dispatch("retry", ["nobody"], 1.0)
+        assert "wake_path" not in load_settings_file()
+
+    @pytest.mark.skipif(os.name != "posix", reason="fnm session links are POSIX")
+    def test_a_per_shell_fnm_directory_is_stored_as_its_alias(
+        self, fake_home, tmp_path
+    ):
+        from settings import durable_path
+
+        alias = tmp_path / "fnm" / "aliases" / "default"
+        (alias / "bin").mkdir(parents=True)
+        sessions = tmp_path / "state" / "fnm_multishells"
+        sessions.mkdir(parents=True)
+        (sessions / "123_456").symlink_to(alias)
+        assert durable_path(f"{sessions}/123_456/bin:/usr/bin") == f"{alias}/bin:/usr/bin"
+
+    def test_a_directory_that_does_not_exist_is_not_remembered(self, fake_home):
+        from settings import durable_path
+
+        assert durable_path("/a8s/no/such/dir:/usr/bin::~/not/expanded") == "/usr/bin"
 
 
 class TestParseOptionTokens:

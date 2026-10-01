@@ -100,6 +100,9 @@ from definitions import (
     max_wake_seconds,
     pause_seconds,
     wake_env,
+    wake_path_repair,
+    wake_path_source,
+    wake_shell,
     wrap_wake_argv,
 )
 from mailbox import (
@@ -585,6 +588,31 @@ def _pause_ready_for_wake(
     return False
 
 
+def _explain_not_found(p: Participant) -> None:
+    """Exit 127 is the shell's "command not found", and the operator's own
+    terminal usually finds the same command — so name the PATH this wake
+    searched and where that PATH came from."""
+    try:
+        definition = load_definition(p.name)
+        if wake_shell(definition) is not None:
+            out_agent(
+                p.name,
+                f"[{p.name}] exit 127 means a program was not found. This node "
+                f"wakes through a login shell, so its rc files set the PATH.",
+            )
+            return
+        path = {**os.environ, **wake_env(definition)}.get("PATH", "")
+        source = wake_path_source(definition)
+    except (FileNotFoundError, RuntimeError, ValueError):
+        return
+    out_agent(
+        p.name,
+        f"[{p.name}] exit 127 means a program was not found. This wake's PATH "
+        f"came from {source}: {path}",
+    )
+    out_agent(p.name, f"[{p.name}] {wake_path_repair(p.name, definition, 'the program')}")
+
+
 def _settle_wake(
     p: Participant,
     envelopes: list[Path],
@@ -609,6 +637,8 @@ def _settle_wake(
         return
     if reason is None:
         reason = "spawn failed" if rc is None else f"exit {rc}"
+    if rc == 127:
+        _explain_not_found(p)
     unit = sorted(f.name for f in envelopes)
     record = read_wake_retry(p.name) or {}
     attempts = (record.get("attempts", 0) if record.get("unit") == unit else 0) + 1

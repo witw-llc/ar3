@@ -10,6 +10,45 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.98 — 2026-09-27
+
+### Changed
+
+- **`wake_path` adds to the start shell's PATH and never removes from it.**
+  A wake's `PATH` is the start shell's own, with each directory only
+  `wake_path` names placed where the recording had it. A start from cron,
+  ssh or launchd gets the recording in its own order. A start from a working
+  shell keeps every directory that shell has, so a CLI that runs at the
+  terminal runs in the wake, and a recording made before a tool was installed
+  does not hide that tool. `definition.env` still replaces `PATH` for the one
+  node that declares it.
+
+- **a8s keeps the wake PATH current, and the operator sets nothing.** Each
+  time `a8s add`, `define`, `start`, `run`, `restart` or `retry` runs at a
+  terminal, a8s adds that terminal's directories to what it remembers and
+  prints the new ones once. It remembers only directories that exist, and it
+  stores a per-shell fnm directory as the alias it links to. A command inside
+  a wake, or with no terminal, changes nothing.
+- **Every "not found" message names one command.** The pre-start warning,
+  the exit 127 line and `ar3 doctor` no longer tell the operator to write a
+  `PATH` into a setting. They say: run `a8s retry <name>` from a terminal
+  where the program runs.
+
+### Added
+
+- **`a8s retry <name>` tries a failed wake again now.** It ends the backoff
+  the failed wake armed, and the waiting mail is tried on the next pass with
+  a full set of attempts. A running node needs no restart.
+- **`a8s start` and `a8s define` warn when a harness is a script whose
+  interpreter is not on the wake's PATH.** A CLI installed by npm is a script
+  that starts with `#!/usr/bin/env node`, so it resolves on a `PATH` with no
+  `node` and then exits 127. The warning names the script, the interpreter
+  and the `PATH` searched. `r4t engine <id> check` reports the same finding,
+  and its `--json` output carries `runnable`.
+- **A wake that exits 127 says what was not found and where it looked.** The
+  agent log names the `PATH` the wake searched and the knob that `PATH` came
+  from. An engine turn names the interpreter its CLI lacks.
+
 ## 0.1.97 — 2026-09-25
 
 ### Fixed

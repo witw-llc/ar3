@@ -24,6 +24,7 @@ from definitions import (
     build_command,
     definition_env,
     harness_is_resolvable,
+    harness_missing_interpreter,
     harness_program,
     default_definition_path,
     load_definition,
@@ -32,7 +33,9 @@ from definitions import (
     resolve_inbox_dir,
     resolve_outbox_dir,
     validate_var_name,
+    merge_paths,
     wake_env,
+    wake_path_source,
     wake_shell,
     wrap_wake_argv,
 )
@@ -1667,16 +1670,53 @@ class TestDefinitionEnv:
             definition_env({"env": {key: "x"}})
 
 
+class TestMergePaths:
+    """`wake_path` adds to the start shell's PATH and never removes from it."""
+
+    def test_a_thin_path_gets_the_recording_in_its_own_order(self):
+        recorded = "/home/me/bin:/opt/homebrew/bin:/usr/bin:/bin:/late/bin"
+        assert merge_paths("/usr/bin:/bin", recorded) == recorded
+
+    def test_a_directory_newer_than_the_recording_keeps_its_place(self):
+        live = "/home/me/node/bin:/opt/homebrew/bin:/usr/bin"
+        assert merge_paths(live, "/opt/homebrew/bin:/usr/bin") == live
+
+    def test_a_recorded_directory_lands_before_its_recorded_neighbor(self):
+        assert (
+            merge_paths("/new/bin:/usr/bin:/bin", "/usr/bin:/old/bin:/bin")
+            == "/new/bin:/usr/bin:/old/bin:/bin"
+        )
+
+    def test_the_live_order_wins_where_the_two_disagree(self):
+        assert merge_paths("/b:/a", "/a:/b") == "/b:/a"
+
+    def test_an_empty_live_path_is_the_recording(self):
+        assert merge_paths("", "/opt/bin:/usr/bin") == "/opt/bin:/usr/bin"
+
+    def test_repeats_and_empty_entries_are_dropped(self):
+        assert merge_paths("/a::/b:/a", "/b:/c:/c") == "/a:/b:/c"
+
+
 class TestWakeEnv:
-    """`wake_path` is the fallback under `definition.env`, and both sit under
-    the routing variables a8s injects (see daemon `_wake_env`)."""
+    """`wake_path` merges into the handler's PATH under `definition.env`, and
+    both sit under the routing variables a8s injects (see daemon `_wake_env`)."""
 
     def test_no_knobs_means_inherit(self, fake_home):
         assert wake_env({"invoke": ["x"]}) == {}
 
-    def test_wake_path_fills_in_a_missing_path(self, fake_home, monkeypatch):
+    def test_wake_path_fills_in_what_a_thin_start_lacks(self, fake_home, monkeypatch):
+        monkeypatch.setenv("PATH", "/usr/bin")
         monkeypatch.setenv("A8S_WAKE_PATH", "/opt/bin:/usr/bin")
         assert wake_env({"invoke": ["x"]}) == {"PATH": "/opt/bin:/usr/bin"}
+
+    def test_wake_path_cannot_hide_a_directory_the_start_shell_has(
+        self, fake_home, monkeypatch
+    ):
+        monkeypatch.setenv("PATH", "/home/me/node/bin:/opt/bin:/usr/bin")
+        monkeypatch.setenv("A8S_WAKE_PATH", "/opt/bin:/usr/bin")
+        assert wake_env({"invoke": ["x"]}) == {
+            "PATH": "/home/me/node/bin:/opt/bin:/usr/bin"
+        }
 
     def test_a_declared_path_beats_wake_path(self, fake_home, monkeypatch):
         monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
@@ -1685,15 +1725,58 @@ class TestWakeEnv:
     def test_wake_path_still_fills_in_beside_other_declared_vars(
         self, fake_home, monkeypatch
     ):
+        monkeypatch.setenv("PATH", "/usr/bin")
         monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
         assert wake_env({"env": {"LANG": "C"}}) == {
-            "PATH": "/machine/bin",
+            "PATH": "/usr/bin:/machine/bin",
             "LANG": "C",
         }
 
     def test_a_blank_wake_path_is_inherit(self, fake_home, monkeypatch):
         monkeypatch.setenv("A8S_WAKE_PATH", "   ")
         assert wake_env({"invoke": ["x"]}) == {}
+
+    def test_the_source_names_the_knob_that_decided_the_path(
+        self, fake_home, monkeypatch
+    ):
+        assert wake_path_source({"invoke": ["x"]}) == "the start shell's PATH"
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
+        assert "terminals a8s has run in" in wake_path_source({"invoke": ["x"]})
+        assert wake_path_source({"env": {"PATH": "/node/bin"}}) == "`definition.env`"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="`#!` lines are POSIX")
+class TestHarnessMissingInterpreter:
+    def _script(self, directory, name, first_line):
+        directory.mkdir(exist_ok=True)
+        exe = directory / name
+        exe.write_text(first_line + "\n")
+        exe.chmod(0o755)
+        return exe
+
+    def test_a_script_whose_interpreter_is_off_the_path_is_named(self, tmp_path):
+        exe = self._script(tmp_path / "bin", "probe-cli", "#!/usr/bin/env a8s-no-such-node")
+        env = {"PATH": str(tmp_path / "bin")}
+        assert harness_is_resolvable("probe-cli", env)
+        assert harness_missing_interpreter("probe-cli", env) == (exe, "a8s-no-such-node")
+
+    def test_an_interpreter_on_the_path_is_no_gap(self, tmp_path):
+        self._script(tmp_path / "bin", "probe-cli", "#!/usr/bin/env -S probe-node --flag")
+        self._script(tmp_path / "node", "probe-node", "#!/bin/sh")
+        env = {"PATH": os.pathsep.join([str(tmp_path / "bin"), str(tmp_path / "node")])}
+        assert harness_missing_interpreter("probe-cli", env) is None
+
+    def test_an_absolute_interpreter_is_checked_where_it_is(self, tmp_path):
+        self._script(tmp_path / "bin", "ok-cli", "#!/bin/sh")
+        exe = self._script(tmp_path / "bin", "bad-cli", "#!/a8s/no/such/interpreter")
+        env = {"PATH": str(tmp_path / "bin")}
+        assert harness_missing_interpreter("ok-cli", env) is None
+        assert harness_missing_interpreter("bad-cli", env) == (
+            exe, "/a8s/no/such/interpreter"
+        )
+
+    def test_a_program_that_does_not_resolve_is_not_this_checks_to_report(self, tmp_path):
+        assert harness_missing_interpreter("probe-cli", {"PATH": str(tmp_path)}) is None
 
 
 class TestWakeShell:

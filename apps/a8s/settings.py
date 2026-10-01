@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -115,7 +116,7 @@ KNOBS: tuple[Knob, ...] = (
         "machine",
         True,
         "A8S_WAKE_PATH",
-        "PATH every wake gets unless its definition.env names one; a8s add records the operator's PATH here (empty = inherit the handler's)",
+        "Directories a8s has seen in the operator's terminals, added to the PATH of every wake whose definition.env names none; a8s keeps it current",
     ),
     Knob(
         "wake_drain_grace_seconds",
@@ -203,7 +204,11 @@ __all__ = [
     "ENV_VARS",
     "KNOBS",
     "Knob",
+    "at_a_terminal",
     "capture_wake_path",
+    "durable_path",
+    "learn_wake_path",
+    "merge_paths",
     "get_float",
     "get_int",
     "get_setting",
@@ -386,22 +391,99 @@ def set_setting(key: str, value: Any) -> None:
     save_settings_file(data)
 
 
-def capture_wake_path() -> bool:
-    """Record this process's PATH as `wake_path` unless one is already set.
+def merge_paths(live: str, recorded: str) -> str:
+    """`live`, with each directory only `recorded` names placed where
+    `recorded` had it: before the next directory both name, else at the end.
 
-    `a8s add` runs in the operator's own working shell, so that shell's PATH is
-    correct by construction at that moment. Recording it there is what stops the
-    provenance of the *start* shell from deciding whether a node can find its
-    harness hours later. Never overwrites — a value the operator set outranks
-    one a command noticed.
+    A thin PATH (cron, ssh, launchd) names only system directories, which a
+    recording holds near its end, so the result is the recording in its own
+    order. A working shell's PATH keeps its order and its newer directories,
+    so a recording made before a tool was installed cannot hide that tool.
+    """
+    live_dirs = list(dict.fromkeys(d for d in live.split(os.pathsep) if d))
+    known = set(live_dirs)
+    before: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for d in dict.fromkeys(d for d in recorded.split(os.pathsep) if d):
+        if d in known:
+            before.setdefault(d, []).extend(pending)
+            pending = []
+        else:
+            pending.append(d)
+    out: list[str] = []
+    for d in live_dirs:
+        out.extend(before.get(d, ()))
+        out.append(d)
+    return os.pathsep.join(out + pending)
+
+
+FNM_SESSIONS = "fnm_multishells"
+
+
+def durable_path(path: str) -> str:
+    """`path` as it is worth remembering: the directories that exist, with a
+    per-shell fnm directory replaced by the alias it links to.
+
+    fnm gives every shell its own `fnm_multishells/<id>` link, and that link
+    outlives neither the session nor a reboot on every platform. The alias it
+    points at is the stable name for the same install.
+    """
+    out: list[str] = []
+    for entry in path.split(os.pathsep):
+        parts = Path(entry).parts
+        if FNM_SESSIONS in parts[:-1]:
+            at = parts.index(FNM_SESSIONS) + 2
+            session = Path(*parts[:at])
+            if session.is_symlink():
+                entry = str((session.parent / os.readlink(session)).joinpath(*parts[at:]))
+        if entry and os.path.isdir(entry):
+            out.append(entry)
+    return os.pathsep.join(dict.fromkeys(out))
+
+
+def at_a_terminal() -> bool:
+    """Whether the operator is typing this command. A wake carries its
+    recipient in the environment, and its PATH is a8s's own composition, so a
+    command an agent runs inside a turn teaches nothing."""
+    if "A8S_TURN_RECIPIENT" in os.environ:
+        return False
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def learn_wake_path() -> list[str] | None:
+    """Fold this process's PATH into `wake_path`. Returns the directories that
+    are new to the recording, or None when nothing was recorded.
+
+    The recording only grows: a directory the operator wrote there stays, and
+    this shell's order wins where the two orders disagree. `A8S_WAKE_PATH` in
+    the environment is the operator's own value, so it is left alone.
+    """
+    stored = load_settings_file()
+    if "wake_path" not in stored and os.environ.get(ENV_VARS["wake_path"], "").strip():
+        return None
+    recorded = str(stored.get("wake_path") or "").strip()
+    live = durable_path(os.environ.get("PATH", ""))
+    merged = merge_paths(live, recorded)
+    if not live or merged == recorded:
+        return None
+    set_setting("wake_path", merged)
+    known = set(recorded.split(os.pathsep))
+    return [d for d in merged.split(os.pathsep) if d not in known]
+
+
+def capture_wake_path() -> bool:
+    """Record this process's PATH as `wake_path` when there is none yet.
+
+    `a8s add` calls this from any start, terminal or not: a first recording
+    from a thin shell costs nothing, because `learn_wake_path` adds to it from
+    the next terminal the operator works in.
     """
     if str(get_setting("wake_path") or "").strip():
         return False
-    path = os.environ.get("PATH", "")
-    if not path:
-        return False
-    set_setting("wake_path", path)
-    return True
+    return learn_wake_path() is not None
 
 
 def unset_setting(key: str) -> bool:

@@ -20,10 +20,16 @@ guess falls back further, to a plain kill of the pid itself.
 file: the first says a process holds the number, the second says which one,
 so a pid the OS handed to another process after a reboot does not read as
 the one that wrote the file.
+
+`missing_interpreter` reads the other half of a launch. A script found on
+PATH still needs the interpreter its `#!` line names, and `#!/usr/bin/env
+node` searches PATH a second time — so a CLI installed by npm resolves and
+still exits 127 on a PATH with no `node`.
 """
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -47,6 +53,33 @@ def spawn(
         start_new_session=(os.name == "posix"),
         env=env,
     )
+
+
+def missing_interpreter(program: Path | str, path: str | None = None) -> str | None:
+    """The interpreter `program`'s `#!` line names, when a launch on `path`
+    cannot run it. None when the interpreter resolves, and None for a binary,
+    an unreadable file or a file with no `#!` line — those are not this
+    function's failure to report. `path` is the PATH the launch will get;
+    None reads this process's."""
+    if os.name != "posix":
+        return None
+    try:
+        with open(program, "rb") as f:
+            head = f.read(256)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    words = head[2:].split(b"\n", 1)[0].decode("utf-8", "replace").split()
+    if not words:
+        return None
+    interpreter = words[0]
+    if os.path.basename(interpreter) != "env":
+        return None if os.access(interpreter, os.X_OK) else interpreter
+    named = [w for w in words[1:] if not w.startswith("-") and "=" not in w]
+    if not named:
+        return None
+    return None if shutil.which(named[0], path=path) else named[0]
 
 
 def pid_alive(pid: int) -> bool:

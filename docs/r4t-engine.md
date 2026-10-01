@@ -569,7 +569,10 @@ Two probe shapes, one per parser class, each recorded with its engine in
 
 Each engine reports its binary and version, then `accepted`, `rejected` (with
 what the CLI said, or which flag its help never lists), or `unverifiable` — a
-CLI that is not installed, which is not a failure. The exit code is 1 if any
+CLI that is not installed, which is not a failure. A CLI that is installed as
+a script and whose `#!` interpreter is not on `PATH` is also `unverifiable`:
+the detail names the script and the interpreter, and `--json` carries
+`"runnable": false`. The exit code is 1 if any
 run-capable engine's argv is rejected, so this belongs in a release check as
 much as at a keyboard.
 
@@ -664,8 +667,8 @@ A custom node beyond these eleven is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for
 recipes.
 
-A wake's `PATH` is whatever the process that ran `a8s start` had — see
-[Wake environment](a8s.md#wake-environment-optional). `a8s start` and `a8s
+A wake's `PATH` is the start shell's, plus the directories a8s remembers from
+the operator's terminals — see [Wake environment](a8s.md#wake-environment). `a8s start` and `a8s
 define` both probe an engine definition's own binary (not just the always-
 present interpreter) against that environment and warn by name before the
 node ever wakes; if a turn still fails to spawn, `failed to spawn 'codex':

@@ -35,11 +35,13 @@ from core import (
     agent_dir,
     agent_log_path,
     canonical_name,
+    clear_wake_retry,
     folder_ledger_path,
     inbox_dir,
     out,
     out_agent,
     pid_path,
+    read_wake_retry,
     s3_ledger_path,
     trash_dir,
     unique_path,
@@ -52,6 +54,7 @@ from definitions import (
     default_definition_path,
     definition_stem,
     harness_is_resolvable,
+    harness_missing_interpreter,
     harness_program,
     list_definition_entries,
     load_definition,
@@ -62,6 +65,7 @@ from definitions import (
     resolve_outbox_dir,
     validate_var_name,
     wake_env,
+    wake_path_repair,
     wake_shell,
     wrap_wake_argv,
 )
@@ -229,7 +233,7 @@ def cmd_add(args: list[str]) -> int:
     print(f"added {name} -> {root}")
     print(f"definition: {definition_path}  ({note})")
     if captured_path:
-        print("wake_path: recorded this shell's PATH for every node's wakes")
+        print("a8s: remembered this shell's PATH for every node's wakes")
     for k, v in sorted(initial_vars.items()):
         print(f"var: {k}={v}")
     return 0
@@ -1431,7 +1435,7 @@ def _engine_check_probe(
     (`$A8S_DIR/../r4t/r4t.py`), spawned rather than imported so a8s stays off
     r4t's internals.
 
-    Returns `(installed, binary, detail)` from the first report, or None
+    Returns `(runnable, binary, detail)` from the first report, or None
     when the probe itself could not be run or answered — a broken r4t
     install has its own diagnostics; this warning only covers the PATH case
     #243 exists for.
@@ -1458,7 +1462,7 @@ def _engine_check_probe(
     if not isinstance(report, dict):
         return None
     return (
-        bool(report.get("installed")),
+        bool(report.get("installed")) and bool(report.get("runnable", True)),
         str(report.get("binary") or engine),
         str(report.get("detail") or ""),
     )
@@ -1515,18 +1519,16 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
                 probe = _engine_check_probe(engine_id, env, wake_cwd)
                 if probe is None:
                     continue  # r4t's own diagnostics cover a broken probe
-                installed, binary, detail = probe
-                if installed:
+                runnable, binary, detail = probe
+                if runnable:
                     continue
                 path_value = env.get("PATH", "")
                 print(
                     f"warning: {member}: engine {engine_id!r} ({label}) needs "
-                    f"{binary!r}, which is not on the PATH this node's wakes "
-                    f"will get: {detail or 'not found'}\n"
+                    f"{binary!r}, which cannot start on the PATH this node's "
+                    f"wakes will get: {detail or 'not found'}\n"
                     f"         Searched PATH: {path_value}\n"
-                    f"         Set `definition.env` `{{\"PATH\": ...}}` for this node, "
-                    f"or `a8s config set wake_path \"$PATH\"` from a shell that "
-                    f"resolves it. `ar3 doctor` lists what it can find.",
+                    f"         {wake_path_repair(member, definition, binary)}",
                     file=sys.stderr,
                 )
                 continue
@@ -1534,13 +1536,23 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
             if program is None or "$" in program:
                 continue  # a shell string, or a var that expands per wake
             if harness_is_resolvable(program, env, cwd=wake_cwd):
+                gap = harness_missing_interpreter(program, env, cwd=wake_cwd)
+                if gap is not None:
+                    script, interpreter = gap
+                    print(
+                        f"warning: {member}: {program!r} ({label}) is {script}, "
+                        f"a script that runs under {interpreter!r}, which is "
+                        f"not on the PATH this node's wakes will get.\n"
+                        f"         Searched PATH: {env.get('PATH', '')}\n"
+                        f"         {wake_path_repair(member, definition, interpreter)}",
+                        file=sys.stderr,
+                    )
                 continue
             print(
                 f"warning: {member}: {program!r} ({label}) is not on the PATH "
                 f"this node's wakes will get.\n"
-                f"         Set `definition.env` `{{\"PATH\": ...}}` for this node, "
-                f"or `a8s config set wake_path \"$PATH\"` from a shell that "
-                f"resolves it. `ar3 doctor` lists what it can find.",
+                f"         Searched PATH: {env.get('PATH', '')}\n"
+                f"         {wake_path_repair(member, definition, program)}",
                 file=sys.stderr,
             )
 
@@ -2009,6 +2021,37 @@ def cmd_drain(args: list[str]) -> int:
         count += 1
 
     print(f"{name}: drained {count} message(s)")
+    return 0
+
+
+# ---------- retry ----------
+
+def cmd_retry(args: list[str]) -> int:
+    """`a8s retry <name>` — end the backoff a failed wake armed.
+
+    The mail that wake requeued is tried on the handler's next pass, with a
+    full set of attempts: the operator runs this after fixing what failed, so
+    the earlier failures say nothing about the next one. The handler reads the
+    record on every pass, which is why a running node needs no restart."""
+    if len(args) != 1:
+        print("usage: a8s retry <name>", file=sys.stderr)
+        return 2
+    match = resolve_recipient(args[0])
+    if match is None:
+        print(f"a8s: no agent named {args[0]!r}", file=sys.stderr)
+        return 1
+    name = match[0]
+    record = read_wake_retry(name)
+    if record is None:
+        print(f"{name}: no wake is waiting on a backoff")
+        return 0
+    clear_wake_retry(name)
+    waiting = len(record.get("unit") or [])
+    if _read_handler_pid(name) is None:
+        when = "wait for the node to start"
+    else:
+        when = "wake on the next pass"
+    out_agent(name, f"[{name}] backoff ended by `a8s retry`; {waiting} message(s) {when}")
     return 0
 
 

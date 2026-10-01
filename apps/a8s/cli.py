@@ -17,6 +17,7 @@ from commands import (
     cmd_definitions,
     cmd_discover,
     cmd_drain,
+    cmd_retry,
     cmd_config,
     cmd_convo,
     cmd_exit,
@@ -77,6 +78,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("tells",    "[-f] [--timeout SEC] [--glow [theme]]", "Wait for inbound messages to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
+    ("retry",    "<name>",                   "Try a failed wake again now."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.config/a8s/settings.json."),
     ("convo",    "<name> [--limit N] [-f] [--from NAME] [--glow [theme]]", "Show markdown conversation history for an agent."),
     ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),
@@ -107,7 +109,23 @@ def _format_commands(rows: list[tuple[str, str, str]], indent: int = 2) -> str:
 CLI_EPILOG = "Commands:\n" + _format_commands(COMMANDS)
 
 
+LEARNS_PATH = {"add", "define", "start", "run", "restart", "retry"}
+
+
+def _learn_path() -> None:
+    """The operator's terminal is where the harness already runs, so the
+    verbs that set a node going remember its PATH for every later wake."""
+    known = bool(str(sm.load_settings_file().get("wake_path") or "").strip())
+    added = sm.learn_wake_path()
+    if added and known:
+        print(f"a8s: wakes now also search {', '.join(added)}")
+    elif added:
+        print("a8s: remembered this terminal's PATH for every node's wakes")
+
+
 def dispatch(cmd: str, args: list[str], interval: float) -> int:
+    if cmd in LEARNS_PATH and sm.at_a_terminal():
+        _learn_path()
     if cmd == "add":
         return cmd_add(args)
     if cmd in ("remove", "rm"):
@@ -158,6 +176,8 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
         return cmd_tells(args)
     if cmd == "drain":
         return cmd_drain(args)
+    if cmd == "retry":
+        return cmd_retry(args)
     if cmd == "config":
         return cmd_config(args)
     if cmd == "convo":

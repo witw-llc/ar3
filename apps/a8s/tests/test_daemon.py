@@ -538,9 +538,10 @@ class TestDeclaredWakeEnv:
     ):
         from daemon import _wake_env
 
-        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("A8S_WAKE_PATH", "/machine/bin:/usr/bin")
         p = self._participant(tmp_path)
-        assert _wake_env(p, {"invoke": ["x"]})["PATH"] == "/machine/bin"
+        assert _wake_env(p, {"invoke": ["x"]})["PATH"] == "/machine/bin:/usr/bin"
 
     def test_the_spawned_process_gets_the_declared_path(self, tmp_path, monkeypatch):
         from daemon import _wake_env, run_with_prefix

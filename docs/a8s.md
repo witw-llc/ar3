@@ -206,7 +206,7 @@ any prefixes pointing at it.
 
 |                    |                                                                                                                                                                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s start <name> [<name> ...]` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Several names start in order, one process each, with a line per name; the exit code is nonzero if any of them failed. Warns first if a node's harness is not resolvable in the environment its wakes will get, and names the knobs that fix it (`definition.env`, `wake_path` — see [Wake environment](#wake-environment-optional)).|
+| `a8s start <name> [<name> ...]` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Several names start in order, one process each, with a line per name; the exit code is nonzero if any of them failed. Warns first if a node's harness cannot start in the environment its wakes will get, and names the command that fixes it (see [Wake environment](#wake-environment)).|
 | `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
 | `a8s stop <name> [<name> ...] [--force]` | SIGTERM the handler, then **wait** until it has detached. Several names stop in order; the exit code is nonzero if any of them failed. Idle stops immediately; a busy wake finishes first (like first Ctrl+C). `--force` / `-f` sends a second SIGTERM to kill the in-flight wake (like second Ctrl+C), then waits. |
@@ -226,7 +226,7 @@ Nothing re-attaches a node when its machine boots. The shutdown SIGTERMs the nod
 - **systemd (user):** a unit with `ExecStart=/path/to/ar3/a8s run <name>`, enabled with `systemctl --user enable`, plus `loginctl enable-linger` so it starts without a login
 - **launchd:** a LaunchAgent whose `ProgramArguments` are `/path/to/ar3/a8s`, `run`, `<name>`, with `RunAtLoad` set
 
-None of these starts from a login shell, so set `wake_path` first (see [Wake environment](#wake-environment-optional)).
+None of these starts from a login shell. The wake still gets the `PATH` a8s remembers from your terminal (see [Wake environment](#wake-environment)).
 
 
 ### Messaging
@@ -242,6 +242,7 @@ None of these starts from a login shell, so set `wake_path` first (see [Wake env
 | `a8s transactions [--limit N] [-f] [--event E] [--from N] [--to N] [--msg ULID] [--all]` (alias `a8s tx`) | Recent routing events about this node's messages, oldest first: what it routed, published or received, the receipts for those, and its own lifecycle rows. On a shared remote every node logs `NOT_LOCAL`, and publishes a `no_local_recipient` receipt, for each message it does not own; `--all` shows those rows too, and `--msg` always shows the whole envelope. `--event` (repeatable, checked against the known set), `--from`/`--to` and `--msg` narrow it; `-f` polls for new rows once a second. Use it when you do not have a ULID yet — `--event DISCARDED --event FILE_UPLOAD_FAILED` is the "did anything get lost" view. Same `transactions.sqlite3` and the same `txlog_max_rows` retention as `trace`. |
 | `a8s trace <ULID>`                                                          | Show locally observed transaction boundaries for one envelope: routing, remote publication/resolution, inbox write, delivery receipt, and agent wake. Rows come from `transactions.sqlite3`; `a8s update` retains `txlog_max_rows` (default 200000). |
 | `a8s drain <name>`                                                          | Move pending inbox JSON to trash without waking the agent.                                                                                                                                                                                                                                                                |
+| `a8s retry <name>` | End the backoff a failed wake armed. The mail it requeued is tried on the handler's next pass, with a full set of attempts. A running node needs no restart. |
 | `a8s mcp serve`                                                             | Stdio MCP server (`apps/a8s/mcp_server.py`) registering server `a8s` with tool `tell` — the model sees `a8s_tell`. A harness spawns it as a child of the turn, so it inherits `TELL_OUTBOX_DIR`; the body arrives as a JSON argument and is delivered through `a8s tell <recipient> -`, so no shell touches it. Point a harness at it with the config idiom it accepts (r4t does this per turn behind `r4t rig set <rig> mcp on`). `A8S_MCP_LOG` appends one JSON line per tool call. |
 
 A heartbeat with no persistent monitor uses `a8s convo` as its own cursor: record the newest `{ulid}` a heading prints, or the newest JSON row's `ulid` under `--json`, as its seen-so-far mark. Next run, ask `--since <that ulid>` instead of a bounded `--limit` window, and the whole backlog since the last run comes back however large the burst was. A run that would rather read a fixed page adds `--limit N` and takes the newest `ulid` of that page as the next cursor; the run after it picks up exactly where this one stopped. Because a ulid cursor reads in insertion (`seq`) order rather than by the sender's stamped `date`, a message that arrives late is never skipped.
@@ -439,7 +440,7 @@ Argv elements run through built-in substitutions plus any per-node **a8s vars**:
 - `$A8S_DIR` → `apps/a8s/` itself, so definitions can point at bundled scripts (`default.json` uses this for `dummy-cli`).
 - `$PYTHON` → the interpreter running the router. A definition that needs one asks for this instead of naming `python3`, which python.org's Windows installer does not provide.
 - `$DEFINITION_PATH` → resolved path of this agent's definition file.
-- `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env; `definition.env` is the knob for that (see [Wake environment](#wake-environment-optional)). If the definition references `$KEY` and that var is unset, wake fails closed.
+- `$KEY` → any key from `a8s vars <name> set KEY value` (registry `vars` map). **Not** OS environment — no correlation with process env; `definition.env` is the knob for that (see [Wake environment](#wake-environment)). If the definition references `$KEY` and that var is unset, wake fails closed.
 
 `$NAME?` (trailing `?`, argv only) makes a reference optional: set, it expands like `$NAME`; unset, the whole argv element that contains it drops out instead of failing closed. A built-in can never be written optional (`$SENDER?` is a parse error) — it is always defined.
 
@@ -489,9 +490,23 @@ Override per-agent with `a8s define <name> <definition>` — a filesystem path o
 
 Install reusable custom templates with `a8s defs add /path/to/mine.json` (copies into `definitions/mine.json` under the a8s state root). Basename must not collide with a repo built-in. `a8s defs ls` lists both; `a8s defs rm <name>` removes user installs only.
 
-### Wake environment (optional)
+### Wake environment
 
-A wake inherits the environment of the process that started the handler, so a node's `PATH` is whatever the shell that ran `a8s start` happened to have — permanently, until restart. That is fine from an interactive login shell and wrong from `ssh host -- 'a8s start x'`, cron, launchd or CI, where the rc-managed entries are absent (`~/.local/bin`, nvm, Homebrew, and the `install.sh` line that puts `tell` on `PATH`). Two knobs make the start shell stop mattering.
+**A CLI that runs in your terminal runs in the wake.** a8s remembers the `PATH` of the terminals you work in and gives it to every wake. There is nothing to set.
+
+- `a8s add`, `define`, `start`, `run`, `restart` and `retry` do the remembering, each time you type one at a terminal. A directory that is new to a8s is printed once: `a8s: wakes now also search /home/me/.local/share/fnm/aliases/default/bin`.
+- A node started from cron, launchd, systemd or ssh has a thin `PATH`. It gets the remembered directories as well.
+- A command an agent runs inside a wake teaches a8s nothing, and neither does a command with no terminal on stdin.
+
+**When a wake cannot find a program**, it exits 127 and the agent log names the fix. Run it from a terminal where the program runs:
+
+```bash
+a8s retry <name>
+```
+
+That one command remembers the terminal's `PATH` and tries the waiting mail again. No shell file needs an edit.
+
+Two knobs exist for the node that needs more.
 
 **`definition.env`** — literal `NAME: value` pairs handed to every wake of this node:
 
@@ -504,12 +519,12 @@ A wake inherits the environment of the process that started the handler, so a no
 
 Values are literal — no `$NAME` expansion, no `~`. This is OS environment, and it is a different knob from `a8s vars`: a var reaches argv and never the child's environment, an `env` entry reaches the environment and never argv.
 
-**`wake_path`** — machine-wide (`a8s config set wake_path "$PATH"`, or `A8S_WAKE_PATH`). The `PATH` for every node whose `definition.env` does not name one. `a8s add` records the PATH of the shell it ran in when there is no value yet — that shell is the operator's own and correct by construction at that moment — and never overwrites one already there. Empty means inherit, which is the behavior described above.
+**`wake_path`** — where a8s keeps what it remembers, machine-wide. It is merged into the start shell's `PATH` for every node whose `definition.env` does not name one. The merge adds and never removes: the start shell's directories keep their order, and each directory only the recording names goes where the recording had it. a8s remembers only directories that exist, and it stores a per-shell fnm directory (`fnm_multishells/<id>/bin`) as the alias that directory links to, because the per-shell link does not outlive its session. A directory written by hand (`a8s config set wake_path ...`) stays. `A8S_WAKE_PATH` in the environment is the operator's own value: a8s uses it and records nothing over it.
 
 Precedence, lowest first:
 
 1. the handler process's own environment
-2. `wake_path` — `PATH` only, and only when the definition does not name one
+2. `wake_path` — `PATH` only, merged into the handler's, and only when the definition does not name one
 3. `definition.env`
 4. `TELL_OUTBOX_DIR` and `TELL_FILE_MAX`, which a8s injects last
 
@@ -580,7 +595,9 @@ Debounce mechanics: readiness is measured from the newest inbox message's mtime.
 
 ### Delivery ack and retry
 
-**Exit 0 is the only ack.** A wake that exits nonzero, gets killed for exceeding `max_wake_seconds`, fails to spawn, or aborts on an unset var puts its envelopes back in the agent's inbox and waits before trying again — 30s, then 2m, then 10m. After the 4th failed attempt the envelopes stay in trash as dead letters, logged in the agent log and recorded as `DROPPED` in `transactions.sqlite3`, so one poison message can't wedge the inbox shut. The backoff is per agent (`agents/<NAME>/wake-retry` under the a8s state root) and survives handler restarts, so a broken CLI backs off instead of burning a wake per loop iteration.
+**Exit 127 names its PATH and its fix.** Exit 127 is the shell's "command not found". The agent log follows it with the `PATH` the wake searched, where that `PATH` came from, and the one command that repairs it. An engine turn names the interpreter a script-installed CLI lacks (`codex is /opt/homebrew/bin/codex, a script that runs under node, and node is not on PATH`). `a8s start` and `a8s define` print the same finding as a warning before the first wake.
+
+**Exit 0 is the only ack.** A wake that exits nonzero, gets killed for exceeding `max_wake_seconds`, fails to spawn, or aborts on an unset var puts its envelopes back in the agent's inbox and waits before trying again — 30s, then 2m, then 10m. `a8s retry <name>` ends the wait once the cause is fixed. After the 4th failed attempt the envelopes stay in trash as dead letters, logged in the agent log and recorded as `DROPPED` in `transactions.sqlite3`, so one poison message can't wedge the inbox shut. The backoff is per agent (`agents/<NAME>/wake-retry` under the a8s state root) and survives handler restarts, so a broken CLI backs off instead of burning a wake per loop iteration.
 
 Delivery is therefore at-least-once: **a wake command must tolerate seeing the same envelope twice.** The cheap way to guarantee that is to ack early — record the message durably, exit 0, and do the slow work afterwards. Reserve nonzero exits for "I did not receive this."
 

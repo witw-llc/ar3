@@ -208,9 +208,30 @@ Read [a8s.md](a8s.md) first for concept and usage.
   shell still resolves the binary fine. `wake_env` composes the declared layer
   (`definition.env` over the machine-wide `wake_path`) and `daemon._wake_env`
   puts the routing variables on top of it, so a node can fix its own `PATH` and
-  still cannot move its own outbox. `a8s add` captures the operator's `PATH`
-  into `wake_path` once, which is the moment it is known to be right.
-  `_warn_unresolvable_harnesses` probes against that composed environment, so a
+  still cannot move its own outbox.
+- **The operator never maintains a `PATH`.** `wake_path` is a8s's own record,
+  and `learn_wake_path` adds to it from every terminal the operator types a
+  node-starting verb in (`cli.LEARNS_PATH`). Learn only at a terminal and
+  never inside a wake: a wake's `PATH` is a8s's own composition. Record a
+  whole `PATH`, not one resolved binary: an agent turn calls tools nobody
+  listed. Do not make a login shell the default source of the `PATH`; rc
+  files are programs, and `wake_shell` stays opt-in. Every message about a
+  program that was not found names one command, `a8s retry <name>`.
+- **Remember only what lasts.** `durable_path` drops a directory that does
+  not exist and stores a per-shell fnm directory as the alias it links to.
+- **`wake_path` adds to the handler's `PATH` and never removes from it.** A
+  recording is right on the day it is made and wrong after the next tool
+  install, so `merge_paths` keeps the handler's directories in the handler's
+  order and places each recorded-only directory where the recording had it.
+  Do not make `wake_path` replace the handler's `PATH`: a working shell then
+  loses the directories it has and the recording lacks. `definition.env` is
+  the knob that replaces, and it is per node.
+- **A harness on `PATH` is half of a launch.** A script resolves and still
+  exits 127 when the interpreter on its `#!` line does not, and every npm
+  global install is such a script. `ar3.proc.missing_interpreter` reads that
+  line; `r4t engine <id> check` reports it as `runnable: false`, and a wake
+  that exits 127 names it.
+  `_warn_unresolvable_harnesses` probes against the composed environment, so a
   node the knob fixed stops warning. It resolves the harness through wrappers
   (`harness_program` unwraps `flock`, `timeout`, `env`, `nice` and friends)
   because the `FileNotFoundError` guard around the spawn only ever sees
