@@ -330,6 +330,40 @@ def clear_wake_retry(name: str) -> None:
         pass
 
 
+def dead_letters_dir(name: str) -> Path:
+    """Per-agent dead-letter markers: one empty file per envelope a wake gave
+    up on, named exactly as its trash file. Written when the wake cap
+    dead-letters the envelope and removed by `a8s retry` once the envelope is
+    back in the inbox. Trash holds every settled envelope, so a marker is what
+    tells a dead letter from an acked one. One file per envelope means no
+    writer reads another's record, so a dead letter recorded while a retry is
+    running is never overwritten."""
+    return agent_dir(name) / "dead-letters"
+
+
+def mark_dead_letter(name: str, filename: str) -> None:
+    d = dead_letters_dir(name)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / filename).touch()
+    except OSError:
+        pass
+
+
+def read_dead_letters(name: str) -> list[str]:
+    try:
+        return sorted(p.name for p in dead_letters_dir(name).iterdir() if p.is_file())
+    except OSError:
+        return []
+
+
+def clear_dead_letter(name: str, filename: str) -> None:
+    try:
+        (dead_letters_dir(name) / filename).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def pending_dir(name: str) -> Path:
     """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
     moves each new file from `<root>/.outbox/` into here on every pass before

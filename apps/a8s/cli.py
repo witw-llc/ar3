@@ -78,7 +78,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tell",     "<name> [<message>]",       "Send a message to an agent or alias."),
     ("tells",    "[-f] [--timeout SEC] [--glow [theme]]", "Wait for inbound messages to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
-    ("retry",    "<name>",                   "Try a failed wake again now."),
+    ("retry",    "<name>",                   "Try a failed wake, and its dead letters, again now."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.config/a8s/settings.json."),
     ("convo",    "<name> [--limit N] [-f] [--from NAME] [--glow [theme]]", "Show markdown conversation history for an agent."),
     ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),

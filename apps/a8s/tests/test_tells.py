@@ -990,3 +990,83 @@ def test_tells_non_follow_prints_no_boundary_or_backlog_prefix(tmp_path, monkeyp
     assert "already in the inbox" not in out
     assert "BOB: arriving" in out
     assert "OLD" not in out
+
+
+def test_every_flag_the_help_lists_is_accepted_by_the_parser(capsys):
+    tells_main(["--help"])
+    help_text = capsys.readouterr().err
+    flags = set(re.findall(r"^\s+(--[a-z][a-z-]*)", help_text, flags=re.M))
+    assert {"--from", "--json", "--since"} <= flags
+    for flag in flags:
+        try:
+            parse_tells_argv([flag, "2h"])
+        except TellsUsageError as e:
+            assert f"unexpected argument: {flag!r}" not in str(e)
+
+
+def test_tells_from_keeps_only_that_sender_and_a_filtered_message_does_not_end_the_wait(
+    tmp_path, monkeypatch, capsys
+):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    t = _deliver_after(inbox, 0.2, [
+        ("CAROL", "not for me", "01FROMFILTER00000000000A"),
+        ("BOB", "for me", "01FROMFILTER00000000000B"),
+    ])
+    rc = tells_main(["--from", "bob"])
+    t.join()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "BOB: for me" in out
+    assert "not for me" not in out
+
+
+def test_tells_json_prints_one_object_per_message(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    t = _deliver_after(inbox, 0.2, [
+        ("BOB", "first", "01JSONROWS0000000000000A"),
+        ("CAROL", "second", "01JSONROWS0000000000000B"),
+    ])
+    rc = tells_main(["--json", "--from", "bob", "--from", "carol"])
+    t.join()
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rc == 0
+    assert [(r["ulid"], r["from"], r["content"]) for r in rows] == [
+        ("01JSONROWS0000000000000A", "BOB", "first"),
+        ("01JSONROWS0000000000000B", "CAROL", "second"),
+    ]
+    assert set(rows[0]) == {"ulid", "from", "to", "utc", "content", "files", "files_unavailable"}
+
+
+def test_tells_json_backlog_under_follow_is_json_only(tmp_path, monkeypatch, capsys):
+    outbox, inbox = _setup_node(tmp_path)
+    monkeypatch.setenv(TELL_OUTBOX_DIR_ENV, str(outbox))
+    _drop_inbox(inbox, "BOB", "waiting", "01JSONBACKLOG000000000000")
+
+    def fake_sleep(_seconds):
+        raise KeyboardInterrupt
+
+    import tells as tells_mod
+
+    monkeypatch.setattr(tells_mod.time, "sleep", fake_sleep)
+    assert tells_main(["-f", "--json"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)["content"] for line in lines] == ["waiting"]
+
+
+def test_tells_since_without_sent_names_the_cursor_command(capsys):
+    assert tells_main(["--since", "2h"]) == 2
+    assert "a8s convo" in capsys.readouterr().err
+
+
+def test_tells_since_timestamp_is_a_usage_error_naming_a_duration(capsys):
+    assert tells_main(["--sent", "--since", "2026-09-30T10:00:00Z"]) == 2
+    err = capsys.readouterr().err
+    assert "expected a duration" in err
+    assert "float" not in err
+
+
+def test_tells_sent_rejects_the_inbound_flags(capsys):
+    assert tells_main(["--sent", "--json"]) == 2
+    assert "apply to received messages" in capsys.readouterr().err

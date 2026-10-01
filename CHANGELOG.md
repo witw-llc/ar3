@@ -10,6 +10,35 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.99 — 2026-10-01
+
+### Added
+
+- **`a8s retry <name>` returns dead letters to the inbox.** A message a node
+  gave up on after its last failed wake stays in trash and is listed for the
+  node. `a8s retry <name>` moves it back to the inbox, where it is tried with
+  a full set of attempts, and `a8s trace` shows the message came back
+  (`REQUEUED`). A dead letter stays dead until you run it. The dead-letter
+  log line names the command. A dead letter whose file was removed from trash
+  is reported as gone, and a second run finds nothing to do.
+- **`tells --from NAME` and `tells --json` read received mail.** `--from`
+  keeps only that sender's messages and can repeat. `--json` prints one
+  object per message, the same fields as `a8s convo --json` without `seq`.
+
+### Fixed
+
+- **A node that stops routes its outbox first.** A message told just before
+  `a8s stop` or `a8s restart` was published only on the next start, with
+  nothing in the output saying so. The node now routes its outbox once before
+  it detaches. A node killed outright still leaves outbox mail on disk for
+  the next start.
+
+### Changed
+
+- **`tells --help` lists only what `tells` accepts.** It no longer shows the
+  `a8s convo` cursor options. `tells --since` takes a duration, with `--sent`
+  only, and says so; read history from a cursor with `a8s convo`.
+
 ## 0.1.98 — 2026-09-27
 
 ### Changed

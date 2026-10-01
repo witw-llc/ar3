@@ -36,6 +36,8 @@ from core import (
     agent_log_path,
     canonical_name,
     clear_wake_retry,
+    clear_dead_letter,
+    read_dead_letters,
     folder_ledger_path,
     inbox_dir,
     out,
@@ -109,6 +111,7 @@ from registry import (
     save_namespace_options,
     unresolved_mailboxes,
 )
+import txlog
 from txlog import last_heard, read_events
 from ar3 import clock
 from ar3.deps import require_group
@@ -2027,12 +2030,16 @@ def cmd_drain(args: list[str]) -> int:
 # ---------- retry ----------
 
 def cmd_retry(args: list[str]) -> int:
-    """`a8s retry <name>` — end the backoff a failed wake armed.
+    """`a8s retry <name>` — try a failed wake again now.
 
-    The mail that wake requeued is tried on the handler's next pass, with a
-    full set of attempts: the operator runs this after fixing what failed, so
-    the earlier failures say nothing about the next one. The handler reads the
-    record on every pass, which is why a running node needs no restart."""
+    Ends the backoff a failed wake armed and returns every dead letter still
+    in trash to the inbox. The handler tries that mail on its next pass, with
+    a full set of attempts: the operator runs this after fixing what failed,
+    so the earlier failures say nothing about the next one. The handler reads
+    the record on every pass, which is why a running node needs no restart.
+    Each dead letter has its own marker, removed after its envelope is back in
+    the inbox, so a dead letter recorded while this runs is never lost. A
+    dead letter whose trash file is gone is reported, not an error."""
     if len(args) != 1:
         print("usage: a8s retry <name>", file=sys.stderr)
         return 2
@@ -2042,16 +2049,47 @@ def cmd_retry(args: list[str]) -> int:
         return 1
     name = match[0]
     record = read_wake_retry(name)
-    if record is None:
-        print(f"{name}: no wake is waiting on a backoff")
+    dead = read_dead_letters(name)
+    if record is None and not dead:
+        print(f"{name}: no wake is waiting on a backoff and no dead letters")
         return 0
-    clear_wake_retry(name)
-    waiting = len(record.get("unit") or [])
     if _read_handler_pid(name) is None:
         when = "wait for the node to start"
     else:
         when = "wake on the next pass"
-    out_agent(name, f"[{name}] backoff ended by `a8s retry`; {waiting} message(s) {when}")
+    if record is not None:
+        clear_wake_retry(name)
+        waiting = len(record.get("unit") or [])
+        out_agent(name, f"[{name}] backoff ended by `a8s retry`; {waiting} message(s) {when}")
+    if dead:
+        trash = trash_dir(name)
+        inbox = inbox_dir(name)
+        inbox.mkdir(parents=True, exist_ok=True)
+        returned = 0
+        gone = 0
+        for fname in dead:
+            src = trash / fname
+            if not src.is_file():
+                clear_dead_letter(name, fname)
+                gone += 1
+                continue
+            try:
+                src.rename(inbox / fname)
+            except OSError as e:
+                out_agent(name, f"[{name}] could not return {fname}: {e}")
+                continue
+            returned += 1
+            txlog.log(
+                "REQUEUED",
+                msg_id=Path(fname).stem,
+                recipient=name,
+                detail="dead letter returned to the inbox by `a8s retry`",
+            )
+            clear_dead_letter(name, fname)
+        if returned:
+            out_agent(name, f"[{name}] {returned} dead letter(s) returned to the inbox; {when}")
+        if gone:
+            out_agent(name, f"[{name}] {gone} dead letter(s) gone from trash; nothing to return")
     return 0
 
 
@@ -2151,6 +2189,7 @@ def cmd_convo(args: list[str]) -> int:
         decode_template,
         follow_conversation,
         format_entry,
+        json_row,
         load_agent_entries,
         load_agent_records,
         open_glow_stdout,
@@ -2293,35 +2332,8 @@ def cmd_convo(args: list[str]) -> int:
         except ConversationArchiveError as e:
             print(f"a8s: {e}", file=sys.stderr)
             return 1
-        # `files` names every attachment the message declared, delivered or
-        # not, so a consumer reading it alone reads a lost file as an
-        # arrived one — the exact confusion the archive keeps
-        # `files_unavailable` to prevent (see `entry_from_message`). The key
-        # is always present, empty list and all, so its absence never has to
-        # be told apart from a clean transfer.
         for seq, entry in records:
-            print(
-                json.dumps(
-                    {
-                        "ulid": entry.get("id", ""),
-                        "seq": seq,
-                        "from": entry.get("from", ""),
-                        "to": entry.get("to", ""),
-                        "utc": entry.get("date", ""),
-                        "content": entry.get("content", ""),
-                        "files": entry.get("files", []),
-                        "files_unavailable": [
-                            {
-                                "filename": str(lost.get("filename") or ""),
-                                "error": str(lost.get("error") or ""),
-                                "detail": str(lost.get("detail") or ""),
-                            }
-                            for lost in (entry.get("files_unavailable") or [])
-                        ],
-                    },
-                    ensure_ascii=False,
-                )
-            )
+            print(json.dumps(json_row(entry, seq), ensure_ascii=False))
         return 0
 
     try:

@@ -87,13 +87,13 @@ class TellsVersion(Exception):
 _USAGE = (
     "usage: tells [-f|--follow] [--timeout SEC] [--live] [--body-max N] [--line-max N] "
     "[--glow [THEME]] "
-    "[--show PATH | --recover TOKEN] [--sent [--since D]] "
+    "[--from NAME ...] [--json] [--show PATH | --recover TOKEN] [--sent [--since D]] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
 )
 
 
 def _print_usage() -> None:
-    from convo import convo_help_epilog
+    from convo import heading_help
 
     print(_USAGE, file=sys.stderr)
     print("       default: wait (no time limit) for the next message burst, then exit", file=sys.stderr)
@@ -113,7 +113,20 @@ def _print_usage() -> None:
     )
     print("       --glow [THEME]: render markdown via glow (default theme from A8S_GLOW)", file=sys.stderr)
     print("       --sent [--since 2h]: this seat's outbound messages and their delivery state", file=sys.stderr)
-    print(convo_help_epilog(), file=sys.stderr)
+    print(
+        "\nfilters:\n"
+        "  --from NAME    show only messages sent by NAME (case-insensitive; repeat for\n"
+        "                 several senders)\n"
+        "  --since D      with --sent only: a duration such as 30m, 2h or 7d. To read\n"
+        "                 history from a cursor, use `a8s convo <name> --since CURSOR`.\n\n"
+        + heading_help()
+        + "\noutput:\n"
+        "  --json         one JSON object per message (ulid, from, to, utc, content,\n"
+        "                 files, files_unavailable), newline-delimited, instead of text\n"
+        "\nenvironment:\n"
+        "  A8S_GLOW=<theme>    default glow theme; --glow overrides",
+        file=sys.stderr,
+    )
 
 
 def _argv_looks_like_option(arg: str) -> bool:
@@ -134,6 +147,8 @@ class TellsOptions:
     show: str | None = None
     sent: bool = False
     since: float | None = None
+    senders: tuple[str, ...] = ()
+    json: bool = False
 
     @property
     def follow_forever(self) -> bool:
@@ -366,6 +381,8 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     show: str | None = None
     sent = False
     since: float | None = None
+    senders: list[str] = []
+    as_json = False
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
     glow_theme = default_glow
     i = 0
@@ -383,6 +400,17 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             sent = True
             i += 1
             continue
+        if arg == "--json":
+            as_json = True
+            i += 1
+            continue
+        if arg == "--from":
+            i += 1
+            if i >= len(rest) or _argv_looks_like_option(rest[i]):
+                raise TellsUsageError("--from requires a sender name")
+            senders.append(rest[i])
+            i += 1
+            continue
         if arg == "--since":
             i += 1
             if i >= len(rest):
@@ -392,7 +420,9 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             try:
                 since = parse_duration(rest[i])
             except ValueError as e:
-                raise TellsUsageError(f"--since: {e}") from e
+                raise TellsUsageError(
+                    f"--since: expected a duration such as 30m, 2h or 7d, not {rest[i]!r}"
+                ) from e
             i += 1
             continue
         if arg == "--timeout":
@@ -455,15 +485,21 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         show=show,
         sent=sent,
         since=since,
+        senders=tuple(senders),
+        json=as_json,
     )
     if follow and timeout_explicit and timeout != 0:
         raise TellsUsageError("cannot use -f/--follow with a positive --timeout")
     if live and not opts.follow_forever:
         raise TellsUsageError("--live requires -f/--follow or --timeout 0")
     if since is not None and not sent:
-        raise TellsUsageError("--since applies to --sent")
+        raise TellsUsageError(
+            "--since applies to --sent; read history from a cursor with `a8s convo <name> --since`"
+        )
     if sent and follow:
         raise TellsUsageError("--sent lists what was sent; it does not follow")
+    if sent and (senders or as_json):
+        raise TellsUsageError("--from and --json apply to received messages, not to --sent")
     return opts
 
 
@@ -628,7 +664,11 @@ def _poll_new_messages(
     heading_out: str,
     heading_in: str,
     backlog: bool = False,
+    senders: frozenset[str] = frozenset(),
+    as_json: bool = False,
 ) -> int:
+    from convo import entry_from_message, json_row, sent_by
+
     printed = 0
     current = _inbox_fingerprints(inbox)
     for name in sorted(current):
@@ -640,7 +680,13 @@ def _poll_new_messages(
         if msg is None:
             # Incomplete rename / mid-write — retry next poll without locking seen.
             continue
-        if markdown:
+        if not sent_by(msg, senders):
+            seen[name] = fingerprint
+            continue
+        if as_json:
+            entry = entry_from_message(msg, recipients=[agent])
+            print(json.dumps(json_row(entry), ensure_ascii=False), flush=True)
+        elif markdown:
             local = agent or (msg.get("to") or "").strip() or "me"
             _print_markdown(
                 msg,
@@ -700,7 +746,7 @@ def tells_main(argv: list[str]) -> int:
         # message has to be recoverable from wherever the reader is standing.
         return show_envelope_body(opts.show)
 
-    from convo import DEFAULT_HEADING_IN, DEFAULT_HEADING_OUT, open_glow_stdout
+    from convo import DEFAULT_HEADING_IN, DEFAULT_HEADING_OUT, open_glow_stdout, sender_keys
 
     _configure_stdout()
 
@@ -728,6 +774,8 @@ def tells_main(argv: list[str]) -> int:
         "glow_stream": glow_stream,
         "heading_out": heading_out,
         "heading_in": heading_in,
+        "senders": sender_keys(list(opts.senders)),
+        "as_json": opts.json,
     }
 
     try:
@@ -740,7 +788,8 @@ def tells_main(argv: list[str]) -> int:
         seen = _inbox_fingerprints(inbox)
         if opts.follow_forever:
             if not opts.live and seen:
-                print(_backlog_boundary_line(len(seen)), flush=True)
+                if not opts.json:
+                    print(_backlog_boundary_line(len(seen)), flush=True)
                 backlog_seen: dict[str, tuple[int, int]] = {}
                 _poll_new_messages(inbox, backlog_seen, backlog=True, **poll_kwargs)
                 seen = backlog_seen

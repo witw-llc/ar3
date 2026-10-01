@@ -29,6 +29,8 @@ __all__ = [
     "DEFAULT_HEADING_OUT",
     "HEADING_PLACEHOLDERS",
     "convo_help_epilog",
+    "heading_help",
+    "json_row",
     "decode_template",
     "entry_from_message",
     "extract_heading_templates",
@@ -98,6 +100,29 @@ def _consume_template(argv: list[str], start: int) -> tuple[str, int]:
     return decode_template("\n".join(parts)), i
 
 
+def heading_help() -> str:
+    return f"""heading templates:
+  Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
+    {{from}}       sender name
+    {{to}}         recipient or alias
+    {{timestamp}}  the message's time in this machine's zone, e.g. 2026-08-16 13:22:04 PDT
+    {{date}}       alias for {{timestamp}}
+    {{utc}}        the same instant as stored: ISO 8601 UTC
+    {{ulid}}       the message's own id, empty string when the row has none
+
+  Defaults:
+    outbound: {DEFAULT_HEADING_OUT}
+    inbound:  {DEFAULT_HEADING_IN}
+
+  Multiline headings:
+    - Shell quotes preserve embedded newlines in one argument
+    - Multiple arguments after the flag join with newlines (one line each)
+    - Use \\n and \\t escapes inside a single argument
+
+  Message body and attachment lines are appended after the heading block.
+"""
+
+
 def convo_help_epilog() -> str:
     return f"""filters:
   --from NAME    show only messages sent by NAME (case-insensitive; repeat for several
@@ -122,25 +147,7 @@ def convo_help_epilog() -> str:
                  window is skipped. Composes with --from. Nothing new prints nothing
                  and exits 0.
 
-heading templates:
-  Outbound (--heading-out) and inbound (--heading-in) use Python str.format placeholders:
-    {{from}}       sender name
-    {{to}}         recipient or alias
-    {{timestamp}}  the message's time in this machine's zone, e.g. 2026-08-16 13:22:04 PDT
-    {{date}}       alias for {{timestamp}}
-    {{utc}}        the same instant as stored: ISO 8601 UTC
-    {{ulid}}       the message's own id, empty string when the row has none
-
-  Defaults:
-    outbound: {DEFAULT_HEADING_OUT}
-    inbound:  {DEFAULT_HEADING_IN}
-
-  Multiline headings:
-    - Shell quotes preserve embedded newlines in one argument
-    - Multiple arguments after the flag join with newlines (one line each)
-    - Use \\n and \\t escapes inside a single argument
-
-  Message body and attachment lines are appended after the heading block.
+{heading_help()}
 
 output:
   --json         one JSON object per row (ulid, seq, from, to, utc, content, files,
@@ -160,6 +167,36 @@ examples:
 environment:
   A8S_GLOW=<theme>    default glow theme (auto, dark, light, dracula, …); --glow overrides
 """
+
+
+def json_row(entry: dict[str, Any], seq: int | None = None) -> dict[str, Any]:
+    """One `--json` object for an archive or inbox entry.
+
+    `files` names every attachment the message declared, delivered or not, so
+    a consumer reading it alone reads a lost file as an arrived one — the
+    confusion `files_unavailable` exists to prevent (see `entry_from_message`).
+    The key is always present, empty list and all, so its absence never has to
+    be told apart from a clean transfer. `seq` is the archive's delivery
+    order and is absent for a message that has no archive row yet."""
+    row: dict[str, Any] = {"ulid": entry.get("id", "")}
+    if seq is not None:
+        row["seq"] = seq
+    row.update({
+        "from": entry.get("from", ""),
+        "to": entry.get("to", ""),
+        "utc": entry.get("date", ""),
+        "content": entry.get("content", ""),
+        "files": entry.get("files", []),
+        "files_unavailable": [
+            {
+                "filename": str(lost.get("filename") or ""),
+                "error": str(lost.get("error") or ""),
+                "detail": str(lost.get("detail") or ""),
+            }
+            for lost in (entry.get("files_unavailable") or [])
+        ],
+    })
+    return row
 
 
 def _name_key(name: str) -> str:

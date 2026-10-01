@@ -194,14 +194,31 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **Exit 0 is the only delivery ack.** Any other wake outcome — nonzero exit,
   timeout kill, failed spawn, unexpanded vars — moves the envelopes back into
   the inbox and arms the agent's `wake-retry` record, and after
-  MAX_WAKE_ATTEMPTS they stay in trash as logged dead letters.
+  MAX_WAKE_ATTEMPTS they stay in trash as logged dead letters, named in the
+  agent's `dead-letters/` directory. A dead letter is recoverable with one
+  command: `a8s retry <name>` returns every marked dead letter still in
+  trash to the inbox with a full set of attempts, and logs a `REQUEUED` row
+  for each. Nothing requeues a dead letter automatically, and a marked file
+  that retention removed is reported as gone and is not an error. Keep one
+  empty marker file per envelope, named as its trash file, and never a
+  shared list: a shared list loses a record written while a retry runs.
+  Rename the envelope first and remove its marker second, so a crash leaves
+  a stale marker and never a lost letter. Do not delete the envelope at the
+  cap.
   `_wake_retry_ready` gates dispatch, so a permanently broken CLI backs off
   instead of spinning the handler. Delivery is at-least-once: a wake command
   must tolerate the same envelope twice. r4t dispatch already does — it
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.
+- **A detach routes the outbox once.** `attached_loop`'s `finally:` runs one
+  `route_outboxes` pass over the agents whose pid file still names this
+  process, before `stop_remotes`. Reuse the loop's own routing call; write no
+  second routing path. A failure in it is logged to the agent log and never
+  holds the detach. `a8s step` and `--drain` add no final pass, and an agent
+  released to a take-over or a kill is left to its new holder. `tell` stays
+  non-blocking: the guarantee lives in the stop, not in the sender.
 - **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
-- **Wake environment is declared, not inherited from the start shell.**
+- **Wake environment is declared and learned, not only inherited from the start shell.**
   Without a knob a node's `PATH` is whatever shell ran `a8s start`, forever —
   fine from an interactive login shell, wrong from `ssh host -- 'a8s start x'`,
   cron or CI, where the first wake fails hours later while the operator's own

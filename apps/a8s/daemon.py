@@ -75,6 +75,7 @@ from core import (
     process_start_token,
     clear_inbox_waiting_since,
     clear_wake_retry,
+    mark_dead_letter,
     read_inbox_waiting_since,
     read_last_active,
     read_wake_retry,
@@ -627,8 +628,8 @@ def _settle_wake(
     unexpanded vars — moves them back into the inbox and arms a per-agent
     backoff so the next attempt waits instead of hot-looping. Once
     MAX_WAKE_ATTEMPTS attempts have failed they stay in trash as dead letters,
-    logged and recorded in the transaction log, so a poison envelope can't block
-    the inbox forever."""
+    logged, recorded in the transaction log and marked as dead letters, so a poison envelope can't block the inbox
+    forever and `a8s retry` can return it."""
     return_detail = f"exit {rc}" if rc is not None else (reason or "spawn failed")
     for f in envelopes:
         txlog.log("WAKE_RETURN", msg_id=f.stem, recipient=p.name, detail=return_detail)
@@ -646,10 +647,13 @@ def _settle_wake(
     if attempts >= MAX_WAKE_ATTEMPTS:
         clear_wake_retry(p.name)
         for f in envelopes:
+            mark_dead_letter(p.name, f.name)
+        for f in envelopes:
             out_agent(
                 p.name,
                 f"[{p.name}] dead letter after {attempts} failed wakes "
-                f"({reason}): {f.name} left in trash",
+                f"({reason}): {f.name} left in trash; `a8s retry {p.name}` "
+                f"returns it to the inbox",
             )
             txlog.log(
                 "DROPPED",
@@ -1571,6 +1575,39 @@ def _hold_stores(label: str) -> list[sqlite3.Connection]:
     return held
 
 
+def _route_outboxes_once_more(
+    names: list[str],
+    pid: int,
+    publish_remotes,
+    configured_remote_ids: list[str],
+    unstarted_remote_ids: list[str],
+) -> None:
+    """The detach's one routing pass, over the agents this process still holds.
+
+    Mail written between the last loop pass and the stop signal would
+    otherwise wait on disk for the next start. An agent released to a
+    take-over or a kill no longer names this process in its pid file and is
+    left to its new holder. A failure is logged and the detach goes on."""
+    label = names[0] if names else "a8s"
+    try:
+        mine = {n for n in names if _read_handler_pid(n) == pid}
+        handled = [p for p in participants_from_registry() if p.name in mine]
+        if not handled:
+            return
+        for p in handled:
+            ensure_mailboxes(p)
+        route_outboxes(
+            handled,
+            all_agents=participants_from_registry(),
+            publish_remotes=publish_remotes,
+            configured_remote_ids=configured_remote_ids,
+            unstarted_remote_ids=unstarted_remote_ids,
+            services=load_services(),
+        )
+    except Exception as e:
+        out_agent(label, f"[a8s] {label}: final outbox pass failed: {e}")
+
+
 def attached_loop(names: list[str], interval: float, *, single_pass: bool = False, drain_seconds: float = 0) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
@@ -1860,6 +1897,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         # we release pid files (otherwise an in-flight envelope arriving
         # during shutdown could try to write into a directory we're about to
         # forget).
+        if drain_seconds == 0 and not single_pass and _SIGNAL_COUNT < 2:
+            _route_outboxes_once_more(
+                names, pid, publish_remotes, configured_remote_ids, unstarted_remote_ids
+            )
         stop_remotes(started_remotes)
         while _wake_in_flight():
             _service_in_flight_wake()

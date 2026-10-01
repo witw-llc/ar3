@@ -183,7 +183,8 @@ KNOBS: tuple[Knob, ...] = (
         False,
         note=(
             "Delays in seconds before redelivering after a failed wake; "
-            f"{MAX_WAKE_ATTEMPTS} attempts then the envelope stays in trash as a dead letter"
+            f"{MAX_WAKE_ATTEMPTS} attempts then the envelope stays in trash as a dead letter "
+            "until `a8s retry <name>` returns it"
         ),
     ),
 )
