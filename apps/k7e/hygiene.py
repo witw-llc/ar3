@@ -1,6 +1,7 @@
 """Store hygiene auditor — checks structural integrity of knowledge nodes."""
 
 import re
+import hashlib
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ def run_audit(fix=False):
     tag_to_nodes = {}
     referenced_assets = set()
     issues = []
+    source_entries = []
     conn = engine._connect()
     indexed = dict(conn.execute("SELECT id, superseded_by FROM nodes").fetchall())
     conn.close()
@@ -29,6 +31,8 @@ def run_audit(fix=False):
         text = node_path.read_text(encoding="utf-8")
         meta = engine._parse_frontmatter(text)
         node_id = node_path.stem
+        if "source_refs" in meta:
+            source_entries.append({"id": node_id, "source_refs": meta["source_refs"]})
         repaired = text
         body = engine._extract_body(text)
         collapsed, duplicates = engine.collapse_sections(body)
@@ -55,7 +59,7 @@ def run_audit(fix=False):
         tags = meta.get("tags", [])
         if not tags:
             issues.append(f"[{node_id}] No tags assigned")
-        for tag in tags:
+        for tag in ([] if engine.is_archive_record(meta) else tags):
             tag_to_nodes.setdefault(tag, []).append(node_id)
 
         for link in re.findall(r"\[\[(K7E-\d{3}-\d{5})\]\]", text):
@@ -87,6 +91,21 @@ def run_audit(fix=False):
             issues.append(f"[Asset: {rel}] Unreferenced")
             if fix:
                 asset.unlink()
+
+    # Offline audit covers every reference. Each validation has a fresh cache,
+    # bounding memory to one snapshot without recall's total query budget.
+    for entry in source_entries:
+        refs = entry["source_refs"]
+        if not isinstance(refs, list):
+            issues.append(f"[{entry['id']}] Source provenance: source_refs must be an array")
+            continue
+        for index, ref in enumerate(refs):
+            try:
+                engine._validate_source_ref(ref, {"bytes": 0, "data": {}})
+            except (OSError, UnicodeDecodeError, ValueError, TypeError, RecursionError) as error:
+                detail = "snapshot unavailable" if isinstance(error, OSError) else str(error)
+                issues.append(f"[{entry['id']}] Source provenance: reference {index}: {detail}")
+    issues.extend(_audit_source_snapshots())
 
     if fix and (changed or index_disagreement()):
         engine.reindex()
@@ -131,3 +150,23 @@ def index_disagreement():
         gaps.append(f"{store_count} entr(ies), {len(indexed)} indexed")
     gaps.extend(disagreed)
     return "; ".join(gaps) + " — run k7e reindex"
+
+
+def _audit_source_snapshots():
+    issues = []
+    home = engine.NODES_DIR.parent.resolve()
+    for path in (home / "sources").glob("*.txt"):
+        try:
+            if not re.fullmatch(r"[a-f0-9]{64}\.txt", path.name) or not path.resolve().is_relative_to(home):
+                raise ValueError("invalid snapshot path")
+            size = path.stat().st_size
+            if size > engine.SOURCE_VALIDATION_BYTES:
+                raise ValueError("snapshot exceeds per-file byte limit")
+            with path.open("rb") as stream:
+                raw = stream.read(engine.SOURCE_VALIDATION_BYTES + 1)
+            if len(raw) > engine.SOURCE_VALIDATION_BYTES or len(raw) != size or hashlib.sha256(raw).hexdigest() != path.stem:
+                raise ValueError("snapshot hash mismatch or per-file byte limit exceeded")
+        except (OSError, ValueError) as error:
+            detail = "snapshot unavailable" if isinstance(error, OSError) else str(error)
+            issues.append(f"[Source snapshot: {path.name}] {detail}")
+    return issues

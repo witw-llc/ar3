@@ -131,7 +131,8 @@ class TestExactIdLookup:
         old_id = engine.store_entry("Old Protocol", "Original steps")
         new_id = engine.store_entry("New Protocol", "Replacement steps")
         engine.supersede(old_id, new_id)
-        results = engine.search(old_id)
+        assert engine.search(old_id) == []
+        results = engine.search(old_id, include_superseded=True)
         assert results[0]["id"] == old_id
         assert results[0]["match"] == "id"
         assert results[0]["status"] == "superseded"

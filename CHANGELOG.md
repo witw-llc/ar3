@@ -10,6 +10,63 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.100 — 2026-10-02
+
+### Added
+
+- **k7e can take its embeddings from a hosted API.** `k7e config embeddings
+  openai` selects the OpenAI provider, for a machine that cannot run a local
+  model. It is never selected automatically, and ollama stays the default.
+  The key is read from `OPENAI_API_KEY` in the environment at request time
+  and is never stored; `k7e config openai_api_key` is refused. Requests go
+  to one fixed endpoint, and a redirect is refused. Each vector and each
+  semantic search is a paid request that sends text to the provider;
+  [`docs/k7e-configuration.md`](docs/k7e-configuration.md) says what is sent.
+  Closes #313
+- **`k7e status` reports vector coverage.** It shows how many entries have a
+  current vector and how many are pending. A vector is current only for the
+  provider, model, dimensions and input text it was made from, so a change to
+  any of them leaves the entry pending, and `k7e embed-pending` derives what
+  is missing. Search stays keyword-only for an entry without a current vector.
+- **`k7e distill --archive` keeps exploratory material as typed records.**
+  Ideas, decisions, instructions and observations from a source are stored
+  with a `kind`, a retained copy of the source, and the span each record
+  quotes. `recall --include-archive` cites the original source and flags a
+  citation it cannot verify against the retained bytes. A record that was retired stays retired
+  when its source is taken again. A directory intake takes its good files,
+  names each bad one on stderr and exits 1. `k7e check` audits every retained
+  source and every reference. See [`docs/k7e-archive.md`](docs/k7e-archive.md).
+- **`k7e get --json` reports `kind`.** It is `null` for an operational entry,
+  so a reader need not parse the frontmatter.
+
+### Changed
+
+- **k7e rebuilds a stale search index by itself.** When the index was built
+  by another version of k7e, the first verb that opens it rebuilds it from
+  the markdown files and prints one line to stderr. The operator removes and
+  runs nothing. The rebuild keeps the id counter, makes no embedding request,
+  and resets usage ranking. An index from 0.1.99 or earlier loses its
+  vectors, and `k7e status` shows them as pending. A failed rebuild leaves
+  the old index in place, and the next verb tries again.
+- **Archive records stay out of every default reader.** Search, recall, list,
+  stats, embedding and the r4t knowledge pack skip typed records; `search
+  --include-archive` and `recall --include-archive` opt in.
+- **The embedding input is the title and the first 500 characters of the
+  body, without the template headings.** The four template heading lines and
+  blank lines outside code fences are left out before the cut; section
+  content, custom headings and fenced code stay. A write and a reindex build
+  the same input, so a plain reindex makes no vector stale.
+- **The r4t idle sweep embeds whatever is pending, with the selected
+  provider.** A provider or model change leaves a backlog for the next sweep,
+  a plain reindex does not hide it, and a store whose vectors are all current
+  logs nothing.
+
+### Fixed
+
+- **A failed `k7e reindex` leaves the index as it was.** It emptied the index
+  before it read the files, so a failure part-way left a store that searched
+  as empty.
+
 ## 0.1.99 — 2026-10-01
 
 ### Added

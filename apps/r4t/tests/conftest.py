@@ -90,10 +90,13 @@ def zone(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_ollama(monkeypatch):
-    """Member stores drive k7e as a subprocess, which reaches for ollama when
-    one answers. Point every test at a dead port so the suite measures r4t and
-    not whichever models the developer happens to be running."""
+def _offline_embeddings(monkeypatch):
+    """Subprocesses use a dead local provider, never inherited hosted settings
+    or whichever models the developer happens to be running."""
+    monkeypatch.setenv("K7E_EMBEDDINGS", "ollama")
+    monkeypatch.setenv("EMBED_MODEL", "nomic-embed-text")
+    monkeypatch.delenv("K7E_EMBED_DIMENSIONS", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("OLLAMA_URL", "http://localhost:99999")
 
 

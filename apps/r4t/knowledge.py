@@ -10,8 +10,8 @@ a knowledge problem may cost the section, never the turn.
 
 The semantic track follows the same rule. Dreaming pays for entry vectors
 (`k7e embed-pending` over the store's queue); a wake embeds only the seed query,
-on a budget short enough that an absent ollama costs the section its semantic
-half and the turn nothing.
+on a budget short enough that an unavailable provider costs the section its
+semantic half and the turn nothing.
 
 k7e is driven as a subprocess — the CLI is the stable surface, and importing
 k7e in-process would couple r4t to k7e's internals for no reason.
@@ -416,7 +416,10 @@ def retrieve(home: Path, query: str, budget: int, *, framing=None,
         try:
             got = _run_k7e(home, "get", *pool, "--no-track", "--json")
             if got.returncode == 0 or got.stdout.strip():
-                texts = {e["id"]: e["text"] for e in json.loads(got.stdout or "[]")}
+                # k7e's own typed-record test decides; an entry without the
+                # field is from a k7e that cannot say, and is left out.
+                texts = {e["id"]: e["text"] for e in json.loads(got.stdout or "[]")
+                         if "kind" in e and e["kind"] is None}
         except Exception:
             texts = {}
     entries: list[dict] = []
@@ -467,10 +470,10 @@ def packed_ids(section) -> list[str]:
 def _embed_backlog(
     ctx, member_name: str, home: Path, *, deadline: float | None = None
 ) -> None:
-    """Give the store's queued entries their vectors. Storing an entry only
-    queues it, so this pass is where the semantic track pays for itself —
-    dreaming has all the time in the world and a waking member has none.
-    An unreachable ollama leaves the queue intact for the next pass."""
+    """Give eligible entries their missing or stale vectors within the sweep
+    budget. The selected provider embeds the coverage backlog, including
+    entries invalidated by a provider or model change. An unavailable provider
+    leaves pending work for the next pass; a fully current store is silent."""
     if not (home / "nodes").is_dir():
         return
     timeout = EMBED_TIMEOUT
@@ -514,7 +517,7 @@ def _embed_backlog(
             ctx.node,
             f"r4t: DREAM-EMBED-SKIP {member_name.lower()} {pending} "
             f"entr{'y' if pending == 1 else 'ies'} still queued — embeddings "
-            "unavailable; the store searches FTS-only until ollama answers",
+            "unavailable; keyword search remains available",
         )
 
 

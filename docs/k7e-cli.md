@@ -14,6 +14,7 @@ Hybrid search (BM25 + metadata + semantic), fused and ranked.
 --rerank               LLM rerank the candidate pool
 --no-rerank            disable reranking even when configured globally
 --include-superseded   include retired entries
+--include-archive      include exploratory source claims
 ```
 
 When the semantic track runs, search prints `embed <N>ms` to **stderr** — the
@@ -22,7 +23,8 @@ line gains `(semantic track unavailable)` when ollama did not answer in time and
 FTS5 carried the search by itself. stdout is untouched either way.
 
 A node id (`K7E-BBB-NNNNN`) named in the query is a lookup, not a search: that
-node comes first, superseded or not, ahead of the ranked results.
+active node comes first, ahead of the ranked results. Retired nodes require
+`--include-superseded` even when named by ID; use `get` for a direct audit read.
 
 ### `get <id> [<id> ...] [--no-track] [--json]`
 Print full entries. Counts as a "use" (bumps ranking signals) unless
@@ -32,8 +34,10 @@ before deciding whether to use it (r4t's knowledge packer), and wants
 
 One id prints the entry alone. Several print them in the order asked,
 separated by a `--- k7e:<id> ---` line before each entry after the first;
-`--json` emits `[{"id", "text"}]` instead and is the form to parse. Both
-flags apply to the whole batch.
+`--json` emits `[{"id", "text", "kind"}]` instead and is the form to parse.
+`kind` is the archive record's kind as the file holds it, or `null` for an
+operational entry; it is k7e's own typed-record test, so a reader need not
+parse the frontmatter. Both flags apply to the whole batch.
 
 A batch is one interpreter startup rather than one per id, which is most of
 what a small local read costs: eight entries take ~60ms batched against
@@ -45,7 +49,7 @@ nothing. The exit code is 1 only when nothing at all was found.
 Bump the usage ranking signal (`use_count`, `last_used_at`) for one or more
 entries without reading them — the other half of `get --no-track`.
 
-### `recall <text> [--limit N]`
+### `recall <text> [--limit N] [--include-superseded] [--include-archive]`
 RAG: retrieve relevant entries for a topic or pasted conversation and synthesize
 an answer (LLM, reranker on by default). Accepts text as an arg or via stdin.
 
@@ -83,7 +87,7 @@ old entry from default search.
 ### `asset <file>`
 Store a binary content-addressed (SHA256, deduped). Prints the stored path.
 
-### `distill <file|dir> [--dry-run]`
+### `distill <file|dir> [--dry-run] [--archive]`
 
 `--job ID` gives one immutable capture file a stable processing identity. Extraction decisions
 and mutations are journaled for recovery, including appends and supersession.

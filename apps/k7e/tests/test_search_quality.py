@@ -86,9 +86,12 @@ class TestRecall:
         results = engine.search("kestrel deployment", limit=8)
         assert len(results) == 8, f"got {len(results)} results"
 
-    def test_two_track_floor_still_cuts_the_single_track_tail(self, store, fake_embeddings):
+    def test_two_track_floor_still_cuts_the_single_track_tail(self, store, fake_embeddings, monkeypatch):
         """The floor earns its keep once both tracks are live: an entry only one
         track ranks, and ranks late, falls under it while the fused dozen stay."""
+        # Fix the track membership independently of document-template vocabulary.
+        monkeypatch.setattr(engine, "embed_text", lambda text, **kw:
+                            [0.0, 1.0] if text.startswith("Catering note ") else [1.0, 0.0])
         for i in range(12):
             engine.store_entry(
                 f"Runbook section {i}",
@@ -103,6 +106,13 @@ class TestRecall:
             tags=["ops"],
         )
         engine.process_pending_embeddings()
+        conn = engine._connect()
+        try:
+            assert len(engine._search_bm25(conn, "kestrel deployment", 20)) == 13
+            semantic = engine._search_embeddings(conn, "kestrel deployment", 20)
+            assert {row[1] for row in semantic} == {f"Runbook section {i}" for i in range(12)}
+        finally:
+            conn.close()
         results = engine.search("kestrel deployment", limit=20)
         titles = [r["title"] for r in results]
         assert len(titles) == 12, titles

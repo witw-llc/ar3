@@ -3,9 +3,12 @@
 > Files are truth. The index is a rebuildable cache.
 
 k7e stores knowledge as flat markdown files on disk and derives a SQLite search
-index from them. If the index is ever lost, corrupted, or schema-changed, delete
-it and run `k7e reindex` — nothing is lost, because the markdown *is* the
-database.
+index from them. When a k7e version changes the index shape, the first verb that
+opens an older index rebuilds it from the markdown by itself and prints one line
+to stderr. If the index is ever lost or corrupted, delete it and run
+`k7e reindex`. Canonical Markdown and assets are preserved; index-only usage
+ranking is reset, and cached vectors are reset when the index is deleted or
+the vector table changes shape.
 
 ## Storage layout
 
@@ -117,3 +120,47 @@ k7e is the inverse of a multi-tenant cloud memory service. It optimizes for a
 single person (and their agents): portable as a folder of text files,
 greppable, diffable, git-friendly, and never hostage to a running database or a
 remote endpoint. The index exists only to make retrieval fast.
+
+
+## Embedding cache
+
+Each derived vector records provider, model, dimensions, input-format version
+and the SHA256 of its exact input. The input is the parsed persisted title, a
+space and the first 500 characters of the normalized persisted Markdown body
+(`title-body-500-reserved-headings-v2`). Normalization omits outside-fence blank
+lines and only the exact reserved lines `## Verified Protocol`, `## Edge Cases`,
+`## False Paths` and `## History`. Those exact lines are omitted from the
+embedding view even when user-authored; indentation, trailing whitespace or
+other spelling makes a heading distinct. Custom headings, section contents,
+History entries and every fenced line, including blanks, remain in the view.
+The 500-character cut follows normalization. Source Markdown and FTS are not
+rewritten by this embedding view.
+
+Writes, pending-vector generation and reindex share this one input function.
+Pending-vector generation aligns an older node hash before its request,
+without overwriting a concurrent write. A returned vector is stored only
+while the node hash still matches its exact input; a source change during
+the request leaves work pending. A plain
+reindex retains vectors whose exact input is unchanged.
+Semantic reads compare the hash in SQL and validate the query vector;
+provider results are validated before storage. Equal dimensions do not make
+different providers or models interchangeable.
+
+Vectors with a different input-format version are pending until regenerated;
+matching dimensions alone do not make them compatible. A stale save leaves
+that entry pending and the pass continues with other entries. An unavailable
+or invalid provider result ends the pass, retaining the unfinished backlog.
+
+`embed-pending` reconciles active operational nodes against the current vector
+space before draining its backlog. Entries missing a compatible vector remain
+visible to lexical search and appear as pending in status and check output.
+Typed archive records are excluded. One vector is retained per node; changing
+providers or models replaces that derived vector after a successful request.
+There is no schema migration: when a version changes the index shape, the first
+verb that opens the older index re-derives it from the files in one transaction
+under the write lock. A failed rebuild leaves the old index in place, and the
+next verb tries again. The rebuild makes no embedding request. A vector table
+in the current shape is kept, and each kept vector is current only while its
+input matches the rebuilt entry; a vector table in an older shape is dropped,
+and `k7e status` shows those vectors as pending until `k7e embed-pending`
+derives them.

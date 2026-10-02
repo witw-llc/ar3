@@ -139,3 +139,9 @@ Genuinely new or changed knowledge becomes new entries.
   a single `compiled` reference page (LLM).
 
 See [k7e-cli.md](k7e-cli.md) for full command/flag reference.
+
+Archive ingestion optionally adds structured `source_refs` containing retained
+source versions and spans. It preserves `source` as the writing turn and
+`sources` as the files read; richer references do not replace those meanings.
+See [exploratory archives](k7e-archive.md) for automatic/unknown-origin locators,
+derivation edges and recall validation.

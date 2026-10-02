@@ -5,15 +5,16 @@ How `k7e search` and `k7e recall` turn a query into the right entries.
 ## Pipeline
 
 A node id (`K7E-BBB-NNNNN`) named in the query bypasses this pipeline: that
-node is resolved directly and returned first, superseded or not, ahead of
-whatever the three tracks below rank.
+node is resolved directly and returned first when active, ahead of whatever
+the three tracks below rank. Retired exact-ID hits require `--include-superseded`,
+just like ranked historical results. `k7e get` remains a direct audit read.
 
 ```
 query
   │
   ├─ BM25 (SQLite FTS5)        ┐
   ├─ metadata (title/alias/tag)├─ Reciprocal Rank Fusion (RRF)
-  └─ embeddings (ollama)       ┘            │
+  └─ embeddings (selected provider)       ┘            │
                                             ▼
                          score × confidence × recency-decay × use-boost
                                             │
@@ -28,13 +29,17 @@ query
 
 - **BM25** — keyword relevance via FTS5. Always available (stdlib sqlite3).
 - **Metadata** — exact-ish matches against title, aliases, and tags.
-- **Embeddings** — semantic similarity via ollama vectors. Optional; linear
-  scan, automatically skipped past ~10k nodes (k7e is single-user scale, not a
+- **Embeddings** — semantic similarity via compatible provider vectors. Optional; linear
+  scan, skipped when the embeddings table exceeds 10,000 rows (k7e is single-user scale, not a
   vector-DB). The read path embeds **the query only**, on a 2s budget
   (`embed_query_timeout`); entry vectors come from the queue that
-  `k7e embed-pending` drains offline. An ollama that does not answer costs the
+  `k7e embed-pending` drains offline. A provider that does not answer costs the
   query embedding and nothing else — the track drops out and the other two
   carry the search.
+
+Cached vectors are isolated by provider, model, dimension, exact input hash and
+input-format version. Missing or incompatible vectors count as pending work for
+`k7e embed-pending`; see [configuration](k7e-configuration.md#vector-coverage).
 
 All three filter to `status='active'` unless `include_superseded` is set.
 

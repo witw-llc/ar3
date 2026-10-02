@@ -60,11 +60,11 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
     ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
-    ("recall",      "<text> [--limit N]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
-    ("distill", "<file|dir> [--dry-run]",          "Extract knowledge from raw experience files."),
+    ("recall",      "<text> [--limit N] [--include-superseded] [--include-archive]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
+    ("distill", "<file|dir> [--dry-run] [--archive]",          "Extract knowledge from raw experience files."),
     ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
     ("reindex",     "[--embeddings]",                  "Rebuild search index from files."),
-    ("embed-pending", "[--json]",                      "Embed the queued backlog (ollama)."),
+    ("embed-pending", "[--json]",                      "Embed the queued backlog."),
     ("rebuild-mocs", "",                               "Rebuild all Maps of Content from entry tags."),
     ("stats",       "[--json]",                        "Show knowledge store statistics."),
     ("check",       "[--fix]",                         "Audit structural integrity."),
@@ -99,6 +99,8 @@ def main(argv=None):
     reranking.add_argument("--rerank", action="store_true", help="Rerank results with the LLM")
     reranking.add_argument("--no-rerank", action="store_true", help="Never call an LLM for ranking")
     p.add_argument("--include-superseded", action="store_true", help="Include superseded entries")
+
+    p.add_argument("--include-archive", action="store_true", help="Include exploratory source claims")
 
     # get
     p = sub.add_parser("get", help="Read entry")
@@ -137,8 +139,13 @@ def main(argv=None):
     p.add_argument("text", nargs="?", default=None, help="Topic, question, or conversation (reads stdin if omitted)")
     p.add_argument("--limit", type=int, default=8)
 
+    p.add_argument("--include-superseded", action="store_true", help="Recall historical entries too")
+
+    p.add_argument("--include-archive", action="store_true", help="Recall exploratory source claims")
+
     # distill
     p = sub.add_parser("distill", help="Extract knowledge from files")
+    p.add_argument("--archive", action="store_true", help="Retain exploratory source claims and source snapshots")
     p.add_argument("--job", help="Stable job identity for recoverable, idempotent writes")
     p.add_argument("paths", nargs="+", help="Files or directories")
     p.add_argument("--dry-run", action="store_true")
@@ -165,6 +172,7 @@ def main(argv=None):
 
     # stats
     p = sub.add_parser("stats", help="Statistics")
+    p.add_argument("--include-archive", action="store_true", help="Include exploratory source claims")
     p.add_argument("--json", action="store_true")
 
     # check
@@ -173,6 +181,7 @@ def main(argv=None):
 
     # list
     p = sub.add_parser("list", help="List entries")
+    p.add_argument("--include-archive", action="store_true", help="Include exploratory source claims")
     p.add_argument("--limit", type=int, default=None, help="Maximum entries, newest first")
     p.add_argument("--status", default=None)
     p.add_argument("--tag", default=None)
@@ -204,6 +213,7 @@ def main(argv=None):
             args.query,
             limit=args.limit,
             include_superseded=args.include_superseded,
+            **({"include_archive": True} if args.include_archive else {}),
             rerank=False if args.no_rerank else True if args.rerank else None,
         )
         # What the semantic track cost this query, so a caller on a latency
@@ -240,7 +250,12 @@ def main(argv=None):
         if not args.no_track and found:
             engine._bump_usage([node_id for node_id, _ in found])
         if args.json:
-            print(json.dumps([{"id": i, "text": t} for i, t in found]))
+            entries = []
+            for node_id, text in found:
+                meta = engine._parse_frontmatter(text)
+                kind = meta["kind"] if engine.is_archive_record(meta) else None
+                entries.append({"id": node_id, "text": text, "kind": kind})
+            print(json.dumps(entries))
         else:
             for n, (node_id, text) in enumerate(found):
                 if n:
@@ -302,13 +317,30 @@ def main(argv=None):
         if not config.llm_configured("summarize"):
             print(_LLM_REQUIRED.format(cmd="recall"), file=sys.stderr)
             return 1
-        answer, sources = recall(text, limit=args.limit)
+        answer, sources = recall(text, limit=args.limit, **({"include_superseded": True} if args.include_superseded else {}), **({"include_archive": True} if args.include_archive else {}))
         if not sources:
             print("No relevant knowledge found.")
         elif answer:
             print(answer)
             ids = ", ".join(e["id"] for e in sources)
             print(f"\n---\nSources: {ids}")
+            warnings = list(dict.fromkeys(
+                error for entry in sources
+                for error in entry.get("citation_errors", []) + entry.get("source_ref_errors", [])
+            ))
+            if warnings:
+                print("Citation validation warnings: " + "; ".join(warnings), file=sys.stderr)
+            originals = list(dict.fromkeys(
+                f"[{citation['handle']}] "
+                f"({citation['snapshot']['path']}"
+                + (f", record {citation['span']['record_index']}" if citation['span']['record_index'] is not None else "")
+                + ", "
+                f"chars {citation['span']['start']}:{citation['span']['end']})"
+                for entry in sources for citation in entry.get("resolved_citations", [])
+                if citation["namespace"] == "original_source"
+            ))
+            if originals:
+                print("Validated original sources: " + "; ".join(originals))
         else:
             print("LLM synthesis failed.", file=sys.stderr)
             return 1
@@ -318,11 +350,14 @@ def main(argv=None):
             print(_LLM_REQUIRED.format(cmd="distill"), file=sys.stderr)
             return 1
         engine.reset_llm_failures()
+        if args.job and args.archive:
+            print("k7e: --archive cannot be combined with --job", file=sys.stderr)
+            return 1
         if args.job:
             with file_lock(engine.NODES_DIR.parent / ".distill.lock"):
                 results = distill(args.paths, dry_run=args.dry_run, job_id=args.job)
         else:
-            results = distill(args.paths, dry_run=args.dry_run)
+            results = distill(args.paths, dry_run=args.dry_run, **({"archive": True} if args.archive else {}))
         for r in results:
             action = r["action"]
             if action == "skipped":
@@ -340,7 +375,7 @@ def main(argv=None):
         # bridge, and reading it as one retries a capture that was distilled
         # perfectly well.
         failures = engine.llm_failures("distill")
-        if args.job and any(r["action"] == "skipped" for r in results):
+        if (args.job or args.archive) and any(r["action"] == "skipped" for r in results):
             return 1
         if failures:
             # ANY failed call fails the run, not only an all-failed one. A
@@ -404,7 +439,7 @@ def main(argv=None):
         print("MOCs rebuilt.")
 
     elif args.command == "stats":
-        s = stats()
+        s = stats(**({"include_archive": True} if args.include_archive else {}))
         if args.json:
             print(json.dumps(s, indent=2))
         else:
@@ -424,9 +459,12 @@ def main(argv=None):
         disagreement = index_disagreement()
         if disagreement:
             print(f"Index: {disagreement}")
+        coverage = engine.embedding_coverage()
+        if coverage["pending"]:
+            print(f"Embeddings: {coverage['current']}/{coverage['total']} current; {coverage['pending']} pending. Run k7e embed-pending.")
 
     elif args.command == "list":
-        nodes = list_nodes(status=args.status, tag=args.tag, limit=args.limit)
+        nodes = list_nodes(status=args.status, tag=args.tag, limit=args.limit, **({"include_archive": True} if args.include_archive else {}))
         if args.ids:
             for n in nodes:
                 print(n['id'])
@@ -440,6 +478,9 @@ def main(argv=None):
         print(config.status())
 
     elif args.command == "config":
+        if args.key.lower() == "openai_api_key":
+            print("k7e: supply OPENAI_API_KEY through the runtime environment, not config", file=sys.stderr)
+            return 1
         if args.value is None:
             val = config.get(args.key)
             if val is not None:

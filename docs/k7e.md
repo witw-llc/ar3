@@ -84,7 +84,8 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
 ## How it works (30 seconds)
 
 - Every fact is a markdown file under `$K7E_HOME/nodes/` (default `~/.config/k7e`).
-  `.index.db` is a derived cache — delete it and `k7e reindex` rebuilds.
+  `.index.db` is a derived cache that k7e rebuilds by itself when a version
+  changes its shape; delete it and `k7e reindex` to rebuild on demand.
 - **Search** fuses BM25 + metadata + embeddings (RRF), then weights by
   confidence, recency decay, and use-count, with an optional LLM reranker.
 - **The semantic track rides ollama when it answers.** Storing an entry only
@@ -106,6 +107,7 @@ embeddings; an **LLM CLI** you configure via `llm_command` for distill/recall/co
 | Doc | What's in it |
 |-----|--------------|
 | [k7e-architecture.md](k7e-architecture.md) | Storage model, entry format, schema, lifecycle |
+| [k7e-archive.md](k7e-archive.md) | Exploratory ingestion, original sources, typed claims and limits |
 | [k7e-retrieval.md](k7e-retrieval.md) | Search/recall pipeline, ranking, reranker, eval harness |
 | [k7e-distillation.md](k7e-distillation.md) | Extracting knowledge from raw experience |
 | [k7e-configuration.md](k7e-configuration.md) | Config keys, env, LLM/embedding backends |
@@ -131,4 +133,5 @@ harness/curator writes.
 ## Status
 
 Pre-v1. The on-disk format (markdown + frontmatter) is the stable contract; the
-derived index schema may change (just `reindex`).
+derived index schema may change, and k7e rebuilds the index by itself on the
+first verb that opens an older one.

@@ -5,7 +5,7 @@ Falls back to env vars, then sensible defaults.
 
 LLM integration is explicit and CLI-based. Each command is a shell string
 invoked with the prompt on stdin; the model response is read from stdout.
-No auto-detection. Embeddings use ollama's HTTP API separately.
+No auto-detection. Embeddings use an explicitly selected HTTP provider.
 
 Config format:
 {
@@ -15,8 +15,9 @@ Config format:
   "distill_command": null,              # knowledge extraction
   "compile_command": null,              # tag synthesis
   "rerank_command": null,               # search/recall reranking
-  "embeddings": "ollama",               # "off" disables the semantic track
+  "embeddings": "ollama",               # "openai" opts in; "off" disables
   "embed_model": "nomic-embed-text",
+  "embed_dimensions": null,            # OpenAI model default, or explicit size
   "embed_query_timeout": 2.0,           # read-path budget, seconds
   "ollama_url": "http://localhost:11434",
   "rerank": false,
@@ -87,6 +88,7 @@ def get(key, default=None):
         "rerank_command": "K7E_RERANK_COMMAND",
         "embeddings": "K7E_EMBEDDINGS",
         "embed_model": "EMBED_MODEL",
+        "embed_dimensions": "K7E_EMBED_DIMENSIONS",
         "embed_query_timeout": "K7E_EMBED_QUERY_TIMEOUT",
         "ollama_url": "OLLAMA_URL",
         "decay_offset_days": "K7E_DECAY_OFFSET",
@@ -135,7 +137,18 @@ llm_available = llm_configured
 def detect_providers():
     """Check what's available on this system."""
     results = {}
+    import embeddings
+    selected = embeddings.space()
+    if selected and selected.provider == "openai":
+        # Local readiness only: status must never make a paid embedding call.
+        results["embeddings:openai"] = {"configured": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
+                                        "model": selected.model, "dimensions": selected.dimensions}
+        results["search:fts5"] = {"available": True}
+        return results
 
+    if selected is None:
+        results["search:fts5"] = {"available": True}
+        return results
     ollama_url = get("ollama_url", "http://localhost:11434")
     try:
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
@@ -185,11 +198,23 @@ def status():
             lines.append(f"  LLM {purpose}: unavailable")
 
     import engine  # the off-vocabulary is the engine's; status only reports it
+    import embeddings
+    selected = embeddings.space()
 
     embed_status = providers.get("embeddings:ollama", {})
     disabled = str(get("embeddings", "ollama")).strip().lower() in engine.EMBEDDINGS_OFF
     if disabled:
         lines.append("  Embeddings: off (embeddings = off)")
+    elif str(get("embeddings", "ollama")).strip().lower() == "openai":
+        ready = providers.get("embeddings:openai", {}).get("configured", False)
+        if selected is None:
+            lines.append("  Embeddings: OpenAI configuration invalid (model or dimensions)")
+        elif ready:
+            lines.append(f"  Embeddings: OpenAI ({selected.model}, {selected.dimensions} dimensions); API access unverified")
+        else:
+            lines.append("  Embeddings: OpenAI missing runtime OPENAI_API_KEY")
+    elif selected is None:
+        lines.append("  Embeddings: configuration invalid (provider, model or dimensions)")
     elif embed_status.get("available"):
         if embed_status.get("has_embed_model"):
             lines.append(f"  Embeddings: ollama ({embed_status['embed_model']}) ✓")
@@ -202,14 +227,17 @@ def status():
         lines.append("    → Install: curl -fsSL https://ollama.com/install.sh | sh")
         lines.append(f"    → Then: ollama pull {get('embed_model', 'nomic-embed-text')}")
 
-    semantic = not disabled and embed_status.get("available") and embed_status.get("has_embed_model")
+    coverage = engine.embedding_coverage()
     lines.append("  Search: FTS5 (keyword) ✓")
-    if semantic:
-        lines.append("  Search: Semantic (embeddings) ✓")
+    ready = providers.get("embeddings:openai", {}).get("configured", False) if selected and selected.provider == "openai" else bool(embed_status.get("available") and embed_status.get("has_embed_model"))
+    if selected and coverage:
+        lines.append(f"  Vectors: {coverage['current']}/{coverage['total']} current; {coverage['pending']} pending")
+    if selected and coverage and coverage["current"] and ready:
+        lines.append("  Search: Semantic configured with current vectors; query availability unverified")
     else:
-        lines.append("  Search: Semantic (embeddings) ✗ — FTS5-only mode")
-        if not disabled:
-            lines.append("    → For intentional keyword-only use: k7e config embeddings off")
+        lines.append("  Search: Semantic unavailable or unverified — FTS5-only mode")
+    if coverage and coverage["pending"]:
+        lines.append("    → Run: k7e embed-pending")
 
     lines.append("")
     missing = []
@@ -217,6 +245,9 @@ def status():
         missing.append("Set llm_command (stdin→stdout CLI) for distill/recall/compile")
     if disabled:
         missing.append("Set `embeddings` to ollama to use the semantic track")
+    elif str(get("embeddings", "ollama")).strip().lower() == "openai":
+        if not providers.get("embeddings:openai", {}).get("configured"):
+            missing.append("Configure a supported OpenAI model/dimension and runtime OPENAI_API_KEY")
     elif not embed_status.get("has_embed_model"):
         missing.append(f"Run `ollama pull {get('embed_model', 'nomic-embed-text')}` for semantic search")
     if missing:
@@ -224,6 +255,7 @@ def status():
         for m in missing:
             lines.append(f"    • {m}")
     else:
-        lines.append("  All capabilities active.")
+        lines.append("  All capabilities configured; OpenAI API access unverified." if "embeddings:openai" in providers
+                     else "  All capabilities active.")
 
     return "\n".join(lines)

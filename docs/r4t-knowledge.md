@@ -248,28 +248,53 @@ rule.
 
 ## The semantic track — the query at wake, the backlog at night
 
-A member's store searches BM25 **and** embeddings when ollama answers, which
-closes the lexical gap: a note distilled in one vocabulary still surfaces for a
-question phrased in another. Nothing to configure — `ollama pull
-nomic-embed-text` and member stores use it.
+A member's store searches BM25 **and** embeddings when its selected provider
+answers, which closes the lexical gap: a note distilled in one vocabulary
+still surfaces for a question phrased in another. Ollama is the default: `ollama pull
+nomic-embed-text` enables it for member stores. Hosted embeddings are opt-in
+through the member store's [K7E configuration](k7e-configuration.md#opt-in-openai-provider)
+or the roster process's environment.
 
 The wake path embeds **the query and nothing else**, on k7e's two-second
-`embed_query_timeout`, and the whole search runs under a 15-second cap. An
-ollama that is down or slow costs that budget once and the search returns FTS5
+`embed_query_timeout`, and the whole search runs under a 15-second cap. A
+provider that is down or slow costs that budget once and the search returns FTS5
 results — the inject degrades, the turn does not wait. The day log says which
 happened (`embed 41ms` vs `embed 2011ms unanswered, fts-only`).
 
-Entry vectors are never computed at wake. Storing an entry queues it; dreaming
-drains the queue with `k7e embed-pending` on the same idle pass that distills,
-and logs the cost per entry:
+Entry vectors are never computed at wake. Dreaming runs `k7e embed-pending`
+on the same idle pass that distills, using the selected provider. The backlog
+is every active operational entry without a valid current vector, including
+entries whose provider, model, dimensions, input format or input changed.
+A plain `reindex` does not clear that missing-vector work. When a k7e version
+changes the index shape, the first k7e call on a member store rebuilds its index
+from the markdown, so the wake search still fills the pack; usage ranking
+resets, and vectors the rebuild dropped count as pending for the next idle
+sweep. Changing provider or model makes the
+member store's operational vectors pending for re-embedding at the next idle
+sweep; work beyond the sweep budget waits for later passes. A store whose
+vectors are all current logs no `DREAM-EMBED` line. Completed work logs its
+cost per entry:
 
 ```
 r4t: DREAM-EMBED wren embedded 5 entries in 0.2s (35ms each)
 r4t: DREAM-EMBED-SKIP wren 5 entries still queued — embeddings unavailable; …
 ```
 
-A queue that outlives a pass is not a loss: the store searches FTS-only until
-ollama answers, and the next pass embeds the backlog.
+A backlog that outlives a pass remains pending for the next pass. Keyword
+search remains available, and compatible current vectors can still contribute
+when query embedding succeeds.
+
+With OpenAI selected, the idle sweep sends each pending operational entry's
+title and first 500 normalized body characters to OpenAI to generate its vector.
+The [embedding view](k7e-architecture.md#embedding-cache) omits exact reserved
+template heading lines and blank lines outside code fences before that cut.
+Every semantic search sends its query to OpenAI; a roster's wake query can
+contain incoming message text. Selecting a hosted provider therefore covers both
+automatic idle backlog requests and wake queries, including entries already
+in the member store. Exploratory archive records are excluded from these
+embedding requests. Hosted requests incur provider charges. Credentials must
+be available in the host-side roster process's environment; they are not
+stored in the member's K7E configuration.
 
 ## Distill on the way out — dreaming, not per-turn
 
