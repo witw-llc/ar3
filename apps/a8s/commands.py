@@ -24,17 +24,19 @@ import sys
 import time
 import urllib.parse
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from core import (
     ENTRYPOINT,
+    MAX_WAKE_ATTEMPTS,
     SCRIPT_DIR,
     _pid_alive,
     _preview,
     agent_dir,
     agent_log_path,
     canonical_name,
+    clear_wake_pid,
     clear_wake_retry,
     clear_dead_letter,
     read_dead_letters,
@@ -43,16 +45,20 @@ from core import (
     out,
     out_agent,
     pid_path,
+    read_wake_pid,
     read_wake_retry,
     s3_ledger_path,
     trash_dir,
     unique_path,
     user_definitions_dir,
+    wake_retry_wait,
 )
 from definitions import (
     MAILBOX_PATH_FIELDS,
     _autodiscover_definition,
+    argv_vars,
     builtin_definition_stems,
+    canonical_var_key,
     default_definition_path,
     definition_stem,
     harness_is_resolvable,
@@ -60,11 +66,13 @@ from definitions import (
     harness_program,
     list_definition_entries,
     load_definition,
+    load_agent_env,
     placeholder_names,
     resolve_definition_arg,
     resolve_files_dir,
     resolve_inbox_dir,
     resolve_outbox_dir,
+    split_env_var_key,
     validate_var_name,
     wake_env,
     wake_path_repair,
@@ -72,8 +80,10 @@ from definitions import (
     wrap_wake_argv,
 )
 from daemon import (
+    _clear_detach_request,
     _clear_kill_request,
     _read_handler_pid,
+    _unlink_pid_files,
     _write_kill_request,
     attached_loop,
 )
@@ -149,7 +159,9 @@ def cmd_add(args: list[str]) -> int:
     ``~/.config/a8s/definitions/`` (`a8s defs add`); any other path is used as-is.
 
     Trailing ``--KEY value`` or ``--KEY=value`` flags set per-node a8s vars
-    (same as ``a8s vars <name> set KEY value``). Keys are case-insensitive.
+    (same as ``a8s vars <name> set KEY value``). Keys are case-insensitive;
+    ``--env.NAME=value`` sets the node's environment variable NAME, whose case
+    is kept.
     The first flag ends the positional arguments, so the definition, if given,
     comes before it.
 
@@ -293,7 +305,10 @@ def parse_option_tokens(
                     "with a dash."
                 )
             i += 2
-        key = (aliases or {}).get(raw_key, raw_key).replace("-", "_")
+        if split_env_var_key(raw_key) is not None:
+            key = raw_key
+        else:
+            key = (aliases or {}).get(raw_key, raw_key).replace("-", "_")
         if key in out:
             raise ValueError(f"duplicate option: --{key}")
         out[key] = value
@@ -301,7 +316,8 @@ def parse_option_tokens(
 
 
 def _parse_add_var_flags(tokens: list[str]) -> dict[str, str]:
-    """Parse agent-var option tokens into a canonical (uppercase) vars map."""
+    """Parse agent-var option tokens into a canonical vars map: uppercase keys,
+    and `env.<NAME>` keys with NAME as written."""
     return {
         validate_var_name(k): v for k, v in parse_option_tokens(tokens).items()
     }
@@ -550,23 +566,28 @@ def _cmd_definitions_remove(name: str) -> int:
 
 def _vars_usage() -> int:
     print(
-        "usage: a8s vars <name>                 # list a8s vars for a node\n"
-        "       a8s vars <name> set <KEY> <val> # set (not OS environment)\n"
-        "       a8s vars <name> unset <KEY>     # remove\n"
+        "usage: a8s vars <name>                      # list a8s vars for a node\n"
+        "       a8s vars <name> set <KEY> <val>      # set an argv placeholder\n"
+        "       a8s vars <name> set env.<NAME> <val> # set an OS environment variable\n"
+        "       a8s vars <name> unset <KEY>          # remove (also env.<NAME>)\n"
         "\n"
-        "Per-node placeholders for definition argv ($KEY). Names are\n"
-        "case-insensitive (stored uppercase). Built-in names ($SENDER,\n"
-        "$MESSAGE, …) are reserved. Used-but-unset is a wake error.",
+        "A plain KEY is a per-node placeholder for definition argv ($KEY).\n"
+        "Names are case-insensitive (stored uppercase). Built-in names\n"
+        "($SENDER, $MESSAGE, …) are reserved. Used-but-unset is a wake error.\n"
+        "An env.<NAME> var reaches the node's wakes as the environment variable\n"
+        "NAME, case kept, and is never an argv placeholder.",
         file=sys.stderr,
     )
     return 2
 
 
 def cmd_vars(args: list[str]) -> int:
-    """`a8s vars` — per-node a8s variables for definition interpolation.
+    """`a8s vars` — per-node a8s variables.
 
-    Stored on the agent in the registry (`vars` map). Expanded as `$KEY` in
-    invoke argv; never read from or written to the process environment.
+    Stored on the agent in the registry (`vars` map). A plain key expands as
+    `$KEY` in invoke argv and never reaches the process environment. An
+    `env.<NAME>` key is the opposite: it becomes environment variable NAME in
+    the node's wakes and never takes part in interpolation.
     """
     if len(args) < 1:
         return _vars_usage()
@@ -592,16 +613,20 @@ def cmd_vars(args: list[str]) -> int:
 def _cmd_vars_list(agent_key: str, info: dict) -> int:
     raw = info.get("vars")
     vars_map = raw if isinstance(raw, dict) else {}
-    items: dict[str, str] = {}
-    for k, v in vars_map.items():
-        if isinstance(k, str) and isinstance(v, str):
-            items[k.upper()] = v
-    if not items:
+    items: dict[str, str] = argv_vars(vars_map)
+    env_items = {
+        canonical_var_key(k): v
+        for k, v in vars_map.items()
+        if isinstance(k, str) and isinstance(v, str) and split_env_var_key(k) is not None
+    }
+    if not items and not env_items:
         print(f"{agent_key}: (no vars)")
         return 0
-    width = max(len(k) for k in items)
+    width = max(len(k) for k in (*items, *env_items))
     for k in sorted(items):
         print(f"{k.ljust(width)}  {items[k]}")
+    for k in sorted(env_items):
+        print(f"{k.ljust(width)}  {env_items[k]}")
     return 0
 
 
@@ -632,7 +657,7 @@ def _mailbox_paths_with(agent_key: str, info: dict, vars_map: dict) -> dict[str,
         definition = load_definition(agent_key)
     except (FileNotFoundError, RuntimeError):
         definition = {}
-    canon = {k.upper(): v for k, v in vars_map.items() if isinstance(k, str) and isinstance(v, str)}
+    canon = argv_vars(vars_map)
     out: dict[str, Path] = {}
     for field, resolve in (
         ("outbox_dir", resolve_outbox_dir),
@@ -777,7 +802,7 @@ def _cmd_vars_set(agent_key: str, info: dict, key: str, value: str) -> int:
     before = _mailbox_paths_with(agent_key, entry, vars_map)
     overwriting = False
     for existing in list(vars_map):
-        if isinstance(existing, str) and existing.upper() == key:
+        if isinstance(existing, str) and canonical_var_key(existing) == key:
             del vars_map[existing]
             overwriting = True
     vars_map[key] = value
@@ -812,7 +837,7 @@ def _cmd_vars_unset(agent_key: str, info: dict, key: str) -> int:
     before = _mailbox_paths_with(agent_key, entry, vars_map)
     found = False
     for existing in list(vars_map):
-        if isinstance(existing, str) and existing.upper() == key:
+        if isinstance(existing, str) and canonical_var_key(existing) == key:
             del vars_map[existing]
             found = True
     if not found:
@@ -1476,8 +1501,8 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
     when a node's harness is not on the PATH its wakes will get.
 
     The probe runs against the spawn environment as a wake will see it —
-    `definition.env` and the machine-wide `wake_path` already applied — so a
-    node that has been given a PATH stops warning, and a node with neither
+    `definition.env`, the node's `env.<NAME>` vars and the machine-wide
+    `wake_path` already applied — so a node that has been given a PATH stops warning, and a node with neither
     inherits the starting shell's PATH and is judged on that. That inheritance
     is the whole footgun: start from `ssh host -- 'a8s start x'`, cron or CI and
     the rc-managed entries are missing, so the harness is unresolvable hours
@@ -1504,7 +1529,8 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
         try:
             if wake_shell(definition) is not None:
                 continue  # the rc decides PATH; nothing here can predict it
-            env = {**os.environ, **wake_env(definition)}
+            node_env = load_agent_env(member)
+            env = {**os.environ, **wake_env(definition, node_env)}
         except ValueError:
             continue  # `a8s start` reports a malformed knob separately
         root = reg.get(member, {}).get("root")
@@ -1531,7 +1557,7 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
                     f"{binary!r}, which cannot start on the PATH this node's "
                     f"wakes will get: {detail or 'not found'}\n"
                     f"         Searched PATH: {path_value}\n"
-                    f"         {wake_path_repair(member, definition, binary)}",
+                    f"         {wake_path_repair(member, definition, binary, node_env)}",
                     file=sys.stderr,
                 )
                 continue
@@ -1547,7 +1573,7 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
                         f"a script that runs under {interpreter!r}, which is "
                         f"not on the PATH this node's wakes will get.\n"
                         f"         Searched PATH: {env.get('PATH', '')}\n"
-                        f"         {wake_path_repair(member, definition, interpreter)}",
+                        f"         {wake_path_repair(member, definition, interpreter, node_env)}",
                         file=sys.stderr,
                     )
                 continue
@@ -1555,7 +1581,7 @@ def _warn_unresolvable_harnesses(members: list[str]) -> None:
                 f"warning: {member}: {program!r} ({label}) is not on the PATH "
                 f"this node's wakes will get.\n"
                 f"         Searched PATH: {env.get('PATH', '')}\n"
-                f"         {wake_path_repair(member, definition, program)}",
+                f"         {wake_path_repair(member, definition, program, node_env)}",
                 file=sys.stderr,
             )
 
@@ -1614,7 +1640,8 @@ def cmd_step(args: list[str], interval: float) -> int:
 
 
 STOP_WAIT_S = 600.0
-STOP_FORCE_WAIT_S = 30.0
+STOP_FORCE_GRACE_S = 8.0
+STOP_KILL_WAIT_S = 5.0
 STOP_POLL_S = 0.1
 
 
@@ -1662,6 +1689,32 @@ def cmd_stop(args: list[str]) -> int:
     return _each_name(rest, lambda name: _stop_one(name, force))
 
 
+def _hard_kill_targets(
+    posix: bool, handler_pid: int, wake_pid: int | None
+) -> list[tuple[str, int]]:
+    """What `stop --force` kills when the handler has not detached: the wake
+    first, so it is not orphaned, then the handler. A POSIX wake leads its own
+    session, so its group takes the CLI's helpers with it. Windows has no group
+    to aim at, and `os.kill` there already ends the process outright."""
+    targets: list[tuple[str, int]] = []
+    if wake_pid is not None:
+        targets.append(("group" if posix else "pid", wake_pid))
+    targets.append(("pid", handler_pid))
+    return targets
+
+
+def _hard_kill(targets: list[tuple[str, int]]) -> None:
+    sig = getattr(signal, "SIGKILL", signal.SIGTERM)
+    for kind, pid in targets:
+        try:
+            if kind == "group":
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except OSError:
+            pass
+
+
 def _stop_one(name: str, force: bool) -> int:
     """SIGTERM the handler(s) of one name, then wait until they have actually
     detached.
@@ -1669,27 +1722,48 @@ def _stop_one(name: str, force: bool) -> int:
     Like Ctrl+C on `a8s run`: the first signal asks for a graceful detach
     after the current wake. Idle nodes stop immediately; a busy wake finishes
     first. ``--force`` / ``-f`` sends a second SIGTERM so the daemon kills the
-    in-flight wake subprocess group (same as a second Ctrl+C), then waits.
+    in-flight wake subprocess group (same as a second Ctrl+C). A handler that
+    has not detached `STOP_FORCE_GRACE_S` later cannot act on a signal, so it
+    is killed outright along with its wake and the node is left startable.
 
     One handler may serve multiple alias members; we dedupe by PID so each
-    unique handler is signaled once. Detaches the WHOLE handler.
+    unique handler is signaled once. Detaches the WHOLE handler, so every node
+    attached to it is stopped, named or not: a forced kill returns their wakes'
+    mail and clears their backoff, and the nodes that were not named are
+    reported.
+
+    Once the handlers are gone the name's wake-retry record is cleared: a stop
+    is the operator's cue that the cause was dealt with, so the next start
+    delivers waiting mail at once. Trash and dead letters are left alone.
     """
     members = _expand_to_agents(name)
     if members is None:
         return 1
     seen_pids: dict[int, str] = {}
     not_running: list[str] = []
-    for name in members:
-        pid = _read_handler_pid(name)
+    for member in members:
+        pid = _read_handler_pid(member)
         if pid is None:
-            not_running.append(name)
+            not_running.append(member)
             continue
         if pid not in seen_pids:
-            seen_pids[pid] = name
+            seen_pids[pid] = member
     if not seen_pids:
         for n in not_running:
             print(f"{n}: not running", file=sys.stderr)
         return 1
+    attached = _running_nodes_by_pid()
+    affected = list(members)
+    for pid in seen_pids:
+        for n in attached.get(pid, []):
+            if n not in affected:
+                affected.append(n)
+    wakes: dict[str, tuple[int, int, list[str]]] = {}
+    if force:
+        for n in affected:
+            handler, wake = _read_handler_pid(n), read_wake_pid(n)
+            if handler in seen_pids and wake is not None:
+                wakes[n] = (handler, wake[0], wake[1])
     for pid, label in seen_pids.items():
         try:
             os.kill(pid, signal.SIGTERM)
@@ -1706,9 +1780,24 @@ def _stop_one(name: str, force: bool) -> int:
                 pass
             except OSError as e:
                 print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
-    wait_s = STOP_FORCE_WAIT_S if force else STOP_WAIT_S
+    wait_s = STOP_FORCE_GRACE_S if force else STOP_WAIT_S
     print(f"waiting up to {wait_s:g}s for stop…")
-    if not _wait_handlers_stopped(members, set(seen_pids), wait_s):
+    stopped = _wait_handlers_stopped(members, set(seen_pids), wait_s)
+    if not stopped and force:
+        print(f"still attached after {wait_s:g}s — killing it", file=sys.stderr)
+        for pid, label in seen_pids.items():
+            if not _pid_alive(pid):
+                continue
+            wake_pid = next((w for h, w, _ in wakes.values() if h == pid), None)
+            _hard_kill(_hard_kill_targets(os.name == "posix", pid, wake_pid))
+            txlog.log("RUN_STOP", sender=label, detail="killed by `a8s stop --force`")
+            print(f"{label}: killed PID {pid}")
+        stopped = _wait_handlers_stopped(members, set(seen_pids), STOP_KILL_WAIT_S)
+        for n in affected:
+            _clear_dead_handler_files(n)
+            if n in wakes:
+                _return_killed_wake(n, wakes[n][2])
+    if not stopped:
         print(
             f"still running after {wait_s:g}s"
             + ("" if force else " — try `a8s stop --force` or `a8s kill`"),
@@ -1720,7 +1809,46 @@ def _stop_one(name: str, force: bool) -> int:
             print(f"{n}: stopped")
     for n in not_running:
         print(f"{n}: not running")
+    for n in affected:
+        if n not in members:
+            print(f"{n}: stopped too; it shared the handler with {name}")
+    for n in affected:
+        if read_wake_retry(n) is not None:
+            clear_wake_retry(n)
+            print(f"{n}: backoff cleared; waiting mail wakes on the next start")
     return 0
+
+
+def _return_killed_wake(name: str, unit: list[str]) -> None:
+    """Put back the envelopes a killed wake had consumed. A handler that
+    detaches on its own does this when the wake settles; one that was killed
+    outright cannot, and the mail would sit in trash with nothing to say so."""
+    inbox = inbox_dir(name)
+    inbox.mkdir(parents=True, exist_ok=True)
+    returned = 0
+    for fname in unit:
+        src = trash_dir(name) / fname
+        if not src.is_file() or (inbox / fname).exists():
+            continue
+        try:
+            src.rename(inbox / fname)
+        except OSError:
+            continue
+        returned += 1
+    if returned:
+        print(f"{name}: returned {returned} message(s) from the killed wake to the inbox")
+
+
+def _clear_dead_handler_files(name: str) -> None:
+    """What a handler killed outright leaves behind: its pid files, its wake
+    record and any request addressed to it. Leaves a node that is still held
+    alone."""
+    if _read_handler_pid(name) is not None:
+        return
+    _unlink_pid_files(name)
+    clear_wake_pid(name)
+    _clear_kill_request(name)
+    _clear_detach_request(name)
 
 
 def cmd_restart(args: list[str]) -> int:
@@ -1935,9 +2063,46 @@ def cmd_exit() -> int:
     return 0
 
 
+def _duration_left(seconds: float) -> str:
+    """A wait still to run, rounded up: `45s`, `2m`, `1h`."""
+    secs = max(1, int(seconds + 0.999))
+    if secs < 60:
+        return f"{secs}s"
+    mins = (secs + 59) // 60
+    if mins < 60:
+        return f"{mins}m"
+    return f"{(mins + 59) // 60}h"
+
+
+def _node_status(name: str) -> str:
+    """`failed, backoff 2m (attempt 3/4)` while a failed wake's backoff runs,
+    `busy` while a wake is in flight, else `ok` — the node wakes on its next
+    pass. The backoff reads first: it is what keeps the mail waiting."""
+    wait = wake_retry_wait(name)
+    if wait is not None:
+        left, failed = wait
+        attempt = f" (attempt {failed + 1}/{MAX_WAKE_ATTEMPTS})" if failed is not None else ""
+        return f"failed, backoff {_duration_left(left)}{attempt}"
+    if read_wake_pid(name) is not None:
+        return "busy"
+    return "ok"
+
+
+def _inbox_activity_by_node() -> dict[str, tuple[str, str]]:
+    """`{lowercased name: (messages in the last 24 hours, local time of the
+    newest message)}`, empty when the transaction log cannot be read."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    try:
+        found = txlog.inbox_activity(since)
+    except txlog.TransactionLogError:
+        return {}
+    return {name: (str(count), clock.stamp(newest)) for name, (count, newest) in found.items()}
+
+
 def cmd_ps(args: list[str] | None = None) -> int:
     """`a8s ps` — list only running node processes (docker/ollama style).
-    Columns: NAME, PID, UPTIME, ROOT. `-q` prints just names, one per line."""
+    Columns: NAME, PID, UPTIME, STATUS, MSGS 24H, LAST MSG, ROOT. `-q` prints
+    just names, one per line."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
@@ -1958,8 +2123,12 @@ def cmd_ps(args: list[str] | None = None) -> int:
             print(name)
         return 0
 
-    rows = [(name, str(pid), _pid_uptime(name), root) for name, pid, root in running]
-    _print_table(["NAME", "PID", "UPTIME", "ROOT"], rows)
+    activity = _inbox_activity_by_node()
+    rows = []
+    for name, pid, root in running:
+        count, last = activity.get(name.lower(), ("0", "-"))
+        rows.append((name, str(pid), _pid_uptime(name), _node_status(name), count, last, root))
+    _print_table(["NAME", "PID", "UPTIME", "STATUS", "MSGS 24H", "LAST MSG", "ROOT"], rows)
     return 0
 
 
@@ -2590,27 +2759,44 @@ def _merge_log_lines(paths: list[Path]) -> list[str]:
     return [line for _key, line in tagged]
 
 
+LOGS_DEFAULT_TAIL = 1000
+LOGS_USAGE = "usage: a8s logs <name> [<name>...] [-n N|all] [-f|--follow]"
+
+
 def _dump_logs(paths: list[Path], tail_n: int | None) -> None:
     existing = [p for p in paths if p.is_file()]
     if not existing:
         return
     lines = _read_agent_log(existing[0]) if len(existing) == 1 else _merge_log_lines(existing)
     if tail_n is not None:
-        lines = lines[-tail_n:]
+        lines = lines[-tail_n:] if tail_n else []
     for line in lines:
         sys.stdout.write(_render_log_line(line))
     sys.stdout.flush()
 
 
+def _parse_tail_count(value: str) -> int | None:
+    """`all` -> None (no cut); a count of zero or more -> that count; anything
+    else raises ValueError."""
+    if value.lower() == "all":
+        return None
+    count = int(value)
+    if count < 0:
+        raise ValueError(value)
+    return count
+
+
 def cmd_logs(args: list[str]) -> int:
-    """Read each named agent's log.txt. One agent: append order (file order).
-    Multiple agents: merge by leading ISO timestamp. -f follows; multi-agent
-    follow uses a short ordering buffer."""
+    """Read each named agent's log.txt, the last `LOGS_DEFAULT_TAIL` lines
+    unless `-n N|all` says otherwise. One agent: append order (file order).
+    Multiple agents: merge by leading ISO timestamp. -f follows after the
+    initial lines, like `tail -f`; multi-agent follow uses a short ordering
+    buffer."""
     if not args:
-        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
+        print(LOGS_USAGE, file=sys.stderr)
         return 2
     names: list[str] = []
-    tail_n: int | None = None
+    tail_n: int | None = LOGS_DEFAULT_TAIL
     follow = False
     i = 0
     while i < len(args):
@@ -2618,19 +2804,18 @@ def cmd_logs(args: list[str]) -> int:
         if a in ("-f", "--follow"):
             follow = True
             i += 1
-        elif a == "--tail" and i + 1 < len(args):
-            try:
-                tail_n = int(args[i + 1])
-            except ValueError:
-                print(f"--tail: not an integer: {args[i + 1]!r}", file=sys.stderr)
+            continue
+        if a in ("-n", "--tail"):
+            if i + 1 >= len(args):
+                print(f"{a}: needs a count or `all`", file=sys.stderr)
                 return 2
+            raw = args[i + 1]
             i += 2
         elif a.startswith("--tail="):
-            try:
-                tail_n = int(a.split("=", 1)[1])
-            except ValueError:
-                print(f"--tail: not an integer: {a!r}", file=sys.stderr)
-                return 2
+            raw = a.split("=", 1)[1]
+            i += 1
+        elif a.startswith("-n") and len(a) > 2:
+            raw = a[2:]
             i += 1
         elif a.startswith("-"):
             print(f"unknown logs arg: {a!r}", file=sys.stderr)
@@ -2638,9 +2823,15 @@ def cmd_logs(args: list[str]) -> int:
         else:
             names.append(a)
             i += 1
+            continue
+        try:
+            tail_n = _parse_tail_count(raw)
+        except ValueError:
+            print(f"-n: not a count or `all`: {raw!r}", file=sys.stderr)
+            return 2
 
     if not names:
-        print("usage: a8s logs <name> [<name>...] [--tail N] [-f|--follow]", file=sys.stderr)
+        print(LOGS_USAGE, file=sys.stderr)
         return 2
 
     # Expand aliases. Names may include agents and aliases; dedupe agent names

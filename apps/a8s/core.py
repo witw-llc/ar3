@@ -330,6 +330,78 @@ def clear_wake_retry(name: str) -> None:
         pass
 
 
+def wake_retry_wait(
+    name: str, *, now: datetime | None = None
+) -> tuple[float, int | None] | None:
+    """`(seconds left, failed attempts)` while a failed wake's backoff is
+    running, else None. An unreadable or unparseable record reads as no wait —
+    a corrupt sidecar must not wedge an agent's inbox shut."""
+    record = read_wake_retry(name)
+    if not record:
+        return None
+    raw = record.get("next_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        next_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    left = (next_at - (now or datetime.now(timezone.utc))).total_seconds()
+    if left <= 0:
+        return None
+    attempts = record.get("attempts")
+    return left, attempts if isinstance(attempts, int) else None
+
+
+def wake_pid_path(name: str) -> Path:
+    """Per-agent record of the wake subprocess in flight: JSON `{"pid": N,
+    "start": "<process start token>", "unit": [<trash filenames>]}`. Written when a wake spawns and removed
+    when it settles. A handler that dies hard leaves it behind, which is why a
+    reader checks that the pid is alive and is the same process before it
+    trusts it."""
+    return agent_dir(name) / "wake-pid"
+
+
+def write_wake_pid(name: str, pid: int, unit: list[str] | None = None) -> None:
+    body = json.dumps({
+        "pid": pid,
+        "start": process_start_token(pid) or "",
+        "unit": sorted(unit or []),
+    })
+    try:
+        p = wake_pid_path(name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_wake_pid(name: str) -> None:
+    try:
+        wake_pid_path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def read_wake_pid(name: str) -> tuple[int, list[str]] | None:
+    """`(pid, envelope filenames)` of the wake in flight for `name`, or None.
+    A recorded pid that is gone, or that the OS has since handed to another
+    process, reads as no wake."""
+    try:
+        data = json.loads(wake_pid_path(name).read_text(encoding="utf-8"))
+        pid = int(data["pid"])
+        start = str(data.get("start") or "")
+        unit = [str(f) for f in data.get("unit") or []]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if pid <= 0 or not _pid_alive(pid):
+        return None
+    current = process_start_token(pid)
+    if start and current is not None and current != start:
+        return None
+    return pid, unit
+
+
 def dead_letters_dir(name: str) -> Path:
     """Per-agent dead-letter markers: one empty file per envelope a wake gave
     up on, named exactly as its trash file. Written when the wake cap

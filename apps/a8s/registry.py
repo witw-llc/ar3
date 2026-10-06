@@ -2,14 +2,16 @@
 
 Schema:
   {
-    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."], "vars": {"KEY": "..."}, "retired_mailboxes": ["..."]}},
+    "agents":     {"<NAME>": {"root": "...", "definition": "...?", "safe_dirs": ["..."], "vars": {"KEY": "...", "env.NAME": "..."}, "retired_mailboxes": ["..."]}},
     "aliases":    {"<ALIAS>": ["<NAME-or-ALIAS>", ...]},
     "namespaces": {"<PREFIX>": "<AGENT>"}
   }
   `safe_dirs` — optional extra directories (absolute paths) where FILE
   attachments may originate at routing time, in addition to `root`.
   `vars` — optional per-node a8s variables (`a8s vars`); expanded as `$KEY` in
-  definition argv. Not OS environment variables.
+  definition argv. Not OS environment variables, except an `env.NAME` key,
+  which is the environment variable NAME for the node's wakes and is never
+  expanded in argv.
   `retired_mailboxes` — optional list of absolute paths this tool itself
   un-pointed a mailbox field from (`a8s vars set`/`unset`), most recent last,
   deduped, capped at 20. `a8s health`'s orphan scan walks this list directly

@@ -52,6 +52,14 @@ from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
 from registry import save_aliases, save_registry
 
 
+@pytest.fixture(autouse=True)
+def _no_start_token_probe(monkeypatch):
+    """The wake record stamps its pid's start token, which on macOS spawns
+    `ps`. Several tests here replace `subprocess.Popen` with a fake that cannot
+    answer it, and none of them reads the record."""
+    monkeypatch.setattr("core.process_start_token", lambda pid: None)
+
+
 def _main_thread_only(patched):
     """Scope an Event.wait monkeypatch to the loop under test.
 
@@ -406,6 +414,7 @@ class TestTellOutboxEnv:
         captured: dict = {}
 
         class FakeProc:
+            pid = 424242
             stdout = iter([])
             returncode = 0
 
@@ -549,6 +558,7 @@ class TestDeclaredWakeEnv:
         captured: dict = {}
 
         class FakeProc:
+            pid = 424242
             stdout = iter([])
             returncode = 0
 

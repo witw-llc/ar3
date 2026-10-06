@@ -10,6 +10,16 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `$AGE`, `$A8S_DIR`, `$PYTHON`, `$DEFINITION_PATH`, plus per-node a8s vars as `$KEY`)
   expands via `definitions._expand_argv`. Vars are registry-backed (`a8s vars`),
   not OS environment. Used-but-unset raises `UndefinedVarsError` before spawn.
+- **A node's own environment is `a8s vars <name> set env.<NAME> <value>`,** the
+  grammar `r4t rig set <rig> env.<NAME>` uses. Only an `env.`-prefixed key
+  reaches the child's environment, and `<NAME>` keeps its case; every other var
+  stays argv interpolation and never reaches the environment. Do not export
+  every var. Precedence,
+  lowest first: the start shell, the PATH record (`wake_path`),
+  `definition.env`, the node's `env.<NAME>` vars, then the routing variables a8s
+  injects. `definitions.wake_env` composes the first four and `daemon._wake_env`
+  adds the last; any new place that builds a wake or probe environment calls
+  `wake_env(definition, load_agent_env(name))`.
   Per-message wakes use `invoke` via `build_command`; batch wakes use
   `batch.invoke` via `build_batch_command`, appending either a composed
   prose prompt (`batch.format` absent/`"prompt"`) or a JSON array of
@@ -206,10 +216,28 @@ Read [a8s.md](a8s.md) first for concept and usage.
   a stale marker and never a lost letter. Do not delete the envelope at the
   cap.
   `_wake_retry_ready` gates dispatch, so a permanently broken CLI backs off
-  instead of spinning the handler. Delivery is at-least-once: a wake command
+  instead of spinning the handler. `a8s stop` clears the `wake-retry` record of
+  every member once the handlers are gone, and prints one line when it cleared
+  one; clear it only after the handler has detached or been killed, or the
+  handler writes it back. A stop never touches trash, dead letters or their
+  markers: only `a8s retry` returns those. Delivery is at-least-once: a wake command
   must tolerate the same envelope twice. r4t dispatch already does — it
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.
+- **`stop --force` ends in seconds, and plain `stop` never kills.** A plain stop
+  sends one SIGTERM and waits for the wake as long as it runs. `--force` sends a
+  second SIGTERM, which makes the handler kill its wake group; a handler that has
+  not detached `STOP_FORCE_GRACE_S` later cannot act on a signal, and `--force`
+  then kills it with SIGKILL. A handler blocked in a call never runs a Python
+  signal handler, so do not lengthen the wait in place of the kill. The wake's
+  pid comes from the agent's `wake-pid` record, written when the wake spawns and
+  removed when it settles; a reader checks the pid's start token before it
+  signals, because a record outlives a handler killed outright. Kill the wake
+  first (its group on POSIX; the process on Windows, which has no group), then
+  the handler. Never `killpg` the handler: `a8s run` in a terminal shares its
+  group with the shell. After a kill, clear the pid files and any request files,
+  return the wake's envelopes from trash to the inbox (nothing else will), and
+  write a `RUN_STOP` row, so the node starts again at once.
 - **A detach routes the outbox once.** `attached_loop`'s `finally:` runs one
   `route_outboxes` pass over the agents whose pid file still names this
   process, before `stop_remotes`. Reuse the loop's own routing call; write no

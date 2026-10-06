@@ -683,7 +683,7 @@ class TestCmdStopAndRestart:
         monkeypatch.setattr("core.os.kill", fake_kill)
         monkeypatch.setattr("commands._pid_alive", lambda pid: pid_path("claude").is_file())
         monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
-        monkeypatch.setattr("commands.STOP_FORCE_WAIT_S", 2.0)
+        monkeypatch.setattr("commands.STOP_FORCE_GRACE_S", 2.0)
 
         rc = cmd_stop(["claude", "--force"])
         assert rc == 0
@@ -3403,6 +3403,74 @@ class TestCmdLogs:
         log.write_text("line1\nline2\nline3\n")
         assert cmd_logs(["claude", "--tail", "2"]) == 0
         assert capsys.readouterr().out.splitlines() == ["line2", "line3"]
+
+    @pytest.fixture
+    def long_log(self, fake_home, tmp_path):
+        root = tmp_path / "x"; root.mkdir()
+        save_registry({"claude": {"root": str(root)}})
+        log = agent_log_path("claude")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("".join(f"line{i}\n" for i in range(1, 1201)))
+        return log
+
+    def test_default_is_the_last_thousand_lines(self, long_log, capsys):
+        assert cmd_logs(["claude"]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 1000
+        assert lines[0] == "line201" and lines[-1] == "line1200"
+
+    def test_n_sets_the_count(self, long_log, capsys):
+        assert cmd_logs(["claude", "-n", "3"]) == 0
+        assert capsys.readouterr().out.splitlines() == ["line1198", "line1199", "line1200"]
+
+    def test_n_takes_its_value_attached_or_as_tail(self, long_log, capsys):
+        assert cmd_logs(["claude", "-n2"]) == 0
+        assert capsys.readouterr().out.splitlines() == ["line1199", "line1200"]
+        assert cmd_logs(["claude", "--tail=1"]) == 0
+        assert capsys.readouterr().out.splitlines() == ["line1200"]
+
+    def test_n_all_prints_everything(self, long_log, capsys):
+        assert cmd_logs(["claude", "-n", "all"]) == 0
+        assert len(capsys.readouterr().out.splitlines()) == 1200
+
+    def test_n_zero_prints_nothing(self, long_log, capsys):
+        assert cmd_logs(["claude", "-n", "0"]) == 0
+        assert capsys.readouterr().out == ""
+
+    def test_a_count_that_is_not_one_is_a_usage_error(self, long_log, capsys):
+        assert cmd_logs(["claude", "-n", "many"]) == 2
+        assert cmd_logs(["claude", "-n", "-4"]) == 2
+        assert cmd_logs(["claude", "-n"]) == 2
+        assert "not a count or `all`" in capsys.readouterr().err
+
+    def test_merged_agents_are_cut_after_the_merge(self, fake_home, tmp_path, capsys, zone):
+        zone("UTC")
+        for name in ("claude", "gemini"):
+            (tmp_path / name).mkdir()
+        save_registry({"claude": {"root": str(tmp_path / "claude")},
+                       "gemini": {"root": str(tmp_path / "gemini")}})
+        for name, base in (("claude", 0), ("gemini", 1)):
+            p = agent_log_path(name)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("".join(
+                f"2026-01-01T12:00:{base + 2 * i:02d}Z {name} {i}\n" for i in range(4)
+            ))
+        assert cmd_logs(["claude", "gemini", "-n", "3"]) == 0
+        assert capsys.readouterr().out.splitlines() == [
+            "2026-01-01 12:00:05 UTC gemini 2",
+            "2026-01-01 12:00:06 UTC claude 3",
+            "2026-01-01 12:00:07 UTC gemini 3",
+        ]
+
+    def test_follow_starts_from_the_same_cut(self, long_log, capsys, monkeypatch):
+        def stop_following(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("commands.time.sleep", stop_following)
+        assert cmd_logs(["claude", "-f", "-n", "2"]) == 0
+        assert capsys.readouterr().out.splitlines() == ["line1199", "line1200"]
+        assert cmd_logs(["claude", "-f"]) == 0
+        assert len(capsys.readouterr().out.splitlines()) == 1000
 
 
 class TestCmdTrace:

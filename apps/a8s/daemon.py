@@ -74,6 +74,7 @@ from core import (
     pid_start_path,
     process_start_token,
     clear_inbox_waiting_since,
+    clear_wake_pid,
     clear_wake_retry,
     mark_dead_letter,
     read_inbox_waiting_since,
@@ -83,6 +84,8 @@ from core import (
     touch_last_active,
     trash_dir,
     unique_path,
+    wake_retry_wait,
+    write_wake_pid,
     write_wake_retry,
 )
 from definitions import (
@@ -95,6 +98,7 @@ from definitions import (
     has_batch_invoke,
     idle_timeout_seconds,
     is_file_proxy,
+    load_agent_env,
     load_agent_vars,
     load_definition,
     resolve_definition_path,
@@ -183,6 +187,8 @@ def _clear_wake_state(rc: int | None = None) -> None:
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     global _WAKE_STDOUT_THREAD, _WAKE_STDOUT_QUEUE
+    if _CURRENT_WAKE_NAME is not None:
+        clear_wake_pid(_CURRENT_WAKE_NAME)
     _CURRENT_WAKE_PROC = None
     _CURRENT_WAKE_NAME = None
     _WAKE_STARTED_MONO = None
@@ -408,8 +414,12 @@ def _start_wake_subprocess(
     env: dict[str, str] | None = None,
     max_seconds: float | None = None,
     on_complete: Callable[[int | None], None] | None = None,
+    unit: list[Path] | None = None,
 ) -> bool:
     """Start a wake subprocess. Returns True iff the process was spawned.
+
+    `unit` is the envelopes the wake consumed. They go into the agent's
+    `wake-pid` record so a handler killed outright can have them put back.
 
     `on_complete` fires from `_clear_wake_state` with the subprocess exit code
     once the wake finishes. It does NOT fire when the spawn itself fails —
@@ -448,6 +458,7 @@ def _start_wake_subprocess(
     stdout_thread.start()
     _CURRENT_WAKE_PROC = proc
     _CURRENT_WAKE_NAME = name
+    write_wake_pid(name, proc.pid, [f.name for f in unit or []])
     _WAKE_STARTED_MONO = _time.monotonic()
     _WAKE_MAX_SECONDS = max_seconds
     _WAKE_ON_COMPLETE = on_complete
@@ -465,6 +476,7 @@ def run_with_prefix(
     max_seconds: float | None = None,
     on_complete: Callable[[int | None], None] | None = None,
     on_start: Callable[[int], None] | None = None,
+    unit: list[Path] | None = None,
 ) -> int:
     """Run the wake subprocess in its own session so SIGKILL can target the
     whole process group (LLM CLI + any helpers it spawns). Tracks the live
@@ -475,7 +487,8 @@ def run_with_prefix(
     with its pid — the sync wake path's only way to log the pid, since it has
     no access to `_CURRENT_WAKE_PROC` before calling in."""
     if not _start_wake_subprocess(
-        name, cmd, cwd, env=env, max_seconds=max_seconds, on_complete=on_complete
+        name, cmd, cwd, env=env, max_seconds=max_seconds, on_complete=on_complete,
+        unit=unit,
     ):
         if on_complete is not None:
             on_complete(None)
@@ -527,9 +540,10 @@ def _wake_env(p: Participant, definition: dict, envelopes=()) -> dict[str, str]:
     Declared node env underneath, routing variables on top: an operator who
     writes `TELL_OUTBOX_DIR` into `definition.env` still gets the outbox a8s
     routes to, because a node that answers into someone else's outbox is worse
-    than a node that does not answer.
+    than a node that does not answer. The node's own `env.<NAME>` vars are read
+    from the registry on every wake, so a change lands on the next one.
     """
-    return {**wake_env(definition), **_tell_outbox_env(p),
+    return {**wake_env(definition, load_agent_env(p.name)), **_tell_outbox_env(p),
             "A8S_TURN_RECIPIENT": p.name,
             "A8S_TURN_ENVELOPES": json.dumps([str(path.resolve()) for path in envelopes])}
 
@@ -602,8 +616,9 @@ def _explain_not_found(p: Participant) -> None:
                 f"wakes through a login shell, so its rc files set the PATH.",
             )
             return
-        path = {**os.environ, **wake_env(definition)}.get("PATH", "")
-        source = wake_path_source(definition)
+        node_env = load_agent_env(p.name)
+        path = {**os.environ, **wake_env(definition, node_env)}.get("PATH", "")
+        source = wake_path_source(definition, node_env)
     except (FileNotFoundError, RuntimeError, ValueError):
         return
     out_agent(
@@ -611,7 +626,7 @@ def _explain_not_found(p: Participant) -> None:
         f"[{p.name}] exit 127 means a program was not found. This wake's PATH "
         f"came from {source}: {path}",
     )
-    out_agent(p.name, f"[{p.name}] {wake_path_repair(p.name, definition, 'the program')}")
+    out_agent(p.name, f"[{p.name}] {wake_path_repair(p.name, definition, 'the program', node_env)}")
 
 
 def _settle_wake(
@@ -687,20 +702,8 @@ def _settle_wake(
 
 
 def _wake_retry_ready(name: str, *, now: datetime | None = None) -> bool:
-    """False while a failed wake's backoff is still running. An unreadable or
-    unparseable record reads as ready — a corrupt sidecar must not wedge an
-    agent's inbox shut."""
-    record = read_wake_retry(name)
-    if not record:
-        return True
-    raw = record.get("next_at")
-    if not isinstance(raw, str):
-        return True
-    try:
-        next_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return True
-    return (now or datetime.now(timezone.utc)) >= next_at
+    """False while a failed wake's backoff is still running."""
+    return wake_retry_wait(name, now=now) is None
 
 
 def _wake_completion(
@@ -768,6 +771,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
             env=spawn_env,
             max_seconds=max_sec,
             on_complete=complete,
+            unit=[trashed],
         )
         if started and _CURRENT_WAKE_PROC is not None:
             txlog.log(
@@ -786,6 +790,7 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
         env=spawn_env,
         max_seconds=max_sec,
         on_complete=complete,
+        unit=[trashed],
         on_start=lambda pid: txlog.log(
             "WAKE_START", msg_id=trashed.stem, recipient=p.name, detail=f"wake pid={pid}"
         ),
@@ -864,6 +869,7 @@ def wake_batch(
             env=spawn_env,
             max_seconds=max_sec,
             on_complete=complete,
+            unit=trashed,
         )
         if started and _CURRENT_WAKE_PROC is not None:
             log_batch_start(_CURRENT_WAKE_PROC.pid)
@@ -877,6 +883,7 @@ def wake_batch(
         env=spawn_env,
         max_seconds=max_sec,
         on_complete=complete,
+        unit=trashed,
         on_start=log_batch_start,
     )
     return False
@@ -1902,7 +1909,10 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                 names, pid, publish_remotes, configured_remote_ids, unstarted_remote_ids
             )
         stop_remotes(started_remotes)
-        while _wake_in_flight():
+        # A wake that already exited still owes its settle: a second stop
+        # signal kills it while the loop is between iterations, and without
+        # this its mail stays in trash and its wake record is never cleared.
+        while _CURRENT_WAKE_PROC is not None:
             _service_in_flight_wake()
             _time.sleep(0.05)
         txlog.log("RUN_STOP", sender=label, detail=stop_reason or "loop exited")

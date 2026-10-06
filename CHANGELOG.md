@@ -10,6 +10,60 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.101 — 2026-10-06
+
+### Added
+
+- **A node can have its own environment variables.** `a8s vars <name> set
+  env.<NAME> <value>` gives one node an OS environment variable for every wake,
+  and `a8s add <name> <dir> --env.<NAME>=<value>` sets it at registration.
+  Only an `env.`-prefixed key reaches the environment, and `<NAME>` keeps its
+  case. Every other var stays an argv `$KEY` and never reaches the
+  environment, and an `env.` key never fills a `$KEY` or a path field. A
+  node var wins over `definition.env` and loses to the variables a8s routing
+  injects; `TELL_OUTBOX_DIR`, `TELL_FILE_MAX` and the `A8S_TURN_` names are
+  refused at `set`. `env.PATH` replaces `PATH` like `definition.env` does, and
+  `a8s start` probes the harness under it. A changed var reaches the next wake
+  with no restart. Values sit in the registry in plain text, so a secret does
+  not belong in one. See
+  [Wake environment](docs/a8s.md#wake-environment).
+
+### Changed
+
+- **`a8s logs` prints the last 1000 lines.** A log that holds days of lines
+  no longer scrolls past. `-n N` picks the count (`--tail N` still works),
+  `-n all` prints everything, and `-f` follows from the same cut, like
+  `tail -f`. Several nodes still merge by timestamp before the cut.
+- **`a8s ps` shows each node's status and activity.** STATUS is `ok` when the
+  node wakes on its next pass, `busy` while a wake runs, and
+  `failed, backoff 2m (attempt 3/4)` while a failed wake's backoff runs, with
+  the time that remains. MSGS 24H counts the messages that reached the node in
+  the last day, and LAST MSG is the local time of the newest one. See
+  [`docs/a8s.md`](docs/a8s.md).
+- **`a8s stop` ends the node's wake backoff.** Once the node has detached, a
+  stop clears the backoff a failed wake armed, so the next start delivers
+  waiting mail at once instead of waiting out the old clock, and it prints one
+  line when it did. `a8s restart` does the same. Trash and dead letters are
+  left alone; `a8s retry` still returns those.
+
+### Fixed
+
+- **`a8s stop --force` ends a node that cannot act on a signal.** A node
+  blocked in a call never ran its signal handler, so `--force` waited 30
+  seconds, reported the node still running and left it and its wake alive.
+  The wake's pid is now recorded while it runs. If the node has not detached 8
+  seconds after the second SIGTERM, `--force` kills the node and its wake,
+  puts the wake's message back in the inbox, and leaves the node ready to
+  start. A plain `a8s stop` still waits for the wake and never kills it.
+- **`a8s stop --force` on one member of an alias ends every node on that
+  handler.** The shared process dies for all of them, so the other members'
+  wakes now end too, their mail goes back to their inboxes, their backoff
+  clears, and the stop names them.
+- **A node that detaches after a second stop signal returns the killed wake's
+  mail.** When the second signal killed the wake between two loop passes, the
+  message stayed in trash and the wake record stayed behind. The node now
+  settles the wake before it detaches.
+
 ## 0.1.100 — 2026-10-02
 
 ### Added

@@ -28,6 +28,7 @@ __all__ = [
     "EVENTS",
     "TransactionLogError",
     "hold_open",
+    "inbox_activity",
     "log",
     "prune_transactions",
     "read_events",
@@ -324,6 +325,34 @@ def read_recent(
     if after_seq is None:
         rows.reverse()
     return [(int(row[0]), dict(zip(FIELDS, row[1:]))) for row in rows]
+
+
+# The two events that mean a message landed in a node's inbox: the router
+# writing it there (`ROUTED`, one row per recipient of an alias) and a remote
+# envelope arriving (`RECEIVED_REMOTE`, which repeats for a redelivery).
+_LANDED_EVENTS = ("ROUTED", "RECEIVED_REMOTE")
+
+
+def inbox_activity(since: str) -> dict[str, tuple[int, str]]:
+    """`{recipient: (messages since, newest stamp)}` for every node a message
+    has landed for, keyed by the lowercased name.
+
+    `since` is a stamp in the log's own form (`2026-10-05T12:00:00.000Z`).
+    The count is distinct message ids at or after it; the newest stamp covers
+    the whole log, so a quiet node still says when it last heard.
+    """
+    marks = ",".join("?" * len(_LANDED_EVENTS))
+    try:
+        with closing(open_for_read()) as conn:
+            rows = conn.execute(
+                f"SELECT LOWER(recipient), COUNT(DISTINCT CASE WHEN timestamp >= ? "
+                f"THEN msg_id END), MAX(timestamp) FROM transactions "
+                f"WHERE event IN ({marks}) AND recipient != '' GROUP BY LOWER(recipient)",
+                (since, *_LANDED_EVENTS),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
+    return {name: (int(count), newest) for name, count, newest in rows}
 
 
 def last_heard() -> dict[str, str]:

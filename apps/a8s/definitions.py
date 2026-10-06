@@ -16,9 +16,11 @@ nodes at the edges and a8s learns nothing about any node's protocol.
 
 A8s vars are NOT process environment variables — they live on the agent in
 the registry and expand only through this interpolator. A `$NAME` that is
-neither a built-in placeholder nor a set a8s var is a hard error. Process
-environment for a wake is a separate knob, `definition.env`, and the two never
-meet: a var reaches argv, an `env` entry reaches the child's environment.
+neither a built-in placeholder nor a set a8s var is a hard error. The one
+exception is the `env.<NAME>` key (`a8s vars <name> set env.<NAME> <value>`):
+it names a process environment variable for the node's wakes, is never an
+argv placeholder, and never reaches this interpolator. `definition.env` is the
+other source of wake environment.
 
 Argv only, `$NAME?` (trailing `?`) is optional: an unset var drops the whole
 argv element that references it instead of erroring, which is what lets a
@@ -67,6 +69,7 @@ from registry import load_registry, resolve_recipient
 from settings import get_setting, merge_paths
 
 from ar3 import clock
+from ar3.envseam import ROUTING_OWNED
 from ar3.proc import missing_interpreter
 
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
@@ -101,6 +104,12 @@ MAILBOX_PATH_FIELDS = ("outbox_dir", "inbox_dir", "files_dir")
 PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)(\?)?")
 VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+ENV_VAR_PREFIX = "env."
+# Names a8s injects on every wake. A node var that named one would lose to the
+# routing layer, so the verb refuses it where it is written.
+ROUTING_ENV_NAMES = frozenset(n.upper() for n in ROUTING_OWNED)
+ROUTING_ENV_PREFIX = "A8S_TURN_"
+
 
 class UndefinedVarsError(ValueError):
     """Definition argv referenced `$NAME` that is not a built-in and not set."""
@@ -112,11 +121,53 @@ class UndefinedVarsError(ValueError):
         super().__init__(f"{label}: {refs}")
 
 
-def validate_var_name(name: str) -> str:
-    """Return the canonical (uppercase) a8s var key, or raise ValueError.
+def split_env_var_key(key: str) -> str | None:
+    """The variable name in an `env.<NAME>` var key, else None. Only the
+    prefix case-folds; environment variable names are case-sensitive."""
+    if key[: len(ENV_VAR_PREFIX)].lower() != ENV_VAR_PREFIX:
+        return None
+    return key[len(ENV_VAR_PREFIX):]
 
-    Names are case-insensitive: ``model`` and ``MODEL`` are the same var.
+
+def canonical_var_key(key: str) -> str:
+    """The stored spelling of a var key: `env.<NAME>` keeps NAME as written,
+    every other key is uppercase."""
+    name = split_env_var_key(key)
+    if name is not None:
+        return f"{ENV_VAR_PREFIX}{name}"
+    return key.upper()
+
+
+def _env_name_problem(name: str) -> str | None:
+    """Why `name` cannot be a node environment variable, or None if it can."""
+    if not VAR_NAME_RE.match(name):
+        return (
+            f"a8s: env name is not a usable environment variable name: {name!r} "
+            f"(try: a8s vars <node> set env.OTEL_RESOURCE_ATTRIBUTES <value>)"
+        )
+    upper = name.upper()
+    if upper in ROUTING_ENV_NAMES or upper.startswith(ROUTING_ENV_PREFIX):
+        return (
+            f"a8s: {name} is set by a8s routing on every wake and a node var "
+            f"may not override it"
+        )
+    return None
+
+
+def validate_var_name(name: str) -> str:
+    """Return the canonical a8s var key, or raise ValueError.
+
+    Names are case-insensitive and stored uppercase: ``model`` and ``MODEL``
+    are the same var. An ``env.<NAME>`` key keeps NAME as written, because
+    environment variable names are case-sensitive; only the ``env.`` prefix
+    case-folds.
     """
+    env_name = split_env_var_key(name)
+    if env_name is not None:
+        problem = _env_name_problem(env_name)
+        if problem:
+            raise ValueError(problem)
+        return f"{ENV_VAR_PREFIX}{env_name}"
     if not VAR_NAME_RE.match(name):
         raise ValueError(
             f"var name must match [A-Za-z_][A-Za-z0-9_]*: {name!r}"
@@ -127,23 +178,59 @@ def validate_var_name(name: str) -> str:
     return canon
 
 
-def load_agent_vars(name: str) -> dict[str, str]:
-    """Per-node a8s vars from the registry (`agents.<name>.vars`).
+def argv_vars(raw: object) -> dict[str, str]:
+    """The `$KEY` placeholders in a registry `vars` map: every string pair
+    except an `env.` key, which is environment and never argv. Keys come back
+    uppercase; duplicate spellings collapse."""
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and split_env_var_key(k) is None:
+            out[k.upper()] = v
+    return out
 
-    Keys are returned uppercase (canonical). Duplicate spellings collapse.
+
+def env_vars(raw: object) -> dict[str, str]:
+    """The `env.<NAME>` entries in a registry `vars` map, as NAME -> value.
+
+    NAME keeps its case. A registry entry whose NAME cannot be an environment
+    variable raises ValueError, which aborts the wake the way a malformed
+    `definition.env` does."""
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        name = split_env_var_key(k)
+        if name is None:
+            continue
+        if not VAR_NAME_RE.match(name):
+            raise ValueError(f"node env var name is not usable as a variable: {k!r}")
+        out[name] = v
+    return out
+
+
+def load_agent_vars(name: str) -> dict[str, str]:
+    """Per-node a8s vars from the registry (`agents.<name>.vars`), the ones
+    that expand as `$KEY`. Keys are returned uppercase (canonical). Duplicate
+    spellings collapse. `env.` keys are not here; see `load_agent_env`.
     """
     match = resolve_recipient(name)
     if match is None:
         return {}
     _, info = match
-    raw = info.get("vars")
-    if not isinstance(raw, dict):
+    return argv_vars(info.get("vars"))
+
+
+def load_agent_env(name: str) -> dict[str, str]:
+    """The node's own environment variables (`env.<NAME>` vars), NAME -> value."""
+    match = resolve_recipient(name)
+    if match is None:
         return {}
-    out: dict[str, str] = {}
-    for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, str):
-            out[k.upper()] = v
-    return out
+    _, info = match
+    return env_vars(info.get("vars"))
 
 
 def placeholder_names(argv: list[str]) -> set[str]:
@@ -806,8 +893,8 @@ def definition_env(definition: dict) -> dict[str, str]:
     """`definition.env` — process environment declared for every wake.
 
     Literal strings only: no `$NAME` expansion, because these are OS variables
-    handed to the child, not argv the interpolator owns. `a8s vars` is the
-    other knob and stays argv-only.
+    handed to the child, not argv the interpolator owns. A node's `env.<NAME>`
+    vars (`load_agent_env`) are the per-node counterpart.
     """
     raw = definition.get("env")
     if raw is None:
@@ -824,19 +911,21 @@ def definition_env(definition: dict) -> dict[str, str]:
     return out
 
 
-def wake_env(definition: dict) -> dict[str, str]:
+def wake_env(definition: dict, node_env: dict[str, str] | None = None) -> dict[str, str]:
     """The environment a node declares, layered over the handler's own.
 
-    `definition.env` wins over what `a8s start`'s shell happened to carry. For
-    a node that names no PATH, the machine-wide `wake_path` is merged into the
+    `definition.env` wins over what `a8s start`'s shell happened to carry, and
+    the node's own `env.<NAME>` vars (`node_env`) win over `definition.env`. A
+    node that names no PATH gets the machine-wide `wake_path` merged into the
     handler's PATH (`merge_paths`): it adds what the start shell lacks and
     never removes what that shell has. An unset `wake_path` means inherit,
     which is the handler's PATH.
 
     Routing variables are NOT in here. a8s injects those on top of this layer
-    so a definition cannot point its own outbox somewhere else.
+    so neither a definition nor a node var can point its own outbox somewhere
+    else.
     """
-    env = definition_env(definition)
+    env = {**definition_env(definition), **(node_env or {})}
     if "PATH" in env:
         return env
     recorded = str(get_setting("wake_path") or "").strip()
@@ -845,9 +934,11 @@ def wake_env(definition: dict) -> dict[str, str]:
     return {"PATH": merge_paths(os.environ.get("PATH", ""), recorded), **env}
 
 
-def wake_path_source(definition: dict) -> str:
+def wake_path_source(definition: dict, node_env: dict[str, str] | None = None) -> str:
     """Where the PATH of this node's wakes comes from, in the operator's
     words — what a failed wake names so the fix has an address."""
+    if "PATH" in (node_env or {}):
+        return "the node's `env.PATH` var"
     if "PATH" in definition_env(definition):
         return "`definition.env`"
     if str(get_setting("wake_path") or "").strip():
@@ -855,8 +946,18 @@ def wake_path_source(definition: dict) -> str:
     return "the start shell's PATH"
 
 
-def wake_path_repair(member: str, definition: dict, program: str) -> str:
+def wake_path_repair(
+    member: str,
+    definition: dict,
+    program: str,
+    node_env: dict[str, str] | None = None,
+) -> str:
     """The one step that repairs a wake that cannot find `program`."""
+    if "PATH" in (node_env or {}):
+        return (
+            f"This node declares its own PATH: add the directory that holds "
+            f"{program} to `a8s vars {member} set env.PATH <value>`."
+        )
     if "PATH" in definition_env(definition):
         return (
             f"This node declares its own PATH: add the directory that holds "
