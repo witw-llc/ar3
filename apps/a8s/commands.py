@@ -3125,13 +3125,14 @@ def _cmd_remote_set(name: str, broker: str, topic: str, opt_tokens: list[str]) -
         return _remote_usage()
     cfg = load_network_config()
     overwriting = name in cfg["remotes"]
+    prior_spec = cfg["remotes"].get(name)
     public, secrets = split_secret_keys(
         {"transport": "mqtt", "broker": broker, "topic": topic, **extras}
     )
     _forget_secrets_of_prior_kind("remotes", name, "mqtt")
     cfg["remotes"][name] = public
     save_network_config(cfg)
-    put_remote_secrets(name, secrets)
+    put_remote_secrets(name, public, secrets, prior_spec)
     verb = "updated" if overwriting else "added"
     print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
     return 0
@@ -3243,10 +3244,11 @@ def _cmd_remote_set_s3(name: str, url: str, opt_tokens: list[str]) -> int:
     public, secrets = split_secret_keys(spec)
     cfg = load_network_config()
     overwriting = name in cfg["remotes"]
+    prior_spec = cfg["remotes"].get(name)
     _forget_secrets_of_prior_kind("remotes", name, "s3")
     cfg["remotes"][name] = public
     save_network_config(cfg)
-    put_remote_secrets(name, secrets)
+    put_remote_secrets(name, public, secrets, prior_spec)
     verb = "updated" if overwriting else "added"
     print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
     # A remote with nowhere for its attachments to go is a trap the operator
@@ -3371,6 +3373,7 @@ def _cmd_remote_set_folder(name: str, folder: str, opt_tokens: list[str]) -> int
     cfg = load_network_config()
     prior = cfg["remotes"].get(name)
     overwriting = name in cfg["remotes"]
+    prior_spec = cfg["remotes"].get(name)
     prior_path = (
         str(prior.get("path", ""))
         if isinstance(prior, dict)
@@ -3400,7 +3403,7 @@ def _cmd_remote_set_folder(name: str, folder: str, opt_tokens: list[str]) -> int
     _forget_secrets_of_prior_kind("remotes", name, "folder")
     cfg["remotes"][name] = public
     save_network_config(cfg)
-    put_remote_secrets(name, secrets)
+    put_remote_secrets(name, public, secrets, prior_spec)
     transport.touch_ledger()
     verb = "updated" if overwriting else "added"
     print(f"{verb} remote {name} ({_format_remote_summary(merge_remote_secrets(name, public))})")
@@ -3816,10 +3819,11 @@ def _cmd_storage_set(name: str, url: str, opt_tokens: list[str]) -> int:
     public, secrets = split_secret_keys(spec)
     cfg = load_network_config()
     overwriting = name in cfg["services"]
+    prior_spec = cfg["services"].get(name)
     _forget_secrets_of_prior_kind("services", name, kind)
     cfg["services"][name] = public
     save_network_config(cfg)
-    put_spec_secrets("services", name, secrets)
+    put_spec_secrets("services", name, public, secrets, prior_spec)
     verb = "updated" if overwriting else "added"
     print(f"{verb} storage {name} ({_format_storage_summary(spec)})")
     return 0

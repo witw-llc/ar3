@@ -191,14 +191,6 @@ def _argv_looks_like_option(arg: str) -> bool:
     return arg.startswith("-") and arg != "-"
 
 
-def _argv_is_existing_file(arg: str) -> bool:
-    """True if arg names a regular file. OSError (e.g. ENAMETOOLONG) → False."""
-    try:
-        return Path(arg).expanduser().is_file()
-    except OSError:
-        return False
-
-
 def parse_byte_size(raw: str) -> int:
     """Parse a positive byte size: plain int, or with k/kb/m/mb/g/gb suffix."""
     text = raw.strip().lower().replace("_", "")
@@ -388,16 +380,27 @@ def join_args(args: list[str]) -> str:
 
 def parse_tell_argv(
     argv: list[str],
-) -> tuple[str | None, list[str], list[str], bool, bool]:
-    """Return `(recipient, attachments, message_argv, check, split)`."""
+) -> tuple[str | None, list[str], list[str], bool, bool, bool]:
+    """Return `(recipient, attachments, message_argv, check, split, verbatim)`.
+
+    Nothing after the first `--` is an option: the recipient and the message
+    follow it as given."""
     attachments: list[str] = []
     recipient: str | None = None
     message_argv: list[str] = []
     check = False
     split = False
+    verbatim = False
     i = 0
     while i < len(argv):
         arg = argv[i]
+        if arg == "--":
+            for rest in argv[i + 1:]:
+                if recipient is None:
+                    recipient = rest
+                else:
+                    message_argv.append(rest)
+            break
         if arg.startswith("--attach=") or arg.startswith("--file="):
             path = arg.split("=", 1)[1]
             if not path.strip():
@@ -408,15 +411,10 @@ def parse_tell_argv(
             if i >= len(argv) or _argv_looks_like_option(argv[i]):
                 raise TellUsageError("--attach requires a path")
             attachments.append(argv[i])
-            while (
-                i + 1 < len(argv)
-                and not _argv_looks_like_option(argv[i + 1])
-                and _argv_is_existing_file(argv[i + 1])
-            ):
-                i += 1
-                attachments.append(argv[i])
         elif arg == "--split":
             split = True
+        elif arg == "--verbatim":
+            verbatim = True
         elif arg == "--check":
             check = True
         elif arg in ("-h", "--help"):
@@ -428,7 +426,7 @@ def parse_tell_argv(
         else:
             message_argv.append(arg)
         i += 1
-    return recipient, attachments, message_argv, check, split
+    return recipient, attachments, message_argv, check, split, verbatim
 
 
 def split_recipients(recipient: str) -> list[str]:
@@ -462,7 +460,7 @@ def _stdin_wait_sec() -> float:
     return seconds if seconds > 0 else STDIN_WAIT_SEC
 
 
-def resolve_message_body(message_argv: list[str]) -> str | None:
+def resolve_message_body(message_argv: list[str], *, verbatim: bool = False) -> str | None:
     """The body, or None when there is not one.
 
     Four cases, and the difference between the last two is the whole design.
@@ -491,7 +489,7 @@ def resolve_message_body(message_argv: list[str]) -> str | None:
             print("tell: reading the message; end with Ctrl-D", file=sys.stderr)
         return sys.stdin.read()
     if message_argv:
-        return join_args(message_argv)
+        return " ".join(message_argv) if verbatim else join_args(message_argv)
     if sys.stdin.isatty():
         print("tell: reading the message; end with Ctrl-D", file=sys.stderr)
         return sys.stdin.read() or None
@@ -604,13 +602,15 @@ class TellVersion(Exception):
     the recipient name, which fails later and for the wrong reason."""
 
 
-_USAGE = "usage: tell [--attach PATH ...] [--split] <name> [<message...>|-]"
+_USAGE = "usage: tell [--attach PATH]... [--split] [--verbatim] [--] <name> [<message...>|-]"
 
 
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
     print('       quote comma/semicolon-separated recipients: "alpha,beta;gamma"', file=sys.stderr)
-    print("       --attach/--file may repeat; multiple paths after one flag OK if they exist", file=sys.stderr)
+    print("       --attach/--file take exactly one path each; repeat the flag for more files", file=sys.stderr)
+    print("       --verbatim: send the body exactly as given; trailing FILE: lines stay text", file=sys.stderr)
+    print("       --: end of options; the recipient and message follow as given", file=sys.stderr)
     print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
     print(f"       size limit: {TELL_FILE_MAX_ENV} (bytes or 50m), else max_file_bytes / 50MiB", file=sys.stderr)
     print("       body on stdin keeps the shell out of it: - <<'EOF' … EOF, or - < body.md", file=sys.stderr)
@@ -828,7 +828,7 @@ def run_check(recipient: str | None) -> int:
 def tell_main(argv: list[str]) -> int:
     harden_stdio()
     try:
-        recipient, attachments, message_argv, check, split = parse_tell_argv(argv)
+        recipient, attachments, message_argv, check, split, verbatim = parse_tell_argv(argv)
         recipients = split_recipients(recipient) if recipient is not None else []
     except TellHelp:
         _print_usage()
@@ -842,9 +842,9 @@ def tell_main(argv: list[str]) -> int:
         return 2
 
     if check:
-        if attachments or message_argv or split:
+        if attachments or message_argv or split or verbatim:
             print(
-                "tell: --check does not accept a message, attachments, or --split",
+                "tell: --check does not accept a message, attachments, --split, or --verbatim",
                 file=sys.stderr,
             )
             return 2
@@ -855,7 +855,7 @@ def tell_main(argv: list[str]) -> int:
         return 2
 
     try:
-        body = resolve_message_body(message_argv)
+        body = resolve_message_body(message_argv, verbatim=verbatim)
     except TellStdinError as e:
         print(f"tell: {e}", file=sys.stderr)
         return 1
@@ -868,10 +868,22 @@ def tell_main(argv: list[str]) -> int:
         _print_usage()
         return 2
 
-    content, files = _split_content_and_files(body)
+    if verbatim:
+        content, files = body, []
+    else:
+        content, files = _split_content_and_files(body)
     for path in attachments:
         files.append({"filename": Path(path).name, "path": path})
     files = _normalize_file_entries(files)
+    names = [entry["filename"] for entry in files if "filename" in entry]
+    twice = sorted({name for name in names if names.count(name) > 1})
+    if twice:
+        print(
+            f"tell: two attachments share the name {twice[0]!r}; the recipient "
+            "gets one file per name, so rename one",
+            file=sys.stderr,
+        )
+        return 2
 
     outbox = find_outbox()
     if outbox is None:
@@ -895,6 +907,21 @@ def tell_main(argv: list[str]) -> int:
             assert canonical is not None
             to = canonical
         targets.append((to, kind))
+
+    # `kind` is None when the registry does not know the name and a remote
+    # might: the only recipients a storage service has to carry a file to.
+    if files and registered and any(kind is None for _, kind in targets):
+        from network import configured_service_ids
+
+        if not configured_service_ids():
+            remote_names = ", ".join(repr(to) for to, kind in targets if kind is None)
+            print(
+                f"tell: {remote_names} is not in the local registry, and files "
+                "to a remote recipient need a storage service — set one up "
+                "with `a8s storage`",
+                file=sys.stderr,
+            )
+            return 1
 
     split_dir = outbox / f".{new_ulid()}.parts"
     try:

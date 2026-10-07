@@ -20,7 +20,7 @@ Or point stdin at a file you wrote: `tell <recipient> - < message.md`.
 Full surface:
 
 ```
-tell [--attach PATH ...] [--split] <recipient> [<message...>|-]
+tell [--attach PATH]... [--split] [--verbatim] [--] <recipient> [<message...>|-]
 ```
 
 - `<recipient>` is an opaque name — do not guess who/what it is or change tone.
@@ -30,7 +30,8 @@ tell [--attach PATH ...] [--split] <recipient> [<message...>|-]
 - A trailing `<message...>` argument suits a short plain body. Anything holding
   `$`, backticks, backslashes, quotes, or newlines goes on stdin — inside double
   quotes the shell eats it (`"$1.25"` sends `.25`).
-- `--attach` / `--file` may repeat (or list existing paths after one flag); `--attach=PATH` works.
+- `--attach` / `--file` take exactly one path each; repeat the flag for more files. `--attach=PATH` works.
+- `--verbatim` sends the body exactly as given, so trailing `FILE:` lines stay text; `--` ends options, so a recipient that starts with a dash is still a name.
 - Oversized attachments fail immediately unless `--split` chunks them under the size limit.
 - Returns immediately. Delivery may take seconds or longer; do not expect a reply in-session.
 - If `tell` fails with “cannot send from this directory”, tell the user — do not `cd` to work around it.

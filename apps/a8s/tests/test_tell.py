@@ -488,19 +488,30 @@ def test_tell_attach_equals_form(tmp_path):
     _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
 
 
-def test_tell_attach_multiple_paths_after_one_flag(tmp_path):
+def test_tell_attach_takes_exactly_one_path(tmp_path):
+    """The word after the path is the message, even when it names a file."""
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "notes.txt").write_text("not an attachment")
+    res = _run(tmp_path, "gerry", "--attach", "./a.txt", "notes.txt")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "notes.txt"
+    _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt"])
+
+
+def test_tell_a_second_path_needs_its_own_flag(tmp_path):
     (tmp_path / ".outbox").mkdir()
     (tmp_path / "a.txt").write_text("a")
     (tmp_path / "b.txt").write_text("b")
-    res = _run(tmp_path, "gerry", "--attach", "./a.txt", "./b.txt", "multi path")
+    res = _run(tmp_path, "gerry", "--attach", "./a.txt", "--attach", "./b.txt", "two flags")
     assert res.returncode == 0, res.stderr
     _name, msg = _read_outbox(tmp_path / ".outbox")
     _assert_staged_files(tmp_path / ".outbox", msg, ["a.txt", "b.txt"])
 
 
 def test_tell_attach_then_long_prompt_does_not_crash(tmp_path):
-    """After --attach, tell probes the next argv as a file. Prompts longer than
-    NAME_MAX raise ENAMETOOLONG on some Pythons; that must be message text."""
+    """The argument after the attached path is message text, however long."""
     (tmp_path / ".outbox").mkdir()
     (tmp_path / "a.txt").write_text("a")
     long_prompt = ("research " + ("detail " * 400)).rstrip()
@@ -516,7 +527,7 @@ def test_parse_tell_argv_long_token_after_attach_is_message():
     from tell import parse_tell_argv
 
     long_prompt = "x" * 300
-    recipient, attachments, message_argv, check, split = parse_tell_argv(
+    recipient, attachments, message_argv, check, split, verbatim = parse_tell_argv(
         ["bob", "--attach", "./nope-missing.txt", long_prompt]
     )
     assert recipient == "bob"
@@ -524,6 +535,7 @@ def test_parse_tell_argv_long_token_after_attach_is_message():
     assert message_argv == [long_prompt]
     assert check is False
     assert split is False
+    assert verbatim is False
 
 
 def test_tell_rejects_oversized_attachment_without_split(tmp_path, monkeypatch):
@@ -1600,3 +1612,121 @@ class TestTellRegistryOutboxDiscovery:
         assert list((seat / ".outbox").glob("*.json")) == []
         _name, msg = _read_outbox(other)
         assert msg["content"] == "locked"
+
+
+def test_tell_refuses_two_attachments_with_the_same_name(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    (tmp_path / "one" / "report.txt").write_text("first")
+    (tmp_path / "two" / "report.txt").write_text("second")
+    res = _run(
+        tmp_path, "gerry",
+        "--attach=./one/report.txt", "--attach=./two/report.txt", "hello",
+    )
+    assert res.returncode == 2
+    assert "'report.txt'" in res.stderr
+    assert list((tmp_path / ".outbox").iterdir()) == []
+
+
+def test_tell_refuses_a_file_line_that_repeats_an_attachment_name(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    (tmp_path / "one" / "a.txt").write_text("1")
+    (tmp_path / "two" / "a.txt").write_text("2")
+    res = _run(tmp_path, "gerry", "--attach=./one/a.txt", f"see\nFILE:{tmp_path / 'two' / 'a.txt'}")
+    assert res.returncode == 2
+    assert "'a.txt'" in res.stderr
+    assert list((tmp_path / ".outbox").iterdir()) == []
+
+
+def _remote_setup(tmp_path, *, services):
+    from network import save_network_config
+    from registry import save_aliases, save_registry
+
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    save_registry({"sender": {"root": str(tmp_path)}, "local": {"root": str(tmp_path / "l")}})
+    save_aliases({"crew": ["local"]})
+    cfg = {"remotes": {"hub": {"transport": "folder", "path": str(tmp_path / "remote")}}}
+    if services:
+        cfg["services"] = {"files": {"service": "tempfile_org", "url": "https://tempfile.org"}}
+    save_network_config(cfg)
+    payload = tmp_path / "payload.txt"
+    payload.write_text("bytes")
+    return outbox, payload
+
+
+def test_tell_refuses_files_to_a_remote_recipient_without_storage(fake_home, tmp_path):
+    outbox, payload = _remote_setup(tmp_path, services=False)
+    res = _run_a8s(tmp_path, "sender;far-away", "--attach", str(payload), "hello")
+    assert res.returncode == 1
+    assert "a8s storage" in res.stderr
+    assert "'far-away'" in res.stderr
+    assert list(outbox.iterdir()) == []
+
+
+def test_tell_refuses_a_file_line_to_a_remote_recipient_without_storage(fake_home, tmp_path):
+    outbox, payload = _remote_setup(tmp_path, services=False)
+    res = _run_a8s(tmp_path, "far-away", f"see\nFILE:{payload}")
+    assert res.returncode == 1
+    assert "a8s storage" in res.stderr
+    assert list(outbox.iterdir()) == []
+
+
+def test_tell_sends_files_to_local_recipients_without_storage(fake_home, tmp_path):
+    outbox, payload = _remote_setup(tmp_path, services=False)
+    res = _run_a8s(tmp_path, "sender;crew", "--attach", str(payload), "hello")
+    assert res.returncode == 0, res.stderr
+    assert len(list(outbox.glob("*.json"))) == 2
+
+
+def test_tell_sends_text_to_a_remote_recipient_without_storage(fake_home, tmp_path):
+    outbox, _payload = _remote_setup(tmp_path, services=False)
+    res = _run_a8s(tmp_path, "far-away", "hello")
+    assert res.returncode == 0, res.stderr
+    assert len(list(outbox.glob("*.json"))) == 1
+
+
+def test_tell_sends_files_to_a_remote_recipient_with_storage(fake_home, tmp_path):
+    outbox, payload = _remote_setup(tmp_path, services=True)
+    res = _run_a8s(tmp_path, "far-away", "--attach", str(payload), "hello")
+    assert res.returncode == 0, res.stderr
+    assert len(list(outbox.glob("*.json"))) == 1
+
+
+def test_tell_double_dash_ends_options(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "--", "--check", "hello", "--split")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["to"] == "--check"
+    assert msg["content"] == "hello --split"
+
+
+def test_tell_verbatim_keeps_trailing_file_lines_as_text(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "x.txt").write_text("x")
+    body = "see\nFILE:./x.txt\n"
+    res = _run(tmp_path, "--verbatim", "gerry", "-", stdin=body)
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == body
+    assert msg["files"] == []
+
+
+def test_tell_without_verbatim_still_reads_trailing_file_lines(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "x.txt").write_text("x")
+    res = _run(tmp_path, "gerry", "-", stdin="see\nFILE:./x.txt\n")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "see"
+    _assert_staged_files(tmp_path / ".outbox", msg, ["x.txt"])
+
+
+def test_tell_verbatim_with_check_is_refused(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "--check", "--verbatim")
+    assert res.returncode == 2

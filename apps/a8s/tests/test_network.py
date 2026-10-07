@@ -102,23 +102,103 @@ class TestNetworkConfig:
     def test_secrets_overlay_merged_at_load(self, fake_home, monkeypatch):
         from network import put_remote_secrets, merge_remote_secrets
 
-        save_network_config({
-            "remotes": {
-                "hub": {
-                    "transport": "mqtt",
-                    "broker": "mqtt://localhost:1883",
-                    "topic": "t",
-                    "user": "alice",
-                }
-            }
-        })
-        put_remote_secrets("hub", {"pass": "s3cret"})
+        spec = {
+            "transport": "mqtt",
+            "broker": "mqtt://localhost:1883",
+            "topic": "t",
+            "user": "alice",
+        }
+        save_network_config({"remotes": {"hub": spec}})
+        put_remote_secrets("hub", spec, {"pass": "s3cret"})
         merged = merge_remote_secrets("hub", load_network_config()["remotes"]["hub"])
         assert merged["user"] == "alice"
         assert merged["pass"] == "s3cret"
         # Legacy inline pass still works until rewritten.
         inline = {"transport": "mqtt", "broker": "mqtt://x", "topic": "t", "pass": "old"}
         assert merge_remote_secrets("missing", inline)["pass"] == "old"
+
+    def test_a_secret_without_a_binding_is_missing(self, fake_home):
+        from core import secrets_config_path
+        from network import merge_remote_secrets
+
+        spec = {"transport": "mqtt", "broker": "mqtt://h", "topic": "t"}
+        save_network_config({"remotes": {"hub": spec}})
+        secrets_config_path().write_text(
+            json.dumps({"remotes": {"hub": {"pass": "old"}}, "services": {}})
+        )
+        assert "pass" not in merge_remote_secrets("hub", spec)
+
+    @pytest.mark.parametrize("section", ["remotes", "services"])
+    def test_a_reader_never_pairs_a_spec_with_another_writes_secret(
+        self, fake_home, monkeypatch, section
+    ):
+        """The reader holds the spec it read from network.json while a writer
+        replaces both files; the secret it then reads belongs to the new
+        destination and must not be sent to the old one."""
+        import network
+        from commands import cmd_remote, cmd_storage
+
+        def write(host, password):
+            if section == "remotes":
+                assert cmd_remote(["hub", f"mqtt://{host}", "t", "--pass", password]) == 0
+            else:
+                assert cmd_storage([
+                    "hub", f"webdav://{host}/dav",
+                    "--base-url", f"https://{host}/dav", "--password", password,
+                ]) == 0
+
+        write("old.example.com", "old-secret")
+        built = []
+
+        def capture(name, spec):
+            built.append(spec)
+            raise ValueError("captured")
+
+        monkeypatch.setattr(network, "_build_transport", capture)
+        monkeypatch.setattr(network, "_build_service", capture)
+        monkeypatch.setattr(network, "_SERVICE_CACHE", None)
+        real = network.load_secrets_config
+        state = {"paused": False}
+
+        def pausing_loader():
+            if not state["paused"]:
+                state["paused"] = True
+                write("new.example.com", "new-secret")
+            return real()
+
+        monkeypatch.setattr(network, "load_secrets_config", pausing_loader)
+        # Reader: loads the old spec, pauses, the overwrite completes, resumes.
+        (network.load_remotes if section == "remotes" else network.load_services)()
+        monkeypatch.setattr(network, "load_secrets_config", real)
+        assert len(built) == 1
+        assert "old.example.com" in json.dumps(built[0])
+        assert "pass" not in built[0] and "password" not in built[0]
+
+    @pytest.mark.parametrize("section", ["remotes", "services"])
+    def test_an_unchanged_entry_still_yields_its_secret(
+        self, fake_home, monkeypatch, section
+    ):
+        import network
+        from commands import cmd_remote, cmd_storage
+
+        if section == "remotes":
+            assert cmd_remote(["hub", "mqtt://h.example.com", "t", "--pass", "pw"]) == 0
+        else:
+            assert cmd_storage([
+                "hub", "webdav://h.example.com/dav",
+                "--base-url", "https://h.example.com/dav", "--password", "pw",
+            ]) == 0
+        built = []
+
+        def capture(name, spec):
+            built.append(spec)
+            raise ValueError("captured")
+
+        monkeypatch.setattr(network, "_build_transport", capture)
+        monkeypatch.setattr(network, "_build_service", capture)
+        monkeypatch.setattr(network, "_SERVICE_CACHE", None)
+        (network.load_remotes if section == "remotes" else network.load_services)()
+        assert [s.get("pass") or s.get("password") for s in built] == ["pw"]
 
 
 class TestLoadRemotes:
@@ -1349,3 +1429,54 @@ def test_network_config_save_is_atomic(fake_home, monkeypatch):
     save_network_config({"remotes": {"r": {"transport": "folder"}}, "services": {}})
     assert calls == [network_config_path()]
     assert json.loads(network_config_path().read_text())["remotes"] == {"r": {"transport": "folder"}}
+
+
+class TestReceiptLogging:
+    """The agent log shows one line per delivery; every receipt, including the
+    no-local-recipient reports of the other nodes, lives in the transaction log."""
+
+    @staticmethod
+    def _receipt(msg_id, stage, node=""):
+        original = {"id": msg_id, "from": "A", "to": "B"}
+        return build_delivery_receipt(original, ["B"], stage, node=node)
+
+    @staticmethod
+    def _agent_log(name):
+        from core import agent_log_path
+        path = agent_log_path(name)
+        return path.read_text() if path.exists() else ""
+
+    def test_no_local_recipient_is_txlog_only(self, two_local_agents):
+        from txlog import read_events
+
+        msg_id = new_ulid()
+        network._receive_control_envelope(
+            self._receipt(msg_id, "no_local_recipient", node="n-1"),
+            two_local_agents, "hub",
+        )
+        events = [e["event"] for e in read_events(msg_id)]
+        assert "DELIVERY_RECEIPT" in events
+        assert "NO_LOCAL_RECIPIENT" in events
+        assert msg_id not in self._agent_log("A")
+
+    def test_inbox_write_logs_a_delivered_line(self, two_local_agents):
+        msg_id = new_ulid()
+        network._receive_control_envelope(
+            self._receipt(msg_id, "inbox_write"), two_local_agents, "hub",
+        )
+        log = self._agent_log("A")
+        assert f"delivered id={msg_id} -> B" in log
+        assert "delivery confirmed" not in log
+
+    def test_node_is_optional_and_reaches_the_txlog(self, two_local_agents):
+        from txlog import read_events
+
+        bare = self._receipt(new_ulid(), "inbox_write")
+        assert "node" not in bare["a8s_control"]
+        assert parse_delivery_receipt(bare).node == ""
+        msg_id = new_ulid()
+        tagged = self._receipt(msg_id, "no_local_recipient", node="n-abc")
+        assert parse_delivery_receipt(tagged).node == "n-abc"
+        network._receive_control_envelope(tagged, two_local_agents, "hub")
+        details = [e["detail"] for e in read_events(msg_id)]
+        assert any("no_local_recipient; node=n-abc; receipt_id=" in d for d in details)

@@ -740,6 +740,18 @@ def out(text: str = "", end: str = "\n") -> None:
         _emit_supervisor(line)
 
 
+def out_err(text: str = "", end: str = "\n") -> None:
+    """A diagnostic from a command whose stdout a caller may parse: stderr,
+    and the supervisor log, never stdout."""
+    line = text + end
+    sys.stderr.write(line)
+    sys.stderr.flush()
+    ts_line = f"{_ts()} {line}"
+    if not ts_line.endswith("\n"):
+        ts_line += "\n"
+    _append(_log_path(), ts_line)
+
+
 def log_agent_unlocked(name: str, text: str) -> None:
     """One line into an agent's log, with no stdout and no `PRINT_LOCK`.
 

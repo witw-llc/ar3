@@ -2141,6 +2141,56 @@ class TestCmdRemote:
         assert "pass" not in net
         assert load_secrets_config()["remotes"]["hub"]["pass"] == "KEEPME"
 
+    @pytest.mark.parametrize("stored", ["unbound", "mismatched"])
+    def test_a_rewrite_drops_a_password_not_bound_to_the_previous_spec(
+        self, fake_home, capsys, stored
+    ):
+        from network import SECRET_BINDING_KEY, load_secrets_config, save_secrets_config
+
+        assert cmd_remote(["hub", "mqtt://x", "t", "--pass", "OLD"]) == 0
+        secrets = load_secrets_config()
+        if stored == "unbound":
+            del secrets["remotes"]["hub"][SECRET_BINDING_KEY]
+        else:
+            secrets["remotes"]["hub"][SECRET_BINDING_KEY] = "0" * 64
+        save_secrets_config(secrets)
+        capsys.readouterr()
+
+        assert cmd_remote(["hub", "mqtt://y", "t", "--user", "bob"]) == 0
+        captured = capsys.readouterr()
+        assert "stored password for remote 'hub' dropped" in captured.err
+        assert "dropped" not in captured.out
+        assert "hub" not in load_secrets_config()["remotes"]
+        assert "OLD" not in json.dumps(load_secrets_config())
+
+    def test_a_rewrite_keeps_a_bound_password_and_rebinds_it(self, fake_home, capsys):
+        from network import (
+            SECRET_BINDING_KEY, load_secrets_config, merge_remote_secrets, spec_binding,
+        )
+
+        assert cmd_remote(["hub", "mqtt://x", "t", "--pass", "KEEP"]) == 0
+        capsys.readouterr()
+        assert cmd_remote(["hub", "mqtt://y", "t", "--user", "bob"]) == 0
+        assert "dropped" not in capsys.readouterr().err
+        net = load_network_config()["remotes"]["hub"]
+        assert load_secrets_config()["remotes"]["hub"][SECRET_BINDING_KEY] == spec_binding(net)
+        assert merge_remote_secrets("hub", net)["pass"] == "KEEP"
+
+    def test_a_storage_rewrite_drops_an_unbound_password(self, fake_home, capsys):
+        from network import SECRET_BINDING_KEY, load_secrets_config, save_secrets_config
+
+        args = ["box", "webdav://dav.example/p", "--base-url", "https://dav.example/p"]
+        assert cmd_storage([*args, "--user", "u", "--password", "OLD"]) == 0
+        secrets = load_secrets_config()
+        del secrets["services"]["box"][SECRET_BINDING_KEY]
+        save_secrets_config(secrets)
+        capsys.readouterr()
+
+        assert cmd_storage([*args, "--user", "v"]) == 0
+        captured = capsys.readouterr()
+        assert "stored password for storage 'box' dropped" in captured.err
+        assert "box" not in load_secrets_config()["services"]
+
     def test_unremote_clears_secrets(self, fake_home):
         from network import load_secrets_config
 

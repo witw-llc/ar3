@@ -23,6 +23,7 @@ transport's own option-bag handling.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -40,12 +41,14 @@ from core import (
     network_config_path,
     out,
     out_agent,
+    out_err,
     secrets_config_path,
     seen_ids_path,
 )
 import receipts
 from delivery_receipt import (
     build_delivery_receipt,
+    local_node,
     is_control_envelope,
     parse_delivery_receipt,
 )
@@ -157,18 +160,17 @@ def _remote_discarded(
 SECRET_SPEC_KEYS = frozenset({"pass", "password"})
 
 
-def load_network_config() -> dict:
-    p = network_config_path()
-    if not p.is_file():
-        return {"remotes": {}, "services": {}}
+def _parse_sections(raw: bytes | None, label: str) -> dict:
+    empty = {"remotes": {}, "services": {}}
+    if raw is None:
+        return empty
     try:
-        with p.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        out(f"WARN: network.json malformed ({e}); treating as empty")
-        return {"remotes": {}, "services": {}}
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        out_err(f"WARN: {label} malformed ({e}); treating as empty")
+        return empty
     if not isinstance(data, dict):
-        return {"remotes": {}, "services": {}}
+        return empty
     data.setdefault("remotes", {})
     if not isinstance(data["remotes"], dict):
         data["remotes"] = {}
@@ -176,6 +178,27 @@ def load_network_config() -> dict:
     if not isinstance(data["services"], dict):
         data["services"] = {}
     return data
+
+
+def _load_sections(p, label: str) -> dict:
+    try:
+        raw = p.read_bytes() if p.is_file() else None
+    except OSError as e:
+        out_err(f"WARN: {label} malformed ({e}); treating as empty")
+        return {"remotes": {}, "services": {}}
+    return _parse_sections(raw, label)
+
+
+def parse_network_config(raw: bytes | None) -> dict:
+    return _parse_sections(raw, "network.json")
+
+
+def parse_secrets_config(raw: bytes | None) -> dict:
+    return _parse_sections(raw, "secrets.json")
+
+
+def load_network_config() -> dict:
+    return _load_sections(network_config_path(), "network.json")
 
 
 def save_network_config(cfg: dict) -> None:
@@ -183,24 +206,7 @@ def save_network_config(cfg: dict) -> None:
 
 
 def load_secrets_config() -> dict:
-    p = secrets_config_path()
-    if not p.is_file():
-        return {"remotes": {}, "services": {}}
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        out(f"WARN: secrets.json malformed ({e}); treating as empty")
-        return {"remotes": {}, "services": {}}
-    if not isinstance(data, dict):
-        return {"remotes": {}, "services": {}}
-    data.setdefault("remotes", {})
-    if not isinstance(data["remotes"], dict):
-        data["remotes"] = {}
-    data.setdefault("services", {})
-    if not isinstance(data["services"], dict):
-        data["services"] = {}
-    return data
+    return _load_sections(secrets_config_path(), "secrets.json")
 
 
 def save_secrets_config(cfg: dict) -> None:
@@ -221,30 +227,83 @@ def split_secret_keys(spec: dict) -> tuple[dict, dict]:
     return public, secrets
 
 
-def merge_spec_secrets(section: str, name: str, spec: dict) -> dict:
+#: Key in a secrets.json entry that holds the binding digest. Not a secret
+#: key, so the overlay never copies it onto a spec.
+SECRET_BINDING_KEY = "bind"
+
+_SECTION_NOUN = {"remotes": "remote", "services": "storage"}
+
+
+def spec_binding(spec: dict) -> str:
+    """Digest of a spec's non-secret fields: the destination a secret was
+    stored for. A secret travels with this digest and is used only with a spec
+    that hashes to it."""
+    public, _ = split_secret_keys(spec)
+    blob = json.dumps(public, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def merge_spec_secrets(section: str, name: str, spec: dict, secrets: dict | None = None) -> dict:
     """Overlay secrets.json (and any legacy inline secrets) onto a spec.
 
-    secrets.json wins for secret keys. Inline values still in network.json
-    remain effective until the next `a8s remote` / `a8s storage` rewrite
-    strips them. `section` is "remotes" or "services".
+    A stored secret applies only when its binding matches ``spec``'s
+    destination. network.json and secrets.json are two files, so a reader that
+    loaded the spec before a writer replaced both would otherwise pair the old
+    destination with the new password. A secret with no binding or a different
+    one is dropped and reported; the operator re-enters it. Inline values still
+    in network.json remain effective until the next `a8s remote` /
+    `a8s storage` rewrite strips them. `section` is "remotes" or "services".
+    `secrets` is an already parsed secrets.json; None reads the file.
     """
     merged = dict(spec)
-    stored = (load_secrets_config().get(section) or {}).get(name)
-    if isinstance(stored, dict):
-        for key, value in stored.items():
-            if key in SECRET_SPEC_KEYS:
-                merged[key] = value
+    if secrets is None:
+        secrets = load_secrets_config()
+    stored = (secrets.get(section) or {}).get(name)
+    if isinstance(stored, dict) and any(k in SECRET_SPEC_KEYS for k in stored):
+        if stored.get(SECRET_BINDING_KEY) == spec_binding(spec):
+            for key, value in stored.items():
+                if key in SECRET_SPEC_KEYS:
+                    merged[key] = value
+        else:
+            out_err(
+                f"WARN: the stored secret for {_SECTION_NOUN[section]} {name!r} does not "
+                "match its destination and is not used; enter it again"
+            )
     return merged
 
 
-def put_spec_secrets(section: str, name: str, secrets: dict) -> None:
-    """Merge ``secrets`` into secrets.json for ``name`` (no-op if empty)."""
-    if not secrets:
-        return
+def put_spec_secrets(
+    section: str, name: str, spec: dict, secrets: dict, prior: dict | None = None
+) -> None:
+    """Store ``secrets`` for ``name``, bound to the destination in ``spec`` (the
+    non-secret fields just written to network.json).
+
+    With no new password, the stored one is kept and rebound to ``spec`` only
+    when its binding matches ``prior``, the entry as it stood before this
+    rewrite. An unbound or mismatched password is dropped and reported: the
+    reader already treats it as missing, and rebinding it would hand it to a
+    destination it was never typed for.
+    """
     cfg = load_secrets_config()
     prev = cfg[section].get(name)
-    merged = dict(prev) if isinstance(prev, dict) else {}
+    merged: dict = {}
+    if isinstance(prev, dict):
+        kept = {k: v for k, v in prev.items() if k in SECRET_SPEC_KEYS}
+        if kept and not secrets:
+            if isinstance(prior, dict) and prev.get(SECRET_BINDING_KEY) == spec_binding(prior):
+                merged = kept
+            else:
+                out_err(
+                    f"stored password for {_SECTION_NOUN[section]} {name!r} dropped: it is "
+                    "not bound to the entry's previous destination; enter it again"
+                )
+                del cfg[section][name]
+                save_secrets_config(cfg)
+                return
     merged.update(secrets)
+    if not merged:
+        return
+    merged[SECRET_BINDING_KEY] = spec_binding(spec)
     cfg[section][name] = merged
     save_secrets_config(cfg)
 
@@ -261,8 +320,10 @@ def merge_remote_secrets(name: str, spec: dict) -> dict:
     return merge_spec_secrets("remotes", name, spec)
 
 
-def put_remote_secrets(name: str, secrets: dict) -> None:
-    put_spec_secrets("remotes", name, secrets)
+def put_remote_secrets(
+    name: str, spec: dict, secrets: dict, prior: dict | None = None
+) -> None:
+    put_spec_secrets("remotes", name, spec, secrets, prior)
 
 
 def delete_remote_secrets(name: str) -> None:
@@ -1463,6 +1524,15 @@ def _receipt_sender(sender: str, all_agents: list[Participant]) -> Participant |
     return by_name.get(bound[0].lower()) if kind == "namespace" else None
 
 
+_RECEIPT_LOG_LINE = {
+    "inbox_write": "delivered",
+    "attachment_fetched": "attachments fetched",
+    "attachment_failed": "attachment delivery failed",
+    "expired": "delivery expired",
+    "deferred": "delivery deferred",
+}
+
+
 def _receive_control_envelope(
     message: dict,
     all_agents: list[Participant],
@@ -1481,10 +1551,13 @@ def _receive_control_envelope(
     if local_sender is None:
         return
     recipients = ",".join(receipt.recipients)
-    out_agent(
-        local_sender.name,
-        f"delivery confirmed id={receipt.for_id} -> {recipients} ({receipt.stage})",
-    )
+    line = _RECEIPT_LOG_LINE.get(receipt.stage)
+    if line is not None:
+        out_agent(
+            local_sender.name,
+            f"{line} id={receipt.for_id} -> {recipients}",
+        )
+    node = f"; node={receipt.node}" if receipt.node else ""
     txlog.log(
         "DELIVERY_RECEIPT",
         msg_id=receipt.for_id,
@@ -1492,7 +1565,7 @@ def _receive_control_envelope(
         recipient=recipients,
         files=list(receipt.files) or None,
         remote=remote_id,
-        detail=f"{receipt.stage}; receipt_id={receipt.receipt_id}",
+        detail=f"{receipt.stage}{node}; receipt_id={receipt.receipt_id}",
     )
     _EVENT_FOR_STAGE = {
         "attachment_failed": "ATTACHMENT_FAILED",
@@ -1536,7 +1609,8 @@ def _publish_delivery_receipt(
     detail: str = "",
 ) -> None:
     receipt = build_delivery_receipt(
-        original, delivered_names, stage, files=files, detail=detail
+        original, delivered_names, stage, files=files, detail=detail,
+        node=local_node(),
     )
     if receipt is None:
         return

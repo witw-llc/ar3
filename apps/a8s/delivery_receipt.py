@@ -11,6 +11,8 @@ one conversation between two nodes.
 """
 from __future__ import annotations
 
+import hashlib
+import platform
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -57,6 +59,13 @@ class DeliveryReceipt:
     stage: str
     files: tuple[str, ...] = ()
     detail: str = ""
+    node: str = ""
+
+
+def local_node() -> str:
+    """The id this machine puts on the receipts it sends: a short digest of the
+    host name, so the receipts of several nodes tell apart without naming any."""
+    return "n-" + hashlib.sha256(platform.node().encode()).hexdigest()[:8]
 
 
 def is_control_envelope(message: dict) -> bool:
@@ -70,6 +79,7 @@ def build_delivery_receipt(
     *,
     files: list[str] | None = None,
     detail: str = "",
+    node: str = "",
 ) -> dict | None:
     """Return a receipt envelope, or None when the original cannot correlate."""
     original_id = original.get("id")
@@ -81,6 +91,7 @@ def build_delivery_receipt(
         return None
     if stage not in STAGES:
         return None
+    control_node = str(node or "").strip()
     named = [str(name).strip() for name in (files or []) if str(name).strip()]
     return {
         "id": new_ulid(),
@@ -98,6 +109,7 @@ def build_delivery_receipt(
             "stage": stage,
             "files": named,
             "detail": str(detail or ""),
+            **({"node": control_node} if control_node else {}),
         },
     }
 
@@ -141,6 +153,7 @@ def parse_delivery_receipt(message: dict) -> DeliveryReceipt | None:
             if isinstance(name, str) and name.strip()
         )
     detail = control.get("detail")
+    node = control.get("node")
     return DeliveryReceipt(
         receipt_id=receipt_id,
         for_id=for_id,
@@ -149,4 +162,5 @@ def parse_delivery_receipt(message: dict) -> DeliveryReceipt | None:
         stage=stage,
         files=files,
         detail=detail.strip() if isinstance(detail, str) else "",
+        node=node.strip() if isinstance(node, str) else "",
     )

@@ -7,7 +7,7 @@ on small models.
 
 The message body arrives as a JSON string argument, so no shell touches it:
 `$1.25`, backticks and backslashes reach the envelope byte-exact. Delivery
-reuses `a8s tell <recipient> -` with the body on stdin — the same safe path a
+reuses `a8s tell --verbatim -- <recipient> -` with the body on stdin — the same safe path a
 shell caller has — and the envelope lands in `TELL_OUTBOX_DIR`, which the
 server reads from its own environment (r4t pins it per turn).
 
@@ -88,19 +88,18 @@ def log_call(event: dict) -> None:
 
 
 def send(recipient: str, body: str, attachments: list[str] | None = None) -> tuple[bool, str]:
-    """Deliver through `a8s tell <recipient> -`, body on stdin.
+    """Deliver through `a8s tell --verbatim -- <recipient> -`, body on stdin.
 
-    Attachments use the `--attach=<path>` form on purpose: the separate-argument
-    form consumes following arguments while they name existing files, so a
-    recipient that happens to match a filename in the working directory would be
-    swallowed as an attachment. The `=` form takes exactly one path and cannot.
+    `--verbatim` keeps a body that ends in `FILE:` lines as text, and `--` keeps
+    a recipient that starts with a dash from being read as a flag. Files go
+    only through `attachments`.
 
     Path validation is left to `tell` — existence, the size cap and the resolved
     path in the error message all live there, and a second copy here would drift.
     """
     argv = [sys.executable, str(A8S_PY), "tell"]
     argv += [f"--attach={path}" for path in (attachments or [])]
-    argv += [recipient, "-"]
+    argv += ["--verbatim", "--", recipient, "-"]
     try:
         proc = subprocess.run(
             argv,

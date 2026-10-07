@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -94,7 +96,41 @@ COMMANDS: list[tuple[str, str, str]] = [
 
 ALIASES = {"tx": "transactions"}
 
-KNOWN_COMMANDS = {name for name, _, _ in COMMANDS} | set(ALIASES)
+
+def _load_extensions() -> list:
+    """Modules from `ext/*.py` (or `$A8S_EXT_DIR`), sorted, `_`-prefixed names
+    skipped. One that fails to import, or lacks `handle`, is reported and
+    skipped; a8s still runs."""
+    here = Path(__file__).resolve().parent
+    env = os.environ.get("A8S_EXT_DIR")
+    ext_dir = Path(env) if env else here / "ext"
+    if not ext_dir.is_dir():
+        return []
+    if str(here) not in sys.path:
+        sys.path.insert(0, str(here))
+    loaded = []
+    for path in sorted(ext_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(f"a8s_ext_{path.stem}", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            if not callable(getattr(module, "handle", None)):
+                raise AttributeError("no handle(cmd, args)")
+        except Exception as e:
+            print(f"a8s: extension {path.name}: {e}", file=sys.stderr)
+            continue
+        loaded.append(module)
+    return loaded
+
+
+EXTENSIONS = _load_extensions()
+EXT_COMMANDS: list[tuple[str, str, str]] = [
+    row for module in EXTENSIONS for row in getattr(module, "COMMANDS", [])
+]
+
+KNOWN_COMMANDS = {name for name, _, _ in COMMANDS + EXT_COMMANDS} | set(ALIASES)
 
 
 def _format_commands(rows: list[tuple[str, str, str]], indent: int = 2) -> str:
@@ -107,6 +143,8 @@ def _format_commands(rows: list[tuple[str, str, str]], indent: int = 2) -> str:
 
 
 CLI_EPILOG = "Commands:\n" + _format_commands(COMMANDS)
+if EXT_COMMANDS:
+    CLI_EPILOG += "\n\nExtensions:\n" + _format_commands(EXT_COMMANDS)
 
 
 LEARNS_PATH = {"add", "define", "start", "run", "restart", "retry"}
@@ -124,6 +162,10 @@ def _learn_path() -> None:
 
 
 def dispatch(cmd: str, args: list[str], interval: float) -> int:
+    for module in EXTENSIONS:
+        claimed = module.handle(cmd, args)
+        if claimed is not None:
+            return claimed
     if cmd in LEARNS_PATH and sm.at_a_terminal():
         _learn_path()
     if cmd == "add":
@@ -227,9 +269,15 @@ def main(argv: list[str]) -> int:
 
     interval = args.interval if args.interval is not None else sm.get_float("loop_interval")
 
+    rest = args.rest
+    if args.command == "tell":
+        # argparse drops the first `--` from a REMAINDER, and `tell` needs it:
+        # it ends options so a recipient that starts with a dash stays a name.
+        rest = argv[argv.index("tell") + 1:]
+
     if args.command in KNOWN_COMMANDS:
         try:
-            return dispatch(args.command, args.rest, interval)
+            return dispatch(args.command, rest, interval)
         except RegistryUnreadable as e:
             print(f"a8s: {e}", file=sys.stderr)
             return 1

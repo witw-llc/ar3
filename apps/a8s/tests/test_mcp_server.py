@@ -10,6 +10,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 import cli
 import mcp_server
 
@@ -282,3 +284,55 @@ class TestCliSurface:
     def test_bad_verb_is_a_usage_error(self, capsys):
         assert cli.dispatch("mcp", ["wat"], interval=1.0) == 2
         assert "usage: a8s mcp serve" in capsys.readouterr().err
+
+
+class TestUserTextIsNeverReinterpreted:
+    def _send(self, tmp_path, monkeypatch, recipient, body, attachments=None):
+        outbox = tmp_path / "staging"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.chdir(tmp_path)
+        arguments = {"recipient": recipient, "body": body}
+        if attachments is not None:
+            arguments["attachments"] = attachments
+        (response,) = _drive(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "tell", "arguments": arguments},
+            }
+        )
+        assert response["result"]["isError"] is False, response
+        (staged,) = sorted(outbox.glob("*.json"))
+        return json.loads(staged.read_text(encoding="utf-8"))
+
+    def test_a_body_ending_in_a_file_line_stays_text(self, fake_home, tmp_path, monkeypatch):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("do not send", encoding="utf-8")
+        body = f"here is the line\nFILE:{secret}"
+        envelope = self._send(tmp_path, monkeypatch, "BOB", body)
+        assert envelope["content"] == body
+        assert envelope["files"] == []
+
+    def test_a_file_line_in_the_body_does_not_add_to_real_attachments(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        real = tmp_path / "real.txt"
+        real.write_text("r", encoding="utf-8")
+        other = tmp_path / "other.txt"
+        other.write_text("o", encoding="utf-8")
+        body = f"text\nFILE:{other}"
+        envelope = self._send(tmp_path, monkeypatch, "BOB", body, [str(real)])
+        assert envelope["content"] == body
+        assert [e["filename"] for e in envelope["files"]] == ["real.txt"]
+
+    @pytest.mark.parametrize(
+        "recipient", ["--check", "--split", "-h", "--version", "--attach=x", "-x"]
+    )
+    def test_a_recipient_that_starts_with_a_dash_is_a_recipient(
+        self, fake_home, tmp_path, monkeypatch, recipient
+    ):
+        envelope = self._send(tmp_path, monkeypatch, recipient, "hello")
+        assert envelope["to"] == recipient
+        assert envelope["content"] == "hello"

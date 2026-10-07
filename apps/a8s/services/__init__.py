@@ -96,8 +96,8 @@ class StorageService(ABC):
         ours or the backend offers no delete.
 
         Only `a8s health` calls this, and only on the probe object it just
-        uploaded. Attachments are never deleted: the receiver decides how long
-        it needs them, and a sender that tidied up would race that. A backend
+        uploaded. A sender that deleted attachments would race the receiver, so
+        expiry is the store's own, or the `sync_folder` sweep's. A backend
         that cannot delete is not broken — `tempfile_org` expires on its own —
         so the default is a quiet False rather than an error."""
         return False

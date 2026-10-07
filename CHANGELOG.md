@@ -10,6 +10,49 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.102 — 2026-10-06
+
+### Added
+
+- **a8s loads extensions.** A module in `apps/a8s/ext/` (or the directory named
+  by `A8S_EXT_DIR`) can claim a verb or a flag form, and `a8s --help` lists its
+  commands under an `Extensions:` heading. An extension that fails to import is
+  skipped with one line on stderr, and the rest of a8s runs as before.
+
+### Fixed
+
+- **The agent log shows one delivery line per message.** The no-local-recipient
+  reports from the other nodes on a shared topic live only in the transaction
+  log, and each row now names the reporting node.
+- **A stored secret is used only with the destination it was typed for.**
+  `secrets.json` keeps a digest of the entry's address and options beside each
+  password, and a reader that finds a different digest drops the password and
+  names the entry, so a remote or storage entry replaced during a read can no
+  longer send the new password to the old address. A password stored by an
+  earlier version has no digest and counts as missing: enter it again with
+  `a8s remote` or `a8s storage` (#316). The report goes to stderr, so
+  `a8s remote --json` and `a8s storage --json` stay JSON and carry a revision
+  taken from the same file bytes as their entries, and a rewrite without
+  `--pass` drops a stored password that has no digest or a different one
+  instead of binding it to the new address.
+- **`tell` refuses two attachments with the same file name.** The envelope
+  listed both and the recipient received one. The send fails with exit 2 and
+  names the file before anything is queued.
+- **`tell` refuses files for a remote recipient when no storage is
+  configured.** The send used to report success while the file could never
+  arrive. It now fails with exit 1 and points at `a8s storage`; local
+  recipients and text-only messages are unchanged.
+- **`--file` takes exactly one argument.** A message that happened to match an
+  existing file name was swallowed as a second attachment. Repeat the flag to
+  send more files.
+- **The MCP `tell` sends the body and recipient as typed.** A body ending in
+  `FILE:` lines no longer becomes attachments and a recipient that starts with
+  a dash is no longer read as an option. `tell` gains `--verbatim` (send the
+  body unparsed) and `--` (end of options) for this.
+- **The docs state when a8s deletes stored objects.** Two pages said it never
+  does; a `sync_folder` service and a folder or s3 remote remove what passes
+  their `--retain-days` window.
+
 ## 0.1.101 — 2026-10-06
 
 ### Added

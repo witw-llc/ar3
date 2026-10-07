@@ -119,6 +119,8 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 ## Commands
 
+`a8s --help` lists extensions, when present, under their own heading.
+
 ### Registration
 
 
@@ -320,7 +322,7 @@ Redundancy is **any-of**. Every send attempts every service, so the good case is
 
 A daemon re-reads the service config as it works, so a service configured after it started is picked up without a restart.
 
-`a8s health` uploads a probe to each service, downloads it the way a receiver would, and then removes it. Attachments themselves are never removed: the receiver decides how long it needs them. A store that expires on its own schedule keeps its probe and health stays quiet about it; any other probe that survives is reported with its URL so you can clear it.
+`a8s health` uploads a probe to each service, downloads it the way a receiver would, and then removes it. a8s removes an attachment only when a `sync_folder` service's `--retain-days` sweep reaches its bundle, and every other store keeps its files until the store expires them. A store that expires on its own schedule keeps its probe and health stays quiet about it; any other probe that survives is reported with its URL so you can clear it.
 
 Sync-backed uploads are asynchronous — bytes copied into a Drive or rclone folder take a moment to reach the cloud — so the **receiver** waits, retrying the download for up to `storage_receive_wait_seconds` (default 900s) before delivering. The sender never waits: a message may not go anywhere for minutes, and pulling the file is the receiving node's job anyway. A message is held out of the inbox until its bytes land, because an agent woken for a file it cannot open burns tokens hunting for it. That retry runs in the background, so mail without attachments is never held up behind it. When the wait is exhausted the message is delivered anyway with the failure named: an `ATTACHMENT UNAVAILABLE: <file>: <reason>` line in the wake text instead of a path that goes nowhere.
 

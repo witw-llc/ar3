@@ -24,6 +24,10 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `batch.invoke` via `build_batch_command`, appending either a composed
   prose prompt (`batch.format` absent/`"prompt"`) or a JSON array of
   envelopes (`"envelopes"`).
+- **`apps/a8s/ext/` never reaches the public mirror.** An extension verb moves
+  into core, with its tests and a `docs/a8s.md` line, only after it has proved
+  general. An extension claims a verb or a flag form by returning non-None from
+  `handle`, and never changes core behaviour for arguments it does not claim.
 - **`core.PRINT_LOCK` is the cross-module log lock.** Only set when
   `daemon.attached_loop` starts.
 - **`run_with_prefix` uses `start_new_session=True`** — don't drop this.
@@ -62,6 +66,17 @@ Read [a8s.md](a8s.md) first for concept and usage.
   to lose mail — one unreachable remote pushed the envelope through the whole
   backoff schedule and into the trash while a working remote held a copy. The
   floor is one, not zero: zero successes keeps the retry (#93).
+- **A stored secret is bound to the destination it was typed for.** `secrets.json`
+  keeps beside each secret a digest of the entry's non-secret fields
+  (`network.spec_binding`), written by every writer that stores a secret. A
+  reader uses a secret only when the digest matches the spec it loaded, because
+  `network.json` and `secrets.json` are two files and a reader between a
+  writer's two writes would otherwise send the new password to the old
+  destination. A secret with no digest or a different one is dropped and
+  reported on stderr, so `--json` output stays JSON; there is no migration, and
+  the operator enters it again. A rewrite without `--pass` keeps the stored
+  password only when its digest matches the entry as it stood before the
+  rewrite; otherwise the rewrite drops it and says so on stderr.
 - **Services resolve at use time, not daemon start.** `load_services` rebuilds
   only when `network.json` or `secrets.json` changes, so both the routing pass
   and the receive callback can call it per use. A daemon runs for days, and one
@@ -73,7 +88,9 @@ Read [a8s.md](a8s.md) first for concept and usage.
   optional import (`requirements/a8s-s3.txt`) chosen for its credential chain:
   an operator who grants a machine an IAM role gets working uploads with no
   a8s-side secret handling. Keys sit under a prefix (default `a8s`) so bucket
-  lifecycle rules own expiry — nothing in a8s deletes objects.
+  lifecycle rules own expiry, and the only objects a8s deletes are a health
+  probe and what a `retain_days` sweep reaps: the bundles of a `sync_folder`
+  service and the envelopes of a folder or s3 remote.
 - **WebDAV URLs use the `webdav://` scheme** at config time (`webdav+https` is not
   used — map to HTTPS internally).
 - Inbound remote delivery **waits** (`storage_receive_wait_seconds`, default 900s)
@@ -200,6 +217,10 @@ Read [a8s.md](a8s.md) first for concept and usage.
   while the link is down and the worker sends the held list on the next
   CONNACK. The flush never runs on paho's network thread: a QoS-1 publish
   there waits for a PUBACK that same thread has to read.
+- **The agent log shows delivery outcomes only.** One line per message for
+  `inbox_write`, one for attachments fetched, failed, expired or deferred. A
+  `no_local_recipient` receipt never writes to the agent log; it goes to the
+  transaction log, which names the reporting node.
 - **Per-message backoff retry.** BACKOFF_SCHEDULE drives `.retry` sidecars.
 - **Exit 0 is the only delivery ack.** Any other wake outcome — nonzero exit,
   timeout kill, failed spawn, unexpanded vars — moves the envelopes back into

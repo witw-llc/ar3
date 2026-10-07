@@ -47,6 +47,11 @@ the router sees for that ULID. **The router writes it; the sender only reads
 it** — a sender that writes its own receipt is asserting an outcome it cannot
 observe, the same reason the filesystem and not the envelope settles `from`.
 
+The sender's agent log shows one `delivered id=<ULID> -> <recipients>` line per
+message, plus a line for attachments fetched, failed, expired or deferred.
+No-local-recipient reports from the other nodes on a shared topic go to the
+transaction log only (`a8s tx`), each row naming the reporting node.
+
 | State | Meaning |
 |-------|---------|
 | `enqueued` | the envelope is in the sender's own outbox |
@@ -120,7 +125,7 @@ reasoning, the measured launcher sizes and the costs nobody has priced are in
    otherwise may resolve a unique configured outbox from CWD when the registry
    is reachable (see [a8s-filedrop.md](a8s-filedrop.md)). System installs for
    agent users without a readable registry always need the env var.
-2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files`. `--attach` / `--file` append to the same `files` array (`--attach=PATH` and multiple paths after one flag are supported). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
+2. Build message body (argv, stdin, or `-`); parse trailing `FILE:` lines via `mailbox._split_content_and_files` (`--verbatim` skips that parse and keeps the body byte for byte; `--` ends options, so a recipient that starts with a dash stays a name). `--attach` / `--file` append to the same `files` array (`--attach=PATH` works; each flag takes exactly one path, so more files need more flags). Oversized sources fail immediately unless `--split` chunks them under `TELL_FILE_MAX` / `max_file_bytes`. Allocate `msg_id`, copy each file into `<outbox>/<msg_id>/<basename>`, then write `<outbox>/<msg_id>.json` with **filename-only** `files` entries (no `path` field).
 3. Optionally read the a8s state root (default `~/.config/a8s`) to stamp `from` when CWD sits inside a registered agent root, and to validate the recipient — see [Who validates the recipient](#who-validates-the-recipient). Validation runs before any file is staged, and an abort between staging and the envelope write removes the partial `<outbox>/<msg_id>/` bundle — the outbox never keeps a bundle without its `.json`.
 
 Envelope shape:
