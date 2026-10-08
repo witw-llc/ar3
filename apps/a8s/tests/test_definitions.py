@@ -1195,12 +1195,22 @@ class TestBundledEngineDefinitions:
                 node_vars["MODEL"] = "qwen3.6"
             for defn in self._both_variants(engine_id):
                 wakes += [argv[2:] for argv in self._three_wakes(defn, agent_root, node_vars)]
+        # Through the same path as `main`: parse_known_args plus the stray
+        # adopter. Ubuntu LTS interpreters (3.10, 3.12.3) leave a trailing
+        # prompt unparsed at the bare parser, and the CLI adopts it there.
         probe = (
             "import json, sys\n"
             "import r4t\n"
             "parser = r4t.build_parser()\n"
+            "def parse(w):\n"
+            "    args, extras = parser.parse_known_args(w)\n"
+            "    if extras:\n"
+            "        extras = r4t._adopt_stray_positionals(args, extras)\n"
+            "    if extras:\n"
+            "        parser.error('unrecognized arguments: ' + ' '.join(extras))\n"
+            "    return args\n"
             "print(json.dumps([[a.git_name, a.git_email] for a in "
-            "(parser.parse_args(w) for w in json.loads(sys.argv[1]))]))\n"
+            "(parse(w) for w in json.loads(sys.argv[1]))]))\n"
         )
         proc = subprocess.run(
             [sys.executable, "-c", probe, json.dumps(wakes)],

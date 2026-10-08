@@ -5,6 +5,7 @@ a real broker."""
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -842,16 +843,17 @@ class TestDeliveryClaim:
         release_claim(u)
         assert claim_message(u) is True
 
-    def test_a_dead_holder_does_not_strand_the_message(self, fake_home, monkeypatch):
+    def test_a_dead_holder_does_not_strand_the_message(self, fake_home):
         # A receiver killed mid-delivery leaves its claim behind. Holding that
         # forever would turn a duplicate-delivery bug into a lost-message bug.
+        # The claim file is aged, not the clock: a takeover re-stamps the file
+        # and wins only when the stamp moved, and a claim created in the same
+        # kernel timestamp tick as the re-stamp (a few milliseconds on Linux)
+        # would read as unchanged. A real dead holder's claim is minutes old.
         u = new_ulid()
         assert network.claim_message(u) is True
-        real_time = network.time.time
-        monkeypatch.setattr(
-            network.time, "time",
-            lambda: real_time() + network.CLAIM_STALE_SECONDS + 10,
-        )
+        stale = time.time() - network.CLAIM_STALE_SECONDS - 10
+        os.utime(network._claims_dir() / u, (stale, stale))
         assert network.claim_message(u) is True
 
     def test_a_second_receiver_mid_delivery_is_turned_away(self, two_local_agents):

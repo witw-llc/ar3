@@ -10,6 +10,20 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.103 — 2026-10-07
+
+### Changed
+
+- **Pull-request checks run on the owner's own Linux server.** Every job in
+  the PR workflow, the suites, the version gate and the PII scan, runs on the
+  self-hosted runner `ovh-witw` instead of the
+  Mac runner and GitHub's hosted Linux runners, so an ordinary PR commit
+  bills no Actions minutes; the Docker isolation test runs at release only.
+- **Linux is the test platform.** The release runs the full suites on Linux
+  only; the macOS leg and the Windows memory-portability job are gone, and
+  the three Mac runners are retired. macOS and Windows are covered by bug
+  reports and local testing.
+
 ## 0.1.102 — 2026-10-06
 
 ### Added
