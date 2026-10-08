@@ -73,10 +73,20 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `network.json` and `secrets.json` are two files and a reader between a
   writer's two writes would otherwise send the new password to the old
   destination. A secret with no digest or a different one is dropped and
-  reported on stderr, so `--json` output stays JSON; there is no migration, and
-  the operator enters it again. A rewrite without `--pass` keeps the stored
+  reported on stderr, so `--json` output stays JSON. A secret stored before
+  0.1.102 has no digest and is entered again once; every shape since then is
+  read for good (next bullet). A rewrite without `--pass` keeps the stored
   password only when its digest matches the entry as it stood before the
   rewrite; otherwise the rewrite drops it and says so on stderr.
+- **A stored secret survives every update.** A release reads every `secrets.json`
+  that any earlier release since 0.1.102 wrote, and a stored password keeps
+  working after `ar3 update` with no action from the operator. A change to the
+  secret file's shape, its digest input, or the fields a writer stores carries
+  a reader for the old shape, and `apps/a8s/tests/test_secrets_compat.py` reads
+  the frozen fixtures of every shape ever shipped. Breaking this takes the
+  owner's explicit exception, recorded in the Decisions ledger before the
+  change is built (ruled 2026-10-08, after 0.1.102 cost the operator a
+  password re-entry on every seat).
 - **Services resolve at use time, not daemon start.** `load_services` rebuilds
   only when `network.json` or `secrets.json` changes, so both the routing pass
   and the receive callback can call it per use. A daemon runs for days, and one
@@ -241,7 +251,14 @@ Read [a8s.md](a8s.md) first for concept and usage.
   every member once the handlers are gone, and prints one line when it cleared
   one; clear it only after the handler has detached or been killed, or the
   handler writes it back. A stop never touches trash, dead letters or their
-  markers: only `a8s retry` returns those. Delivery is at-least-once: a wake command
+  markers: only `a8s retry` returns those. `a8s retry` also asks for every backed-off
+  pending send to run: the CLI drops a `.retry-now` request marker in the node's
+  pending directory and writes no sidecar. The router, the only writer of a
+  `.retry` sidecar, treats every parked send as due on its next pass and removes
+  the marker at the start of that pass. Nothing else changes in a sidecar, so
+  `attempts` continues the backoff schedule and `succeeded_remotes`,
+  `local_delivered` and `uploaded` keep a destination that already took the
+  message from getting it twice. Delivery is at-least-once: a wake command
   must tolerate the same envelope twice. r4t dispatch already does — it
   enqueues durably and returns 0 before any turn runs, so a8s retries
   delivery without re-running turns.

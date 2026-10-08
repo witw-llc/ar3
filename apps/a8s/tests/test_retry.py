@@ -1,4 +1,4 @@
-"""Tests for `a8s retry <name>` — end a failed wake's backoff and return its dead letters."""
+"""Tests for `a8s retry <name>` — end a failed wake's backoff, make parked sends due, and return dead letters."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -243,3 +243,253 @@ class TestDeadLetterRetry:
         assert sorted(f.name for f in inbox_dir("alpha").glob("*.json")) == sorted(
             [dead.name, live.name]
         )
+
+
+class TestParkedSendRetry:
+    """An outbound send that failed to publish waits in pending/ behind a sidecar."""
+
+    @pytest.fixture
+    def node(self, fake_home, tmp_path):
+        from core import Participant
+        from mailbox import ensure_mailboxes
+
+        root = tmp_path / "agent-root"
+        root.mkdir()
+        save_registry({"alpha": {"root": str(root)}})
+        ensure_mailboxes(Participant("alpha", root))
+        return "alpha"
+
+    @staticmethod
+    def _park(name, *, next_attempt, attempts=2, remotes=("mqtt-1",), sidecar=True):
+        import json
+
+        from ar3.ulid import new as new_ulid
+        from core import pending_dir, retry_sidecar_path
+
+        msg_id = new_ulid()
+        path = pending_dir(name) / f"{msg_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"id": msg_id, "to": "beta", "content": "hi", "files": []}))
+        if sidecar:
+            retry_sidecar_path(path).write_text(json.dumps({
+                "attempts": attempts,
+                "next_attempt": next_attempt,
+                "succeeded_remotes": list(remotes),
+                "local_delivered": True,
+                "uploaded": {"a.txt": {"svc": "https://example.test/a"}},
+            }))
+        return path
+
+    @staticmethod
+    def _read(path):
+        import json
+
+        from core import retry_sidecar_path
+
+        return json.loads(retry_sidecar_path(path).read_text())
+
+    @staticmethod
+    def _in_an_hour():
+        return (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+    @staticmethod
+    def _marker(name):
+        from mailbox import retry_request_path
+
+        return retry_request_path(name)
+
+    @staticmethod
+    def _pass(name, tmp_path, *, accept=("ok",), remotes=("ok", "bad"), calls=None):
+        """One router pass over `name`'s pending sends with a fake remote that
+        accepts only the ids in `accept`. `calls` collects (message id, ids
+        already succeeded) per publish."""
+        from core import Participant
+        from mailbox import route_outboxes
+
+        sender = Participant(name, tmp_path / "agent-root")
+
+        def publish(msg, sender_name, prev, attempts):
+            if calls is not None:
+                calls.append((msg["id"], list(prev)))
+            return list(prev) + [r for r in remotes if r in accept and r not in prev]
+
+        return route_outboxes(
+            [sender], all_agents=[sender],
+            publish_remotes=publish, configured_remote_ids=list(remotes),
+        )
+
+    def test_retry_drops_a_marker_and_never_writes_a_sidecar(self, node):
+        from core import retry_sidecar_path
+
+        path = self._park(node, next_attempt=self._in_an_hour())
+        sidecar = retry_sidecar_path(path)
+        before = (sidecar.read_bytes(), sidecar.stat().st_mtime_ns)
+
+        assert dispatch("retry", [node], 1.0) == 0
+
+        assert self._marker(node).is_file()
+        assert (sidecar.read_bytes(), sidecar.stat().st_mtime_ns) == before
+
+    def test_a_pass_with_the_marker_runs_a_backed_off_send_and_the_router_writes_the_sidecar(
+        self, node, tmp_path
+    ):
+        path = self._park(node, next_attempt=self._in_an_hour(), attempts=2, remotes=())
+        dispatch("retry", [node], 1.0)
+        calls = []
+
+        self._pass(node, tmp_path, calls=calls)
+
+        assert len(calls) == 1
+        assert not self._marker(node).exists()
+        after = self._read(path)
+        assert after["attempts"] == 3
+        assert after["succeeded_remotes"] == ["ok"]
+        assert after["next_attempt"] != ""
+        assert after["uploaded"] == {"a.txt": {"svc": "https://example.test/a"}}
+
+    def test_a_pass_without_the_marker_still_honors_next_attempt(self, node, tmp_path):
+        path = self._park(node, next_attempt=self._in_an_hour(), remotes=())
+        before = self._read(path)
+        calls = []
+
+        self._pass(node, tmp_path, calls=calls)
+
+        assert calls == []
+        assert self._read(path) == before
+
+    def test_a_marker_left_by_a_stopped_node_is_honored_on_the_first_pass(self, node, tmp_path):
+        path = self._park(node, next_attempt=self._in_an_hour(), remotes=())
+        self._marker(node).touch()
+        calls = []
+
+        self._pass(node, tmp_path, calls=calls)
+
+        assert len(calls) == 1
+        assert not self._marker(node).exists()
+        self._pass(node, tmp_path, calls=calls)
+        assert len(calls) == 1  # one request forces one pass, not every pass
+        assert self._read(path)["next_attempt"] != ""
+
+    def test_the_marker_is_not_a_pending_message(self, node, tmp_path):
+        self._marker(node).touch()
+
+        assert self._pass(node, tmp_path) == 0
+
+        assert not self._marker(node).exists()
+
+    def test_no_parked_send_means_no_marker(self, node):
+        self._park(node, next_attempt="")
+        self._park(node, next_attempt=self._in_an_hour(), sidecar=False)
+
+        assert dispatch("retry", [node], 1.0) == 0
+
+        assert not self._marker(node).exists()
+
+    def test_a_router_save_between_the_count_and_the_pass_is_not_lost(self, node, tmp_path):
+        """The lost-update race: the router saves progress after retry counted
+        the send. Retry writes no sidecar, so the saved progress stands and the
+        healthy remote and the local inbox are not served twice."""
+        import json
+
+        from core import Participant, inbox_dir, retry_sidecar_path
+        from mailbox import ensure_mailboxes
+
+        beta_root = tmp_path / "beta-root"
+        beta_root.mkdir()
+        save_registry({"alpha": {"root": str(tmp_path / "agent-root")}, "beta": {"root": str(beta_root)}})
+        ensure_mailboxes(Participant("beta", beta_root))
+        path = self._park(node, next_attempt=self._in_an_hour(), attempts=2, remotes=())
+        assert dispatch("retry", [node], 1.0) == 0
+
+        sidecar = json.loads(retry_sidecar_path(path).read_text())
+        sidecar.update(
+            attempts=3, succeeded_remotes=["ok"], local_delivered=True,
+            next_attempt=self._in_an_hour(),
+        )
+        retry_sidecar_path(path).write_text(json.dumps(sidecar))
+        calls = []
+
+        self._pass(node, tmp_path, calls=calls)
+
+        assert [prev for _, prev in calls] == [["ok"]]
+        after = self._read(path)
+        assert after["succeeded_remotes"] == ["ok"]
+        assert after["local_delivered"] is True
+        assert after["attempts"] == 4
+        assert list(inbox_dir("beta").glob("*.json")) == []
+
+    def test_a_send_already_due_is_not_rewritten_or_counted(self, node, capsys):
+        from core import retry_sidecar_path
+
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        due = self._park(node, next_attempt=past)
+        empty = self._park(node, next_attempt="")
+        marks = {p: retry_sidecar_path(p).stat().st_mtime_ns for p in (due, empty)}
+
+        assert dispatch("retry", [node], 1.0) == 0
+
+        assert {p: retry_sidecar_path(p).stat().st_mtime_ns for p in (due, empty)} == marks
+        out = capsys.readouterr().out
+        assert "pending send(s)" not in out
+        assert "no pending send is parked" in out
+
+    def test_a_pending_file_without_a_sidecar_is_untouched_and_not_counted(self, node, capsys):
+        from core import retry_sidecar_path
+
+        path = self._park(node, next_attempt="", sidecar=False)
+        text = path.read_text()
+
+        assert dispatch("retry", [node], 1.0) == 0
+
+        assert path.read_text() == text
+        assert not retry_sidecar_path(path).exists()
+        assert "pending send(s)" not in capsys.readouterr().out
+
+    def test_the_line_counts_the_sends_and_says_when(self, node, capsys):
+        for _ in range(2):
+            self._park(node, next_attempt=self._in_an_hour())
+
+        dispatch("retry", [node], 1.0)
+
+        assert capsys.readouterr().out.strip().splitlines() == [
+            "[alpha] 2 pending send(s) due now; wait for the node to start"
+        ]
+
+    def test_a_running_node_wakes_on_the_next_pass(self, node, capsys, monkeypatch):
+        import commands
+
+        monkeypatch.setattr(commands, "_read_handler_pid", lambda name: 4242)
+        self._park(node, next_attempt=self._in_an_hour())
+
+        dispatch("retry", [node], 1.0)
+
+        assert "[alpha] 1 pending send(s) due now; wake on the next pass" in capsys.readouterr().out
+
+    def test_the_all_clear_names_all_three_things(self, node, capsys):
+        assert dispatch("retry", [node], 1.0) == 0
+        assert capsys.readouterr().out.strip() == (
+            "alpha: no wake is waiting on a backoff, no pending send is parked, and no dead letters"
+        )
+
+    def test_the_lines_come_in_backoff_then_sends_then_dead_letters_order(
+        self, backed_off, capsys
+    ):
+        import json
+
+        from core import mark_dead_letter, pending_dir, retry_sidecar_path, trash_dir
+
+        name = backed_off
+        pending_dir(name).mkdir(parents=True, exist_ok=True)
+        trash_dir(name).mkdir(parents=True, exist_ok=True)
+        path = self._park(name, next_attempt=self._in_an_hour())
+        assert retry_sidecar_path(path).is_file()
+        letter = trash_dir(name) / "01ARZ3NDEKTSV4RRFFQ69G5FAV.json"
+        letter.write_text(json.dumps({"id": letter.stem, "to": name, "content": "x", "files": []}))
+        mark_dead_letter(name, letter.name)
+
+        dispatch("retry", [name], 1.0)
+
+        lines = capsys.readouterr().out.strip().splitlines()
+        assert [("backoff ended" in l, "pending send(s)" in l, "dead letter(s)" in l) for l in lines] == [
+            (True, False, False), (False, True, False), (False, False, True),
+        ]

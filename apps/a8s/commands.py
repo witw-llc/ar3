@@ -87,6 +87,7 @@ from daemon import (
     _write_kill_request,
     attached_loop,
 )
+from mailbox import request_parked_sends
 from network import (
     PAIRED_KEY,
     _build_service as build_service,
@@ -2199,16 +2200,21 @@ def cmd_drain(args: list[str]) -> int:
 # ---------- retry ----------
 
 def cmd_retry(args: list[str]) -> int:
-    """`a8s retry <name>` — try a failed wake again now.
+    """`a8s retry <name>` — try a failed wake and parked sends again now.
 
-    Ends the backoff a failed wake armed and returns every dead letter still
-    in trash to the inbox. The handler tries that mail on its next pass, with
-    a full set of attempts: the operator runs this after fixing what failed,
-    so the earlier failures say nothing about the next one. The handler reads
-    the record on every pass, which is why a running node needs no restart.
-    Each dead letter has its own marker, removed after its envelope is back in
-    the inbox, so a dead letter recorded while this runs is never lost. A
-    dead letter whose trash file is gone is reported, not an error."""
+    Ends the backoff a failed wake armed, makes every backed-off pending send
+    due, and returns every dead letter still in trash to the inbox. The
+    handler tries that mail on its next pass, with a full set of attempts: the
+    operator runs this after fixing what failed, so the earlier failures say
+    nothing about the next one. The handler reads the record on every pass,
+    which is why a running node needs no restart. A parked send is made due by
+    a request marker in the node's pending directory that the router consumes;
+    the router is the only writer of a sidecar, so the send keeps its attempt
+    count and the destinations that already took it, and nothing publishes
+    twice. Each dead letter has its own marker, removed
+    after its envelope is back in the inbox, so a dead letter recorded while
+    this runs is never lost. A dead letter whose trash file is gone is
+    reported, not an error."""
     if len(args) != 1:
         print("usage: a8s retry <name>", file=sys.stderr)
         return 2
@@ -2219,8 +2225,9 @@ def cmd_retry(args: list[str]) -> int:
     name = match[0]
     record = read_wake_retry(name)
     dead = read_dead_letters(name)
-    if record is None and not dead:
-        print(f"{name}: no wake is waiting on a backoff and no dead letters")
+    parked = request_parked_sends(name)
+    if record is None and not dead and not parked:
+        print(f"{name}: no wake is waiting on a backoff, no pending send is parked, and no dead letters")
         return 0
     if _read_handler_pid(name) is None:
         when = "wait for the node to start"
@@ -2230,6 +2237,8 @@ def cmd_retry(args: list[str]) -> int:
         clear_wake_retry(name)
         waiting = len(record.get("unit") or [])
         out_agent(name, f"[{name}] backoff ended by `a8s retry`; {waiting} message(s) {when}")
+    if parked:
+        out_agent(name, f"[{name}] {parked} pending send(s) due now; {when}")
     if dead:
         trash = trash_dir(name)
         inbox = inbox_dir(name)

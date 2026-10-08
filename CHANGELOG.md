@@ -10,6 +10,26 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.104 — 2026-10-08
+
+### Added
+
+- **A stored secret survives every update.** The suite reads the `secrets.json`
+  every release since 0.1.102 wrote, a frozen fixture of each shape is under
+  test, and changing that takes the owner's explicit exception recorded in the
+  Decisions ledger. 0.1.102's digest did not have this rule and cost a password
+  re-entry on every seat.
+
+### Changed
+
+- **`a8s retry` tries the node's pending sends again now.** An outbound
+  message that failed to publish, for example while a broker was down or
+  refused its password, waited out its backoff even after the operator fixed
+  the cause. `a8s retry <name>` now asks the node's router to run those sends on its
+  next pass, about 1 second later at the default `loop_interval`; the router
+  keeps each send's attempt count and delivered-to record, so nothing
+  publishes twice (#321).
+
 ## 0.1.103 — 2026-10-07
 
 ### Changed

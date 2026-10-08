@@ -66,6 +66,7 @@ from core import (
     unique_path,
 )
 from network import seen_id_append
+from ar3.fsio import atomic_write_text
 from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
 from services.attachment_errors import ATTACHMENT_UNAVAILABLE
@@ -385,10 +386,50 @@ def _load_or_init_sidecar(pending_file: Path) -> dict:
 def _save_sidecar(pending_file: Path, sidecar: dict) -> None:
     p = retry_sidecar_path(pending_file)
     try:
-        with p.open("w", encoding="utf-8") as fp:
-            json.dump(sidecar, fp, indent=2)
+        atomic_write_text(p, json.dumps(sidecar, indent=2))
     except OSError:
         pass  # best-effort — bad write means we'll retry on the next pass
+
+
+def retry_request_path(name: str) -> Path:
+    return pending_dir(name) / ".retry-now"
+
+
+def request_parked_sends(name: str) -> int:
+    """Ask the node's router to treat every parked send of `name` as due.
+
+    The router is the only process that writes a sidecar, so this reads them
+    and writes none: it counts the sends still behind a backoff and, when
+    there are any, drops the request marker the router consumes at the start
+    of its next pass. A sidecar the router cannot read is not counted; the
+    router owns it. Returns the count."""
+    pending = pending_dir(name)
+    if not pending.is_dir():
+        return 0
+    now = datetime.now(timezone.utc)
+    parked = 0
+    for f in sorted(pending.iterdir()):
+        if not (f.is_file() and f.name.endswith(".json")):
+            continue
+        try:
+            sidecar = json.loads(retry_sidecar_path(f).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(sidecar, dict) or not sidecar.get("next_attempt"):
+            continue
+        try:
+            due_at = datetime.fromisoformat(str(sidecar["next_attempt"]).replace("Z", "+00:00"))
+            if now >= due_at:
+                continue
+        except (TypeError, ValueError):
+            continue
+        parked += 1
+    if parked:
+        try:
+            retry_request_path(name).touch()
+        except OSError:
+            return 0
+    return parked
 
 
 def _drop_sidecar(pending_file: Path) -> None:
@@ -847,6 +888,16 @@ def _process_pending(
     }
     opaque = opaque_prefixes()
     now = datetime.now(timezone.utc)
+    marker = retry_request_path(sender.name)
+    force_due = marker.is_file()
+    if force_due:
+        # Removed before the pass, not after: a request dropped while this pass
+        # runs survives to the next one, and a crash mid-pass loses at most a
+        # request the operator repeats.
+        try:
+            marker.unlink()
+        except OSError:
+            pass
     files = sorted(
         f for f in pending.iterdir()
         if f.is_file() and f.name.endswith(".json")
@@ -859,7 +910,7 @@ def _process_pending(
         # never an exception that would abort the whole pass and strand every
         # message behind this one, inbound proxy delivery included.
         raw_next_attempt = sidecar["next_attempt"]
-        if raw_next_attempt:
+        if raw_next_attempt and not force_due:
             try:
                 next_dt = datetime.fromisoformat(str(raw_next_attempt).replace("Z", "+00:00"))
                 if now < next_dt:
