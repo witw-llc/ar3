@@ -944,3 +944,174 @@ class TestQuotaExitCodes:
         assert rc == r4t_mod.QUOTA_EXIT_STALE
         assert rc not in (0, 1), "must differ from both live and no-answer"
         capsys.readouterr()
+
+
+class TestClaudeTokenRefresh:
+    NOW_MS = 1_800_000_000_000
+
+    @staticmethod
+    def _creds(token, expires_at=None):
+        oauth = {"accessToken": token}
+        if expires_at is not None:
+            oauth["expiresAt"] = expires_at
+        return {"claudeAiOauth": oauth}
+
+    def _wire(self, monkeypatch, stored, usage, doctor=None):
+        """stored: credential dicts the fake Keychain answers in turn (the last
+        repeats). usage: statuses (int) or payloads (dict) per usage request."""
+        import io
+        import subprocess
+        import urllib.error
+
+        log = {"doctor": 0, "usage": [], "reads": 0}
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+        def keychain():
+            log["reads"] += 1
+            return stored[min(log["reads"], len(stored)) - 1] if stored else None
+
+        def run(argv, **kwargs):
+            if argv[:2] == ["claude", "doctor"]:
+                log["doctor"] += 1
+                if isinstance(doctor, BaseException):
+                    raise doctor
+                return subprocess.CompletedProcess(argv, doctor or 0, b"", b"")
+            return subprocess.CompletedProcess(argv, 0, "2.1.0 (Claude Code)\n", "")
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(request, timeout=None):
+            if request.full_url == claude.PROFILE_URL:
+                raise urllib.error.URLError("no profile in tests")
+            token = request.get_header("Authorization").removeprefix("Bearer ")
+            log["usage"].append(token)
+            answer = usage[len(log["usage"]) - 1]
+            if isinstance(answer, int):
+                raise urllib.error.HTTPError(request.full_url, answer, "x", {}, None)
+            import json
+            return Response(json.dumps(answer).encode())
+
+        monkeypatch.setattr(claude, "_keychain_credentials", keychain)
+        monkeypatch.setattr(claude, "_file_credentials", lambda: None)
+        monkeypatch.setattr(claude.subprocess, "run", run)
+        monkeypatch.setattr(claude.urllib.request, "urlopen", urlopen)
+        return log
+
+    OK = {"five_hour": {"utilization": 10.0, "resets_at": None}}
+
+    def test_expiry_is_at_or_before_now_and_unknown_is_not_expired(self):
+        now = self.NOW_MS / 1000
+        assert claude._token_expired(self._creds("t", self.NOW_MS), now)
+        assert claude._token_expired(self._creds("t", self.NOW_MS - 1), now)
+        assert not claude._token_expired(self._creds("t", self.NOW_MS + 1), now)
+        assert not claude._token_expired(self._creds("t"), now)
+        assert not claude._token_expired(self._creds("t", "soon"), now)
+        assert not claude._token_expired({}, now)
+
+    def test_a_valid_stored_token_never_runs_doctor(self, monkeypatch):
+        future = int((__import__("time").time() + 3600) * 1000)
+        log = self._wire(monkeypatch, [self._creds("good", future)], [self.OK])
+        result = claude.quota()
+        assert log["doctor"] == 0
+        assert log["usage"] == ["good"]
+        assert result["note"] is None
+
+    def test_an_expired_token_runs_doctor_once_and_uses_the_new_token(self, monkeypatch):
+        log = self._wire(
+            monkeypatch,
+            [self._creds("old", 1000), self._creds("new", 9_999_999_999_999)],
+            [self.OK],
+        )
+        result = claude.quota()
+        assert log["doctor"] == 1
+        assert log["usage"] == ["new"]
+        assert result["note"] == "token refreshed by claude doctor"
+
+    def test_a_401_on_an_unexpired_token_refreshes_and_retries_once(self, monkeypatch):
+        far = 9_999_999_999_999
+        log = self._wire(
+            monkeypatch,
+            [self._creds("stale", far), self._creds("fresh", far)],
+            [401, self.OK],
+        )
+        result = claude.quota()
+        assert log["doctor"] == 1
+        assert log["usage"] == ["stale", "fresh"]
+        assert result["note"] == "token refreshed by claude doctor"
+
+    def test_a_401_after_the_refresh_names_auth_login_and_doctor_ran_once(self, monkeypatch):
+        far = 9_999_999_999_999
+        log = self._wire(
+            monkeypatch,
+            [self._creds("stale", far), self._creds("fresh", far)],
+            [401, 401],
+        )
+        with pytest.raises(QuotaError, match="claude auth login"):
+            claude.quota()
+        assert log["doctor"] == 1
+        assert len(log["usage"]) == 2
+
+    def test_a_401_right_after_an_expiry_refresh_does_not_refresh_twice(self, monkeypatch):
+        log = self._wire(
+            monkeypatch,
+            [self._creds("old", 1000), self._creds("new", 9_999_999_999_999)],
+            [401],
+        )
+        with pytest.raises(QuotaError, match="claude auth login"):
+            claude.quota()
+        assert log["doctor"] == 1
+        assert len(log["usage"]) == 1
+
+    @pytest.mark.parametrize(
+        "failure",
+        [OSError("no claude"), __import__("subprocess").TimeoutExpired("claude", 45), 1],
+    )
+    def test_a_failing_doctor_names_auth_login(self, monkeypatch, failure):
+        log = self._wire(monkeypatch, [self._creds("old", 1000)], [self.OK], doctor=failure)
+        with pytest.raises(QuotaError, match="claude auth login"):
+            claude.quota()
+        assert log["usage"] == []
+
+    def test_an_env_token_is_used_as_given_and_a_401_never_runs_doctor(self, monkeypatch):
+        log = self._wire(monkeypatch, [], [401])
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "from-env")
+        with pytest.raises(QuotaError, match="set a fresh CLAUDE_CODE_OAUTH_TOKEN"):
+            claude.quota()
+        assert log["doctor"] == 0
+        assert log["usage"] == ["from-env"]
+
+    def _http_error(self, monkeypatch, status, body):
+        import io
+        import urllib.error
+
+        def urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(
+                request.full_url, status, "x", {}, io.BytesIO(body)
+            )
+
+        monkeypatch.setattr(claude.urllib.request, "urlopen", urlopen)
+
+    def test_an_http_error_with_a_json_body_names_the_endpoints_error_type(self, monkeypatch):
+        self._http_error(
+            monkeypatch,
+            403,
+            b'{"type":"error","error":{"type":"permission_error","message":"OAuth '
+            b'authentication is currently not allowed for this organization."}}',
+        )
+        with pytest.raises(QuotaError) as caught:
+            claude._fetch_usage("t")
+        assert str(caught.value) == (
+            "usage endpoint returned HTTP 403 (permission_error: OAuth authentication "
+            "is currently not allowed for this organization.)"
+        )
+
+    def test_an_http_error_with_a_non_json_body_keeps_the_plain_message(self, monkeypatch):
+        self._http_error(monkeypatch, 502, b"<html>bad gateway</html>")
+        with pytest.raises(QuotaError) as caught:
+            claude._fetch_usage("t")
+        assert str(caught.value) == "usage endpoint returned HTTP 502"

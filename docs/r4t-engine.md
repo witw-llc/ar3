@@ -627,6 +627,7 @@ All definitions also carry `--effort=$EFFORT?` on invoke, batch, and idle:
 Unset drops the token. Cursor keeps effort inside `MODEL` bracket syntax;
 setting a separate `EFFORT` on Cursor or Devin produces an unsupported error.
 See [reasoning effort](#reasoning-effort) for each engine's values.
+`r4t engine <id> efforts` and `r4t engine <id> models` list what `MODEL` and `EFFORT` accept (see [`models` and `efforts`](#models-and-efforts--what---model-and---effort-accept)).
 
 All definitions also carry `--git-name=$GIT_NAME?` and
 `--git-email=$GIT_EMAIL?` on invoke, batch, and idle, so each node commits
@@ -719,6 +720,24 @@ snapshots that still answer when the live check cannot. A snapshot lives at
 `<r4t home>/quota/<engine>.json` — the same home as rigs and rosters,
 relocatable with `R4T_HOME`.
 
+**Claude's token.** `claude` reads the OAuth access token from the macOS
+Keychain item `Claude Code-credentials`, then `~/.claude/.credentials.json`,
+then the environment variable `CLAUDE_CODE_OAUTH_TOKEN`. When a stored token
+is expired, or the usage endpoint rejects it, r4t runs `claude doctor` once —
+no turn, no terminal — so the CLI refreshes and rewrites its own stored token,
+then reads the credentials again and retries the probe once. A refreshed
+answer carries the note `token refreshed by claude doctor`. If the retry is
+rejected too, or `claude doctor` fails, the error says to run
+`claude auth login`. r4t never calls the refresh endpoint itself. A token from
+`CLAUDE_CODE_OAUTH_TOKEN` is used as given and never refreshed.
+
+**Cursor's token.** `r4t engine cursor quota` takes its token from the IDE's
+state database, or on macOS from the `agent` CLI's own Keychain item
+(`cursor-access-token`) when the IDE is not installed; that answer carries the
+note `token from the agent CLI's Keychain item`. A Linux or Windows machine with
+only the CLI is not covered yet: where the CLI keeps its login there is not
+verified.
+
 **Not every engine answers.** `devin` cannot: its `/usage` and
 `/session-stats` report a session's own consumption, but there is no
 account-quota endpoint the CLI can answer without spending a turn. So
@@ -778,3 +797,33 @@ This is every dial the account carries, raw. Each bucket's own reading is
 <rig>`](r4t-rigs.md#rig-fuel--the-tank-as-one-number), which reads this same
 answer, keeps the buckets the rig's model burns, and reports the lowest of them
 as `fuel`.
+
+## `models` and `efforts` — what `--model` and `--effort` accept
+
+```
+r4t engine <id> efforts [--json]
+r4t engine <id> models  [--json]
+```
+
+`<id>` is an engine id or any rig preset id, as for `run`. Values print one per
+line on stdout; a note prints on stderr as `r4t engine: <note>`. `--json`
+prints `{"values": [...], "note": ...}`. Neither verb starts a session or
+spends a turn. `r4t engine list` shows which engines answer which verb.
+
+| Engine | `models` source | `efforts` source |
+|---|---|---|
+| claude | aliases read from `claude --help`, or a full model name | fixed list |
+| ollama, ollama-* | `ollama list` | fixed list for ollama-claude and ollama-copilot; any value for ollama-codex and ollama-opencode; none for bare ollama |
+| agy | `agy models` ids; effort is part of each id | fixed list |
+| cursor | `cursor-agent models` | none; effort goes inside `--model` brackets |
+| devin | `devin models list` ids; effort is part of each id | none |
+| copilot, muse | no list verb | fixed list |
+| codex, opencode | no list verb | any value |
+
+Each verb ends in one of three outcomes:
+
+- **A list.** Exit 0, one value per line.
+- **Any value.** The provider decides, so the list is empty and the note says
+  so. Exit 0.
+- **A refusal.** The engine has no flag or no list verb; the message names it
+  and where the string goes. Exit 1.

@@ -16,6 +16,7 @@ from `a8s tx`.
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from typing import Literal
@@ -132,11 +133,23 @@ _SCHEMA = (
         spelling TEXT NOT NULL
     )
     """,
+    # Receive dedup: one row per envelope id this machine has finished with.
+    # Rows leave by age in batches, never by count.
+    """
+    CREATE TABLE IF NOT EXISTS seen (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        seen_at REAL NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS seen_kind_at ON seen(kind, seen_at)
+    """,
 )
 
 # The newest table in `_SCHEMA`: a store without it gets the schema run again,
 # and every statement there is idempotent.
-_SCHEMA_PROBE = "remote_last_heard"
+_SCHEMA_PROBE = "seen"
 
 _HEARD_UPSERT = (
     "INSERT INTO remote_last_heard(name, timestamp, spelling) VALUES (?, ?, ?) "
@@ -243,6 +256,58 @@ def log(
                     conn.execute(_HEARD_UPSERT, (sender, row[0], sender))
 
         sqlite_store.retry_busy(insert)
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def seen_contains(msg_id: str) -> bool:
+    """Whether this machine has finished with `msg_id`. A store that cannot be
+    read answers False: a possible duplicate beats a lost message."""
+    try:
+        def lookup() -> bool:
+            with closing(_connect()) as conn:
+                return conn.execute(
+                    "SELECT 1 FROM seen WHERE id = ?", (msg_id,)
+                ).fetchone() is not None
+
+        return sqlite_store.retry_busy(lookup)
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def seen_insert(msg_id: str, kind: str, seen_at: float | None = None) -> None:
+    """Remember `msg_id`. Best-effort: a missed insert means a possible
+    duplicate, never a lost message."""
+    when = time.time() if seen_at is None else seen_at
+    try:
+        def insert() -> None:
+            with closing(_connect()) as conn, conn:
+                conn.execute(
+                    "INSERT OR IGNORE INTO seen(id, kind, seen_at) VALUES (?, ?, ?)",
+                    (msg_id, kind, when),
+                )
+
+        sqlite_store.retry_busy(insert)
+    except (OSError, sqlite3.Error):
+        pass
+
+
+def seen_expire(message_cutoff: float, receipt_cutoff: float) -> None:
+    """Drop message ids older than `message_cutoff` and receipt ids older than
+    `receipt_cutoff` (epoch seconds), in one transaction."""
+    try:
+        def expire() -> None:
+            with closing(_connect()) as conn, conn:
+                conn.execute(
+                    "DELETE FROM seen WHERE kind = 'message' AND seen_at < ?",
+                    (message_cutoff,),
+                )
+                conn.execute(
+                    "DELETE FROM seen WHERE kind = 'receipt' AND seen_at < ?",
+                    (receipt_cutoff,),
+                )
+
+        sqlite_store.retry_busy(expire)
     except (OSError, sqlite3.Error):
         pass
 

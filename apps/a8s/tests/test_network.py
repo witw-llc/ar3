@@ -1,4 +1,4 @@
-"""Tests for network.py — config IO, seen-ids ring, receive_envelope filter,
+"""Tests for network.py — config IO, seen table, receive_envelope filter,
 publish_with_backoff hook. The transport-side details live in
 test_transport_paho.py; here we use a stub Transport so we can run without
 a real broker."""
@@ -14,12 +14,11 @@ import pytest
 import network
 
 from core import (
-    MAX_SEEN_IDS,
     Participant,
     agent_log_path,
     inbox_dir,
     network_config_path,
-    seen_ids_path,
+    claims_dir,
 )
 from network import (
     configured_remote_ids,
@@ -319,13 +318,41 @@ class TestRemoteIdentity:
         assert load_remotes(node="node-a")[0]._client_id == "a8s-pinned"
 
 
-# ---------- seen-ids ring ----------
+# ---------- seen table ----------
 
 
-class TestSeenIdsRing:
+def _ulid_minted_days_ago(days: float) -> str:
+    from ar3.ulid import ALPHABET
+
+    ts_ms = int((time.time() - days * 86400) * 1000)
+    n = (ts_ms << 80) | int.from_bytes(os.urandom(10), "big")
+    chars = []
+    for _ in range(26):
+        chars.append(ALPHABET[n & 0x1F])
+        n >>= 5
+    return "".join(reversed(chars))
+
+
+def _seen_rows():
+    import sqlite3
+    from contextlib import closing
+    from core import transactions_path
+
+    with closing(sqlite3.connect(str(transactions_path()))) as conn:
+        return dict(
+            (row[0], (row[1], row[2]))
+            for row in conn.execute("SELECT id, kind, seen_at FROM seen")
+        )
+
+
+@pytest.fixture
+def fresh_expiry_clock(monkeypatch):
+    monkeypatch.setattr(network, "_seen_expiry_last", None)
+
+
+class TestSeenTable:
     def test_empty_initial_state(self, fake_home):
-        u = new_ulid()
-        assert seen_id_contains(u) is False
+        assert seen_id_contains(new_ulid()) is False
 
     def test_append_then_contains(self, fake_home):
         u = new_ulid()
@@ -338,18 +365,77 @@ class TestSeenIdsRing:
         assert seen_id_contains(a) is True
         assert seen_id_contains(b) is False
 
-    def test_rotation_at_cap(self, fake_home, monkeypatch):
-        # Lower the cap so we don't have to write 10k lines.
-        monkeypatch.setenv("A8S_MAX_SEEN_IDS", "5")
-        ids = [new_ulid() for _ in range(8)]
-        for u in ids:
-            seen_id_append(u)
-        # First 3 were rotated out.
-        for u in ids[:3]:
-            assert seen_id_contains(u) is False
-        # Last 5 retained.
-        for u in ids[3:]:
-            assert seen_id_contains(u) is True
+    def test_append_is_idempotent(self, fake_home):
+        u = new_ulid()
+        seen_id_append(u)
+        seen_id_append(u)
+        seen_id_append(u, kind="receipt")
+        assert list(_seen_rows()) == [u]
+        assert _seen_rows()[u][0] == "message"
+
+    def test_kinds_are_recorded(self, fake_home):
+        m, r = new_ulid(), new_ulid()
+        seen_id_append(m)
+        seen_id_append(r, kind="receipt")
+        rows = _seen_rows()
+        assert rows[m][0] == "message"
+        assert rows[r][0] == "receipt"
+
+    def test_receipts_never_evict_messages(self, fake_home):
+        import txlog
+
+        m = new_ulid()
+        seen_id_append(m)
+        for _ in range(20_000):
+            txlog.seen_insert(new_ulid(), "receipt")
+        assert seen_id_contains(m) is True
+
+    def test_a_broken_store_answers_false_and_swallows_appends(
+        self, fake_home, monkeypatch
+    ):
+        import txlog
+
+        def boom():
+            raise OSError("disk I/O error")
+
+        monkeypatch.setattr(txlog, "_connect", boom)
+        u = new_ulid()
+        seen_id_append(u)
+        assert seen_id_contains(u) is False
+
+    def test_expiry_is_by_age_and_by_kind(self, fake_home, fresh_expiry_clock):
+        import txlog
+
+        now = time.time()
+        old_receipt, young_receipt = new_ulid(), new_ulid()
+        young_message, old_message = new_ulid(), new_ulid()
+        txlog.seen_insert(old_receipt, "receipt", now - 3 * 86400)
+        txlog.seen_insert(young_receipt, "receipt", now - 2 * 86400 + 3600)
+        txlog.seen_insert(young_message, "message", now - 8 * 86400 + 3600)
+        txlog.seen_insert(old_message, "message", now - 9 * 86400)
+        seen_id_append(new_ulid())
+        rows = _seen_rows()
+        assert old_receipt not in rows
+        assert old_message not in rows
+        assert young_receipt in rows
+        assert young_message in rows
+
+    def test_expiry_runs_at_most_once_per_ten_minutes(
+        self, fake_home, fresh_expiry_clock, monkeypatch
+    ):
+        import txlog
+
+        clock = [1000.0]
+        monkeypatch.setattr(network.time, "monotonic", lambda: clock[0])
+        seen_id_append(new_ulid())
+        stale = new_ulid()
+        txlog.seen_insert(stale, "message", time.time() - 9 * 86400)
+        clock[0] += 599
+        seen_id_append(new_ulid())
+        assert stale in _seen_rows()
+        clock[0] += 2
+        seen_id_append(new_ulid())
+        assert stale not in _seen_rows()
 
 
 # ---------- publish_with_backoff hook ----------
@@ -816,7 +902,7 @@ class TestStartStop:
 class TestDeliveryClaim:
     """One envelope reaches every daemon on the machine, because each runs its
     own subscriber and resolves recipients from the shared registry. The
-    seen-ids ring cannot arbitrate that on its own: it is read on entry and
+    seen table cannot arbitrate that on its own: it is read on entry and
     written after delivery, and a slow attachment turns the gap between into
     seconds. Observed in production 2026-08-05 — one send, two delivery
     receipts, and with a sync-folder attachment two inbox writes 7.3s apart.
@@ -858,7 +944,7 @@ class TestDeliveryClaim:
 
     def test_a_second_receiver_mid_delivery_is_turned_away(self, two_local_agents):
         # The regression itself. The second receiver arrives while the first is
-        # still downloading — before anything has reached the ring.
+        # still downloading — before anything has reached the seen table.
         msg_id = new_ulid()
         envelope = self._envelope(msg_id)
         seen: list[str] = []
@@ -916,7 +1002,7 @@ class TestDeliveryClaim:
         assert not (_claims_dir() / msg_id).exists()
 
     def test_an_undeliverable_message_releases_its_claim(self, two_local_agents):
-        # The ring records "not ours" so this machine answers once; the claim
+        # The seen table records "not ours" so this machine answers once; the claim
         # still has to go, or it would sit until the next sweep.
         from network import _claims_dir, claim_message
 
@@ -1045,7 +1131,7 @@ class TestOneAnswerPerMachine:
         # Not consumed while the holder is mid-delivery: the machine-wide
         # ledgers of the folder and s3 transports depend on that.
         assert answers == [False]
-        # The re-offer after the holder released is answered from the ring.
+        # The re-offer after the holder released is answered from the seen table.
         assert second(envelope) is True
         assert second_sent == []
         receipts = self._receipts(first_sent)
@@ -1073,7 +1159,7 @@ class TestOneAnswerPerMachine:
     def test_a_daemon_that_read_the_ring_just_before_it_was_written(
         self, two_local_agents, monkeypatch
     ):
-        # The ring is read before the claim is taken. A sibling can finish in
+        # The seen table is read before the claim is taken. A sibling can finish in
         # between — record "not ours" and release — and the claim is then free.
         msg_id = new_ulid()
         first_sent: list[bytes] = []
@@ -1117,11 +1203,97 @@ class TestOneAnswerPerMachine:
         assert seen_id_contains(msg_id) is False
 
 
+class TestRestartNeverRedelivers:
+    def _envelope(self, msg_id, to="B"):
+        return json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": to,
+            "content": "hello", "files": [],
+        }).encode()
+
+    def test_receipt_traffic_cannot_rotate_a_message_out(self, two_local_agents):
+        import txlog
+
+        msg_id = new_ulid()
+        first_sent: list[bytes] = []
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=first_sent.append,
+        ) is True
+        assert len(list(inbox_dir("B").iterdir())) == 1
+        assert len(first_sent) == 1
+        for _ in range(11_000):
+            txlog.seen_insert(new_ulid(), "receipt")
+        second_sent: list[bytes] = []
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=second_sent.append,
+        ) is True
+        assert len(list(inbox_dir("B").iterdir())) == 1
+        assert second_sent == []
+
+    def test_an_envelope_older_than_the_memory_is_refused(self, two_local_agents):
+        from txlog import read_events
+
+        msg_id = _ulid_minted_days_ago(8)
+        sent: list[bytes] = []
+        assert receive_envelope(
+            self._envelope(msg_id), two_local_agents,
+            publish_control=sent.append, remote_id="hub",
+        ) is True
+        assert not inbox_dir("B").exists()
+        assert sent == []
+        assert seen_id_contains(msg_id) is False
+        rows = read_events(msg_id)
+        assert [r["event"] for r in rows] == ["EXPIRED"]
+        assert rows[0]["detail"] == "older than dedup_days (7 days)"
+        assert rows[0]["remote"] == "hub"
+        assert rows[0]["from"] == "REMOTE_X"
+        assert rows[0]["to"] == "B"
+
+    def test_aged_mail_for_another_machine_leaves_no_row(self, two_local_agents):
+        from txlog import read_events
+
+        msg_id = _ulid_minted_days_ago(8)
+        sent: list[bytes] = []
+        assert receive_envelope(
+            self._envelope(msg_id, to="elsewhere"), two_local_agents,
+            publish_control=sent.append, remote_id="hub",
+        ) is True
+        assert sent == []
+        assert seen_id_contains(msg_id) is False
+        assert read_events(msg_id) == []
+
+    def test_an_old_receipt_is_dropped_silently(self, two_local_agents):
+        from txlog import read_events
+
+        msg_id = _ulid_minted_days_ago(2)
+        envelope = json.dumps({
+            "id": msg_id, "from": "REMOTE_X", "to": "B",
+            "a8s_control": {"type": "delivery_receipt"},
+        }).encode()
+        called: list[dict] = []
+        orig = network._receive_control_envelope
+        network._receive_control_envelope = lambda *a, **k: called.append(a)
+        try:
+            assert receive_envelope(envelope, two_local_agents) is True
+        finally:
+            network._receive_control_envelope = orig
+        assert called == []
+        assert seen_id_contains(msg_id) is False
+        assert read_events(msg_id) == []
+
+    def test_a_six_day_old_message_is_delivered(self, two_local_agents):
+        msg_id = _ulid_minted_days_ago(6)
+        assert receive_envelope(self._envelope(msg_id), two_local_agents) is True
+        assert [f.name for f in inbox_dir("B").iterdir()] == [f"{msg_id}.json"]
+        assert seen_id_contains(msg_id) is True
+
+
 class TestDurableReceipt:
     """Finished means written down somewhere a restart can find it.
 
     A transport that can redeliver reads this path's answer as permission to
-    drop the only copy it holds, and the seen-ids ring turns away everything
+    drop the only copy it holds, and the seen table turns away everything
     that comes after. So the two of them have to agree with the disk: an
     envelope that never reached an inbox is not finished, however normally
     the code that tried to put it there returned.
@@ -1360,7 +1532,7 @@ class TestDeferredCustody:
         """`ThreadPoolExecutor.submit` enqueues the work and only then starts
         a worker, so it can run the job and raise. Both the guard and the job
         then settle, and counting both would take the debt below zero and
-        stamp the ring for a delivery nobody has made."""
+        stamp the seen table for a delivery nobody has made."""
         jobs = []
 
         class QueuesThenRaises:

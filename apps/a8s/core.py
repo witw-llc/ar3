@@ -558,13 +558,10 @@ def transactions_path() -> Path:
     return _a8s_dir() / "transactions.sqlite3"
 
 
-def seen_ids_path() -> Path:
-    """Single cluster-wide ring file holding the last MAX_SEEN_IDS message
-    IDs the receive loops have written into local inboxes. Receive-side dedup
-    lookups read this; appends rotate when the cap is hit. Cluster-wide (not
-    per-agent) because a duplicate envelope can target any local agent and we
-    only need to know whether we've ever delivered it."""
-    return _a8s_dir() / "seen-ids"
+def claims_dir() -> Path:
+    """Directory of per-message delivery claims shared by the receivers on
+    this machine."""
+    return _a8s_dir() / "claims"
 
 
 def folder_ledger_path(remote_id: str) -> Path:
@@ -590,8 +587,7 @@ def s3_ledger_path(remote_id: str) -> Path:
     return _a8s_dir() / "s3-remotes" / f"{remote_id}.consumed"
 
 
-# Receive-side dedup ring cap. 26 chars per ULID + newline = 27 bytes per row;
-# 10k rows ≈ 270 KiB, comfortably below any sane filesystem block budget.
+# Cap on a folder or s3 remote's consumed ledger.
 MAX_SEEN_IDS = 10000
 
 # Per-message retry backoff. Index = number of failed attempts so far. After

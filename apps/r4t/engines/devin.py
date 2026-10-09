@@ -17,5 +17,11 @@ own surfaces.
 
 If Cognition ships a headless usage verb, this file grows a `quota()` and the
 verb appears with no other change — that is what the getattr dispatch buys.
+
+Rechecked 2026-10-08: CLI 3000.10.48 gained `acp`, and `devin auth status`
+prints the tier and plan but no allowance. API v3
+`/v3/organizations/{org}/consumption/daily` reports ACUs spent, with a
+service-user key; the billing-cycle endpoints are Enterprise-only. Nothing
+reports what remains, so the module still defines no quota verb.
 """
 from __future__ import annotations

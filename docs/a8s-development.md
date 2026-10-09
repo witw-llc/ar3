@@ -162,7 +162,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
   (`core.s3_ledger_path`, `transports/ledger.py`) and leave the object for the
   other machines. Publish every envelope, including one addressed to a name
   this node holds — the routing pass has already delivered it and written
-  `seen-ids`, as it does before an MQTT publish, and the receive path collapses
+  the `seen` table, as it does before an MQTT publish, and the receive path collapses
   the echo. Delete an object only in the retention reap, and only when both its
   ULID mint time and its `LastModified` clear `retain_days`. Keep the refusal
   in `a8s remote` and `a8s storage` of a prefix the other uses at the same
@@ -178,7 +178,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
   session, and s3 and folder leave the object or file. The `OnMessage`
   contract lets a callback give no answer at all, which reads as consumed.
 - **Consumed means an inbox holds it.** Only a path that answers `True` appends
-  to `seen-ids`, because the ring suppresses every later attempt: recording an
+  to the `seen` table, because the table suppresses every later attempt: recording an
   id whose write failed converts a disk that was full for a minute into a
   message nobody ever receives. An envelope addressed to a name this cluster
   does not hold is the exception and answers `True` — no retry can make it
@@ -283,7 +283,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
   holds the detach. `a8s step` and `--drain` add no final pass, and an agent
   released to a take-over or a kill is left to its new holder. `tell` stays
   non-blocking: the guarantee lives in the stop, not in the sender.
-- **Local routing claims the ULID in `seen-ids`** to prevent MQTT round-trip dupes.
+- **Local routing claims the ULID in the `seen` table** to prevent MQTT round-trip dupes.
 - **Wake environment is declared and learned, not only inherited from the start shell.**
   Without a knob a node's `PATH` is whatever shell ran `a8s start`, forever —
   fine from an interactive login shell, wrong from `ssh host -- 'a8s start x'`,
@@ -332,13 +332,21 @@ Read [a8s.md](a8s.md) first for concept and usage.
   injection and rc stdout lands in the wake log ahead of the harness output.
   Windows has no login-shell convention, so `a8s start` refuses rather than
   ignoring the field.
-- **Receive-side dedup needs the claim as well as the ring.** `seen-ids` is read
+- **Receive dedup remembers by age, never by count.** The `seen` table in
+  `transactions.sqlite3` keeps a message id for `dedup_days` and a receipt id
+  for one day, each a day longer than its admission window so a sender's
+  clock running up to a day ahead cannot slip a replay through the edge,
+  expired in batches; an inbound envelope older than `dedup_days`
+  is refused without a receipt, with an `EXPIRED` row only when the recipient
+  is an agent this node holds, so the memory always outlasts what any wire
+  can replay. Never put receipts and messages under one count budget.
+- **Receive-side dedup needs the claim as well as the table.** The `seen` table is read
   on entry and written after delivery, and the gap between the two is a whole
   download. Several daemons on one machine each subscribe and each resolve
-  recipients from the shared registry, so they all read a ring that does not
+  recipients from the shared registry, so they all read a table that does not
   mention the message yet and all deliver it. `claim_message` takes the ULID
   first, with a single `O_CREAT | O_EXCL`; the loser drops the envelope exactly
-  as it would a duplicate. Claiming is an optimisation over the ring and never
+  as it would a duplicate. Claiming is an optimisation over the table and never
   a gate on delivery: if the claims directory cannot be written, deliver and
   accept the duplicate. A claim expires after `CLAIM_STALE_SECONDS`, and
   `sweep_stale_claims` runs at daemon startup, so a process killed mid-delivery

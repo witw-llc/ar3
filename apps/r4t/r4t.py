@@ -1537,6 +1537,7 @@ def cmd_rig_presets(_args: argparse.Namespace) -> int:
 
 def cmd_engine(args: argparse.Namespace) -> int:
     import engines
+    from engines import values
 
     if args.target == "check":
         return _cmd_engine_check(args, None)
@@ -1547,15 +1548,20 @@ def cmd_engine(args: argparse.Namespace) -> int:
                 [p for p, e in engines.PRESET_ENGINES.items() if e == name]
                 + ([name] if name in HARNESS_PRESETS else [])
             )
-            verbs = ", ".join(engines.capabilities(name)) or "-"
+            verbs = ", ".join(engines.capabilities(name) + values.verbs(name)) or "-"
             served = f"  presets: {', '.join(presets)}" if presets else ""
             print(f"  {name:<{width}}  [{verbs}]{served}")
         print()
         print("Ask one: r4t engine <id> quota — or run a turn: r4t engine <id> run")
         return 0
     if not args.action:
-        print("r4t engine: expected an action (quota, run, check)", file=sys.stderr)
+        print(
+            "r4t engine: expected an action (quota, run, check, models, efforts)",
+            file=sys.stderr,
+        )
         return 2
+    if args.action in ("models", "efforts"):
+        return _cmd_engine_values(args)
     if args.action == "run":
         return _cmd_engine_run(args)
     if args.action == "check":
@@ -1578,6 +1584,35 @@ def cmd_engine(args: argparse.Namespace) -> int:
     # a plausible-looking reading.
     if payload.get("origin") == "snapshot":
         return QUOTA_EXIT_STALE
+    return 0
+
+
+def _cmd_engine_values(args: argparse.Namespace) -> int:
+    """`r4t engine <id> models|efforts`: what `--model` / `--effort` accept.
+    Values go to stdout one per line so the list pipes; the note goes to
+    stderr so it never pollutes that pipe."""
+    from engines import values
+
+    if args.prompt is not None:
+        print(
+            f"r4t engine: {args.action} takes no further argument "
+            f"(got {args.prompt!r})",
+            file=sys.stderr,
+        )
+        return 2
+    ask = values.models if args.action == "models" else values.efforts
+    try:
+        found, note = ask(args.target)
+    except values.ValuesError as exc:
+        print(f"r4t engine: {exc}", file=sys.stderr)
+        return 1
+    if args.as_json:
+        print(json.dumps({"values": found, "note": note}, indent=2))
+        return 0
+    for value in found:
+        print(value)
+    if note:
+        print(f"r4t engine: {note}", file=sys.stderr)
     return 0
 
 
@@ -3228,7 +3263,8 @@ def build_parser() -> argparse.ArgumentParser:
         "roster or dispatcher involved; check — ask the installed CLI whether "
         "the argv r4t composes for it still parses, spending no turn. "
         "Accepts an engine id or any rig preset id; `list` shows both, and "
-        "bare `check` probes every run-capable engine.",
+        "bare `check` probes every run-capable engine. models / efforts — the "
+        "values --model and --effort accept, one per line, spending no turn.",
     )
     _memory_options(engine_p)
     engine_p.add_argument(
@@ -3238,7 +3274,7 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "action",
         nargs="?",
-        choices=["quota", "run", "check"],
+        choices=["quota", "run", "check", "models", "efforts"],
         help="What to ask the engine.",
     )
     engine_p.add_argument(
@@ -3251,7 +3287,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         dest="as_json",
-        help="quota: machine-readable JSON instead of the text lines.",
+        help="quota/models/efforts: machine-readable JSON instead of text lines.",
     )
     engine_p.add_argument(
         "--dir",
@@ -3635,7 +3671,7 @@ def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> lis
     for tok in extras:
         if tok != "-" and tok.startswith("-"):
             remaining.append(tok)
-        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check"):
+        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check", "models", "efforts"):
             args.action = tok
         elif (
             getattr(args, "prompt", "") is None

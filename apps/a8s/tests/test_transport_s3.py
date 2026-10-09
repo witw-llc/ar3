@@ -361,8 +361,8 @@ class TestPoll:
         """What MQTT does with the broker's echo of its own publish.
 
         The routing pass delivered the message here and recorded it in the
-        seen-ids ring before publishing it. This node's poll then meets its
-        own object: the real receive callback answers from the ring, nothing
+        seen table before publishing it. This node's poll then meets its
+        own object: the real receive callback answers from the seen table, nothing
         is written twice, and the ledger takes the ULID so the next poll does
         not fetch it again.
         """

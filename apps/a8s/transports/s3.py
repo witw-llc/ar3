@@ -31,10 +31,10 @@ for everyone else. The mailbox set is every agent, alias and namespace prefix
 in the local registry, read fresh on every poll so `a8s add` needs no restart.
 
 A publish goes on the wire whatever this node holds. The routing pass has
-already delivered to a local recipient and recorded the ULID in the seen-ids
-ring, exactly as it has before an MQTT publish; this node's own poll then
+already delivered to a local recipient and recorded the ULID in the seen
+table, exactly as it has before an MQTT publish; this node's own poll then
 meets the object the way an MQTT client meets the broker's echo, the receive
-path answers from the ring, and the ledger takes the ULID.
+path answers from the seen table, and the ledger takes the ULID.
 
 A node is not a process. Every daemon on the machine runs its own subscriber
 over the same registry, so `a8s run alice` and `a8s run bob` each poll every
@@ -42,7 +42,7 @@ mailbox this node holds, and `network.claim_message` arbitrates which of them
 delivers. Only the receive path's answer stamps the ledger: a sibling daemon
 holding the claim, or a released claim after a failed delivery, answers False,
 and the envelope is offered again on the next poll. The wire is at-least-once,
-and `claim_message` plus the seen-ids ring collapse the repeats.
+and `claim_message` plus the seen table collapse the repeats.
 
 A machine that joins is owed the mail sent after it joined, as a new MQTT
 session is owed nothing published before it existed. `a8s remote` stamps a

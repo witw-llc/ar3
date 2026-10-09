@@ -8,8 +8,8 @@ name → {transport, broker, topic, ...}) becomes a list of Transport
 instances. The routing pass uses `publish_with_backoff` as its
 `route_outboxes(publish_remotes=...)` hook; each running attached_loop
 spawns one subscriber thread per remote that calls into
-`receive_envelope`. Cluster-wide dedup lives in the seen-ids ring file
-at `~/.config/a8s/seen-ids`.
+`receive_envelope`. Cluster-wide dedup lives in the `seen` table of the
+transactions store.
 
 Transport modules are imported lazily. `load_remotes()` only pulls in
 e.g. `transports.mqtt` when it sees a `transport: mqtt` entry in the
@@ -36,6 +36,7 @@ from typing import Callable
 from core import (
     Participant,
     _preview,
+    claims_dir,
     inbox_dir,
     inbox_tmp_dir,
     network_config_path,
@@ -43,7 +44,6 @@ from core import (
     out_agent,
     out_err,
     secrets_config_path,
-    seen_ids_path,
 )
 import receipts
 from delivery_receipt import (
@@ -57,13 +57,18 @@ from services import StorageService
 from transports import OnMessage, Transport, TransportError
 import txlog
 from ar3.fsio import atomic_write_text
-from ar3.ulid import is_ulid
+from ar3.ulid import is_ulid, parse as parse_ulid
 
 
-# Process-local lock guarding the seen-ids ring rotation. Multiple subscriber
-# threads (one per remote) call seen_id_append concurrently; the append
-# itself is atomic per POSIX, but the truncate-after-rotate is not.
-_SEEN_IDS_LOCK = threading.Lock()
+RECEIPT_SEEN_DAYS = 1
+# Admission reads the sender's clock (ULID mint time); the memory reads this
+# machine's. The memory outlasts admission by this much, so a sender running
+# ahead by less than this cannot slip a replay through the window's edge; a
+# larger skew can.
+CLOCK_SKEW_DAYS = 1
+_SEEN_EXPIRY_INTERVAL_S = 600.0
+_SEEN_EXPIRY_LOCK = threading.Lock()
+_seen_expiry_last: float | None = None
 _REMOTE_DIAGNOSTIC_LOCK = threading.Lock()
 _REMOTE_DIAGNOSTIC_LAST: dict[tuple[str, str, str], float] = {}
 _REMOTE_DIAGNOSTIC_INTERVAL_S = 300.0
@@ -125,9 +130,9 @@ def _remote_not_local(
     `DROPPED` never covered because a configured remote made the publish
     succeed.
 
-    The id then goes into the seen-ids ring, before the caller releases the
+    The id then goes into the seen table, before the caller releases the
     claim. Every daemon on the machine receives the same envelope, and the
-    ring is what turns the later ones away, so the machine answers once."""
+    table is what turns the later ones away, so the machine answers once."""
     _remote_receive_diagnostic(
         msg_id, recipient, reason, remote_id, event="NOT_LOCAL", prefix="REMOTE_SKIP",
     )
@@ -596,7 +601,7 @@ def detect_service_kind(url: str) -> str | None:
     return None
 
 
-# ---------- seen-ids ring ----------
+# ---------- seen table ----------
 
 # How long a claim may sit before another receiver may take it over. The claim
 # covers one delivery attempt — a single download pass plus the inbox writes —
@@ -607,7 +612,7 @@ CLAIM_STALE_SECONDS = 300
 
 
 def _claims_dir() -> Path:
-    return seen_ids_path().parent / "claims"
+    return claims_dir()
 
 
 def claim_message(ulid: str) -> bool:
@@ -615,14 +620,14 @@ def claim_message(ulid: str) -> bool:
 
     Every daemon on a machine runs its own subscriber and resolves recipients
     from the shared registry, so one envelope arrives at every one of them and
-    any of them will deliver it. The seen-ids ring alone cannot arbitrate that:
+    any of them will deliver it. The seen table alone cannot arbitrate that:
     it is read on entry and written after delivery, and everything in between —
     a download attempt above all — is time in which a second receiver reads a
-    ring that does not mention this message yet and starts delivering it too.
+    table that does not mention this message yet and starts delivering it too.
 
     So the claim is taken up front and atomically. `O_CREAT | O_EXCL` is one
     filesystem operation with one winner, which is what the process-local lock
-    around the ring cannot be.
+    around the table cannot be.
 
     False means somebody else has it; the caller drops the envelope silently,
     exactly as it would for a duplicate.
@@ -636,7 +641,7 @@ def claim_message(ulid: str) -> bool:
     except FileExistsError:
         pass
     except OSError:
-        # Claiming is an optimisation over the ring, never a gate on delivery.
+        # Claiming is an optimisation over the table, never a gate on delivery.
         # If the directory cannot be written, deliver and accept the duplicate.
         return True
     try:
@@ -684,7 +689,7 @@ def hold_claim(ulid: str) -> None:
 
 def release_claim(ulid: str) -> None:
     """Give up a claim. Called once the message is durably recorded in the
-    ring, and on every path that ends without delivering."""
+    seen table, and on every path that ends without delivering."""
     try:
         (_claims_dir() / ulid).unlink(missing_ok=True)
     except OSError:
@@ -707,52 +712,37 @@ def sweep_stale_claims() -> None:
 
 
 def seen_id_contains(ulid: str) -> bool:
-    p = seen_ids_path()
-    if not p.is_file():
-        return False
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip() == ulid:
-                    return True
-    except OSError:
-        pass
-    return False
+    return txlog.seen_contains(ulid)
 
 
-def _max_seen_ids() -> int:
+def _dedup_days() -> int:
     from settings import get_int
 
-    return get_int("max_seen_ids")
+    return get_int("dedup_days")
 
 
-def seen_id_append(ulid: str) -> None:
-    """Append a ULID to the ring, rotating to the last max_seen_ids entries
-    when the file grows past the cap. Best-effort — disk failures don't
-    propagate (a missed append just means we might re-deliver a duplicate)."""
-    with _SEEN_IDS_LOCK:
-        p = seen_ids_path()
-        try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            with p.open("a", encoding="utf-8") as f:
-                f.write(ulid + "\n")
-        except OSError:
+def _expire_seen(now: float) -> None:
+    txlog.seen_expire(
+        now - (_dedup_days() + CLOCK_SKEW_DAYS) * 86400.0,
+        now - (RECEIPT_SEEN_DAYS + CLOCK_SKEW_DAYS) * 86400.0,
+    )
+
+
+def seen_id_append(ulid: str, kind: str = "message") -> None:
+    """Remember a ULID, and at most once per ten minutes drop the ids that
+    have aged out. Best-effort: a missed append just means a possible
+    duplicate."""
+    global _seen_expiry_last
+    txlog.seen_insert(ulid, kind)
+    with _SEEN_EXPIRY_LOCK:
+        mono = time.monotonic()
+        if (
+            _seen_expiry_last is not None
+            and mono - _seen_expiry_last < _SEEN_EXPIRY_INTERVAL_S
+        ):
             return
-        # Rotation check.
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                lines = [ln.rstrip("\n") for ln in f if ln.strip()]
-        except OSError:
-            return
-        if len(lines) > _max_seen_ids():
-            tmp = p.with_suffix(p.suffix + ".tmp")
-            try:
-                with tmp.open("w", encoding="utf-8") as out_f:
-                    for u in lines[-_max_seen_ids():]:
-                        out_f.write(u + "\n")
-                os.replace(str(tmp), str(p))
-            except OSError:
-                pass
+        _seen_expiry_last = mono
+    _expire_seen(time.time())
 
 
 # ---------- send (publish_with_backoff) ----------
@@ -818,9 +808,9 @@ def receive_envelope(
     subscriber thread.
 
     Returns whether this call finished with the envelope. True says the
-    network is done with it here — delivered and recorded in the seen-ids
-    ring, already in that ring, or rejected for good (malformed, or addressed
-    to nobody this node holds, which the ring also records). False says it is
+    network is done with it here — delivered and recorded in the seen
+    table, already in that table, or rejected for good (malformed, or addressed
+    to nobody this node holds, which the table also records). False says it is
     still owed an attempt: a sibling receiver holds the claim, or delivery
     raised and the claim was released precisely so somebody can try again. A
     transport that records what it consumed must not record the envelope on a
@@ -830,8 +820,8 @@ def receive_envelope(
     one consumed ledger per machine: a True here would stamp it for the
     holder too, and a holder that then fails would never see the message
     again. The re-offer that False buys is cheap, because the holder records
-    the id in the ring before it releases the claim, and the re-offer is
-    answered from the ring without a second receipt.
+    the id in the table before it releases the claim, and the re-offer is
+    answered from the table without a second receipt.
 
     `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
@@ -852,6 +842,8 @@ def receive_envelope(
     if not isinstance(msg_id, str) or not is_ulid(msg_id):
         out(f"WARN: envelope without valid id; dropping (id={msg_id!r})")
         return True
+    if _refuse_aged(msg, msg_id, all_agents, remote_id):
+        return True
     if seen_id_contains(msg_id):
         return True  # already delivered — silent dedup
     if not claim_message(msg_id):
@@ -859,7 +851,7 @@ def receive_envelope(
         # message is that receiver's to finish, not this one's to write off.
         return False
     if seen_id_contains(msg_id):
-        # A sibling finished and released between the ring read and the
+        # A sibling finished and released between the table read and the
         # claim. Running the path again would send a second receipt.
         release_claim(msg_id)
         return True
@@ -872,6 +864,43 @@ def receive_envelope(
         # receiver's transport redelivery or by a sibling.
         release_claim(msg_id)
         raise
+
+
+def _holds_recipient(msg: dict, all_agents: list[Participant]) -> bool:
+    recipient_name = (msg.get("to") or "").strip()
+    try:
+        _, member_names = resolve_name(recipient_name)
+    except (KeyError, ValueError):
+        return False
+    local = {p.name.lower() for p in all_agents}
+    return any(m.lower() in local for m in member_names)
+
+
+def _refuse_aged(
+    msg: dict, msg_id: str, all_agents: list[Participant], remote_id: str
+) -> bool:
+    """Whether the envelope is older than the dedup memory. The memory has to
+    outlast anything a wire can replay, so what it no longer remembers is
+    refused rather than delivered a second time. Only mail for an agent this
+    node holds leaves a row; a dead envelope for somebody else is nobody's
+    business here."""
+    age_days = (time.time() - parse_ulid(msg_id)[0] / 1000.0) / 86400.0
+    if is_control_envelope(msg):
+        return age_days > RECEIPT_SEEN_DAYS
+    limit = _dedup_days()
+    if age_days <= limit:
+        return False
+    if not _holds_recipient(msg, all_agents):
+        return True
+    txlog.log(
+        "EXPIRED",
+        msg_id=msg_id,
+        sender=msg.get("from") or "?",
+        recipient=str(msg.get("to") or ""),
+        remote=remote_id,
+        detail=f"older than dedup_days ({limit} days)",
+    )
+    return True
 
 
 def _deliver_claimed_envelope(
@@ -891,15 +920,15 @@ def _deliver_claimed_envelope(
     False means the work is unfinished and the copy on the wire is still the
     only one worth having.
 
-    Only a path that answers True records the id in the seen-ids ring, because
-    the ring suppresses every later attempt: appending it for work that failed
+    Only a path that answers True records the id in the seen table, because
+    the table suppresses every later attempt: appending it for work that failed
     turns a disk that was full for a minute into a message nobody ever gets.
     Local routing already draws the line in this place — `_process_pending`
     appends only once at least one inbox write has committed.
     """
     if is_control_envelope(msg):
         _receive_control_envelope(msg, all_agents, remote_id)
-        seen_id_append(msg_id)
+        seen_id_append(msg_id, kind="receipt")
         release_claim(msg_id)
         return True
     if _deferred_in_flight(msg_id):
@@ -1027,7 +1056,7 @@ def _deliver_claimed_envelope(
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
     if deferred:
-        # The claim stays held and the ring stays empty until the last
+        # The claim stays held and the table stays empty until the last
         # deferred recipient is done. Held, because a sibling daemon reading
         # the same mailbox would otherwise start the same download again;
         # empty, because the only full copy of this envelope is now a closure

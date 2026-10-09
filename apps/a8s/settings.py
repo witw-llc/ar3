@@ -87,12 +87,12 @@ KNOBS: tuple[Knob, ...] = (
         "Sleep between attachment fetch/probe attempts",
     ),
     Knob(
-        "max_seen_ids",
-        10000,
+        "dedup_days",
+        7,
         "machine",
         True,
-        "A8S_MAX_SEEN_IDS",
-        "Cluster-wide receive dedup ring size (~/.config/a8s/seen-ids)",
+        "A8S_DEDUP_DAYS",
+        "Days a received message id is remembered; older inbound mail is refused",
     ),
     Knob(
         "txlog_detail_max",
@@ -262,7 +262,7 @@ def _coerce(key: str, raw: str) -> Any:
     if key in (
         "convo_max_rows",
         "max_file_bytes",
-        "max_seen_ids",
+        "dedup_days",
         "storage_allow_http",
         "storage_receive_wait_seconds",
         "storage_fetch_poll_seconds",
@@ -306,10 +306,10 @@ def _validate(key: str, value: Any) -> Any:
         if n < 1:
             raise ValueError("storage_fetch_poll_seconds must be a positive integer")
         return n
-    if key == "max_seen_ids":
+    if key == "dedup_days":
         n = int(value)
         if n < 1:
-            raise ValueError("max_seen_ids must be a positive integer")
+            raise ValueError("dedup_days must be a positive integer")
         return n
     if key == "txlog_detail_max":
         n = int(value)

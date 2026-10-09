@@ -577,6 +577,10 @@ class TestLifecycle:
         that connected, or the operator's only clue is mail that never comes."""
         absent = tmp_path / "not-mounted-yet"
         t = FolderTransport(remote_id="box", path=str(absent), poll_seconds=1)
+        # The poll thread's own first poll would race the manual poll below
+        # for the reachable flag; park the thread so the manual poll is the
+        # only writer after start.
+        t._poll_loop = t._stop.wait
         t.start(lambda _b: None)
         try:
             assert not t.is_connected()

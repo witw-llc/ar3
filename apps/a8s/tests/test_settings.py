@@ -9,12 +9,23 @@ import settings as sm
 from commands import cmd_config
 
 
+class TestDedupDays:
+    @pytest.mark.parametrize("bad", ["0", "-1"])
+    def test_rejects_non_positive(self, fake_home, bad):
+        with pytest.raises(ValueError, match="dedup_days must be a positive integer"):
+            sm.set_setting("dedup_days", int(bad))
+
+    def test_env_overrides_default(self, fake_home, monkeypatch):
+        monkeypatch.setenv("A8S_DEDUP_DAYS", "3")
+        assert sm.get_int("dedup_days") == 3
+
+
 class TestSettingsResolution:
     def test_default_when_file_and_env_missing(self, fake_home):
         assert sm.get_int("convo_max_rows") == 50_000
         assert sm.get_float("loop_interval") == 1.0
         assert sm.get_int("max_file_bytes") == 50 * 1024 * 1024
-        assert sm.get_int("max_seen_ids") == 10000
+        assert sm.get_int("dedup_days") == 7
 
     def test_settings_file_takes_precedence_over_env(self, fake_home, monkeypatch):
         monkeypatch.setenv("A8S_CONVO_MAX_ROWS", "50")

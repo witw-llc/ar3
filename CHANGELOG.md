@@ -10,6 +10,43 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.105 — 2026-10-08
+
+### Fixed
+
+- **A node restart never delivers a message twice.** Receive dedup remembers
+  every message id for `dedup_days` (default 7) in the transactions store and
+  expires ids by age in batches, instead of a 10,000-entry ring that delivery
+  receipts for other machines rotated through in hours; receipts are kept apart
+  for one day, and inbound mail older than `dedup_days` is refused as
+  `EXPIRED`. The `max_seen_ids` setting and the `seen-ids` file are gone.
+  Closes #329.
+
+- **`r4t engine claude quota` refreshes an expired Claude token by itself.**
+  After hours without an interactive session the stored token had expired and
+  the probe refused until the operator ran `claude` by hand. r4t now runs
+  `claude doctor` once (no turn, no terminal), which makes the CLI refresh its
+  own token, then retries; if that fails the error says to run
+  `claude auth login`.
+  Closes #324.
+
+- **`r4t engine cursor quota` works on a Mac that has only the `agent` CLI.**
+  The probe needed the Cursor IDE's state database; it now falls back to the
+  CLI's own Keychain login and says in its note when it did. Linux and Windows
+  CLI-only machines are not covered yet. Closes #327.
+
+### Added
+
+- **`r4t engine <id> efforts` and `r4t engine <id> models` list the values
+  `--effort` and `--model` accept.** An operator setting `MODEL` or `EFFORT` on
+  an engine node can now ask first; a free-form engine answers with a note, and
+  an engine with no flag or no list verb says where the string goes. `r4t
+  engine list` shows which engines answer which verb. Closes #325.
+
+### Changed
+
+- **Devin still answers no quota verb.** An October 2026 research pass found no headless surface for a seat's remaining allowance: the REST API reports ACUs spent per organization, and only Enterprise sees billing cycles. The engine module and the wiki record the finding. Closes #326.
+
 ## 0.1.104 — 2026-10-08
 
 ### Added

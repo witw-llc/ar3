@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -73,7 +74,7 @@ def state_db() -> Path | None:
 
 
 def quota() -> dict:
-    token = _access_token()
+    token, from_keychain = _access_token()
     body = json.dumps({}).encode("utf-8")
     request = urllib.request.Request(
         USAGE_URL,
@@ -92,7 +93,10 @@ def quota() -> dict:
         raise QuotaError(f"cursor dashboard endpoint returned HTTP {exc.code}") from exc
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
         raise QuotaError(f"cursor dashboard endpoint unreachable: {exc}") from exc
-    return parse_period_usage(payload, _membership_type())
+    result = parse_period_usage(payload, _membership_type())
+    if from_keychain:
+        result["note"] += "; token from the agent CLI's Keychain item"
+    return result
 
 
 def parse_period_usage(payload: dict, plan: str | None) -> dict:
@@ -172,22 +176,58 @@ def _read_state(db: Path, key: str) -> str | None:
     return value.strip('"') if isinstance(value, str) else None
 
 
-def _access_token() -> str:
-    token = _state_value(ACCESS_TOKEN_KEY)
-    if not token:
-        looked = ", ".join(str(p) for p in state_db_candidates())
-        found = state_db()
-        raise QuotaError(
-            (
-                f"Cursor state database has no access token: {found}"
-                if found
-                else f"no Cursor state database (looked in: {looked})"
-            )
-            + " — the token comes from the Cursor IDE, which the `cursor-agent` "
-            f"CLI alone does not install (try: log in to the IDE on this "
-            f"machine, or set {STATE_DB_ENV} to its state.vscdb)"
+KEYCHAIN_SERVICE = "cursor-access-token"
+KEYCHAIN_ACCOUNT = "cursor-user"
+
+
+def _keychain_token() -> str | None:
+    """The `agent` CLI keeps its login in the macOS Keychain. Where it keeps it
+    on Linux and Windows is not verified, so only darwin looks."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "security", "find-generic-password",
+                "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
-    return token
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def _access_token() -> tuple[str, bool]:
+    """The token and whether it came from the CLI's Keychain item."""
+    token = _state_value(ACCESS_TOKEN_KEY)
+    if token:
+        return token, False
+    token = _keychain_token()
+    if token:
+        return token, True
+    looked = ", ".join(str(p) for p in state_db_candidates())
+    found = state_db()
+    raise QuotaError(
+        (
+            f"Cursor state database has no access token: {found}"
+            if found
+            else f"no Cursor state database (looked in: {looked})"
+        )
+        + f"; no `{KEYCHAIN_SERVICE}` Keychain item"
+        + (
+            ""
+            if sys.platform == "darwin"
+            else " (the CLI's login location on this platform is not verified)"
+        )
+        + " — run `agent login`, or log in to the Cursor IDE on this machine"
+        + f" (or set {STATE_DB_ENV} to its state.vscdb); the `cursor-agent` "
+        "CLI alone does not install the IDE"
+    )
 
 
 def _membership_type() -> str | None:

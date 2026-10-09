@@ -12,6 +12,7 @@ from core import (
     BACKOFF_SCHEDULE,
     MAX_ATTEMPTS,
     MAX_SEEN_IDS,
+    claims_dir,
     _a8s_dir,
     _pid_alive,
     agent_dir,
@@ -22,7 +23,6 @@ from core import (
     read_last_active,
     registry_path,
     retry_sidecar_path,
-    seen_ids_path,
     touch_last_active,
 )
 from conftest import set_home
@@ -64,12 +64,9 @@ class TestRetrySidecarPath:
         assert retry_sidecar_path(f) == Path("/tmp/01HX.json.retry")
 
 
-class TestSeenIdsPath:
+class TestClaimsDir:
     def test_cluster_wide(self, fake_home):
-        # Single file under ~/.a8s/, not per-agent.
-        p = seen_ids_path()
-        assert p.parent == fake_home / ".a8s"
-        assert p.name == "seen-ids"
+        assert claims_dir() == fake_home / ".a8s" / "claims"
 
 
 class TestNetworkConfigPath:

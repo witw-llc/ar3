@@ -44,6 +44,15 @@ def _no_var_cache_leak():
     runbook.clear_vars_cache()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_keychain(monkeypatch):
+    """The cursor probe asks the macOS Keychain after its database; a test
+    that reaches it must never read the developer's real login."""
+    from engines import cursor
+
+    monkeypatch.setattr(cursor, "_keychain_token", lambda: None)
+
+
 @pytest.fixture
 def zone(monkeypatch):
     """Force the zone every rendered stamp reads in.

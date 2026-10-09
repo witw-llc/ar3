@@ -4,14 +4,15 @@ There is no first-party scriptable surface; this is the OAuth usage endpoint
 the CLI itself reads, community-documented. The claude-code User-Agent is
 load-bearing — without it the request lands in a punitive rate bucket. The
 token comes from wherever this machine's CLI keeps it: the macOS Keychain
-item, the credentials file, or the environment. An expired token is an error
-with a remedy, not a refresh — the refresh flow belongs to the CLI.
+item, the credentials file, or the environment. An expired or rejected stored
+token is refreshed by the CLI itself (`claude doctor`), never by this module.
 """
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -31,8 +32,54 @@ BUCKET_LABELS = {
 }
 
 
+class _Rejected(Exception):
+    pass
+
+
 def quota() -> dict:
-    token = _oauth_token()
+    creds = _credentials()
+    stored = bool(_stored_token(creds))
+    refreshed = False
+    if stored and _token_expired(creds):
+        _refresh_via_cli()
+        refreshed = True
+        creds = _credentials()
+    token = _oauth_token(creds)
+    try:
+        payload = _fetch_usage(token)
+    except _Rejected as exc:
+        if not stored:
+            raise QuotaError(
+                "usage endpoint rejected CLAUDE_CODE_OAUTH_TOKEN — set a fresh "
+                "CLAUDE_CODE_OAUTH_TOKEN"
+            ) from exc
+        if refreshed:
+            raise _rejected_after_refresh() from exc
+        _refresh_via_cli()
+        refreshed = True
+        token = _oauth_token(_credentials())
+        try:
+            payload = _fetch_usage(token)
+        except _Rejected as again:
+            raise _rejected_after_refresh() from again
+    result = parse_usage(payload)
+    if refreshed:
+        result["note"] = "token refreshed by claude doctor"
+    # One account can hold seats in several workspaces (a Team and a personal
+    # Max, say) and a token answers for exactly one — name it, so nobody
+    # mistakes whose buckets these are.
+    result["plan"] = _workspace(token) or result["plan"]
+    return result
+
+
+def _rejected_after_refresh() -> QuotaError:
+    return QuotaError(
+        "usage endpoint rejected the token after `claude doctor` refreshed it "
+        "— run `claude auth login`"
+    )
+
+
+def _fetch_usage(token: str) -> dict:
     request = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -44,22 +91,24 @@ def quota() -> dict:
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
-            raise QuotaError(
-                "usage endpoint rejected the token (expired?) — run claude "
-                "interactively once to refresh it"
-            ) from exc
-        raise QuotaError(f"usage endpoint returned HTTP {exc.code}") from exc
+            raise _Rejected() from exc
+        raise QuotaError(f"usage endpoint returned HTTP {exc.code}{_error_detail(exc)}") from exc
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
         raise QuotaError(f"usage endpoint unreachable: {exc}") from exc
-    result = parse_usage(payload)
-    # One account can hold seats in several workspaces (a Team and a personal
-    # Max, say) and a token answers for exactly one — name it, so nobody
-    # mistakes whose buckets these are.
-    result["plan"] = _workspace(token) or result["plan"]
-    return result
+
+
+def _error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        error = json.loads(exc.read().decode("utf-8")).get("error")
+        kind, message = error.get("type"), error.get("message")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if not kind or not message:
+        return ""
+    return f" ({kind}: {message})"
 
 
 def _workspace(token: str) -> str | None:
@@ -143,12 +192,48 @@ def parse_usage(payload: dict) -> dict:
     return {"origin": "live", "plan": None, "buckets": buckets, "note": None}
 
 
-def _oauth_token() -> str:
-    creds = _keychain_credentials() or _file_credentials()
-    if creds:
-        token = (creds.get("claudeAiOauth") or {}).get("accessToken")
-        if token:
-            return token
+def _credentials() -> dict:
+    return _keychain_credentials() or _file_credentials() or {}
+
+
+def _stored_token(creds: dict) -> str | None:
+    oauth = creds.get("claudeAiOauth")
+    token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    return token or None
+
+
+def _token_expired(creds: dict, now: float | None = None) -> bool:
+    oauth = creds.get("claudeAiOauth")
+    expires = oauth.get("expiresAt") if isinstance(oauth, dict) else None
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        return False
+    return expires <= (time.time() if now is None else now) * 1000
+
+
+def _refresh_via_cli() -> None:
+    # `claude doctor` makes the CLI refresh and rewrite its own stored token,
+    # with no turn and no terminal. The refresh endpoint is never called from
+    # here: the refresh token rotates, and a bare client there was rate-limited.
+    remedy = "run `claude auth login`"
+    try:
+        proc = subprocess.run(
+            ["claude", "doctor"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=45,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QuotaError(f"`claude doctor` could not refresh the token ({exc}) — {remedy}") from exc
+    if proc.returncode != 0:
+        raise QuotaError(
+            f"`claude doctor` exited {proc.returncode} without refreshing the token — {remedy}"
+        )
+
+
+def _oauth_token(creds: dict) -> str:
+    token = _stored_token(creds)
+    if token:
+        return token
     env = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if env:
         return env

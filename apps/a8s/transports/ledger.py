@@ -10,7 +10,7 @@ Time removes the envelope; the transport that owns the wire does that sweep.
 `a8s start` runs a handler process per agent and each one appends to the same
 remote's ledger, so the file has a cross-process mutex beside it. An append
 never waits for that mutex: a lost append costs one redelivery, which the
-seen-ids ring collapses, while a blocked append would cost delivery itself.
+seen table collapses, while a blocked append would cost delivery itself.
 Only compaction waits, and it may always give up.
 """
 from __future__ import annotations

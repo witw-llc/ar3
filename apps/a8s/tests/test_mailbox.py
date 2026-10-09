@@ -379,7 +379,7 @@ class TestRouteOutboxes:
             f.unlink()
         receive_envelope(envelope_bytes, [a, b])
         assert list(inbox_b.iterdir()) == [], (
-            "Round-trip must be deduped via seen-ids, not delivered again"
+            "Round-trip must be deduped via the seen table, not delivered again"
         )
 
 
