@@ -531,6 +531,23 @@ class TestAgeStamp:
         assert "### Deploy key limits (today)" in text
         assert knowledge.KNOWLEDGE_STATUS_LINE not in text
 
+    def test_an_entry_that_replaced_another_says_so(self, ctx):
+        home = knowledge.store_home(NODE, "phil")
+        ids = []
+        for title, content in (("Deploy key limits", "The deploy key cannot push workflow files."),
+                               ("Deploy key scope", "The deploy key now pushes workflow files too.")):
+            res = knowledge._run_k7e(home, "store", title, "--content", content)
+            assert res.returncode == 0, res.stderr
+            ids.append(res.stdout.split()[1].rstrip(":"))
+        assert knowledge._run_k7e(home, "supersede", *ids).returncode == 0
+        roster = load_roster(ctx.roster_path)
+        phil = roster.find("phil")
+        phil.knowledge_on = True
+        text = "\n".join(knowledge.knowledge_section(ctx, phil, [{"body": "deploy key workflow files"}]))
+        assert text.count(knowledge.KNOWLEDGE_REPLACES_LINE) == 1
+        assert text.index("### Deploy key scope") < text.index(knowledge.KNOWLEDGE_REPLACES_LINE)
+        assert ids[0] not in text and ids[1] not in text
+
     def test_stale_entry_stamps_days_old_with_status_line(self, ctx):
         node_id = seed_dated_store(
             "phil", "Old deploy runbook", "Deploys go out weekly on Fridays from main.", 36,
@@ -778,7 +795,7 @@ class TestDreamSweep:
         roster = self.dreaming_roster(ctx)
         config = self._config(ctx)
         assert knowledge.dream_sweep(ctx, roster, config) == ["Phil"]
-        assert [c[0] for c in calls] == ["distill", "distill"]
+        assert [c[0] for c in calls] == ["distill", "distill", "compile"]
         mark = knowledge.store_home(NODE, "phil") / ".dreamed"
         assert mark.read_text(encoding="utf-8").strip().startswith(
             "20260730T000000000002Z"
@@ -980,6 +997,82 @@ class TestDreamSweep:
         knowledge.dream_sweep(ctx, roster, self._config(ctx))
         assert timeouts and all(x <= 300.0 for x in timeouts)
 
+    def test_a_capture_that_keeps_dying_is_set_aside(self, ctx, monkeypatch):
+        """Field case: one capture timed out at 600 s twelve times in a day,
+        spent the sweep budget every pass, and starved every member after it.
+        The third failure moves the watermark past it and names it."""
+        def fake(home, *a, **k):
+            if a[0] == "distill" and a[1].endswith("0060Z-t.md"):
+                raise subprocess.TimeoutExpired("k7e", 600)
+            return completed(stdout="  [stored] K7E-000-00001 A note\n")
+
+        monkeypatch.setattr(knowledge, "_run_k7e", fake)
+        for i in (0, 1):
+            state.write_turn_capture(NODE, "phil", f"20260730T00000000006{i}Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        home = knowledge.store_home(NODE, "phil")
+        for _ in range(knowledge.DREAM_ATTEMPTS - 1):
+            assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == []
+            assert not (home / ".dreamed").exists()
+        assert "DREAM-QUARANTINE" not in read_log()
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        assert (home / ".dream-failed").read_text(encoding="utf-8").startswith(
+            "20260730T000000000060Z"
+        )
+        assert "DREAM-QUARANTINE phil 20260730T000000000060Z" in read_log()
+        assert knowledge.dream_sweep(ctx, roster, self._config(ctx)) == ["Phil"]
+        assert (home / ".dreamed").read_text(encoding="utf-8").startswith(
+            "20260730T000000000061Z"
+        )
+
+    def test_a_call_the_budget_cut_short_is_not_a_strike(self, ctx, monkeypatch):
+        """A capture reached late in a sweep gets only the budget that is
+        left; timing out there says nothing about the capture."""
+        def fake(home, *a, **k):
+            if a[0] == "distill":
+                raise subprocess.TimeoutExpired("k7e", k["timeout"])
+            return completed()
+
+        monkeypatch.setattr(knowledge, "_run_k7e", fake)
+        monkeypatch.setattr(knowledge, "DREAM_BUDGET_SECONDS", 300.0)
+        state.write_turn_capture(NODE, "phil", "20260730T000000000070Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        for _ in range(knowledge.DREAM_ATTEMPTS + 1):
+            knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        assert "DREAM-QUARANTINE" not in read_log()
+        assert not (knowledge.store_home(NODE, "phil") / ".dream-failed").exists()
+
+    def test_the_sweep_runs_the_scheduled_compile_through_the_bridge(
+        self, ctx, monkeypatch
+    ):
+        calls = []
+
+        def fake(home, *a, **k):
+            calls.append((a, k.get("extra_env") or {}))
+            if a[0] == "compile":
+                return completed(stdout="Compiled K7E-000-00009.\n")
+            return completed(stdout="  [stored] K7E-000-00001 A note\n")
+
+        monkeypatch.setattr(knowledge, "_run_k7e", fake)
+        state.write_turn_capture(NODE, "phil", "20260730T000000000080Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        [(args, env)] = [c for c in calls if c[0][0] == "compile"]
+        assert args == ("compile", "--due")
+        assert env["K7E_COMPILE_COMMAND"] == env["K7E_DISTILL_COMMAND"]
+        assert "DREAM-COMPILE phil Compiled K7E-000-00009." in read_log()
+
+    def test_a_compile_that_is_not_due_says_nothing(self, ctx, monkeypatch):
+        monkeypatch.setattr(
+            knowledge, "_run_k7e",
+            lambda home, *a, **k: completed(
+                stdout="compile: not-due\n" if a[0] == "compile" else ""),
+        )
+        state.write_turn_capture(NODE, "phil", "20260730T000000000090Z", "t", "x")
+        roster = self.dreaming_roster(ctx)
+        knowledge.dream_sweep(ctx, roster, self._config(ctx))
+        assert "compile" not in read_log().lower().replace("compiled", "")
+
     def test_a_spent_budget_leaves_the_rest_for_the_next_pass(
         self, ctx, monkeypatch
     ):
@@ -1083,11 +1176,12 @@ class TestDreamSweep:
         config = self._config(ctx)
         knowledge.dream_sweep(ctx, roster, config)
         # One call per capture — the pass is still bounded at DREAM_BATCH.
+        assert calls.pop() == ("compile", "--due")
         assert len(calls) == knowledge.DREAM_BATCH
         assert all(c[0] == "distill" and len(c) == 2 for c in calls)
         calls.clear()
         knowledge.dream_sweep(ctx, roster, config)  # the remainder rides the next pass
-        assert len(calls) == 3
+        assert [c[0] for c in calls] == ["distill"] * 3 + ["compile"]
 
     def test_backlog_survives_an_absent_ollama(self, ctx):
         """A real store and a dead endpoint: the queue keeps its entries, the

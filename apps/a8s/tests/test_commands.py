@@ -1580,7 +1580,7 @@ class TestHarnessWarningAtStart:
         err = capsys.readouterr().err
         assert "Searched PATH:" in err
         assert (
-            "Run `a8s retry probe` from a terminal where "
+            "Run `a8s restart probe` from a terminal where "
             "a8s-no-such-harness-xyz runs." in err
         )
 
@@ -1597,7 +1597,7 @@ class TestHarnessWarningAtStart:
         _warn_unresolvable_harnesses(["probe"])
         err = capsys.readouterr().err
         assert "`definition.env`" in err
-        assert "a8s retry" not in err
+        assert "a8s restart" not in err
 
     def test_a_declared_path_that_resolves_it_ends_the_warning(
         self, fake_home, agent_root, tmp_path, capsys
@@ -1863,7 +1863,7 @@ class TestWakePathLearning:
         old, new = self._dir(tmp_path, "old"), self._dir(tmp_path, "new")
         set_setting("wake_path", f"{old}:/usr/bin")
         monkeypatch.setenv("PATH", f"{new}:{old}:/usr/bin")
-        dispatch("retry", ["nobody"], 1.0)
+        dispatch("restart", ["nobody"], 1.0)
         assert get_setting("wake_path") == f"{new}:{old}:/usr/bin"
         assert f"a8s: wakes now also search {new}" in capsys.readouterr().out
 
@@ -1875,7 +1875,7 @@ class TestWakePathLearning:
 
         set_setting("wake_path", "/operator/wrote/this:/usr/bin")
         monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
-        dispatch("retry", ["nobody"], 1.0)
+        dispatch("restart", ["nobody"], 1.0)
         assert "/operator/wrote/this" in get_setting("wake_path").split(":")
 
     def test_a_verb_away_from_a_terminal_learns_nothing(
@@ -1887,7 +1887,7 @@ class TestWakePathLearning:
         set_setting("wake_path", "/usr/bin")
         monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
         monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
-        dispatch("retry", ["nobody"], 1.0)
+        dispatch("restart", ["nobody"], 1.0)
         assert get_setting("wake_path") == "/usr/bin"
 
     def test_a_command_inside_a_wake_learns_nothing(
@@ -1899,7 +1899,7 @@ class TestWakePathLearning:
         set_setting("wake_path", "/usr/bin")
         monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
         monkeypatch.setenv("A8S_TURN_RECIPIENT", "alpha")
-        dispatch("retry", ["nobody"], 1.0)
+        dispatch("restart", ["nobody"], 1.0)
         assert get_setting("wake_path") == "/usr/bin"
 
     def test_a_read_only_verb_learns_nothing(
@@ -1921,7 +1921,7 @@ class TestWakePathLearning:
 
         monkeypatch.setenv("A8S_WAKE_PATH", "/chosen/bin")
         monkeypatch.setenv("PATH", f"{self._dir(tmp_path, 'new')}:/usr/bin")
-        dispatch("retry", ["nobody"], 1.0)
+        dispatch("restart", ["nobody"], 1.0)
         assert "wake_path" not in load_settings_file()
 
     @pytest.mark.skipif(os.name != "posix", reason="fnm session links are POSIX")
@@ -2528,6 +2528,18 @@ class TestCmdRemoteFolder:
         cmd_health()
         assert "remote box: OK" in capsys.readouterr().out
         assert envelope.is_file()
+
+    def test_health_counts_ambiguous_sends_per_remote(self, fake_home, shared, capsys):
+        import txlog
+        from commands import cmd_health
+
+        cmd_remote(["box", str(shared)])
+        txlog.log("PUBLISH_AMBIGUOUS", msg_id="01A", remote="box")
+        txlog.log("PUBLISH_AMBIGUOUS", msg_id="01B", remote="box")
+        txlog.log("PUBLISH_AMBIGUOUS", msg_id="01C", remote="elsewhere")
+        capsys.readouterr()
+        cmd_health()
+        assert "remote box: OK; 2 send(s) with unknown outcome in 24 h" in capsys.readouterr().out
 
     def test_health_fails_when_the_folder_is_gone(self, fake_home, tmp_path, capsys):
         from commands import cmd_health

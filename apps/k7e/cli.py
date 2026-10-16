@@ -42,6 +42,7 @@ from engine import (
     stats,
     store_asset,
     append_entry,
+    compile_due,
     compile_tag,
     process_pending_embeddings,
     supersede,
@@ -52,14 +53,15 @@ from ar3.locking import file_lock
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("search",      "<query> [--limit N] [--json] [--ids]", "Hybrid search (BM25 + semantic + metadata)."),
+    ("search",      "<query> [--limit N] [--json] [--ids] [--as-of T] [--valid-at T]", "Hybrid search (BM25 + semantic + metadata)."),
+    ("graph",       "<id> [--json]",                   "Show an entry's two clocks and its edges."),
     ("get",         "<id> [<id> ...] [--no-track] [--json]", "Read full knowledge entries."),
     ("touch",       "<id> [<id> ...]",                 "Bump the usage ranking signal without reading."),
     ("supersede",   "<old_id> <new_id>",               "Mark an entry as superseded by a newer one."),
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
-    ("compile",     "<tag> [--dry-run]",               "Synthesize entries for a tag into a reference page."),
+    ("compile",     "<tag> [--dry-run] | --due",       "Fold a tag's entries into one reference page."),
     ("recall",      "<text> [--limit N] [--include-superseded] [--include-archive]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
     ("distill", "<file|dir> [--dry-run] [--archive]",          "Extract knowledge from raw experience files."),
     ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
@@ -101,6 +103,13 @@ def main(argv=None):
     p.add_argument("--include-superseded", action="store_true", help="Include superseded entries")
 
     p.add_argument("--include-archive", action="store_true", help="Include exploratory source claims")
+    p.add_argument("--as-of", metavar="T", help="Search what the store held at time T")
+    p.add_argument("--valid-at", metavar="T", help="Search what was true at time T")
+
+    # graph
+    p = sub.add_parser("graph", help="Show an entry's clocks and edges")
+    p.add_argument("id", help="Entry ID")
+    p.add_argument("--json", action="store_true")
 
     # get
     p = sub.add_parser("get", help="Read entry")
@@ -155,9 +164,11 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true")
 
     # compile
-    p = sub.add_parser("compile", help="Synthesize entries for a tag into a reference page")
-    p.add_argument("tag", help="Tag to compile")
+    p = sub.add_parser("compile", help="Fold a tag's entries into one reference page")
+    p.add_argument("tag", nargs="?", help="Tag to compile")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--due", action="store_true",
+                   help="Compile the tag with the most loose entries, when one is due")
 
     # reindex
     p = sub.add_parser("reindex", help="Rebuild index")
@@ -209,12 +220,19 @@ def main(argv=None):
     init()
 
     if args.command == "search":
+        try:
+            window = {"as_of": engine.utc_stamp(args.as_of) if args.as_of else None,
+                      "valid_at": engine.utc_stamp(args.valid_at) if args.valid_at else None}
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
         results = search(
             args.query,
             limit=args.limit,
             include_superseded=args.include_superseded,
             **({"include_archive": True} if args.include_archive else {}),
             rerank=False if args.no_rerank else True if args.rerank else None,
+            **window,
         )
         # What the semantic track cost this query, so a caller on a latency
         # budget (r4t's wake inject) can price it without timing the whole CLI.
@@ -230,10 +248,28 @@ def main(argv=None):
             print("No results.")
         else:
             for r in results:
-                if r.get("match") == "id" and r.get("status") != "active":
+                if r.get("status") not in (None, "active"):
                     print(f"  {r['id']}  {r['title']}  (score: {r['score']}, {r['status']})")
                 else:
                     print(f"  {r['id']}  {r['title']}  (score: {r['score']})")
+
+    elif args.command == "graph":
+        try:
+            node = engine.graph(args.id)
+        except FileNotFoundError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(node, indent=2))
+        else:
+            print(f"{node['id']}  {node['title']}  ({node['status']})")
+            for key in ("recorded_at", "superseded_at", "valid_from", "valid_to"):
+                if node[key]:
+                    print(f"  {key}: {node[key]}")
+            for edge in node["out"]:
+                print(f"  {edge['type']} -> {edge['id']}  {edge['title']}")
+            for edge in node["in"]:
+                print(f"  {edge['type']} <- {edge['id']}  {edge['title']}")
 
     elif args.command == "get":
         # A batch is one interpreter startup instead of N. The sizing pass in
@@ -409,6 +445,18 @@ def main(argv=None):
             print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
+        if bool(args.tag) == args.due or (args.due and args.dry_run):
+            print("Error: compile takes a tag, or --due alone.", file=sys.stderr)
+            return 2
+        # A pass that is not due, or finds nothing ready, needs no model.
+        if args.due:
+            status, node_id = compile_due()
+            if status == "failed":
+                print(_LLM_REQUIRED.format(cmd="compile") if not config.llm_configured("compile")
+                      else "Error: the due compile did not complete.", file=sys.stderr)
+                return 1
+            print(f"Compiled {node_id}." if node_id else f"compile: {status}")
+            return 0
         if not config.llm_configured("compile"):
             print(_LLM_REQUIRED.format(cmd="compile"), file=sys.stderr)
             return 1

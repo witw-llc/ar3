@@ -32,19 +32,22 @@ needs_tzset = pytest.mark.skipif(
 
 
 @pytest.fixture
-def machine_timezone(monkeypatch):
+def machine_timezone():
     """Run a test in a named zone and put the real one back afterwards.
 
-    `TZ` reaches the C library only through `tzset`, and `monkeypatch`'s undo
-    restores the variable without calling it, so teardown calls it itself.
+    `TZ` reaches the C library only through `tzset`, and restoring the
+    variable does not call it, so teardown calls it itself. A private patch
+    context restores `TZ` alone; the test's own `monkeypatch` keeps its home
+    redirect until its own teardown.
     """
 
-    def use(name: str) -> None:
-        monkeypatch.setenv("TZ", name)
-        time.tzset()
+    with pytest.MonkeyPatch.context() as zone_patch:
 
-    yield use
-    monkeypatch.undo()
+        def use(name: str) -> None:
+            zone_patch.setenv("TZ", name)
+            time.tzset()
+
+        yield use
     time.tzset()
 
 

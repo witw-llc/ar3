@@ -17,7 +17,6 @@ from typing import Any
 
 import sqlite_store
 from core import conversations_path, inbound_bundle_dir, out
-from receipts import parse_duration, parse_stamp
 from settings import get_int
 
 from ar3 import clock
@@ -32,6 +31,7 @@ __all__ = [
     "heading_help",
     "json_row",
     "decode_template",
+    "duration_text",
     "entry_from_message",
     "extract_heading_templates",
     "format_conversation",
@@ -44,6 +44,8 @@ __all__ = [
     "load_entries",
     "open_for_read",
     "open_glow_stdout",
+    "parse_duration",
+    "parse_stamp",
     "print_entries",
     "prune_conversations",
     "record",
@@ -364,6 +366,44 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def parse_stamp(raw: str) -> datetime | None:
+    """A stored stamp as an aware datetime; one with no offset is UTC."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def parse_duration(raw: str) -> float:
+    """`30s`, `10m`, `2h`, `7d`, or bare seconds. Raises ValueError."""
+    text = str(raw).strip().lower()
+    if not text:
+        raise ValueError("empty duration")
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    factor = 1
+    if text[-1] in units:
+        factor = units[text[-1]]
+        text = text[:-1]
+    value = float(text)
+    if value < 0:
+        raise ValueError("duration must not be negative")
+    return value * factor
+
+
+def duration_text(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
 def load_entries() -> list[dict[str, Any]]:
     try:
         with closing(open_for_read()) as conn:
@@ -505,7 +545,7 @@ def _since_floor(
 
     A cursor that carries no offset — a bare date included — is read in this
     machine's local zone, so `--since 2026-09-10` starts at local midnight,
-    the day the delegator means. `receipts.parse_stamp` keeps presuming UTC:
+    the day the delegator means. `parse_stamp` keeps presuming UTC:
     its other callers read *stored* stamps, which are written in UTC.
     """
     cursor = since.strip()
@@ -601,10 +641,11 @@ def _merge_into_stored(stored_json: str, entry: dict[str, Any]) -> str | None:
     """Fold a later delivery into the stored row, or None when it adds nothing.
 
     One message id is one row, but each recipient downloads separately and a
-    deferred recipient records long after an immediate one. Two things from
-    that later write must reach the row:
+    recipient whose attachments needed the fetch wait records long after an
+    immediate one. Two things from that later write must reach the row:
 
-    `recipients`, because the row is the record of who the message reached.
+    `recipients`, because the row is the record of who the message was
+    delivered or sent to.
     Attaching the name to `message_agents` alone makes the index and the entry
     disagree — the lookup finds the row for a name the row does not list, so
     `involves_agent` denies what the query just asserted, and the rendered row
@@ -653,7 +694,7 @@ def _insert_entry(entry: dict[str, Any], msg_id: str | None) -> None:
             seq = int(cursor.lastrowid)
         else:
             # The id is already archived — a second recipient of the same
-            # message, or a deferred one landing after the immediate batch.
+            # message, or one from the fetch wait landing after the others.
             # Returning here dropped that recipient out of the archive
             # entirely, so `a8s convo <name>` had nothing for it.
             row = conn.execute(
@@ -675,10 +716,11 @@ def _insert_entry(entry: dict[str, Any], msg_id: str | None) -> None:
 
 
 def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
-    """Append one logical message when delivery completes (local inbox, remote
-    receive, or outbound remote publish). `recipients` lists local deliverees
-    for routed/RECEIVED_REMOTE rows, or the logical `to` name for outbound
-    remote-only sends. Retention is applied by `a8s update`, never here.
+    """Append one logical message once it is delivered (local inbox, remote
+    receive) or sent (a remote took the publish). `recipients` lists local
+    deliverees for routed/RECEIVED_REMOTE rows, or the logical `to` name a
+    message was sent to for an outbound remote publish. Retention is applied
+    by `a8s update`, never here.
     """
     if not recipients:
         return

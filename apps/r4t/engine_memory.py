@@ -243,10 +243,33 @@ def _run_job(home, capture, timeout):
     note(out.decode(errors="replace").strip())
 
 
+def _run_compile(home, capture, timeout):
+    """The scheduled consolidation pass after a run that distilled: `k7e
+    compile --due` through the same writer bridge, which k7e keeps to one
+    pass a day per store."""
+    bridge = _command([sys.executable, str(Path(__file__).resolve()), "writer", str(capture)])
+    env = {**os.environ, "K7E_HOME": str(home), "K7E_COMPILE_COMMAND": bridge}
+    proc = subprocess.Popen([sys.executable, str(knowledge.K7E_ENTRY), "compile", "--due"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=os.name != "nt")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stop_process(proc)
+        proc.communicate(timeout=5)
+        raise RuntimeError("compile timed out")
+    said = out.decode(errors="replace").strip()
+    if proc.returncode:
+        raise RuntimeError(err.decode(errors="replace")[-2000:] or f"compile exit {proc.returncode}")
+    if said.startswith("Compiled"):
+        note(said)
+
+
 def worker(home):
     try:
         with file_lock(home / ".worker.lock", blocking=False):
             deadline = time.monotonic() + WORKER_SECONDS
+            distilled = None
             for _ in range(WORKER_BATCH):
                 pending = sorted((home / "queue").glob("*.json"))
                 if not pending or deadline - time.monotonic() < JOB_FLOOR_SECONDS:
@@ -260,6 +283,7 @@ def worker(home):
                     # Resolve relative to the portable home, never the old machine's path.
                     capture = home / "turns" / job.name
                     _run_job(home, capture, min(JOB_SECONDS, deadline - time.monotonic()))
+                    distilled = capture
                     job.unlink()
                     (home / "failure.json").unlink(missing_ok=True)
                 except Exception as exc:
@@ -273,6 +297,11 @@ def worker(home):
                     (home / "queue" / "failed").mkdir(exist_ok=True)
                     job.replace(home / "queue" / "failed" / job.name)
                     note(f"{job.name}: moved to queue/failed after {JOB_ATTEMPTS} attempts")
+            if distilled and deadline - time.monotonic() >= JOB_FLOOR_SECONDS:
+                try:
+                    _run_compile(home, distilled, min(JOB_SECONDS, deadline - time.monotonic()))
+                except Exception as exc:
+                    note(f"compile skipped: {exc}")
             if time.monotonic() < deadline:
                 try:
                     knowledge._run_k7e(home, "embed-pending", timeout=min(30, deadline - time.monotonic()))

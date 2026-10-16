@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -285,74 +286,6 @@ def clear_inbox_waiting_since(name: str) -> None:
         pass
 
 
-def wake_retry_path(name: str) -> Path:
-    """Per-agent wake-delivery retry record, written when a wake fails and its
-    envelopes go back into the inbox. JSON: `{"unit": [<inbox filenames>],
-    "attempts": N, "next_at": "<ISO-8601 UTC>"}`. `unit` identifies which
-    delivery the attempt count belongs to — a different message (or batch)
-    starts the count over. Cleared the moment a wake exits 0. Persists across
-    handler restarts so a restart can't reset the backoff and spin a
-    permanently broken CLI."""
-    return agent_dir(name) / "wake-retry"
-
-
-def read_wake_retry(name: str) -> dict | None:
-    p = wake_retry_path(name)
-    if not p.is_file():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def write_wake_retry(
-    name: str, unit: list[str], attempts: int, next_at: datetime
-) -> None:
-    p = wake_retry_path(name)
-    body = json.dumps({
-        "unit": sorted(unit),
-        "attempts": attempts,
-        "next_at": next_at.isoformat().replace("+00:00", "Z"),
-    })
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(body, encoding="utf-8")
-    except OSError:
-        pass
-
-
-def clear_wake_retry(name: str) -> None:
-    try:
-        wake_retry_path(name).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def wake_retry_wait(
-    name: str, *, now: datetime | None = None
-) -> tuple[float, int | None] | None:
-    """`(seconds left, failed attempts)` while a failed wake's backoff is
-    running, else None. An unreadable or unparseable record reads as no wait —
-    a corrupt sidecar must not wedge an agent's inbox shut."""
-    record = read_wake_retry(name)
-    if not record:
-        return None
-    raw = record.get("next_at")
-    if not isinstance(raw, str):
-        return None
-    try:
-        next_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    left = (next_at - (now or datetime.now(timezone.utc))).total_seconds()
-    if left <= 0:
-        return None
-    attempts = record.get("attempts")
-    return left, attempts if isinstance(attempts, int) else None
-
-
 def wake_pid_path(name: str) -> Path:
     """Per-agent record of the wake subprocess in flight: JSON `{"pid": N,
     "start": "<process start token>", "unit": [<trash filenames>]}`. Written when a wake spawns and removed
@@ -403,13 +336,10 @@ def read_wake_pid(name: str) -> tuple[int, list[str]] | None:
 
 
 def dead_letters_dir(name: str) -> Path:
-    """Per-agent dead-letter markers: one empty file per envelope a wake gave
-    up on, named exactly as its trash file. Written when the wake cap
-    dead-letters the envelope and removed by `a8s retry` once the envelope is
-    back in the inbox. Trash holds every settled envelope, so a marker is what
-    tells a dead letter from an acked one. One file per envelope means no
-    writer reads another's record, so a dead letter recorded while a retry is
-    running is never overwritten."""
+    """Per-agent dead-letter markers: one empty file per envelope a failed
+    wake consumed, named exactly as its trash file. Trash holds every settled
+    envelope, so a marker is what tells a dead letter from an acked one, and
+    its mtime is when the wake failed."""
     return agent_dir(name) / "dead-letters"
 
 
@@ -422,37 +352,40 @@ def mark_dead_letter(name: str, filename: str) -> None:
         pass
 
 
-def read_dead_letters(name: str) -> list[str]:
-    try:
-        return sorted(p.name for p in dead_letters_dir(name).iterdir() if p.is_file())
-    except OSError:
-        return []
+DEAD_LETTER_MARKER_DAYS = 7
 
 
-def clear_dead_letter(name: str, filename: str) -> None:
+def count_dead_letters(name: str, since: datetime) -> int:
+    """Dead letters marked at or after `since`. Deletes markers older than
+    `DEAD_LETTER_MARKER_DAYS`; the envelopes stay in trash."""
+    cutoff = since.timestamp()
+    expired = time.time() - DEAD_LETTER_MARKER_DAYS * 86400
+    count = 0
     try:
-        (dead_letters_dir(name) / filename).unlink(missing_ok=True)
+        markers = list(dead_letters_dir(name).iterdir())
     except OSError:
-        pass
+        return 0
+    for p in markers:
+        try:
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+            if mtime < expired:
+                p.unlink()
+            elif mtime >= cutoff:
+                count += 1
+        except OSError:
+            continue
+    return count
 
 
 def pending_dir(name: str) -> Path:
-    """Ingested-but-not-yet-fully-routed messages. `route_outboxes` atomically
+    """Ingested-but-not-yet-routed messages. `route_outboxes` atomically
     moves each new file from `<root>/.outbox/` into here on every pass before
-    parsing or producing any retry sidecars — the agent's outbox is one-way
-    (agent writes, a8s renames out), and everything a8s does after the rename
-    happens under ~/.config/a8s/. Sidecar metadata (`<file>.retry`) lives alongside
-    the pending file in this dir."""
+    parsing it — the agent's outbox is one-way (agent writes, a8s renames
+    out), and everything a8s does after the rename happens under
+    ~/.config/a8s/. The same pass settles every file here."""
     return agent_dir(name) / "pending"
-
-
-def retry_sidecar_path(pending_file: Path) -> Path:
-    """Companion file to a pending message: `<file>.json.retry`. Tracks
-    attempts, next-attempt time, and which configured remotes have already
-    accepted the publish. Lifetime tied to the pending file — happy path
-    deletes both, exhaustion moves the message to trash and unlinks the
-    sidecar."""
-    return pending_file.with_suffix(pending_file.suffix + ".retry")
 
 
 def resolve_outbox_path(agent_root: Path, spec: str | None = None) -> Path:
@@ -516,6 +449,13 @@ def pending_bundle_dir(name: str, msg_id: str) -> Path:
     return pending_dir(name) / msg_id
 
 
+def sending_dir(name: str) -> Path:
+    """Where a pending message waits while its one pass settles it. A routing
+    pass claims each file by renaming it here first and never scans this
+    directory, so a message whose removal fails afterwards is not sent again."""
+    return agent_dir(name) / "sending"
+
+
 def registry_path() -> Path:
     return _a8s_dir() / "a8s.json"
 
@@ -558,12 +498,6 @@ def transactions_path() -> Path:
     return _a8s_dir() / "transactions.sqlite3"
 
 
-def claims_dir() -> Path:
-    """Directory of per-message delivery claims shared by the receivers on
-    this machine."""
-    return _a8s_dir() / "claims"
-
-
 def folder_ledger_path(remote_id: str) -> Path:
     """Per-remote record of which folder envelopes this machine has read.
 
@@ -589,20 +523,6 @@ def s3_ledger_path(remote_id: str) -> Path:
 
 # Cap on a folder or s3 remote's consumed ledger.
 MAX_SEEN_IDS = 10000
-
-# Per-message retry backoff. Index = number of failed attempts so far. After
-# the schedule is exhausted (MAX_ATTEMPTS = len), the message is moved to trash
-# with a "discarded after backoff exhausted" log line.
-BACKOFF_SCHEDULE = [30, 60, 120, 300, 900, 1800, 3600, 21600, 86400]
-MAX_ATTEMPTS = len(BACKOFF_SCHEDULE)
-
-# Wake-delivery retry backoff. Index = number of failed wakes so far for the
-# same delivery. Deliberately shorter and shallower than BACKOFF_SCHEDULE: a
-# redelivered envelope costs an LLM turn, so duplicates are expensive and a
-# poison envelope must stop blocking the inbox quickly. MAX_WAKE_ATTEMPTS
-# counts the first attempt too, so the schedule holds the retry delays only.
-WAKE_RETRY_SCHEDULE = [30, 120, 600]
-MAX_WAKE_ATTEMPTS = len(WAKE_RETRY_SCHEDULE) + 1
 
 
 # ---------- general helpers ----------

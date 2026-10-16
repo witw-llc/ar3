@@ -7,11 +7,17 @@ is whatever the sender wrote).
 
 POSTs `gmail.send` to the GAS Bridge configured via `GAS_BRIDGE_URL` /
 `GAS_BRIDGE_KEY` env vars. stdlib only.
+
+One try, no retry. Exit 1 only when the bridge answers with its own JSON
+error. Any other failure of the POST is ambiguous, because the bridge
+sends the mail before it redirects to its answer: exit 0 with one stderr
+line that the mail may have been sent.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
@@ -24,7 +30,7 @@ from pathlib import Path
 TIMEOUT_S = 30
 
 
-def _bridge_post(url: str, payload: dict) -> dict:
+def _bridge_post(url: str, payload: dict) -> bytes:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -33,11 +39,15 @@ def _bridge_post(url: str, payload: dict) -> dict:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
+        return resp.read()
+
+
+def _bridge_answer(raw: bytes) -> dict | None:
     try:
-        return json.loads(body)
+        answer = json.loads(raw.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
-        return {"error": f"non-JSON response: {body[:200]}"}
+        return None
+    return answer if isinstance(answer, dict) else None
 
 
 def send(to: str, subject: str, body: str) -> int:
@@ -82,24 +92,24 @@ def send(to: str, subject: str, body: str) -> int:
     if attachments:
         payload["attachments"] = attachments
     try:
-        result = _bridge_post(url, payload)
+        answer = _bridge_answer(_bridge_post(url, payload))
     except urllib.error.HTTPError as e:
-        preview = ""
         try:
-            preview = e.read().decode("utf-8", errors="replace")[:200]
-        except Exception:
-            pass
-        print(f"gmail-connector: HTTP {e.code} {preview}", file=sys.stderr)
-        return 1
-    except urllib.error.URLError as e:
-        print(f"gmail-connector: connection error: {e.reason}", file=sys.stderr)
-        return 1
-    except (TimeoutError, OSError) as e:
-        print(f"gmail-connector: transport error: {e}", file=sys.stderr)
-        return 1
+            answer = _bridge_answer(e.read())
+        except (OSError, http.client.HTTPException):
+            answer = None
+        if not (answer and answer.get("error")):
+            print(f"gmail-connector: HTTP {e.code}; may have been sent", file=sys.stderr)
+            return 0
+    except (OSError, http.client.HTTPException) as e:
+        print(f"gmail-connector: {e!r}; may have been sent", file=sys.stderr)
+        return 0
 
-    if isinstance(result, dict) and result.get("error"):
-        print(f"gmail-connector: bridge error: {result['error']}", file=sys.stderr)
+    if answer is None:
+        print("gmail-connector: answer is not JSON; may have been sent", file=sys.stderr)
+        return 0
+    if answer.get("error"):
+        print(f"gmail-connector: bridge error: {answer['error']}", file=sys.stderr)
         return 1
 
     print(f"sent to {to}: {subject}")

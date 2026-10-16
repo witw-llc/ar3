@@ -9,6 +9,9 @@ venv/
 **/.outbox/
 **/.trash/
 
+# The Gmail connector's record of the message ids it has told, kept in its cwd
+**/.gmail-told
+
 # Harness local settings
 **/.claude/settings.local.json
 

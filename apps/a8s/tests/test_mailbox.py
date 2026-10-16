@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
 import pytest
 
 from core import (
-    BACKOFF_SCHEDULE,
-    MAX_ATTEMPTS,
     MAX_FILE_BYTES,
     Participant,
+    agent_log_path,
     files_dir,
     inbound_bundle_dir,
     inbox_dir,
@@ -19,7 +19,7 @@ from core import (
     outbox_dir,
     pending_bundle_dir,
     pending_dir,
-    retry_sidecar_path,
+    sending_dir,
     trash_dir,
 )
 from mailbox import (
@@ -31,6 +31,7 @@ from mailbox import (
     next_inbox_message,
     route_outboxes,
 )
+from ar3.ulid import new as new_ulid
 from registry import participants_from_registry, save_aliases, save_namespaces, save_registry, save_namespace_options
 
 
@@ -88,10 +89,9 @@ class TestPendingAttachmentStatus:
                 }
             )
         )
-        sidecar = {"attempts": 0, "uploaded": {}}
         msg = json.loads((pending / "01UPLOAD.json").read_text())
-        ok = _upload_files_for_remote(msg, a, [_StubStorage("svc")], sidecar)
-        assert ok is False
+        blocked = _upload_files_for_remote(msg, a, [_StubStorage("svc")])
+        assert "Scan.TIF" in blocked
         failed = [
             event
             for event in read_events("01UPLOAD")
@@ -103,14 +103,8 @@ class TestPendingAttachmentStatus:
 
 
 def _outbox_leftovers(root: Path) -> list[Path]:
-    """Outbox entries an ingest pass should have cleared.
-
-    `.receipts/` is not one of them: the router keeps the delivery record for
-    each sent message there, and it outlives the envelope by design."""
-    return [
-        p for p in outbox_dir(root).iterdir()
-        if p.name != ".receipts"
-    ]
+    """Outbox entries an ingest pass should have cleared."""
+    return list(outbox_dir(root).iterdir())
 
 
 def _write_staged(sender_name: str, sender_root: Path, to: str, content: str, *sources: Path) -> Path:
@@ -669,9 +663,9 @@ class TestNamespaceRouting:
         a, node = namespace_agents
         published: list[dict] = []
 
-        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def publish(msg, sender_name, down):
             published.append(msg)
-            return ["hub"]
+            return {"hub": ("sent", "")}
 
         _write_outbox("A", a.root, "ghost:phil", "cross-cluster", [])
         n = route_outboxes(
@@ -815,9 +809,9 @@ class TestNamespaceEgressIdentity:
         self._conceal("acme")
         published: list[dict] = []
 
-        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def publish(msg, sender_name, down):
             published.append(msg)
-            return ["hub"]
+            return {"hub": ("sent", "")}
 
         self._stage(node, "acme:phil", "acme:jane")
         route_outboxes(
@@ -891,9 +885,9 @@ class TestEnvelopeMeta:
         a, b = two_agents
         published: list[dict] = []
 
-        def publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def publish(msg, sender_name, down):
             published.append(msg)
-            return ["hub"]
+            return {"hub": ("sent", "")}
 
         self._stage(a, "A", "B", {"class": "auto"})
         route_outboxes(
@@ -1206,7 +1200,7 @@ class TestIngestPhase:
     """Phase 1 of `route_outboxes` (issue #63): a8s never reads a file in
     `<root>/.outbox/`; on every pass it atomically moves new outbox files
     out to `~/.a8s/agents/<sender>/pending/` before any further processing.
-    Retry sidecars and trash all live under ~/.a8s/."""
+    Pending and trash both live under ~/.a8s/."""
 
     def test_outbox_emptied_after_pass(self, two_agents):
         a, b = two_agents
@@ -1266,127 +1260,341 @@ class TestIngestPhase:
         assert (inbox_dir("B") / "01TEST.json").is_file()
 
 
-class TestRetrySidecar:
-    """Per-message retry sidecar. With no remotes configured, the happy path
-    never creates a sidecar — local delivery succeeds in one pass. The
-    sidecar machinery only kicks in when something can't be delivered."""
+class TestOnePass:
+    """Every pending message settles in the pass that ingested it."""
 
-    def test_no_sidecar_left_after_happy_path(self, two_agents):
+    def test_pending_empty_after_happy_path(self, two_agents):
         a, b = two_agents
         _write_outbox("A", a.root, "B", "hi", [])
         route_outboxes([a, b], all_agents=[a, b])
-        # No sidecars left over for either sender.
         for s in (a, b):
-            for f in pending_dir(s.name).iterdir():
-                assert not f.name.endswith(".retry")
-        # Pending dirs empty for both senders.
-        assert list(pending_dir(a.name).iterdir()) == []
+            assert list(pending_dir(s.name).iterdir()) == []
 
     def test_unknown_recipient_with_no_remotes_trashes_immediately(self, two_agents):
-        # Defensive: with no remotes there's no point retrying — terminal
-        # failure happens on the first pass. No sidecar is left behind.
+        from txlog import read_events
+
         a, b = two_agents
-        _write_outbox("A", a.root, "BOGUS", "lost", [])
+        out = _write_outbox("A", a.root, "BOGUS", "lost", [])
         route_outboxes([a, b], all_agents=[a, b])
         assert list(pending_dir("A").iterdir()) == []
         trashed = list(trash_dir("A").iterdir())
         assert any("lost" in f.read_text() for f in trashed)
+        assert [e["event"] for e in read_events(out.stem) if e["event"] in ("DROPPED", "DISCARDED")] == ["DROPPED"]
+
+
+def _publish_counter(outcome: str):
+    calls: list[str] = []
+
+    def publish(msg, sender_name, down):
+        calls.append(msg["id"])
+        return {"hub": (outcome, "")}
+
+    publish.calls = calls
+    return publish
+
+
+def _fail_for(real, predicate):
+    def patched(*args, **kwargs):
+        if predicate(*args):
+            raise PermissionError("denied")
+        return real(*args, **kwargs)
+
+    return patched
+
+
+class TestSettledOnce:
+    """A message leaves pending/ before it is sent, so a settle step that
+    fails cannot send it a second time."""
+
+    def _route(self, a, b, publish):
+        return route_outboxes(
+            [a, b], all_agents=[a, b],
+            publish_remotes=publish, configured_remote_ids=["hub"],
+        )
+
+    def test_a_sent_message_whose_removal_fails_is_not_sent_again(
+        self, two_agents, monkeypatch
+    ):
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "GHOST", "once", [])
+        monkeypatch.setattr(
+            Path, "unlink",
+            _fail_for(Path.unlink, lambda path, *_: path.parent == sending_dir("A")),
+        )
+        publish = _publish_counter("sent")
+        self._route(a, b, publish)
+        self._route(a, b, publish)
+        assert publish.calls == [out.stem]
+        assert list(pending_dir("A").glob("*.json")) == []
+        assert (sending_dir("A") / out.name).is_file()
+        assert "could not remove sent" in agent_log_path("A").read_text()
+
+    def test_a_dropped_message_whose_trash_move_fails_is_not_sent_again(
+        self, two_agents, monkeypatch
+    ):
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "GHOST", "once", [])
+        monkeypatch.setattr(
+            Path, "rename",
+            _fail_for(Path.rename, lambda path, *_: path.parent == sending_dir("A")),
+        )
+        publish = _publish_counter("failed")
+        self._route(a, b, publish)
+        self._route(a, b, publish)
+        assert publish.calls == [out.stem]
+        assert list(pending_dir("A").glob("*.json")) == []
+        assert "could not move" in agent_log_path("A").read_text()
+
+    def test_a_message_that_cannot_be_claimed_is_not_sent(
+        self, two_agents, monkeypatch
+    ):
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "GHOST", "held", [])
+        real_rename = os.rename
+        monkeypatch.setattr(
+            os, "rename",
+            _fail_for(real_rename, lambda src, dst: Path(dst).parent == sending_dir("A")),
+        )
+        publish = _publish_counter("sent")
+        self._route(a, b, publish)
+        self._route(a, b, publish)
+        assert publish.calls == []
+        assert (pending_dir("A") / out.name).is_file()
+        assert agent_log_path("A").read_text().count("could not claim") == 1
+
+        monkeypatch.setattr(os, "rename", real_rename)
+        self._route(a, b, publish)
+        assert publish.calls == [out.stem]
+        assert list(pending_dir("A").glob("*.json")) == []
+        assert list(sending_dir("A").iterdir()) == []
+
+
+class TestPartialFanout:
+    """A fan-out that reached some members is delivered; each member it
+    missed gets one `DROPPED` row."""
+
+    def _fail_commit_to(self, monkeypatch, *names: str):
+        blocked = {inbox_dir(n) for n in names}
+        monkeypatch.setattr(
+            os, "replace",
+            _fail_for(os.replace, lambda src, dst: Path(dst).parent in blocked),
+        )
+
+    def test_one_member_failing_still_delivers_to_the_rest(
+        self, three_agents, monkeypatch
+    ):
+        from txlog import read_events
+
+        a, b, c = three_agents
+        save_aliases({"devs": ["B", "C"]})
+        out = _write_outbox("A", a.root, "devs", "half", [])
+        self._fail_commit_to(monkeypatch, "C")
+        assert route_outboxes([a, b, c], all_agents=[a, b, c]) == 1
+        assert [f.name for f in inbox_dir("B").iterdir()] == [out.name]
+        assert list(inbox_dir("C").iterdir()) == []
+        assert list(inbox_tmp_dir("C").iterdir()) == []
+        assert list(trash_dir("A").iterdir()) == []
+        rows = [
+            (e["event"], e["to"]) for e in read_events(out.stem)
+            if e["event"] in ("ROUTED", "DROPPED", "DISCARDED")
+        ]
+        assert sorted(rows) == [("DROPPED", "C"), ("ROUTED", "B")]
+
+    def test_every_member_failing_discards_and_leaves_no_staged_copy(
+        self, three_agents, monkeypatch
+    ):
+        from txlog import read_events
+
+        a, b, c = three_agents
+        save_aliases({"devs": ["B", "C"]})
+        out = _write_outbox("A", a.root, "devs", "none", [])
+        self._fail_commit_to(monkeypatch, "B", "C")
+        assert route_outboxes([a, b, c], all_agents=[a, b, c]) == 0
+        for n in ("B", "C"):
+            assert list(inbox_dir(n).iterdir()) == []
+            assert list(inbox_tmp_dir(n).iterdir()) == []
+        rows = [e for e in read_events(out.stem) if e["event"] in ("ROUTED", "DROPPED", "DISCARDED")]
+        assert [e["event"] for e in rows] == ["DISCARDED"]
+        assert "commit failed" in rows[0]["detail"]
+        assert (trash_dir("A") / out.name).is_file()
+
+
+class TestDropRows:
+    """Every message the router drops leaves one transaction row."""
+
+    def _dropped(self, msg_id: str) -> list[dict]:
+        from txlog import read_events
+
+        return [e for e in read_events(msg_id) if e["event"] in ("DROPPED", "DISCARDED")]
+
+    def test_an_unreadable_pending_file_is_dropped_with_a_row(self, two_agents):
+        a, b = two_agents
+        msg_id = new_ulid()
+        (pending_dir("A") / f"{msg_id}.json").write_text("not json")
+        route_outboxes([a, b], all_agents=[a, b])
+        rows = self._dropped(msg_id)
+        assert [e["event"] for e in rows] == ["DROPPED"]
+        assert "unreadable message" in rows[0]["detail"]
+        assert (trash_dir("A") / f"{msg_id}.json").is_file()
+
+    def test_a_pending_file_that_is_not_an_object_is_dropped_with_a_row(self, two_agents):
+        a, b = two_agents
+        msg_id = new_ulid()
+        (pending_dir("A") / f"{msg_id}.json").write_text("[1, 2]")
+        route_outboxes([a, b], all_agents=[a, b])
+        assert [e["event"] for e in self._dropped(msg_id)] == ["DROPPED"]
+
+    @pytest.mark.parametrize("field, value", [("to", ["B"]), ("files", "abc"), ("content", 5)])
+    def test_a_field_of_the_wrong_type_is_dropped_with_a_row(self, two_agents, field, value):
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "B", "hello", [])
+        msg = json.loads(out.read_text())
+        msg[field] = value
+        out.write_text(json.dumps(msg))
+        route_outboxes([a, b], all_agents=[a, b])
+        rows = self._dropped(out.stem)
+        assert [e["event"] for e in rows] == ["DROPPED"]
+        assert f"'{field}'" in rows[0]["detail"]
+        assert (trash_dir("A") / f"{out.stem}.json").is_file()
+        assert not any(sending_dir("A").iterdir())
+
+    def test_an_empty_to_is_dropped_with_a_row(self, two_agents):
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "B", "nobody", [])
+        msg = json.loads(out.read_text())
+        msg["to"] = ""
+        out.write_text(json.dumps(msg))
+        route_outboxes([a, b], all_agents=[a, b])
+        rows = self._dropped(out.stem)
+        assert [e["event"] for e in rows] == ["DROPPED"]
+        assert "empty 'to'" in rows[0]["detail"]
+
+    def test_a_name_that_fails_to_resolve_is_dropped_with_a_row(
+        self, two_agents, monkeypatch
+    ):
+        import mailbox
+
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "loop", "round", [])
+
+        def cycle(name):
+            raise ValueError(f"alias cycle at {name!r}")
+
+        monkeypatch.setattr(mailbox, "resolve_name", cycle)
+        route_outboxes([a, b], all_agents=[a, b])
+        rows = self._dropped(out.stem)
+        assert [(e["event"], e["to"]) for e in rows] == [("DROPPED", "loop")]
+        assert "alias cycle" in rows[0]["detail"]
+
+
+def _always(outcome: str, detail: str = "", remotes: tuple[str, ...] = ("hub",)):
+    calls: list[dict] = []
+
+    def publish(msg, sender_name, down):
+        calls.append(msg)
+        return {rid: (outcome, detail) for rid in remotes}
+
+    publish.calls = calls
+    return publish
 
 
 class TestRemotePublishHook:
-    """Chunk 4 leaves the publish_remotes hook unwired. Stub it here to
-    confirm the contract: when at least one configured remote hasn't yet
-    accepted, the sidecar persists with bumped attempts; once every remote
-    is in `succeeded_remotes`, the message finalizes (unlinks)."""
+    """One publish per remote per message. A message that any path took is
+    sent; a message no path took drops to trash with one row."""
 
-    def test_remote_failure_creates_sidecar_with_attempts(self, two_agents):
+    def _route(self, a, b, publish, remotes=("hub",), **kw):
+        return route_outboxes(
+            [a, b], all_agents=[a, b],
+            publish_remotes=publish, configured_remote_ids=list(remotes), **kw,
+        )
+
+    def test_remote_failure_after_local_delivery_is_sent_with_a_row(self, two_agents):
+        from txlog import read_events
+
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "B", "hi", [])
+        self._route(a, b, _always("failed", "hub: broker not connected"))
+        assert len(list(inbox_dir("B").iterdir())) == 1
+        assert list(pending_dir("A").iterdir()) == []
+        assert list(trash_dir("A").iterdir()) == []
+        rows = [e for e in read_events(out.stem) if e["event"] in ("DROPPED", "DISCARDED")]
+        assert [(e["event"], e["remote"]) for e in rows] == [("DROPPED", "hub")]
+        assert "broker not connected" in rows[0]["detail"]
+
+    def test_remote_failure_is_never_tried_again(self, two_agents):
+        a, b = two_agents
+        publish = _always("failed", "hub: down")
+        _write_outbox("A", a.root, "GHOST", "once", [])
+        self._route(a, b, publish)
+        self._route(a, b, publish)
+        assert len(publish.calls) == 1
+
+    def test_every_remote_failing_discards_to_trash(self, two_agents):
+        from txlog import read_events
+
+        a, b = two_agents
+        out = _write_outbox("A", a.root, "GHOST", "stubborn", [])
+        self._route(a, b, _always("failed", "rc=7", ("hub", "relay")), remotes=("hub", "relay"))
+        assert list(pending_dir("A").iterdir()) == []
+        assert json.loads((trash_dir("A") / out.name).read_text())["content"] == "stubborn"
+        rows = [e for e in read_events(out.stem) if e["event"] in ("DROPPED", "DISCARDED")]
+        assert [e["event"] for e in rows] == ["DISCARDED"]
+        assert "remote hub: rc=7" in rows[0]["detail"]
+        assert "remote relay: rc=7" in rows[0]["detail"]
+
+    def test_one_remote_taking_it_is_enough(self, two_agents):
+        from txlog import read_events
+
         a, b = two_agents
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            # Always fail — return the input unchanged (no remote IDs added).
-            return list(succeeded_so_far)
+        def publish(msg, sender_name, down):
+            return {"hub": ("failed", "hub: down"), "relay": ("sent", "")}
 
-        _write_outbox("A", a.root, "B", "hi", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-        )
-        # Local delivery succeeded — B has the message.
-        assert len(list(inbox_dir("B").iterdir())) == 1
-        # But the sidecar persists in A's pending/, with attempts=1 and a
-        # next_attempt scheduled per BACKOFF_SCHEDULE[0].
-        pending_files = [f for f in pending_dir("A").iterdir()
-                         if f.name.endswith(".json") and not f.name.endswith(".retry")]
-        assert len(pending_files) == 1
-        sidecar_path = retry_sidecar_path(pending_files[0])
-        assert sidecar_path.is_file()
-        side = json.loads(sidecar_path.read_text())
-        assert side["attempts"] == 1
-        assert side["local_delivered"] is True
-        assert side["succeeded_remotes"] == []
-        assert side["next_attempt"]  # ISO timestamp set
+        out = _write_outbox("A", a.root, "GHOST", "split", [])
+        self._route(a, b, publish, remotes=("hub", "relay"))
+        assert list(pending_dir("A").iterdir()) == []
+        assert list(trash_dir("A").iterdir()) == []
+        events = [(e["event"], e["remote"]) for e in read_events(out.stem)]
+        assert ("PUBLISHED", "relay") in events
+        assert ("DROPPED", "hub") in events
+        assert not any(e == "DISCARDED" for e, _ in events)
+
+    def test_ambiguous_counts_as_sent_with_one_row(self, two_agents):
+        from txlog import read_events
+
+        a, b = two_agents
+        publish = _always("ambiguous", "hub: no PUBACK within 30s")
+        out = _write_outbox("A", a.root, "GHOST", "maybe", [])
+        self._route(a, b, publish)
+        self._route(a, b, publish)
+        assert len(publish.calls) == 1
+        assert list(pending_dir("A").iterdir()) == []
+        assert list(trash_dir("A").iterdir()) == []
+        events = [e for e in read_events(out.stem) if e["remote"] == "hub"]
+        assert [e["event"] for e in events] == ["PUBLISH_AMBIGUOUS"]
+        assert "PUBACK" in events[0]["detail"]
 
     def test_remote_success_finalizes(self, two_agents):
         a, b = two_agents
-
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            # Mark hub as succeeded.
-            return list(succeeded_so_far) + ["hub"]
-
         _write_outbox("A", a.root, "B", "hi", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-        )
-        # Local delivery + remote publish both succeeded → no sidecar, no
-        # pending file.
-        remaining = list(pending_dir("A").iterdir())
-        assert remaining == []
+        self._route(a, b, _always("sent"))
+        assert list(pending_dir("A").iterdir()) == []
 
     def test_remote_only_delivery_unknown_local(self, two_agents):
-        # `to: GHOST` is unknown locally but remotes are configured. The
-        # message should publish and finalize even without a local match.
         a, b = two_agents
-
-        published = []
-
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            published.append(msg.get("to"))
-            return list(succeeded_so_far) + ["hub"]
-
+        publish = _always("sent")
         _write_outbox("A", a.root, "GHOST", "remote-only", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-        )
-        # The publish hook saw the envelope.
-        assert published == ["GHOST"]
-        # Pending is clean — remote-only delivery counts as success.
+        self._route(a, b, publish)
+        assert [m.get("to") for m in publish.calls] == ["GHOST"]
         assert list(pending_dir("A").iterdir()) == []
-        # Nothing in trash either.
         assert list(trash_dir("A").iterdir()) == []
 
     def test_remote_only_records_convo(self, two_agents, fake_home):
         from convo import load_entries
 
         a, b = two_agents
-
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            return list(succeeded_so_far) + ["hub"]
-
         _write_outbox("A", a.root, "GHOST", "remote-only", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-        )
+        self._route(a, b, _always("sent"))
         rows = load_entries()
         assert len(rows) == 1
         assert rows[0]["from"] == "A"
@@ -1394,132 +1602,64 @@ class TestRemotePublishHook:
         assert rows[0]["recipients"] == ["GHOST"]
         assert rows[0]["content"] == "remote-only"
 
-    def test_backoff_exhaustion_trashes(self, two_agents):
-        a, b = two_agents
-
-        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
-            return list(succeeded_so_far)
-
-        _write_outbox("A", a.root, "B", "stubborn", [])
-        # Run MAX_ATTEMPTS + 1 passes, manually overriding the sidecar's
-        # next_attempt each time so the backoff gate doesn't skip us.
-        for _ in range(MAX_ATTEMPTS + 1):
-            route_outboxes(
-                [a, b],
-                all_agents=[a, b],
-                publish_remotes=always_fails,
-                configured_remote_ids=["hub"],
-            )
-            # Force the sidecar to allow another pass right away.
-            for f in pending_dir("A").iterdir():
-                if f.name.endswith(".retry"):
-                    side = json.loads(f.read_text())
-                    side["next_attempt"] = ""
-                    f.write_text(json.dumps(side))
-        # After exhaustion the message is in trash, sidecar is gone.
-        assert list(pending_dir("A").iterdir()) == []
-        trashed = list(trash_dir("A").iterdir())
-        assert any("stubborn" in f.read_text() for f in trashed)
-
-    def test_backoff_exhaustion_records_discard_and_keeps_attachment(self, two_agents):
-        # A discard is the end of a message's life: it must leave a DISCARDED
-        # breadcrumb naming the last failure, and it must park the attachment
-        # bytes in trash rather than delete them (#93).
+    def test_discard_keeps_attachment_in_trash(self, two_agents):
         from txlog import read_events
 
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload bytes")
-
-        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
-            return list(succeeded_so_far)
-
-        svc = _StubStorage("svc")
         out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
         msg_id = out_path.stem
-        for _ in range(MAX_ATTEMPTS + 1):
-            route_outboxes(
-                [a, b],
-                all_agents=[a, b],
-                publish_remotes=always_fails,
-                configured_remote_ids=["hub"],
-                services=[svc],
-            )
-            for f in pending_dir("A").iterdir():
-                if f.name.endswith(".retry"):
-                    side = json.loads(f.read_text())
-                    side["next_attempt"] = ""
-                    f.write_text(json.dumps(side))
+        self._route(a, b, _always("failed", "hub: down"), services=[_StubStorage("svc")])
         assert list(pending_dir("A").iterdir()) == []
         discarded = [e for e in read_events(msg_id) if e["event"] == "DISCARDED"]
         assert len(discarded) == 1
         assert discarded[0]["from"] == "A"
         assert discarded[0]["to"] == "GHOST"
         assert discarded[0]["files"] == "doc.txt"
-        assert "backoff exhausted" in discarded[0]["detail"]
         assert "hub" in discarded[0]["detail"]
-        # Envelope and attachment bytes both survive in trash.
         assert json.loads((trash_dir("A") / f"{msg_id}.json").read_text())["content"] == "see attached"
         assert (trash_dir("A") / msg_id / "doc.txt").read_text() == "payload bytes"
 
-    def test_malformed_next_attempt_does_not_poison_the_pass(self, two_agents):
-        # An operator-edited sidecar carrying a non-string `next_attempt` used
-        # to raise out of the backoff gate and abort the whole pass (#93).
+    def test_down_set_lasts_one_pass(self, two_agents):
         a, b = two_agents
+        known_down: list[bool] = []
 
-        def always_fails(msg, sender_name, succeeded_so_far, attempt_count):
-            return list(succeeded_so_far)
+        def publish(msg, sender_name, down):
+            known_down.append("hub" in down)
+            down.add("hub")
+            return {"hub": ("failed", "hub: broker not connected")}
 
-        first = _write_outbox("A", a.root, "B", "first", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=always_fails,
-            configured_remote_ids=["hub"],
-        )
-        sidecar_path = retry_sidecar_path(pending_dir("A") / first.name)
-        side = json.loads(sidecar_path.read_text())
-        assert side["attempts"] == 1
-        side["next_attempt"] = 1774000000.5
-        sidecar_path.write_text(json.dumps(side))
-
-        _write_outbox("A", a.root, "B", "second", [])
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=always_fails,
-            configured_remote_ids=["hub"],
-        )
-        # Unparseable means due now — the message was attempted, not skipped.
-        assert json.loads(sidecar_path.read_text())["attempts"] == 2
-        # And the pass carried on: the message behind it still delivered.
-        bodies = {json.loads(f.read_text())["content"] for f in inbox_dir("B").iterdir()}
-        assert bodies == {"first", "second"}
+        _write_outbox("A", a.root, "GHOST", "one", [])
+        _write_outbox("A", a.root, "GHOST", "two", [])
+        self._route(a, b, publish)
+        _write_outbox("A", a.root, "GHOST", "three", [])
+        self._route(a, b, publish)
+        assert known_down == [False, True, False]
 
     def test_file_payloads_skip_remote_publish(self, two_agents):
-        # v1 limitation: messages with FILE: payloads stay local-only.
-        # The publish hook must not be called; the sidecar should treat all
-        # configured remotes as already-succeeded so the message finalizes
-        # on local delivery alone.
+        # With no storage service, FILE: payloads stay local-only.
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload")
-        called = []
-
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            called.append(msg)
-            return list(succeeded_so_far) + ["hub"]
-
+        publish = _always("sent")
         _write_staged("A", a.root, "B", "see attached", payload)
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-        )
-        assert called == []  # publish hook not invoked
-        assert list(pending_dir("A").iterdir()) == []  # finalized
-        assert len(list(inbox_dir("B").iterdir())) == 1  # local delivery happened
+        self._route(a, b, publish)
+        assert publish.calls == []
+        assert list(pending_dir("A").iterdir()) == []
+        assert len(list(inbox_dir("B").iterdir())) == 1
+
+    def test_file_payload_with_no_storage_and_no_local_target_discards(self, two_agents):
+        from txlog import read_events
+
+        a, b = two_agents
+        payload = a.root / "doc.txt"
+        payload.write_text("payload")
+        out = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        self._route(a, b, _always("sent"))
+        discarded = [e for e in read_events(out.stem) if e["event"] == "DISCARDED"]
+        assert len(discarded) == 1
+        assert "no storage service" in discarded[0]["detail"]
 
 
 # ---------- storage services (#90) ----------
@@ -1580,9 +1720,9 @@ class TestStorageUpload:
         payload.write_text("payload bytes")
         published: list[dict] = []
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def stub_publish(msg, sender_name, down):
             published.append(msg)
-            return list(succeeded_so_far) + ["hub"]
+            return {"hub": ("sent", "")}
 
         s = _StubStorage("svc")
         out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
@@ -1615,9 +1755,9 @@ class TestStorageUpload:
         payload.write_text("payload bytes")
         published: list[dict] = []
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def stub_publish(msg, sender_name, down):
             published.append(msg)
-            return list(succeeded_so_far) + ["hub"]
+            return {"hub": ("sent", "")}
 
         good = _StubStorage("good")
         dead = _StubStorage("dead", fail_n=99)
@@ -1640,42 +1780,42 @@ class TestStorageUpload:
         # Nothing is left waiting on the dead service.
         assert list(pending_dir("A").iterdir()) == []
 
-    def test_a_file_no_service_accepted_still_blocks(self, two_agents):
+    def test_a_file_no_service_accepted_fails_the_message(self, two_agents):
         # Any-of means at least one, not zero. An envelope whose attachment
-        # nobody can fetch is the silent loss #93 closed.
+        # nobody can fetch is a silent loss, so the message drops instead.
+        from txlog import read_events
+
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload bytes")
         published: list[dict] = []
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def stub_publish(msg, sender_name, down):
             published.append(msg)
-            return list(succeeded_so_far) + ["hub"]
+            return {"hub": ("sent", "")}
 
-        _write_staged("A", a.root, "GHOST", "see attached", payload)
-        route_outboxes(
-            [a, b],
-            all_agents=[a, b],
-            publish_remotes=stub_publish,
-            configured_remote_ids=["hub"],
-            services=[_StubStorage("dead", fail_n=99),
-                      _StubStorage("also-dead", fail_n=99)],
-        )
+        dead = _StubStorage("dead", fail_n=99)
+        out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
+        for _ in range(2):
+            route_outboxes(
+                [a, b],
+                all_agents=[a, b],
+                publish_remotes=stub_publish,
+                configured_remote_ids=["hub"],
+                services=[dead, _StubStorage("also-dead", fail_n=99)],
+            )
         assert published == []
-        pending_files = [f for f in pending_dir("A").iterdir()
-                         if f.name.endswith(".json") and not f.name.endswith(".retry")]
-        assert len(pending_files) == 1
-        sidecar = json.loads(retry_sidecar_path(pending_files[0]).read_text())
-        # A blocking failure is what an eventual discard should name.
-        assert "last_error" in sidecar
+        assert dead._fail_n == 98  # tried once, never again
+        assert list(pending_dir("A").iterdir()) == []
+        assert (trash_dir("A") / out_path.name).is_file()
+        discarded = [e for e in read_events(out_path.stem) if e["event"] == "DISCARDED"]
+        assert len(discarded) == 1
+        assert "doc.txt" in discarded[0]["detail"]
 
-    def test_a_survivable_failure_is_not_the_discard_diagnostic(self, two_agents):
-        # The operator still hears that a service is down, but it is not what
-        # the send is waiting on, so it must not become the discard reason.
+    def test_a_survivable_failure_does_not_block(self, two_agents):
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload bytes")
-        sidecar: dict = {}
         msg = {"id": "01KZAAAAAAAAAAAAAAAAAAAAAA", "to": "GHOST",
                "files": [{"filename": "doc.txt"}]}
         bundle = pending_bundle_dir("A", msg["id"])
@@ -1683,16 +1823,12 @@ class TestStorageUpload:
         shutil.copy2(payload, bundle / "doc.txt")
 
         assert _upload_files_for_remote(
-            msg, a, [_StubStorage("good"), _StubStorage("dead", fail_n=99)], sidecar
-        ) is True
-        assert "last_error" not in sidecar
+            msg, a, [_StubStorage("good"), _StubStorage("dead", fail_n=99)]
+        ) == ""
 
-    def test_sidecar_cache_survives_a_block_by_another_file(self, two_agents):
-        # One file covered, one file not, so the send blocks. The retry must
-        # not re-upload the file that already landed.
+    def test_one_uncovered_file_blocks_the_publish(self, two_agents):
         a, b = two_agents
         good = _StubStorage("good")
-        sidecar: dict = {}
         msg = {"id": "01KZBBBBBBBBBBBBBBBBBBBBBB", "to": "GHOST",
                "files": [{"filename": "here.txt"}, {"filename": "gone.txt"}]}
         bundle = pending_bundle_dir("A", msg["id"])
@@ -1700,24 +1836,20 @@ class TestStorageUpload:
         (bundle / "here.txt").write_text("payload bytes")
         # `gone.txt` is named in the envelope but its bytes never staged.
 
-        assert _upload_files_for_remote(msg, a, [good], sidecar) is False
+        blocked = _upload_files_for_remote(msg, a, [good])
+        assert "gone.txt" in blocked
         assert len(good.uploads) == 1
-        assert sidecar["uploaded"]["here.txt"]["good"].startswith("stub://good/")
+        assert msg["files"] == [{"filename": "here.txt"}, {"filename": "gone.txt"}]
 
-        assert _upload_files_for_remote(msg, a, [good], sidecar) is False
-        assert len(good.uploads) == 1  # unchanged — served from the sidecar
-
-    def test_store_failure_reaches_txlog_and_sidecar(self, two_agents):
-        # A failing store used to be a per-agent WARN and nothing else, so a
-        # blocked upload host left zero trace for `a8s trace` (#93).
+    def test_store_failure_reaches_txlog(self, two_agents):
         from txlog import read_events
 
         a, b = two_agents
         payload = a.root / "doc.txt"
         payload.write_text("payload bytes")
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
-            return list(succeeded_so_far) + ["hub"]
+        def stub_publish(msg, sender_name, down):
+            return {"hub": ("sent", "")}
 
         flaky = _StubStorage("flaky", fail_n=1)
         out_path = _write_staged("A", a.root, "GHOST", "see attached", payload)
@@ -1735,12 +1867,9 @@ class TestStorageUpload:
         assert failed[0]["to"] == "GHOST"
         assert failed[0]["files"] == "doc.txt"
         assert "flaky" in failed[0]["detail"]
-        assert "attempt 1" in failed[0]["detail"]
-        # The reason also lands on the retry record so a later discard can
-        # name what killed the send.
-        pending_files = [f for f in pending_dir("A").iterdir() if f.name.endswith(".json")]
-        side = json.loads(retry_sidecar_path(pending_files[0]).read_text())
-        assert "flaky" in side["last_error"]
+        discarded = [e for e in read_events(msg_id) if e["event"] == "DISCARDED"]
+        assert len(discarded) == 1
+        assert "flaky" in discarded[0]["detail"]
 
     def test_no_services_keeps_v1_skip(self, two_agents):
         # Already covered by `test_file_payloads_skip_remote_publish`, but
@@ -1751,9 +1880,9 @@ class TestStorageUpload:
         payload.write_text("x")
         published = []
 
-        def stub_publish(msg, sender_name, succeeded_so_far, attempt_count):
+        def stub_publish(msg, sender_name, down):
             published.append(msg)
-            return list(succeeded_so_far) + ["hub"]
+            return {"hub": ("sent", "")}
 
         _write_staged("A", a.root, "B", "see attached", payload)
         route_outboxes(
@@ -2033,11 +2162,11 @@ class TestStorageDownload:
         # The sender's reason, not one we invented on its behalf.
         assert by_name["lost.jpg"]["detail"] == "upload produced no usable URL"
 
-    def test_a_sender_declared_loss_does_not_defer_delivery(
+    def test_a_sender_declared_loss_does_not_wait(
         self, fake_home, tmp_path, monkeypatch
     ):
-        """There is no URL to retry, so waiting cannot change the outcome.
-        Deferring would hold the message for the whole retry window and then
+        """There is no URL to fetch, so waiting cannot change the outcome.
+        Waiting would hold the message for the whole fetch wait and then
         deliver exactly what was available at the start."""
         import network
         from network import receive_envelope
@@ -2051,7 +2180,7 @@ class TestStorageDownload:
         monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
         submitted = []
         monkeypatch.setattr(
-            network, "_submit_deferred_delivery",
+            network, "_wait_for_attachments",
             lambda *a, **k: submitted.append(a),
         )
 
@@ -2067,17 +2196,17 @@ class TestStorageDownload:
         }).encode()
         receive_envelope(envelope, [b], services=[s])
 
-        assert submitted == [], "deferred on a loss that can never be retried"
+        assert submitted == [], "waited on a loss no fetch can recover"
         assert list(inbox_dir("B").iterdir()), "message not delivered"
 
-    def test_a_retryable_failure_still_defers_when_a_loss_shares_the_envelope(
+    def test_a_fetchable_failure_still_waits_when_a_loss_shares_the_envelope(
         self, fake_home, tmp_path, monkeypatch
     ):
         """The other direction of the same discrimination, and the only shape
         in which the `source` argument can change anything.
 
-        A sender-declared loss must not defer, but it must not suppress a
-        deferral either. Sync-backed bytes are often still in flight on first
+        A sender-declared loss must not wait, but it must not suppress a
+        wait either. Sync-backed bytes are often still in flight on first
         touch; treating "some loss is present" as "nothing is worth waiting
         for" would deliver immediately and stamp a file that was seconds away
         as permanently unavailable.
@@ -2094,7 +2223,7 @@ class TestStorageDownload:
         monkeypatch.setattr(network, "_receive_wait_seconds", lambda: 900)
         submitted = []
         monkeypatch.setattr(
-            network, "_submit_deferred_delivery",
+            network, "_wait_for_attachments",
             lambda *a, **k: submitted.append(a),
         )
 
@@ -2109,7 +2238,7 @@ class TestStorageDownload:
         }).encode()
         receive_envelope(envelope, [b], services=[s])
 
-        assert submitted, "a file still worth waiting for was not deferred"
+        assert submitted, "a file still worth waiting for was not waited on"
 
     def test_true_legacy_entries_are_still_stripped(self, fake_home, tmp_path):
         """The contract that rule exists for stands: no storage, no error, no
@@ -2272,8 +2401,8 @@ class TestWorstAttachmentOutcome:
 
 class TestRemoteThatFailedToStart:
     """Mail for a name this node does not hold goes to the remotes. When a
-    configured remote failed to start, that mail waits for it instead of
-    being trashed as an unknown recipient."""
+    configured remote failed to start, that mail drops with a row that names
+    the remote."""
 
     def _alice(self, tmp_path):
         a_root = tmp_path / "a"
@@ -2283,22 +2412,23 @@ class TestRemoteThatFailedToStart:
         ensure_mailboxes(alice)
         return alice, a_root
 
-    def test_mail_for_a_remote_name_parks_while_the_remote_is_down(self, fake_home, tmp_path):
+    def test_mail_for_a_remote_name_drops_while_the_remote_is_down(self, fake_home, tmp_path):
         from core import pending_dir, trash_dir
         from mailbox import _write_outbox
+        from txlog import read_events
 
         alice, a_root = self._alice(tmp_path)
-        _write_outbox("A", a_root, "far-away", "hello", [])
+        out = _write_outbox("A", a_root, "far-away", "hello", [])
         route_outboxes(
             [alice], all_agents=[alice],
             configured_remote_ids=[], unstarted_remote_ids=["broker"],
         )
-        parked = list(pending_dir("A").glob("*.json"))
-        assert len(parked) == 1
-        sidecar = json.loads(parked[0].with_name(parked[0].name + ".retry").read_text())
-        assert sidecar["attempts"] == 1
-        assert sidecar["next_attempt"]
-        assert not list(trash_dir("A").glob("*.json"))
+        assert not list(pending_dir("A").glob("*.json"))
+        assert len(list(trash_dir("A").glob("*.json"))) == 1
+        dropped = [e for e in read_events(out.stem) if e["event"] == "DROPPED"]
+        assert len(dropped) == 1
+        assert dropped[0]["remote"] == "broker"
+        assert "broker did not start" in dropped[0]["detail"]
 
     def test_with_no_remote_configured_unknown_mail_is_still_trashed(self, fake_home, tmp_path):
         from core import pending_dir, trash_dir

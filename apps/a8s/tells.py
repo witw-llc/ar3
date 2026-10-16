@@ -87,7 +87,7 @@ class TellsVersion(Exception):
 _USAGE = (
     "usage: tells [-f|--follow] [--timeout SEC] [--live] [--body-max N] [--line-max N] "
     "[--glow [THEME]] "
-    "[--from NAME ...] [--json] [--show PATH | --recover TOKEN] [--sent [--since D]] "
+    "[--from NAME ...] [--json] [--show PATH | --recover TOKEN] "
     "[--heading-out LINE ...] [--heading-in LINE ...]"
 )
 
@@ -112,13 +112,11 @@ def _print_usage() -> None:
         file=sys.stderr,
     )
     print("       --glow [THEME]: render markdown via glow (default theme from A8S_GLOW)", file=sys.stderr)
-    print("       --sent [--since 2h]: this seat's outbound messages and their delivery state", file=sys.stderr)
     print(
         "\nfilters:\n"
         "  --from NAME    show only messages sent by NAME (case-insensitive; repeat for\n"
         "                 several senders)\n"
-        "  --since D      with --sent only: a duration such as 30m, 2h or 7d. To read\n"
-        "                 history from a cursor, use `a8s convo <name> --since CURSOR`.\n\n"
+        "  history from a cursor: `a8s convo <name> --since CURSOR`\n\n"
         + heading_help()
         + "\noutput:\n"
         "  --json         one JSON object per message (ulid, from, to, utc, content,\n"
@@ -145,8 +143,6 @@ class TellsOptions:
     heading_out: str | None = None
     heading_in: str | None = None
     show: str | None = None
-    sent: bool = False
-    since: float | None = None
     senders: tuple[str, ...] = ()
     json: bool = False
 
@@ -342,28 +338,6 @@ def show_envelope_body(path_str: str) -> int:
     return 0
 
 
-def _print_sent(since_s: float | None) -> int:
-    """List this seat's own outbound ULIDs and their latest known state.
-
-    Reads the receipt files in the seat's own outbox — no registry, no
-    machine-wide transaction log. A seat has to be able to answer "did that
-    land?" from where it stands."""
-    import receipts
-
-    outbox = find_outbox()
-    if outbox is None:
-        print("tells: cannot find this agent's outbox", file=sys.stderr)
-        return 1
-    records = receipts.list_recent(outbox, since_s)
-    if not records:
-        print("tells: no sent messages on record", file=sys.stderr)
-        return 1
-    _configure_stdout()
-    for record in records:
-        print(receipts.summary_line(record), flush=True)
-    return 0
-
-
 def parse_tells_argv(argv: list[str]) -> TellsOptions:
     from convo import extract_heading_templates
 
@@ -379,8 +353,6 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
     body_max = resolve_body_max()
     line_max = resolve_line_max()
     show: str | None = None
-    sent = False
-    since: float | None = None
     senders: list[str] = []
     as_json = False
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
@@ -396,10 +368,6 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             live = True
             i += 1
             continue
-        if arg == "--sent":
-            sent = True
-            i += 1
-            continue
         if arg == "--json":
             as_json = True
             i += 1
@@ -409,20 +377,6 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
             if i >= len(rest) or _argv_looks_like_option(rest[i]):
                 raise TellsUsageError("--from requires a sender name")
             senders.append(rest[i])
-            i += 1
-            continue
-        if arg == "--since":
-            i += 1
-            if i >= len(rest):
-                raise TellsUsageError("--since requires a duration (30m, 2h, 7d)")
-            from receipts import parse_duration
-
-            try:
-                since = parse_duration(rest[i])
-            except ValueError as e:
-                raise TellsUsageError(
-                    f"--since: expected a duration such as 30m, 2h or 7d, not {rest[i]!r}"
-                ) from e
             i += 1
             continue
         if arg == "--timeout":
@@ -483,8 +437,6 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         heading_out=heading_out,
         heading_in=heading_in,
         show=show,
-        sent=sent,
-        since=since,
         senders=tuple(senders),
         json=as_json,
     )
@@ -492,14 +444,6 @@ def parse_tells_argv(argv: list[str]) -> TellsOptions:
         raise TellsUsageError("cannot use -f/--follow with a positive --timeout")
     if live and not opts.follow_forever:
         raise TellsUsageError("--live requires -f/--follow or --timeout 0")
-    if since is not None and not sent:
-        raise TellsUsageError(
-            "--since applies to --sent; read history from a cursor with `a8s convo <name> --since`"
-        )
-    if sent and follow:
-        raise TellsUsageError("--sent lists what was sent; it does not follow")
-    if sent and (senders or as_json):
-        raise TellsUsageError("--from and --json apply to received messages, not to --sent")
     return opts
 
 
@@ -577,7 +521,7 @@ LATE_THRESHOLD_SEC = 600.0
 
 def late_prefix(msg: dict, threshold_s: float = LATE_THRESHOLD_SEC) -> str:
     """`[late 32h] ` when this message sat somewhere on the way, else ``."""
-    from receipts import duration_text, parse_stamp
+    from convo import duration_text, parse_stamp
 
     queued = parse_stamp(str(msg.get("date") or ""))
     delivered = parse_stamp(str(msg.get("delivered_at") or ""))
@@ -737,9 +681,6 @@ def tells_main(argv: list[str]) -> int:
         print(f"tells: {e}", file=sys.stderr)
         _print_usage()
         return 2
-
-    if opts.sent:
-        return _print_sent(opts.since)
 
     if opts.show is not None:
         # Addressed by path, so it needs no outbox and no registry — a clipped

@@ -93,16 +93,16 @@ def _allow_plaintext_http_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _settle_deferred_attachment_retries():
-    """Deferred attachment delivery runs on a background pool that outlives the
-    test that started it. Left to run, a retry from an earlier test announces
-    its failure into a later test's captured stdout — a cross-test leak that
+def _settle_attachment_waits():
+    """The attachment wait runs on a background pool that outlives the test
+    that started it. Left to run, a wait from an earlier test announces its
+    failure into a later test's captured stdout — a cross-test leak that
     only shows up when the timing lines up, which is to say on someone else's
     machine."""
     yield
     import network
 
-    network.drain_attachment_retries(timeout_s=10)
+    network.drain_attachment_waits(timeout_s=10)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -157,6 +157,11 @@ def fake_home(tmp_path, monkeypatch):
     # Make sure no prior test left a Lock attached.
     core.PRINT_LOCK = None
     yield tmp_path
+    # Settled before the redirect is undone: a wait that outlives it would
+    # write into the real config home.
+    import network
+
+    network.drain_attachment_waits(timeout_s=10)
 
 
 def write_path_executable(directory: Path, name: str, source: str) -> Path:

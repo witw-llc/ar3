@@ -11,6 +11,7 @@ Configurable root via K7E_HOME env var (defaults to ~/.config/k7e, honoring
 XDG_CONFIG_HOME).
 """
 
+import datetime
 import hashlib
 import json
 import math
@@ -353,12 +354,19 @@ def _source_span_identity(ref):
 
 @_write_locked
 def store_entry(title, content, tags=None, aliases=None, importance=5,
-                source=None, sources=None, kind=None, source_refs=None):
+                source=None, sources=None, kind=None, source_refs=None, valid_to=None,
+                valid_from=None):
     """Store a new knowledge entry. Deduplicates by content hash at storage layer.
     For semantic dedup-aware ingestion, use distill.
 
     `source` names the experience this came from and `sources` the files that
-    experience read — see `_with_provenance`."""
+    experience read — see `_with_provenance`. `valid_to` (`YYYY-MM-DD`) is the
+    last day the entry is current; past it, search and recall pass it over and
+    the file stays.
+
+    Every entry carries two clocks. `recorded_at` is when the store learned
+    it; `valid_from` is when it became true, the source turn's time when a
+    distill passes one (a UTC stamp, `utc_stamp`) and the write time when not."""
     if kind is not None and kind not in RECORD_KINDS:
         raise ValueError("unknown record kind")
     tags = tags or []
@@ -419,6 +427,11 @@ tags: [{', '.join(tags)}]
     if kind:
         body = _set_frontmatter_key(body, "kind", kind)
         body = _set_frontmatter_key(body, "record_hash", content_hash)
+    recorded_at = utc_now()
+    body = _set_frontmatter_key(body, "recorded_at", recorded_at)
+    body = _set_frontmatter_key(body, "valid_from", valid_from or recorded_at)
+    if valid_to:
+        body = _set_frontmatter_key(body, "valid_to", valid_to)
     body = _with_source_refs(body, source_refs)
     body = _with_provenance(body, source, sources)
 
@@ -501,17 +514,21 @@ def append_entry(node_id, section, content, source=None, sources=None, source_re
 
 @_write_locked
 def supersede(old_id, new_id):
-    """Mark old_id as superseded by new_id. Returns True if old_id existed."""
+    """Mark old_id as superseded by new_id. Returns True if old_id existed.
+    An entry never supersedes itself."""
     node_path = _node_path(old_id)
-    if not node_path.exists():
+    if old_id == new_id or not node_path.exists():
         return False
     text = node_path.read_text(encoding="utf-8")
+    superseded_at = utc_now()
     text = _set_frontmatter_key(text, "status", "superseded")
     text = _set_frontmatter_key(text, "superseded_by", new_id)
+    text = _set_frontmatter_key(text, "superseded_at", superseded_at)
     _persist_node(node_path, text, result=True)
-    # Update index
     conn = _connect()
-    conn.execute("UPDATE nodes SET status = 'superseded', superseded_by = ? WHERE id = ?", (new_id, old_id))
+    conn.execute("UPDATE nodes SET status = 'superseded', superseded_by = ?, superseded_at = ? WHERE id = ?",
+                 (new_id, superseded_at, old_id))
+    _write_edges(conn, old_id, _parse_frontmatter(text), _extract_body(text))
     conn.commit()
     conn.close()
     return True
@@ -522,9 +539,92 @@ def _hit_is_active(hit):
     if hit.get("status") not in (None, "active"):
         return False
     try:
-        return _parse_frontmatter(get(hit["id"], track_usage=False)).get("status", "active") == "active"
+        meta = _parse_frontmatter(get(hit["id"], track_usage=False))
     except FileNotFoundError:
         return False
+    return meta.get("status", "active") == "active" and is_current(meta)
+
+
+def is_current(meta):
+    """False once an entry's `valid_to` day has passed."""
+    valid_to = str(meta.get("valid_to") or "")
+    return not valid_to or valid_to >= time.strftime("%Y-%m-%d")
+
+
+def _current_sql(table):
+    """`is_current` in SQL, so an expired row never takes a rank in a search
+    track: filtered only after the fused list is cut, expired entries pushed
+    current ones out of a small limit."""
+    return f"({table}.valid_to = '' OR {table}.valid_to >= '{time.strftime('%Y-%m-%d')}')"
+
+
+_STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def utc_stamp(value):
+    """`value` as a UTC stamp, the one format both clocks are stored in. A bare
+    date means the end of that local day; a time without a zone is local."""
+    value = str(value).strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        value += "T23:59:59"
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(f"not a date or time: {value!r}") from None
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _local_day(stamp):
+    moment = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    return moment.astimezone().strftime("%Y-%m-%d")
+
+
+def _slice_sql(n, as_of=None, valid_at=None):
+    """The rows of a time slice, in SQL on alias `n`.
+
+    `as_of` reads the record clock: what the store held at that moment, so an
+    entry retired since counts and one learned since does not. `valid_at`
+    reads the validity window: what was true at that moment by what the store
+    knows (by `as_of` when both are given). A replacement ends its
+    predecessor's validity where the replacement's own begins, so with both
+    clocks an entry retired by `as_of` still answers for the time before its
+    replacement took effect."""
+    parts = [f"{n}.status IN ('active', 'superseded')"]
+    if as_of:
+        _check_stamp(as_of)
+        parts.append(f"{n}.recorded_at <= '{as_of}'")
+        if not valid_at:
+            parts.append(f"({n}.superseded_at = '' OR {n}.superseded_at > '{as_of}')")
+    if valid_at:
+        _check_stamp(valid_at)
+        known = f" AND r.recorded_at <= '{as_of}'" if as_of else ""
+        parts.append(
+            f"{n}.valid_from <= '{valid_at}' AND ({n}.valid_to = '' OR {n}.valid_to >= '{_local_day(valid_at)}') "
+            f"AND NOT EXISTS (SELECT 1 FROM edges e JOIN nodes r ON r.id = e.dst "
+            f"WHERE e.src = {n}.id AND e.type = 'superseded_by' AND r.valid_from <= '{valid_at}'{known})")
+    elif as_of:
+        parts.append(f"({n}.valid_to = '' OR {n}.valid_to >= '{_local_day(as_of)}')")
+    return " AND ".join(parts)
+
+
+def _check_stamp(value):
+    """A slice value is written into SQL, so only the exact stamp shape passes."""
+    if not _STAMP_RE.fullmatch(str(value)):
+        raise ValueError(f"not a UTC stamp: {value!r}")
+
+
+def _row_filter(n, include_superseded, as_of=None, valid_at=None):
+    if as_of or valid_at:
+        return _slice_sql(n, as_of, valid_at)
+    if include_superseded:
+        return "1 = 1"
+    return f"{n}.status = 'active' AND {_current_sql(n)}"
 
 
 def _hit_is_operational(hit):
@@ -535,14 +635,19 @@ def _hit_is_operational(hit):
 
 
 def search(query, limit=5, json_output=False, include_superseded=False, rerank=None,
-           active_only=False, include_archive=False):
+           active_only=False, include_archive=False, as_of=None, valid_at=None):
     """Rank the store against `query`. A node id in the query is an exact
     lookup returned first only if active, unless historical results are requested.
 
     `active_only` drops every hit whose node is retired, for the callers that
     are choosing a node to write to rather than showing an operator what the
-    store holds. Nothing may append to or dedupe against a retired entry."""
+    store holds. Nothing may append to or dedupe against a retired entry.
+
+    `as_of` and `valid_at` (UTC stamps, `utc_stamp`) search a time slice
+    instead of the current store — see `_slice_sql`. Every hit carries its
+    two clocks and the ids of the entries it replaced."""
     init()
+    sliced = bool(as_of or valid_at)
     if rerank is None:
         rerank = _rerank_enabled()
 
@@ -574,9 +679,14 @@ def search(query, limit=5, json_output=False, include_superseded=False, rerank=N
     pool = max(limit, 15) if rerank else limit
 
     conn = _connect()
-    bm25_results = _search_bm25(conn, query, pool * 3, include_superseded)
-    meta_results = _search_metadata(conn, query, pool * 3, include_superseded)
-    embed_results = _search_embeddings(conn, query, pool * 3, include_superseded)
+    window = {"as_of": as_of, "valid_at": valid_at}
+    bm25_results = _search_bm25(conn, query, pool * 3, include_superseded, **window)
+    meta_results = _search_metadata(conn, query, pool * 3, include_superseded, **window)
+    embed_results = _search_embeddings(conn, query, pool * 3, include_superseded, **window)
+    if sliced:
+        exact_hits = [h for h in exact_hits if conn.execute(
+            f"SELECT 1 FROM nodes n WHERE n.id = ? AND {_slice_sql('n', as_of, valid_at)}",
+            (h["id"],)).fetchone()]
 
     if not include_archive:
         exact_hits = [hit for hit in exact_hits if _hit_is_operational(hit)]
@@ -620,15 +730,26 @@ def search(query, limit=5, json_output=False, include_superseded=False, rerank=N
         exact_id_set = {h["id"] for h in exact_hits}
         fused = [r for r in fused if r["id"] not in exact_id_set]
 
-    if active_only or not include_superseded:
+    if active_only or not (include_superseded or sliced):
         exact_hits = [h for h in exact_hits if _hit_is_active(h)]
         fused = [r for r in fused if _hit_is_active(r)]
 
+    conn = _connect()
+    for hit in exact_hits + fused:
+        hit["kind"] = None
+        row = conn.execute(
+            "SELECT status, recorded_at, superseded_at, valid_from, valid_to FROM nodes WHERE id = ?", (hit["id"],)
+        ).fetchone() or (None, "", "", "", "")
+        hit.update(zip(("status", "recorded_at", "superseded_at", "valid_from", "valid_to"), (v or None for v in row)))
+        hit["replaces"] = [src for (src,) in conn.execute(
+            "SELECT src FROM edges WHERE dst = ? AND type = 'superseded_by' ORDER BY src", (hit["id"],))]
+    conn.close()
     if include_archive:
         for hit in exact_hits + fused:
             try:
                 kind = _parse_frontmatter(get(hit["id"], track_usage=False)).get("kind")
                 hit["title"] = _claim_title(hit["title"], kind)
+                hit["kind"] = kind or None
             except FileNotFoundError:
                 continue
 
@@ -650,12 +771,38 @@ def get(node_id, track_usage=False):
     return text
 
 
+def graph(node_id):
+    """One entry's place in the graph: its two clocks, the edges its own file
+    states (`out`), and the edges other entries state about it (`in`)."""
+    init()
+    conn = _connect()
+    row = conn.execute(
+        "SELECT title, status, recorded_at, superseded_at, valid_from, valid_to FROM nodes WHERE id = ?",
+        (node_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise FileNotFoundError(f"Node {node_id} not found")
+    def side(where, other):
+        return [{"type": kind, "id": peer, "title": title or "", "status": status or ""}
+                for kind, peer, title, status in conn.execute(
+                    f"SELECT e.type, e.{other}, n.title, n.status FROM edges e "
+                    f"LEFT JOIN nodes n ON n.id = e.{other} WHERE e.{where} = ? ORDER BY e.type, e.{other}",
+                    (node_id,))]
+    result = {"id": node_id, **dict(zip(
+        ("title", "status", "recorded_at", "superseded_at", "valid_from", "valid_to"),
+        (v if v != "" else None for v in row))),
+        "out": side("src", "dst"), "in": side("dst", "src")}
+    conn.close()
+    return result
+
+
 @_write_locked
 def reindex(embeddings=False):
     init()
     conn = _connect()
     conn.execute("DELETE FROM nodes")
     conn.execute("DELETE FROM nodes_fts")
+    conn.execute("DELETE FROM edges")
     conn.execute("DELETE FROM pending_embeddings")
     if embeddings:
         conn.execute("DELETE FROM embeddings")
@@ -690,13 +837,15 @@ def _fill_index(conn, embeddings=False):
 
         conn.execute(
             "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-            "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by, kind, embedding_input_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by, kind, embedding_input_hash, "
+            "valid_to, valid_from, recorded_at, superseded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (node_id, title, ", ".join(aliases), meta.get("status", "active"),
              meta.get("confidence", 0.5), meta.get("verification_count", 0),
-             now, ", ".join(tags), now, now, content_hash, meta.get("superseded_by", ""),
-             meta.get("kind", ""), hashlib.sha256(_embedding_text(text).encode()).hexdigest())
+             now, ", ".join(tags), now, now, content_hash, _superseded_by_text(meta),
+             meta.get("kind", ""), hashlib.sha256(_embedding_text(text).encode()).hexdigest(),
+             *_clock_columns(meta))
         )
+        _write_edges(conn, node_id, meta, body)
         conn.execute(
             "INSERT INTO nodes_fts (rowid, title, aliases, tags, content) "
             "VALUES ((SELECT rowid FROM nodes WHERE id = ?), ?, ?, ?, ?)",
@@ -714,6 +863,12 @@ def _fill_index(conn, embeddings=False):
                     "INSERT OR REPLACE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
                     (node_id, now)
                 )
+    # A retirement written before the record clock existed is dated by the
+    # entry that replaced it, the moment the store learned the replacement.
+    conn.execute(
+        "UPDATE nodes SET superseded_at = COALESCE((SELECT MIN(r.recorded_at) FROM edges e "
+        "JOIN nodes r ON r.id = e.dst WHERE e.src = nodes.id AND e.type = 'superseded_by'), recorded_at) "
+        "WHERE status = 'superseded' AND superseded_at = ''")
     return count
 
 
@@ -733,7 +888,7 @@ def _rederive_index():
                 if not stale:
                     conn.execute("ROLLBACK")
                     return
-                for table in {"nodes_fts", "nodes", "pending_embeddings"} | stale:
+                for table in {"nodes_fts", "nodes", "edges", "pending_embeddings"} | stale:
                     conn.execute(f"DROP TABLE IF EXISTS {table}")
                 for statement in _SCHEMA_STATEMENTS:
                     conn.execute(statement)
@@ -753,7 +908,7 @@ def list_nodes(status=None, tag=None, limit=None, include_archive=False):
         raise ValueError("limit must be non-negative")
     init()
     conn = _connect()
-    query = "SELECT id, title, status, confidence, tags FROM nodes"
+    query = "SELECT id, title, status, confidence, tags, recorded_at FROM nodes"
     conditions = []
     params = []
     if status:
@@ -764,13 +919,14 @@ def list_nodes(status=None, tag=None, limit=None, include_archive=False):
         params.append(f"%{tag}%")
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY last_updated DESC, id DESC"
+    query += " ORDER BY last_updated DESC, recorded_at DESC, id DESC"
     if limit is not None and include_archive:
         query += " LIMIT ?"
         params.append(limit)
     rows = conn.execute(query, params).fetchall()
     conn.close()
-    results = [{"id": r[0], "title": r[1], "status": r[2], "confidence": r[3], "tags": r[4]} for r in rows]
+    results = [{"id": r[0], "title": r[1], "status": r[2], "confidence": r[3], "tags": r[4],
+                "recorded_at": r[5] or None} for r in rows]
     if not include_archive:
         results = [hit for hit in results if _hit_is_operational(hit)]
     return results if limit is None else results[:limit]
@@ -1233,6 +1389,7 @@ def recall(text, limit=8, include_superseded=False, include_archive=False):
                             "kind": meta.get("kind", "operational"),
                             "status": meta.get("status", "active"),
                             "superseded_by": meta.get("superseded_by", ""),
+                            "replaces": hit_info[nid].get("replaces") or [],
                             "source": meta.get("source", ""),
                             "sources": meta.get("sources", []),
                             "source_refs": meta.get("source_refs", [])})
@@ -1248,7 +1405,7 @@ def recall(text, limit=8, include_superseded=False, include_archive=False):
 
     # Synthesize
     context_text = "\n\n---\n\n".join(
-        f"[{e['id']}] {e['title']}\nMetadata: {json.dumps({'kind': e['kind'], 'status': e['status'], 'superseded_by': e['superseded_by'], 'citations': [c['handle'] for c in e['citations']]})}\n{e['content']}" for e in entries
+        f"[{e['id']}] {e['title']}\nMetadata: {json.dumps({'kind': e['kind'], 'status': e['status'], 'superseded_by': e['superseded_by'], 'replaces': e['replaces'], 'citations': [c['handle'] for c in e['citations']]})}\n{e['content']}" for e in entries
     )
     prompt = (
         "Summarize everything relevant from the knowledge entries below "
@@ -1417,48 +1574,77 @@ def _decompose_queries(text):
 
 # --- Compile (knowledge compounding) ---
 
-def compile_tag(tag, dry_run=False):
-    """Synthesize all active entries for a tag into a single reference page.
+# A compiled page stands in for every entry it folds, so it inherits their
+# tags — otherwise a fragment found by its own tag disappears from metadata
+# search the moment it is folded. Past a dozen the list stops being a topic.
+COMPILED_TAGS_MAX = 12
+# A scheduled compile folds a tag once it has this many loose entries, and
+# runs at most once per interval per store; the caller sweeps as often as it
+# likes and pays for one compile a day.
+COMPILE_DUE_ENTRIES = 5
+COMPILE_DUE_HOURS = 20
+# One compile folds at most this many entries, the tag's own page first and
+# then the newest, so a large tag's prompt stays the size of a few captures
+# and the rest wait for the next pass.
+COMPILE_MAX_ENTRIES = 30
 
-    Requires 3+ active nodes with the given tag. Uses configured LLM to
-    produce a compiled overview. Source nodes are NOT modified or deleted.
-    Returns the new compiled node ID, or None if dry_run.
+
+def compile_tag(tag, dry_run=False):
+    """Fold a tag's active entries into one reference page that replaces them.
+
+    Requires 3+ active operational entries carrying exactly `tag`. The page is
+    stored `active` and every entry it was compiled from is superseded by it,
+    so the page ranks in their place and the fragments stay on disk for audit
+    (`--include-superseded`). A page left beside its sources never ranked:
+    search reads active entries only, and the fragments kept competing with
+    the synthesis they were meant to become.
+
+    Returns the new node ID, or None if dry_run or nothing was compiled.
     """
     init()
     nodes = list_nodes(tag=tag, status="active")
-    if len(nodes) < 3:
-        print(f"Need 3+ active nodes with tag '{tag}', found {len(nodes)}.", file=sys.stderr)
-        return None
 
-    # Gather content from source nodes
+    # `list_nodes` matches tags by substring; retiring sources makes that a
+    # write, and `compile dev` must not fold `devops`.
     entries = []
     for n in nodes:
         try:
             text = get(n["id"])
-            if is_archive_record(_parse_frontmatter(text)):
-                continue
-            body = _extract_body(text)
-            entries.append({"id": n["id"], "title": n["title"], "content": body.strip()})
         except FileNotFoundError:
             continue
+        meta = _parse_frontmatter(text)
+        tags = meta.get("tags") or []
+        # A task entry expires; folded into a page it would outlive its task.
+        if is_archive_record(meta) or tag not in tags or meta.get("valid_to"):
+            continue
+        # A page carries its sources' tags, so without this a compile of any
+        # of them would fold it, and pages would chain into one.
+        if "compiled" in tags and tags[0] != tag:
+            continue
+        entries.append({"id": n["id"], "title": n["title"], "content": _extract_body(text).strip(),
+                        "tags": tags, "valid_from": _clock_columns(meta)[1]})
 
     if len(entries) < 3:
-        print(f"Need 3+ readable nodes with tag '{tag}', found {len(entries)}.", file=sys.stderr)
+        print(f"Need 3+ active entries with tag '{tag}', found {len(entries)}.", file=sys.stderr)
         return None
+    entries.sort(key=lambda e: "compiled" not in e["tags"])
+    entries = entries[:COMPILE_MAX_ENTRIES]
 
-    # Build prompt
     entry_texts = "\n\n---\n\n".join(
         f"[Entry {e['id']}] {e['title']}\n{e['content']}" for e in entries
     )
     prompt = (
         f"Synthesize these {len(entries)} knowledge entries about '{tag}' into a single "
-        f"authoritative reference. Include sections: Overview, Procedures, Gotchas, "
-        f"Open Questions. Preserve specific technical details (commands, flags, ports). "
-        f"Cite source entry IDs.\n\n{entry_texts}"
+        f"authoritative reference that replaces them. Include sections: Overview, "
+        f"Procedures, Gotchas, Open Questions. Keep every durable detail — commands, "
+        f"flags, ports, names, versions, rules. Drop task telemetry that no longer "
+        f"matters: test counts for one change, PR or branch status, one-off command "
+        f"output. Where entries disagree, say so rather than choosing. Do not add "
+        f"facts the entries do not state. Cite source entry IDs.\n\n{entry_texts}"
     )
 
     if dry_run:
-        print(f"Would compile {len(entries)} entries for tag '{tag}':")
+        print(f"Would compile {len(entries)} entries for tag '{tag}' and supersede them:")
         for e in entries:
             print(f"  {e['id']}  {e['title']}")
         return None
@@ -1468,47 +1654,110 @@ def compile_tag(tag, dry_run=False):
         print("Error: compile_command (or llm_command) not configured or call failed.", file=sys.stderr)
         return None
 
-    # Store as a new compiled node
     source_ids = [e["id"] for e in entries]
     content_with_sources = (
         f"{compiled_content}\n\n"
         f"## Sources\n"
         + "\n".join(f"* [[{sid}]]" for sid in source_ids)
     )
+    counts = {}
+    for e in entries:
+        for t in e["tags"]:
+            if t not in (tag, "compiled"):
+                counts[t] = counts.get(t, 0) + 1
+    inherited = sorted(counts, key=lambda t: (-counts[t], t))
+    tags_list = ([tag, "compiled"] + inherited)[:COMPILED_TAGS_MAX]
+    title = f"{tag} — Compiled Reference"
 
-    tags_list = [tag, "compiled"]
-    node_id = next_id()
-    now = time.strftime("%Y-%m-%d")
-
-    body = f"""---
+    # The page states the newest of what its sources said, so it holds from
+    # the newest source on; before that, a slice by validity finds the
+    # fragments that were true then, not a page that back-dates later facts.
+    valid_from = max((e["valid_from"] for e in entries if e["valid_from"]), default="") or utc_now()
+    with write_lock():
+        node_id = next_id()
+        now = time.strftime("%Y-%m-%d")
+        body = f"""---
 id: {node_id}
-title: {tag} — Compiled Reference
+title: {title}
 aliases: []
-status: compiled
+status: active
 confidence: 0.8
 verification_count: 0
 last_updated: {now}
 tags: [{', '.join(tags_list)}]
+recorded_at: {utc_now()}
+valid_from: {valid_from}
+compiled_from: [{', '.join(source_ids)}]
 ---
 
 {content_with_sources}
 
 ## History
-* {now}: Compiled from {len(entries)} entries.
+* {now}: Compiled from {len(entries)} entries, which it supersedes.
 """
-
-    node_path = _node_path(node_id)
-    node_path.parent.mkdir(parents=True, exist_ok=True)
-    node_path.write_text(body, encoding="utf-8")
-
-    _index_node(node_id, f"{tag} — Compiled Reference", [], tags_list,
-                content_with_sources, now, status="compiled")
-    _update_mocs(node_id, f"{tag} — Compiled Reference", tags_list)
+        node_path = _node_path(node_id)
+        node_path.parent.mkdir(parents=True, exist_ok=True)
+        _persist_node(node_path, body)
+        _index_node(node_id, title, [], tags_list, content_with_sources, now,
+                    content_hash=hashlib.sha256(content_with_sources.encode()).hexdigest()[:16],
+                    confidence=0.8)
+        _update_mocs(node_id, title, tags_list)
+        # The model call ran outside the lock: a source a correction retired
+        # meanwhile keeps the correction as its successor.
+        for sid in source_ids:
+            try:
+                if _parse_frontmatter(get(sid)).get("status", "active") == "active":
+                    supersede(sid, node_id)
+            except FileNotFoundError:
+                continue
 
     return node_id
 
 
 # --- Assets ---
+
+def compile_due(min_entries=COMPILE_DUE_ENTRIES, every_hours=COMPILE_DUE_HOURS):
+    """The scheduled consolidation pass: compile the one tag with the most
+    active operational entries no page has folded yet, when it has at least
+    `min_entries`. Does nothing inside `every_hours` of the last pass.
+    Returns (status, node_id): "not-due", "nothing", "compiled", or "failed".
+    A failed pass waits out the interval too, and the next pass passes over
+    the tag that failed: a compile that times out every time would otherwise
+    spend every sweep's budget on itself, or hold every other tag back."""
+    init()
+    mark = NODES_DIR.parent / ".compile-due"
+    try:
+        if time.time() - mark.stat().st_mtime < every_hours * 3600:
+            return "not-due", None
+        last_failed = json.loads(mark.read_text(encoding="utf-8")).get("failed")
+    except FileNotFoundError:
+        last_failed = None
+    except (OSError, ValueError, AttributeError):
+        last_failed = None
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT tags FROM nodes WHERE status = 'active' AND kind = '' AND valid_to = ''"
+    ).fetchall()
+    conn.close()
+    counts = {}
+    for (tag_str,) in rows:
+        tags = [t.strip() for t in (tag_str or "").split(",") if t.strip()]
+        if "compiled" in tags:
+            continue
+        for t in tags:
+            counts[t] = counts.get(t, 0) + 1
+    ready = sorted((t for t in counts if counts[t] >= min_entries and t != last_failed),
+                   key=lambda t: (-counts[t], t))
+    stamp = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    atomic_write_text(mark, json.dumps({"at": stamp, "tag": ready[0] if ready else None}) + "\n")
+    if not ready:
+        return "nothing", None
+    node_id = compile_tag(ready[0])
+    if not node_id:
+        atomic_write_text(mark, json.dumps({"at": stamp, "failed": ready[0]}) + "\n")
+        return "failed", None
+    return "compiled", node_id
+
 
 def store_asset(source_path):
     """Content-addressed asset storage. Returns relative path for markdown embedding.
@@ -1616,8 +1865,19 @@ _SCHEMA_STATEMENTS = (
     last_used_at TEXT,
     use_count INTEGER DEFAULT 0,
     kind TEXT DEFAULT '',
-    embedding_input_hash TEXT DEFAULT ''
+    embedding_input_hash TEXT DEFAULT '',
+    valid_to TEXT DEFAULT '',
+    valid_from TEXT DEFAULT '',
+    recorded_at TEXT DEFAULT '',
+    superseded_at TEXT DEFAULT ''
 )""",
+    """CREATE TABLE IF NOT EXISTS edges (
+    src TEXT NOT NULL,
+    type TEXT NOT NULL,
+    dst TEXT NOT NULL,
+    PRIMARY KEY (src, type, dst)
+)""",
+    "CREATE INDEX IF NOT EXISTS edges_dst ON edges (dst, type)",
     """CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     title, aliases, tags, content,
     tokenize='porter unicode61'
@@ -1648,7 +1908,8 @@ _EMBED_SCAN_LIMIT = 10000
 
 
 _REQUIRED_COLUMNS = {
-    "nodes": {"content_hash", "superseded_by", "last_used_at", "use_count", "kind", "embedding_input_hash"},
+    "nodes": {"content_hash", "superseded_by", "last_used_at", "use_count", "kind", "embedding_input_hash",
+              "valid_to", "valid_from", "recorded_at", "superseded_at"},
     "embeddings": {"provider", "dimensions", "text_hash", "text_version"},
 }
 
@@ -1672,25 +1933,27 @@ def _index_node(node_id, title, aliases, tags, content, now, content_hash=None,
                 confidence=0.5, status="active", superseded_by=None):
     """Write one node's row and its FTS text. `status` is the file's own —
     a literal here would say active about a node whose frontmatter says
-    superseded or compiled, and search reads the index, not the file.
+    superseded, and search reads the index, not the file.
     Hash the persisted body so writes and reindex embed identical input."""
     conn = _connect()
     path = _node_path(node_id)
     text = path.read_text(encoding="utf-8")
     meta = _parse_frontmatter(text)
     if superseded_by is None:
-        superseded_by = meta.get("superseded_by", "")
+        superseded_by = _superseded_by_text(meta)
     alias_str = ", ".join(aliases) if isinstance(aliases, list) else aliases
     tag_str = ", ".join(tags) if isinstance(tags, list) else tags
 
     conn.execute(
         "INSERT OR REPLACE INTO nodes (id, title, aliases, status, confidence, "
-        "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by, kind, embedding_input_hash) "
-        "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "verification_count, last_updated, tags, created_at, updated_at, content_hash, superseded_by, kind, embedding_input_hash, "
+        "valid_to, valid_from, recorded_at, superseded_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (node_id, title, alias_str, status, confidence, now, tag_str, now, now,
          content_hash, superseded_by, meta.get("kind", ""),
-         hashlib.sha256(_embedding_text(text).encode()).hexdigest())
+         hashlib.sha256(_embedding_text(text).encode()).hexdigest(),
+         *_clock_columns(meta))
     )
+    _write_edges(conn, node_id, meta, _extract_body(text))
 
     conn.execute("DELETE FROM nodes_fts WHERE rowid = (SELECT rowid FROM nodes WHERE id = ?)", (node_id,))
     conn.execute(
@@ -1709,6 +1972,49 @@ def _index_node(node_id, title, aliases, tags, content, now, content_hash=None,
 
     conn.commit()
     conn.close()
+
+
+def _ids(value):
+    values = value if isinstance(value, list) else [value] if value else []
+    return [str(v).strip() for v in values if str(v).strip()]
+
+
+def _superseded_by_text(meta):
+    return ", ".join(_ids(meta.get("superseded_by")))
+
+
+def _clock_columns(meta):
+    """`valid_to`, `valid_from`, `recorded_at`, `superseded_at` for the index.
+    An entry written before the clocks existed was recorded on its
+    `last_updated` day, and became true when it was recorded."""
+    recorded_at = str(meta.get("recorded_at") or "")
+    if not _STAMP_RE.fullmatch(recorded_at):
+        day = str(meta.get("last_updated") or "")
+        recorded_at = f"{day}T00:00:00Z" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) else ""
+    valid_from = str(meta.get("valid_from") or "")
+    superseded_at = str(meta.get("superseded_at") or "")
+    return (str(meta.get("valid_to") or ""),
+            valid_from if _STAMP_RE.fullmatch(valid_from) else recorded_at,
+            recorded_at,
+            superseded_at if _STAMP_RE.fullmatch(superseded_at) else "")
+
+
+_WIKILINK_RE = re.compile(r"\[\[(K7E-\d{3}-\d{5})\]\]")
+EDGE_TYPES = ("superseded_by", "compiled_from", "mentions")
+
+
+def _write_edges(conn, node_id, meta, body):
+    """The entry's edges, as its own file states them: `superseded_by` and
+    `compiled_from` from frontmatter, `mentions` from wikilinks in the body.
+    Every edge is keyed by the entry whose file states it, so re-indexing one
+    entry rewrites exactly its own."""
+    conn.execute("DELETE FROM edges WHERE src = ?", (node_id,))
+    compiled = _ids(meta.get("compiled_from"))
+    stated = [("superseded_by", d) for d in _ids(meta.get("superseded_by"))]
+    stated += [("compiled_from", d) for d in compiled]
+    stated += [("mentions", d) for d in _WIKILINK_RE.findall(body) if d != node_id and d not in compiled]
+    conn.executemany("INSERT OR IGNORE INTO edges (src, type, dst) VALUES (?, ?, ?)",
+                     [(node_id, kind, dst) for kind, dst in stated])
 
 
 def _vector_match(selected):
@@ -1858,7 +2164,7 @@ _STOPWORDS = {"a", "an", "the", "is", "are", "was", "were", "be", "been", "being
               "or", "so", "if", "then", "than", "too", "very", "just"}
 
 
-def _search_bm25(conn, query, limit, include_superseded=False):
+def _search_bm25(conn, query, limit, include_superseded=False, as_of=None, valid_at=None):
     expanded = query.replace("-", " ").replace("_", " ")
     queries_to_try = [query, expanded]
 
@@ -1877,7 +2183,7 @@ def _search_bm25(conn, query, limit, include_superseded=False):
     if meaningful:
         queries_to_try.append(" OR ".join(f'"{w}"' for w in meaningful[:40]))
 
-    status_clause = "" if include_superseded else "AND nodes.status = 'active'"
+    status_clause = f"AND {_row_filter('nodes', include_superseded, as_of, valid_at)}"
     for q in queries_to_try:
         try:
             rows = conn.execute(
@@ -1893,15 +2199,14 @@ def _search_bm25(conn, query, limit, include_superseded=False):
     return []
 
 
-def _search_metadata(conn, query, limit, include_superseded=False):
+def _search_metadata(conn, query, limit, include_superseded=False, as_of=None, valid_at=None):
     # Same \w+ extraction as text_words below, so punctuation in the query
     # ("codeword?") cannot mask a term that is plainly present.
     terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 2]
     if not terms:
         return []
-    status_clause = "" if include_superseded else "WHERE status = 'active'"
     rows = conn.execute(
-        f"SELECT id, title, tags, aliases FROM nodes {status_clause}"
+        f"SELECT id, title, tags, aliases FROM nodes WHERE {_row_filter('nodes', include_superseded, as_of, valid_at)}"
     ).fetchall()
     scored = []
     for r in rows:
@@ -1914,7 +2219,7 @@ def _search_metadata(conn, query, limit, include_superseded=False):
     return scored[:limit]
 
 
-def _search_embeddings(conn, query, limit, include_superseded=False):
+def _search_embeddings(conn, query, limit, include_superseded=False, as_of=None, valid_at=None):
     global LAST_QUERY_EMBED_MS, LAST_QUERY_EMBED_OK
     LAST_QUERY_EMBED_MS = None
     LAST_QUERY_EMBED_OK = False
@@ -1935,7 +2240,7 @@ def _search_embeddings(conn, query, limit, include_superseded=False):
     count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     if count > _EMBED_SCAN_LIMIT:
         return []
-    status_clause = "" if include_superseded else "AND n.status = 'active'"
+    status_clause = f"AND {_row_filter('n', include_superseded, as_of, valid_at)}"
     match, values = _vector_match(selected)
     rows = conn.execute(
         "SELECT e.node_id, e.vector, n.title FROM embeddings e "

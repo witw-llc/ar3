@@ -15,7 +15,14 @@ Hybrid search (BM25 + metadata + semantic), fused and ranked.
 --no-rerank            disable reranking even when configured globally
 --include-superseded   include retired entries
 --include-archive      include exploratory source claims
+--as-of T              what the store held at time T (record clock)
+--valid-at T           what was true at time T (validity window)
 ```
+
+T is `YYYY-MM-DD` (the end of that local day), a local `YYYY-MM-DDTHH:MM:SS`,
+or a UTC stamp ending in `Z`. A slice includes retired entries that the slice
+time still covers. JSON hits carry `status`, `recorded_at`, `superseded_at`,
+`valid_from`, `valid_to` and `replaces`, the ids of the entries each replaced.
 
 When the semantic track runs, search prints `embed <N>ms` to **stderr** — the
 query-embedding cost alone, so a caller on a latency budget can price it. The
@@ -25,6 +32,11 @@ FTS5 carried the search by itself. stdout is untouched either way.
 A node id (`K7E-BBB-NNNNN`) named in the query is a lookup, not a search: that
 active node comes first, ahead of the ranked results. Retired nodes require
 `--include-superseded` even when named by ID; use `get` for a direct audit read.
+
+### `graph <id> [--json]`
+One entry's two clocks and its edges: `->` for the edges its own file states
+(`superseded_by`, `compiled_from`, `mentions`), `<-` for the edges other
+entries state about it. See [k7e-architecture.md](k7e-architecture.md#two-clocks-and-the-graph).
 
 ### `get <id> [<id> ...] [--no-track] [--json]`
 Print full entries. Counts as a "use" (bumps ranking signals) unless
@@ -81,8 +93,8 @@ Append content (arg or stdin) to a named section of an existing entry.
 Repeated calls replace the frontmatter pointer in place. Reindex preserves it.
 Do not supersede a general standing rule with a narrower scoped reinforcement;
 store the scoped fact beside the general rule unless it actually replaces it.
-Mark `old_id` as superseded by `new_id`. Preserves the audit trail; hides the
-old entry from default search.
+Mark `old_id` as superseded by `new_id`, and record when. Preserves the audit
+trail; hides the old entry from default search.
 
 ### `asset <file>`
 Store a binary content-addressed (SHA256, deduped). Prints the stored path.
@@ -99,8 +111,20 @@ entries that turn's people contradicted. See
 ### `consolidate [--dry-run]`
 Find and merge duplicate nodes by title similarity.
 
-### `compile <tag> [--dry-run]`
-Synthesize active entries for a tag into a `compiled` reference page (LLM).
+### `compile <tag> [--dry-run]` · `compile --due`
+Fold the active entries for a tag into one reference page that supersedes them
+(LLM). The page carries the tag first, then `compiled`, then up to ten of its
+sources' own tags. A page folds again only into a compile of its first tag.
+
+`--due` compiles the tag with the most entries no page has folded, when that
+tag has at least five, and prints `compile: nothing` otherwise. It runs about
+once a day per store (`COMPILE_DUE_HOURS`, marked in
+`$K7E_HOME/.compile-due`); inside that window it prints `compile: not-due`. A failed compile exits 1 and also waits
+out the window, and the next pass passes over the tag that failed, so a
+compile that always times out costs one attempt a day and holds no other tag
+back. A pass that finds nothing ready needs no model command. One compile
+folds at most 30 entries (`COMPILE_MAX_ENTRIES`), the tag's own page first;
+the rest wait. Entries that expire (`valid_to`) are never folded or counted.
 
 ## Maintenance
 

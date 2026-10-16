@@ -24,8 +24,7 @@ from typing import Callable, Optional
 from core import MAX_SEEN_IDS
 
 # Cross-process ledger mutex. One atomic exclusive create names one winner,
-# exactly as `network.claim_message` does, and a holder that died mid-write is
-# broken by the lock's own age.
+# and a holder that died mid-write is broken by the lock's own age.
 LEDGER_LOCK_WAIT_SECONDS = 2.0
 LEDGER_LOCK_POLL_SECONDS = 0.02
 LEDGER_LOCK_STALE_SECONDS = 30.0

@@ -124,7 +124,7 @@ class TestCmdConfig:
         assert "registry.agents" in out
         assert "network.remotes" in out
         assert "TELL_OUTBOX_DIR" in out
-        assert "remote.backoff_schedule" in out
+        assert "remote.backoff_schedule" not in out
 
     def test_get_set_unset_writable(self, fake_home, capsys):
         assert cmd_config(["set", "convo_max_rows", "2500"]) == 0

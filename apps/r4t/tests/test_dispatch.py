@@ -569,56 +569,243 @@ def timeout_run(rig, prompt, cwd, *, env=None, variant=0):
     return 0, "hung", 0.05, True
 
 
-def trip_breaker(ctx, agent="phil", cap=5):
-    for i in range(cap):
-        assert run_one(ctx, "acme:gerry", f"acme:{agent}", f"attempt {i}", run_fn=fail_run) == 1
+def error_notices(name):
+    return [m for m in state.read_queue(NODE, name) if m.get("class") == "error"]
 
 
-class TestFailureBreaker:
-    def test_failures_counted_and_cleared_by_clean_turn(self, ctx):
-        assert run_one(ctx, "acme:gerry", "acme:phil", "one", run_fn=fail_run) == 1
-        assert run_one(ctx, "acme:gerry", "acme:phil", "two", run_fn=timeout_run) == 1
-        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 2
-        assert run_one(ctx, "acme:gerry", "acme:phil", "three", run_fn=ok_run) == 1
-        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
-
-    def test_a_failed_turn_requeues_the_same_envelope_and_thread(self, ctx):
-        handle_message(ctx, "acme:gerry", "acme:phil", "keep this thread", drain_after=False)
-        queued = state.read_queue(NODE, "phil")
-        assert len(queued) == 1
-        thread, msg_id = queued[0]["thread"], queued[0]["id"]
-
+class TestFailedTurn:
+    def test_a_failed_turn_dead_letters_its_batch_and_tells_the_sender_once(self, ctx):
+        handle_message(ctx, "acme:gerry", "acme:phil", "one", drain_after=False)
+        handle_message(ctx, "acme:gerry", "acme:phil", "two", drain_after=False)
         assert drain(ctx, run_fn=fail_run) == 1
-        requeued = state.read_queue(NODE, "phil")
-        assert [(m["id"], m["thread"]) for m in requeued] == [(msg_id, thread)]
+        assert state.queue_depth(NODE, "phil") == 0
         assert state.list_inflight(NODE, "phil") == []
         assert state.read_turn(NODE, "phil") is None
-        assert state.read_meta(NODE, "phil")["last_turn"]["threads"] == [thread]
+        assert dead_reasons() == ["turn-failed", "turn-failed"]
+        assert sorted(r["content"] for r in state.list_dead_letters(NODE)) == ["one", "two"]
+        (notice,) = error_notices("gerry")
+        assert notice["body"] == "Phil failed (exit 1); it may have partly acted."
+        assert "DEAD-LETTER phil" in read_log()
 
-        assert drain(ctx, run_fn=ok_run) == 1
-        assert state.read_queue(NODE, "phil") == []
-        assert state.read_meta(NODE, "phil")["last_turn"]["threads"] == [thread]
+    def test_a_timed_out_turn_says_it_ran_out_of_time(self, ctx):
+        assert run_one(ctx, "acme:gerry", "acme:phil", "slow", run_fn=timeout_run) == 1
+        assert state.queue_depth(NODE, "phil") == 0
+        assert dead_reasons() == ["turn-timed-out"]
+        (notice,) = error_notices("gerry")
+        assert notice["body"] == "Phil ran out of time; it may have partly acted."
 
-    def test_trips_at_cap_then_holds_queue(self, ctx):
-        trip_breaker(ctx)
-        handle_message(ctx, "acme:gerry", "acme:phil", "blocked", drain_after=False)
-        assert drain(ctx, run_fn=ok_run) == 0  # breaker open: no turn
-        assert state.queue_depth(NODE, "phil") >= 1  # messages held, not dropped
-        assert "BREAKER phil" in read_log()
-        assert dead_reasons() == []  # nothing dead-lettered
+    def test_an_external_sender_hears_once_through_a8s(self, ctx, tells):
+        sent, _ = tells
+        handle_message(ctx, "boss", "acme", "first", drain_after=False)
+        handle_message(ctx, "boss", "acme", "second", drain_after=False)
+        assert drain(ctx, run_fn=fail_run) == 1
+        assert sent == [("boss", "[r4t acme] Gerry failed (exit 1); it may have partly acted.")]
+        assert dead_reasons() == ["turn-failed", "turn-failed"]
 
-    def test_half_open_probe_success_closes(self, ctx):
-        trip_breaker(ctx)
-        state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert run_one(ctx, "acme:gerry", "acme:phil", "probe", run_fn=ok_run) == 1
-        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 0
+    def test_the_notice_never_asks_for_a_resend(self, ctx, tells):
+        sent, _ = tells
+        run_one(ctx, "boss", "acme", "x", run_fn=fail_run)
+        run_one(ctx, "boss", "acme", "y", run_fn=timeout_run)
+        for _to, body in sent:
+            assert "send" not in body.lower()
 
-    def test_failed_probe_reopens(self, ctx):
-        trip_breaker(ctx)
-        state.update_meta(NODE, "phil", last_failure_at="2020-01-01T00:00:00Z")
-        assert run_one(ctx, "acme:gerry", "acme:phil", "probe", run_fn=fail_run) == 1
-        handle_message(ctx, "acme:gerry", "acme:phil", "again", drain_after=False)
-        assert drain(ctx, run_fn=ok_run) == 0  # reopened for another cooldown
+    def test_what_a_failed_turn_staged_is_released(self, ctx):
+        def staged_then_fail(rig, prompt, cwd, *, env=None, variant=0):
+            msg_id = new_ulid()
+            (Path(env["TELL_OUTBOX_DIR"]) / f"{msg_id}.json").write_text(
+                json.dumps({"id": msg_id, "to": "gerry", "content": "halfway there", "files": []}),
+                encoding="utf-8",
+            )
+            return 1, "boom", 0.05, False
+
+        assert run_one(ctx, "acme:gerry", "acme:phil", "go", run_fn=staged_then_fail) == 1
+        bodies = [m["body"] for m in state.read_queue(NODE, "gerry")]
+        assert "halfway there" in bodies
+        assert "Phil failed (exit 1); it may have partly acted." in bodies
+
+    def test_failures_never_hold_the_next_message(self, ctx):
+        for i in range(6):
+            run_one(ctx, "acme:gerry", "acme:phil", f"attempt {i}", run_fn=fail_run)
+            assert state.queue_depth(NODE, "phil") == 0
+        to_phil = [r for r in state.list_dead_letters(NODE) if r["to"] == "acme:phil"]
+        assert len(to_phil) == 6
+        handle_message(ctx, "acme:gerry", "acme:phil", "next", drain_after=False)
+        assert drain(ctx, run_fn=ok_run) >= 1
+        assert state.queue_depth(NODE, "phil") == 0
+        to_phil = [r for r in state.list_dead_letters(NODE) if r["to"] == "acme:phil"]
+        assert len(to_phil) == 6
+        assert "consecutive_failures" not in state.read_meta(NODE, "phil")
+
+
+def write_definition(tmp_path, **fields):
+    path = tmp_path / "r4t-definition.json"
+    path.write_text(json.dumps(fields), encoding="utf-8")
+    return path
+
+
+class TestWakeBound:
+    def test_the_shipped_definition_bounds_the_wake(self, ctx):
+        shipped = Path(dispatch.__file__).resolve().parent.parent / "a8s" / "definitions" / "r4t.json"
+        bounded = replace(ctx, definition_path=shipped)
+        limit = json.loads(shipped.read_text(encoding="utf-8"))["max_wake_seconds"]
+        assert bounded.max_wake_seconds == limit
+
+    def test_no_definition_means_no_bound(self, ctx):
+        assert ctx.max_wake_seconds is None
+        assert ctx.wake_seconds_left() is None
+
+    def test_a_turn_starts_while_the_wake_has_room(self, ctx, tmp_path):
+        bounded = replace(ctx, definition_path=write_definition(tmp_path, max_wake_seconds=2700))
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        assert drain_until_quiet(bounded, run_fn=ok_run) == 1
+
+    def test_no_turn_starts_that_could_outlast_the_wake(self, ctx, tmp_path):
+        bounded = replace(
+            ctx,
+            definition_path=write_definition(tmp_path, max_wake_seconds=2700),
+            wake_started=time.monotonic() - 2700 + dispatch.WAKE_MARGIN_SECONDS + 10,
+        )
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        seen = []
+
+        def recording(rig, prompt, cwd, *, env=None, variant=0):
+            seen.append(prompt)
+            return 0, "ok", 0.05, False
+
+        assert drain_until_quiet(bounded, run_fn=recording) == 0
+        assert drain_until_quiet(bounded, run_fn=recording) == 0
+        assert seen == []
+        assert state.queue_depth(NODE, "phil") == 1
+        assert dead_reasons() == []
+        assert read_log().count("OUT-OF-TIME phil") == 1
+
+
+def long_rig_ctx(ctx, tmp_path, rig_config, *, timeout=600, max_wake=100, **changes):
+    config = json.loads(rig_config.read_text(encoding="utf-8"))
+    config["junior-dev"]["timeout_seconds"] = timeout
+    path = tmp_path / "long-rigs.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return replace(
+        ctx,
+        config_path=path,
+        definition_path=write_definition(tmp_path, max_wake_seconds=max_wake),
+        **changes,
+    )
+
+
+class TestRigLongerThanAnyWake:
+    def test_the_rest_of_the_roster_still_runs(self, ctx, tmp_path, rig_config):
+        bounded = long_rig_ctx(ctx, tmp_path, rig_config)
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        handle_message(bounded, "acme:phil", "acme:gerry", "go", drain_after=False)
+        assert drain_until_quiet(bounded, run_fn=ok_run) == 1
+        assert state.queue_depth(NODE, "gerry") == 0
+        assert state.queue_depth(NODE, "phil") == 1
+        assert bounded.wake_spent is False
+        assert dead_reasons() == []
+
+    def test_it_never_ends_the_wake_wake_after_wake(self, ctx, tmp_path, rig_config):
+        handle_message(ctx, "acme:gerry", "acme:phil", "go", drain_after=False)
+        for _ in range(3):
+            wake = long_rig_ctx(ctx, tmp_path, rig_config)
+            handle_message(wake, "acme:phil", "acme:gerry", "next", drain_after=False)
+            assert drain_until_quiet(wake, run_fn=ok_run) == 1
+            assert wake.wake_spent is False
+        assert state.queue_depth(NODE, "phil") == 1
+        assert "OUT-OF-TIME" not in read_log()
+
+    def test_it_says_so_once_per_wake_with_both_numbers(self, ctx, tmp_path, rig_config):
+        bounded = long_rig_ctx(ctx, tmp_path, rig_config)
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        drain_until_quiet(bounded, run_fn=ok_run)
+        drain_until_quiet(bounded, run_fn=ok_run)
+        lines = [l for l in read_log().splitlines() if "NEVER-FITS phil" in l]
+        assert len(lines) == 1
+        assert "timeout_seconds 600" in lines[0] and "max_wake_seconds 100" in lines[0]
+
+    def test_a_rig_exactly_at_the_limit_runs_in_a_fresh_wake(
+        self, ctx, tmp_path, rig_config
+    ):
+        bounded = long_rig_ctx(
+            ctx, tmp_path, rig_config,
+            timeout=100 - dispatch.WAKE_MARGIN_SECONDS, max_wake=100,
+            wake_started=time.monotonic() - 0.2,
+        )
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        assert drain_until_quiet(bounded, run_fn=ok_run) == 1
+        assert state.queue_depth(NODE, "phil") == 0
+        assert "OUT-OF-TIME" not in read_log()
+        assert "NEVER-FITS" not in read_log()
+
+    def test_a_rig_that_fits_a_fresh_wake_still_ends_a_late_one(
+        self, ctx, tmp_path, rig_config
+    ):
+        late = long_rig_ctx(
+            ctx, tmp_path, rig_config, timeout=60, max_wake=100,
+            wake_started=time.monotonic() - 60,
+        )
+        handle_message(late, "acme:gerry", "acme:phil", "go", drain_after=False)
+        assert drain_until_quiet(late, run_fn=ok_run) == 0
+        assert late.wake_spent is True
+        assert read_log().count("OUT-OF-TIME phil") == 1
+        assert "NEVER-FITS" not in read_log()
+
+    def test_a_turn_whose_prompt_outran_the_margin_goes_back_unrun(
+        self, ctx, tmp_path, rig_config, monkeypatch
+    ):
+        clock = [1000.0]
+        monkeypatch.setattr(dispatch.time, "monotonic", lambda: clock[0])
+        build = dispatch.prompt_sections
+
+        def slow_build(*args, **kwargs):
+            clock[0] += 40
+            return build(*args, **kwargs)
+
+        monkeypatch.setattr(dispatch, "prompt_sections", slow_build)
+        launched = []
+
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            launched.append(rig.timeout_seconds)
+            return ok_run(rig, prompt, cwd, env=env, variant=variant)
+
+        bounded = long_rig_ctx(ctx, tmp_path, rig_config, timeout=70, max_wake=100, wake_started=clock[0])
+        handle_message(bounded, "acme:gerry", "acme:phil", "go", drain_after=False)
+        full = member_budget(bounded, "phil")
+        assert drain_until_quiet(bounded, run_fn=run) == 0
+        assert launched == []
+        assert state.queue_depth(NODE, "phil") == 1
+        assert state.list_inflight(NODE, "phil") == []
+        assert dead_reasons() == []
+        assert read_log().count("OUT-OF-TIME phil") == 1
+        assert member_budget(bounded, "phil") == pytest.approx(full)
+
+        monkeypatch.setattr(dispatch, "prompt_sections", build)
+        fresh = long_rig_ctx(ctx, tmp_path, rig_config, timeout=70, max_wake=100, wake_started=clock[0])
+        assert drain_until_quiet(fresh, run_fn=run) == 1
+        assert launched == [70]
+        assert state.queue_depth(NODE, "phil") == 0
+
+    def test_status_shows_a_bad_verdict_naming_member_and_numbers(
+        self, ctx, tmp_path, rig_config, repo, capsys
+    ):
+        bounded = long_rig_ctx(ctx, tmp_path, rig_config)
+        rc = r4t_main([
+            "status", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(bounded.config_path), "--no-notify",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        (line,) = [l for l in out.splitlines() if "never runs" in l]
+        assert line.strip().startswith("✗ Phil never runs")
+        assert "timeout_seconds 600" in line and "max_wake_seconds 100" in line
+
+    def test_no_bad_verdict_once_the_rig_fits(self, ctx, tmp_path, rig_config, repo, capsys):
+        long_rig_ctx(ctx, tmp_path, rig_config, timeout=60)
+        r4t_main([
+            "status", "--root", str(repo), "--node", NODE,
+            "--rig-config", str(rig_config), "--no-notify",
+        ])
+        assert "never runs" not in capsys.readouterr().out
 
 
 CONTINUE_ROSTER = textwrap.dedent(
@@ -965,6 +1152,34 @@ def continue_cli(ctx, name="ana"):
 
 
 class TestContinueTurns:
+    def test_a_cold_retry_the_wake_cannot_cover_goes_back_unrun(
+        self, continue_ctx, tmp_path, monkeypatch
+    ):
+        ctx, _ = continue_ctx
+        state.record_conversation(NODE, "ana", continue_cli(ctx))
+        clock = [1000.0]
+        monkeypatch.setattr(dispatch.time, "monotonic", lambda: clock[0])
+        config = json.loads(ctx.config_path.read_text())
+        config["resuming"]["timeout_seconds"] = 70
+        ctx.config_path.write_text(json.dumps(config))
+        bounded = replace(
+            ctx, definition_path=write_definition(tmp_path, max_wake_seconds=100),
+            wake_started=clock[0],
+        )
+        launches = []
+
+        def run(rig, prompt, cwd, *, env=None, variant=0):
+            launches.append(bool(env.get("R4T_CONTINUE")))
+            clock[0] += 69
+            return 1, "No previous chats found.", 69, False
+
+        assert run_one(bounded, "boss", "acme:ana", "task", run_fn=run) == 0
+        assert launches == [True]
+        assert state.queue_depth(NODE, "ana") == 1
+        assert dead_reasons() == []
+        assert "CONTINUE-COLD" not in read_log()
+        assert read_log().count("OUT-OF-TIME ana") == 1
+
     def test_first_turn_refounds_cold_with_the_preamble(self, continue_ctx):
         # No recorded conversation: the turn founds one — no continue argv,
         # read-your-state preamble on top of the prompt.
@@ -1001,7 +1216,7 @@ class TestContinueTurns:
         assert "--continue" not in second  # founded the conversation instead
         assert "CONTINUE-COLD ana" in read_log()
         assert state.queue_depth(NODE, "ana") == 0  # not a failure
-        assert state.read_meta(NODE, "ana")["consecutive_failures"] == 0
+        assert dead_reasons() == []
         assert state.read_conversation(NODE, "ana")["retired"] is False
 
     def test_member_without_continue_never_gets_the_flag(self, continue_ctx):
@@ -1022,7 +1237,22 @@ class TestContinueTurns:
 
         assert run_one(ctx, "boss", "acme:ana", "task", run_fn=broken) == 1
         assert seen == ["1"]  # one attempt only
-        assert state.queue_depth(NODE, "ana") == 1  # normal requeue path
+        assert state.queue_depth(NODE, "ana") == 0
+        assert dead_reasons() == ["turn-failed"]
+
+    def test_a_timeout_is_never_run_again_cold(self, continue_ctx):
+        ctx, _calls = continue_ctx
+        state.record_conversation(NODE, "ana", continue_cli(ctx))
+        seen = []
+
+        def refused_then_hung(rig, prompt, cwd, *, env=None, variant=0):
+            seen.append(env.get("R4T_CONTINUE"))
+            return -9, "No previous chats found.", 30.0, True
+
+        assert run_one(ctx, "boss", "acme:ana", "task", run_fn=refused_then_hung) == 1
+        assert seen == ["1"]
+        assert "CONTINUE-COLD" not in read_log()
+        assert dead_reasons() == ["turn-timed-out"]
 
 
 def write_rig_config(tmp_path, rigs):
@@ -1066,7 +1296,7 @@ class TestContinueGates:
             return 3, "boom", 0.1, False
 
         assert run_one(ctx, "boss", "acme:ana", "two", run_fn=crashed) == 1
-        state.enqueue(  # clear the requeued message so turn 3 is a clean read
+        state.enqueue(
             NODE, "ana",
             {"from": "boss", "to": f"{NODE}:ana", "thread": new_ulid(), "hop": 0,
              "class": "human", "body": "three"},
@@ -2741,20 +2971,24 @@ class TestRunHarness:
         config["junior-dev"]["invoke"] = ["/no/such/binary-r4t", "{prompt}"]
         rig_config.write_text(json.dumps(config), encoding="utf-8")
 
-    def test_spawn_failure_parks_the_member_and_tells_nobody(
+    def test_spawn_failure_parks_the_member_after_one_notice(
         self, ctx, repo, tells, fake_harness, rig_config
     ):
-        # #138: a harness that is not installed fails identically forever, so
-        # the sender heard about it forever. It parks instead — one line, then
-        # silence, with the queue held.
+        # A harness that is not installed fails identically forever. The
+        # failed batch is a dead letter with one notice; then the member parks
+        # and later mail holds in silence.
         self._break_junior_rig(rig_config)
         sent, _ = tells
         handle_message(ctx, "acme:gerry", f"{NODE}:phil", "hi", drain_after=False)
         assert drain(ctx) == 1  # phil's one turn fails to spawn (127)
         assert sent == []  # nothing left via a8s tell
-        assert state.read_queue(NODE, "gerry") == []  # and nothing in-band
+        (notice,) = error_notices("gerry")
+        assert notice["body"] == "Phil failed (exit 127); it may have partly acted."
+        assert dead_reasons() == ["turn-failed"]
         assert state.read_parked(NODE, "phil")["probe"] == "/no/such/binary-r4t"
-        assert state.queue_depth(NODE, "phil") == 1  # the mail is held, not lost
+        handle_message(ctx, "acme:gerry", f"{NODE}:phil", "again", drain_after=False)
+        assert state.queue_depth(NODE, "phil") == 1
+        assert len(error_notices("gerry")) == 1
 
 
 class TestMemberScoping:

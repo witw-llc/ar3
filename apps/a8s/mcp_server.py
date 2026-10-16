@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -39,14 +40,22 @@ QUALIFIED_TOOL_NAME = f"{SERVER_NAME}_{TOOL_NAME}"
 
 A8S_PY = Path(__file__).resolve().parent / "a8s.py"
 
-TELL_TIMEOUT_SECONDS = 60
+# Under the 60 s default request timeout of the MCP TypeScript SDK, so a client
+# built on it reads the answer below instead of its own timeout error.
+TELL_TIMEOUT_SECONDS = 30
+TELL_TIMED_OUT = (
+    f"tell did not finish within {TELL_TIMEOUT_SECONDS} s, so the message may "
+    "have gone out. Do not send it again. If no reply comes, send a new message."
+)
 
 TOOL = {
     "name": TOOL_NAME,
     "description": (
         "Send a message, optionally with files attached, to a roster member or "
         "the human on the a8s network. The body is delivered byte-exact; no "
-        "shell is involved."
+        "shell is involved. Best effort: the message is sent once, with no "
+        "delivery guarantee. Do not resend after a timeout; if no reply comes, "
+        "send a new message."
     ),
     "inputSchema": {
         "type": "object",
@@ -101,18 +110,25 @@ def send(recipient: str, body: str, attachments: list[str] | None = None) -> tup
     argv += [f"--attach={path}" for path in (attachments or [])]
     argv += ["--verbatim", "--", recipient, "-"]
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            input=body,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=TELL_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as e:
+    except OSError as e:
         return False, f"tell failed to run: {e}"
+    try:
+        stdout, stderr = proc.communicate(input=body, timeout=TELL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        # Not an error, and tell is left to finish: a kill could stop it before
+        # the envelope is written, and a client that reads an error sends twice.
+        threading.Thread(target=proc.communicate, daemon=True).start()
+        return True, TELL_TIMED_OUT
     if proc.returncode != 0:
-        return False, (proc.stderr or proc.stdout or "tell failed").strip()
-    return True, (proc.stdout or "sent").strip()
+        return False, (stderr or stdout or "tell failed").strip()
+    return True, (stdout or "sent").strip()
 
 
 def _text_result(text: str, *, is_error: bool = False) -> dict:

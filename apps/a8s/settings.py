@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ar3.fsio import atomic_write_text
-from core import BACKOFF_SCHEDULE, MAX_WAKE_ATTEMPTS, WAKE_RETRY_SCHEDULE, _a8s_dir
+from core import _a8s_dir
 
-Group = Literal["machine", "definition", "registry", "network", "env", "constant"]
+Group = Literal["machine", "definition", "registry", "network", "env"]
 
 
 @dataclass(frozen=True)
@@ -168,25 +168,6 @@ KNOBS: tuple[Knob, ...] = (
     # --- runtime environment ---
     Knob("A8S_HOME", None, "env", False, note="Relocate entire a8s state tree (default: ~/.config/a8s, or legacy ~/.a8s if present)"),
     Knob("TELL_OUTBOX_DIR", None, "env", False, note="Tell write path; a8s sets on wake from definition.outbox_dir"),
-    # --- code constants (not in settings.json) ---
-    Knob(
-        "remote.backoff_schedule",
-        list(BACKOFF_SCHEDULE),
-        "constant",
-        False,
-        note="Remote publish retry delays in seconds (fixed schedule)",
-    ),
-    Knob(
-        "wake.retry_schedule",
-        list(WAKE_RETRY_SCHEDULE),
-        "constant",
-        False,
-        note=(
-            "Delays in seconds before redelivering after a failed wake; "
-            f"{MAX_WAKE_ATTEMPTS} attempts then the envelope stays in trash as a dead letter "
-            "until `a8s retry <name>` returns it"
-        ),
-    ),
 )
 
 DEFAULTS: dict[str, Any] = {
@@ -518,14 +499,13 @@ def list_settings() -> list[tuple[str, Any, Any, Any, str]]:
     return rows
 
 
-_GROUP_ORDER: tuple[Group, ...] = ("machine", "definition", "registry", "network", "env", "constant")
+_GROUP_ORDER: tuple[Group, ...] = ("machine", "definition", "registry", "network", "env")
 _GROUP_LABELS = {
     "machine": "Machine-wide (a8s config set)",
     "definition": "Per-agent definition (a8s define)",
     "registry": "Registry (~/.config/a8s/a8s.json)",
     "network": "Network (~/.config/a8s/network.json)",
     "env": "Runtime environment",
-    "constant": "Code constants (not in settings.json)",
 }
 
 

@@ -82,6 +82,14 @@ DREAM_BUDGET_SECONDS = 1200
 # Below this there is no point starting another capture — it would be killed
 # mid-model for nothing.
 DREAM_MIN_CAPTURE_SECONDS = 60
+# A capture whose distill dies at the full DISTILL_TIMEOUT_SECONDS this many
+# passes in a row is set aside: the watermark moves past it and its name goes
+# to the store's `.dream-failed`. Retried forever, one always-timing-out
+# capture spent the whole sweep budget every pass and starved every member
+# after it. A call the sweep's leftover budget cut short is no evidence
+# against the capture, and a non-zero exit is k7e reporting a store or model
+# fault, not this capture's, so neither counts.
+DREAM_ATTEMPTS = 3
 # The same floor for the embedding pass, which is cheaper per unit of work and
 # resumes cleanly: whatever it does not drain stays queued.
 DREAM_MIN_EMBED_SECONDS = 15
@@ -120,6 +128,7 @@ KNOWLEDGE_STALE_DAYS = 30
 KNOWLEDGE_STATUS_LINE = (
     "Status: possibly superseded -- do not treat as current unless corroborated."
 )
+KNOWLEDGE_REPLACES_LINE = "Replaces an earlier entry on this subject."
 UNTITLED = "Untitled note"
 
 
@@ -436,6 +445,10 @@ def retrieve(home: Path, query: str, budget: int, *, framing=None,
             f"### {title} ({_age_label(age_days)})" if age_days is not None
             else f"### {title}"
         )
+        # The member reads no ids; one line says this entry is the newer of
+        # two claims, so a stale copy elsewhere loses the disagreement.
+        if hit.get("replaces"):
+            header += f"\n\n{KNOWLEDGE_REPLACES_LINE}"
         preamble = (
             f"{header}\n\n{KNOWLEDGE_STATUS_LINE}"
             if age_days is not None and age_days > KNOWLEDGE_STALE_DAYS
@@ -569,8 +582,84 @@ def dream_sweep(ctx, roster, config: RigConfig) -> list[str]:
         home = store_home(ctx.node, m.name)
         if _distill_fresh(ctx, m, home, config, deadline=deadline):
             dreamed.append(m.name)
+            _compile_due(ctx, m, home, config, deadline=deadline)
         _embed_backlog(ctx, m.name, home, deadline=deadline)
     return dreamed
+
+
+def _bridge_env(ctx, m, distill_rig) -> dict[str, str]:
+    """The model command k7e runs for this member's distill and compile.
+
+    The bridge can enter a `run_as` cage but not a container. Rather than hand
+    k7e a command that would run outside the boundary, leave the variables
+    unset there and let the store's own commands answer — an operator who
+    configured one has said how to cross. If they have not, k7e exits non-zero
+    saying it needs an LLM command, and that is the DREAM-SKIP the day log
+    should carry."""
+    if ctx.isolation.container:
+        return {}
+    # `{workdir}` is the harness's working directory, so it has to be a
+    # path the harness can reach. The store is not one: under `run_as` the
+    # documented posture is a 0700 router-owned store dir, and handing an
+    # opencode-class rig `--dir <store>` sends the caged user somewhere the
+    # cage deliberately excludes. The member's own workdir is what a turn
+    # gives it; store I/O stays router-side in k7e, which never enters the
+    # cage — only the model call does.
+    from dispatch import resolve_workdir
+
+    cmd = distill_rig.distill_command(
+        resolve_workdir(ctx, m), run_as=ctx.isolation.run_as
+    )
+    return {"K7E_DISTILL_COMMAND": cmd, "K7E_COMPILE_COMMAND": cmd} if cmd else {}
+
+
+def _compile_due(
+    ctx, m, home: Path, config: RigConfig, *, deadline: float | None = None
+) -> None:
+    """The scheduled consolidation pass, run after a dream that wrote: `k7e
+    compile --due` folds the tag with the most loose entries into one page
+    once a tag is ready, and k7e itself keeps it to one pass a day per store.
+    A pass that distilled nothing changed nothing to fold, and spawns nothing.
+    Quiet unless it compiled or failed."""
+    timeout = DISTILL_TIMEOUT_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout < DREAM_MIN_CAPTURE_SECONDS:
+            return
+    distill_rig, rig_err = resolve_distill_rig(m, config)
+    if distill_rig is None:
+        return
+    try:
+        res = _run_k7e(home, "compile", "--due", timeout=timeout,
+                       extra_env=_bridge_env(ctx, m, distill_rig))
+    except Exception as e:
+        state.append_log(ctx.node, f"r4t: DREAM-SKIP {m.name.lower()} compile died: {e}")
+        return
+    said = (res.stdout or "").strip()
+    if res.returncode != 0:
+        reason = (res.stderr or said).strip().splitlines()
+        state.append_log(
+            ctx.node,
+            f"r4t: DREAM-SKIP {m.name.lower()} compile exit {res.returncode} "
+            f"({reason[0] if reason else 'no output'})",
+        )
+    elif said.startswith("Compiled"):
+        state.append_log(ctx.node, f"r4t: DREAM-COMPILE {m.name.lower()} {said}")
+
+
+def _strike(home: Path, capture: str) -> int:
+    """Count one more failed distill of `capture` and return the count. Only
+    the head of the queue can fail, so one record is enough: a different name
+    starts over at one."""
+    path = home / ".dream-attempts.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    attempts = record.get("attempts", 0) + 1 if record.get("capture") == capture else 1
+    home.mkdir(parents=True, exist_ok=True)
+    state._atomic_write_text(path, json.dumps({"capture": capture, "attempts": attempts}))
+    return attempts
 
 
 def _distill_fresh(
@@ -593,28 +682,7 @@ def _distill_fresh(
             f"{len(fresh)} capture(s) wait",
         )
         return False
-    extra_env = {}
-    # The bridge can enter a `run_as` cage but not a container. Rather than
-    # hand k7e a command that would run outside the boundary, leave the
-    # variable unset there and let the store's own `distill_command` answer —
-    # an operator who configured one has said how to cross. If they have not,
-    # k7e exits non-zero saying it needs an LLM command, and that is the
-    # DREAM-SKIP the day log should carry.
-    if not ctx.isolation.container:
-        # `{workdir}` is the harness's working directory, so it has to be a
-        # path the harness can reach. The store is not one: under `run_as` the
-        # documented posture is a 0700 router-owned store dir, and handing an
-        # opencode-class rig `--dir <store>` sends the caged user somewhere the
-        # cage deliberately excludes. The member's own workdir is what a turn
-        # gives it; store I/O stays router-side in k7e, which never enters the
-        # cage — only the model call does.
-        from dispatch import resolve_workdir
-
-        cmd = distill_rig.distill_command(
-            resolve_workdir(ctx, m), run_as=ctx.isolation.run_as
-        )
-        if cmd:
-            extra_env["K7E_DISTILL_COMMAND"] = cmd
+    extra_env = _bridge_env(ctx, m, distill_rig)
     # One capture per call, with the watermark advancing after each. The batch
     # is counted in captures but the cost is in bytes: a 58KB capture measured
     # ~102s against a small VM's model, and five of them together ran past the
@@ -650,6 +718,18 @@ def _distill_fresh(
                 f"{capture.name}: {e}; {len(fresh) - len(done)} capture(s) wait "
                 "for the next idle pass",
             )
+            if timeout >= DISTILL_TIMEOUT_SECONDS and _strike(home, capture.name) >= DREAM_ATTEMPTS:
+                home.mkdir(parents=True, exist_ok=True)
+                with (home / ".dream-failed").open("a", encoding="utf-8") as f:
+                    f.write(capture.name + "\n")
+                mark.write_text(capture.name + "\n", encoding="utf-8")
+                (home / ".dream-attempts.json").unlink(missing_ok=True)
+                state.append_log(
+                    ctx.node,
+                    f"r4t: DREAM-QUARANTINE {m.name.lower()} {capture.name} "
+                    f"after {DREAM_ATTEMPTS} failed attempts; set aside in "
+                    f"{home / '.dream-failed'}",
+                )
             break
         if res.returncode != 0:
             reason = (res.stderr or res.stdout).strip().splitlines()
@@ -662,6 +742,7 @@ def _distill_fresh(
             break
         home.mkdir(parents=True, exist_ok=True)
         mark.write_text(capture.name + "\n", encoding="utf-8")
+        (home / ".dream-attempts.json").unlink(missing_ok=True)
         done.append(capture.name)
         for action, n in _distill_counts(res.stdout or "").items():
             counts[action] = counts.get(action, 0) + n

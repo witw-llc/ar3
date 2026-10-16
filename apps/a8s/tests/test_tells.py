@@ -996,7 +996,8 @@ def test_every_flag_the_help_lists_is_accepted_by_the_parser(capsys):
     tells_main(["--help"])
     help_text = capsys.readouterr().err
     flags = set(re.findall(r"^\s+(--[a-z][a-z-]*)", help_text, flags=re.M))
-    assert {"--from", "--json", "--since"} <= flags
+    assert {"--from", "--json"} <= flags
+    assert not {"--sent", "--since"} & flags
     for flag in flags:
         try:
             parse_tells_argv([flag, "2h"])
@@ -1055,18 +1056,13 @@ def test_tells_json_backlog_under_follow_is_json_only(tmp_path, monkeypatch, cap
     assert [json.loads(line)["content"] for line in lines] == ["waiting"]
 
 
-def test_tells_since_without_sent_names_the_cursor_command(capsys):
+def test_tells_since_is_refused_and_the_usage_names_the_cursor_command(capsys):
     assert tells_main(["--since", "2h"]) == 2
-    assert "a8s convo" in capsys.readouterr().err
-
-
-def test_tells_since_timestamp_is_a_usage_error_naming_a_duration(capsys):
-    assert tells_main(["--sent", "--since", "2026-09-30T10:00:00Z"]) == 2
     err = capsys.readouterr().err
-    assert "expected a duration" in err
-    assert "float" not in err
+    assert "unexpected argument: '--since'" in err
+    assert "a8s convo" in err
 
 
-def test_tells_sent_rejects_the_inbound_flags(capsys):
-    assert tells_main(["--sent", "--json"]) == 2
-    assert "apply to received messages" in capsys.readouterr().err
+def test_tells_has_no_sent_view(capsys):
+    assert tells_main(["--sent"]) == 2
+    assert "unexpected argument: '--sent'" in capsys.readouterr().err

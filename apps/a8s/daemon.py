@@ -5,7 +5,7 @@ This module owns the runtime engine:
 - `run_with_prefix` spawns the wake subprocess in its own session group so
   SIGKILL can target the whole tree.
 - `wake_once` processes one inbox message (with read-time wipe for CLEAR).
-- `_settle_wake` acks (exit 0) or requeues-with-backoff every other outcome.
+- `_settle_wake` acks (exit 0) or dead-letters every other outcome.
 - `attached_loop` is the daemon body — handles 1+ agents in one process.
 
 Module-level mutable state used by signal handlers:
@@ -49,7 +49,7 @@ import sys
 import threading
 import time as _time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core
@@ -58,10 +58,8 @@ from ar3.fsio import atomic_write_text
 from ar3.proc import terminate_group
 from settings import DEFAULTS, get_float, get_setting
 from core import (
-    MAX_WAKE_ATTEMPTS,
     Participant,
     TELL_OUTBOX_DIR_ENV,
-    WAKE_RETRY_SCHEDULE,
     _pid_alive,
     _preview,
     agent_dir,
@@ -75,18 +73,14 @@ from core import (
     process_start_token,
     clear_inbox_waiting_since,
     clear_wake_pid,
-    clear_wake_retry,
     mark_dead_letter,
     read_inbox_waiting_since,
     read_last_active,
-    read_wake_retry,
     touch_inbox_waiting_since,
     touch_last_active,
     trash_dir,
     unique_path,
-    wake_retry_wait,
     write_wake_pid,
-    write_wake_retry,
 )
 from definitions import (
     BatchEntry,
@@ -123,7 +117,6 @@ from network import (
     load_services,
     make_publish_remotes,
     start_remotes,
-    sweep_stale_claims,
     stop_remotes,
 )
 from registry import RegistryUnreadable, participants_from_registry, unresolved_mailboxes
@@ -419,7 +412,7 @@ def _start_wake_subprocess(
     """Start a wake subprocess. Returns True iff the process was spawned.
 
     `unit` is the envelopes the wake consumed. They go into the agent's
-    `wake-pid` record so a handler killed outright can have them put back.
+    `wake-pid` record so a handler killed outright can mark them dead letters.
 
     `on_complete` fires from `_clear_wake_state` with the subprocess exit code
     once the wake finishes. It does NOT fire when the spawn itself fails —
@@ -636,74 +629,34 @@ def _settle_wake(
     *,
     reason: str | None = None,
 ) -> None:
-    """Ack or requeue the envelopes a wake consumed.
+    """Ack or dead-letter the envelopes a wake consumed.
 
-    Exit 0 is the only ack: the envelopes stay in trash and the agent's retry
-    record clears. Any other outcome — nonzero exit, timeout kill, failed spawn,
-    unexpanded vars — moves them back into the inbox and arms a per-agent
-    backoff so the next attempt waits instead of hot-looping. Once
-    MAX_WAKE_ATTEMPTS attempts have failed they stay in trash as dead letters,
-    logged, recorded in the transaction log and marked as dead letters, so a poison envelope can't block the inbox
-    forever and `a8s retry` can return it."""
+    Exit 0 is the only ack. Any other outcome — nonzero exit, a kill by the
+    timeout, the watchdog or `a8s stop --force`, a failed spawn, an unexpanded
+    var — is a dead letter at once: the envelopes stay in trash and nothing
+    tries them again. The sender is the one who sends again."""
     return_detail = f"exit {rc}" if rc is not None else (reason or "spawn failed")
     for f in envelopes:
         txlog.log("WAKE_RETURN", msg_id=f.stem, recipient=p.name, detail=return_detail)
     if rc == 0:
-        clear_wake_retry(p.name)
         return
     if reason is None:
         reason = "spawn failed" if rc is None else f"exit {rc}"
     if rc == 127:
         _explain_not_found(p)
-    unit = sorted(f.name for f in envelopes)
-    record = read_wake_retry(p.name) or {}
-    attempts = (record.get("attempts", 0) if record.get("unit") == unit else 0) + 1
+    _dead_letter(p.name, [f.name for f in envelopes], f"wake failed ({reason})")
 
-    if attempts >= MAX_WAKE_ATTEMPTS:
-        clear_wake_retry(p.name)
-        for f in envelopes:
-            mark_dead_letter(p.name, f.name)
-        for f in envelopes:
-            out_agent(
-                p.name,
-                f"[{p.name}] dead letter after {attempts} failed wakes "
-                f"({reason}): {f.name} left in trash; `a8s retry {p.name}` "
-                f"returns it to the inbox",
-            )
-            txlog.log(
-                "DROPPED",
-                msg_id=f.stem,
-                recipient=p.name,
-                detail=f"wake failed {attempts}x ({reason}); envelope left in trash",
-            )
+
+def _dead_letter(name: str, filenames: list[str], reason: str) -> None:
+    """Mark each envelope a dead letter where it lies in trash: one agent-log
+    line, one `DROPPED` row each."""
+    if not filenames:
         return
-
-    inbox = inbox_dir(p.name)
-    inbox.mkdir(parents=True, exist_ok=True)
-    requeued = 0
-    for f in envelopes:
-        try:
-            f.rename(inbox / f.name)
-        except OSError as e:
-            out_agent(p.name, f"[{p.name}] requeue failed for {f.name}: {e}")
-            continue
-        requeued += 1
-    if not requeued:
-        return
-    delay = WAKE_RETRY_SCHEDULE[attempts - 1]
-    write_wake_retry(
-        p.name, unit, attempts, datetime.now(timezone.utc) + timedelta(seconds=delay)
-    )
-    out_agent(
-        p.name,
-        f"[{p.name}] wake failed ({reason}) — requeued {requeued}; "
-        f"retry in {delay}s (attempt {attempts + 1}/{MAX_WAKE_ATTEMPTS})",
-    )
-
-
-def _wake_retry_ready(name: str, *, now: datetime | None = None) -> bool:
-    """False while a failed wake's backoff is still running."""
-    return wake_retry_wait(name, now=now) is None
+    for fname in filenames:
+        mark_dead_letter(name, fname)
+        txlog.log("DROPPED", msg_id=Path(fname).stem, recipient=name, detail=f"{reason}; dead letter in trash")
+    ids = ", ".join(Path(f).stem for f in filenames)
+    out_agent(name, f"[{name}] {reason}: {len(filenames)} dead letter(s) left in trash: {ids}")
 
 
 def _wake_completion(
@@ -725,17 +678,17 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
         with msg_path.open("r", encoding="utf-8") as f:
             msg = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        out_agent(p.name, f"[{p.name}] inbox parse error on {msg_path.name}: {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
+        _dead_letter(p.name, [bad.name], f"inbox parse error: {e}")
         return False
 
     try:
         definition = load_definition(p.name)
     except (FileNotFoundError, RuntimeError) as e:
-        out_agent(p.name, f"[{p.name}] {e}")
         bad = unique_path(trash_dir(p.name) / msg_path.name)
         msg_path.rename(bad)
+        _dead_letter(p.name, [bad.name], f"definition did not load: {e}")
         return False
 
     if is_file_proxy(definition):
@@ -1538,9 +1491,6 @@ def _dispatch_agent(p: Participant, definition: dict, *, async_wake: bool) -> bo
         wake_once(p, msg, async_wake=False)
         return False
 
-    if not _wake_retry_ready(p.name):
-        return False
-
     if not _pause_ready_for_wake(p, definition):
         return False
 
@@ -1681,9 +1631,6 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # `a8s storage` cheerfully listed the service it was ignoring. Both sides
     # resolve at use time instead — `load_services` rebuilds only when the
     # config changes.
-    # A receiver killed mid-delivery leaves its claim behind. Startup is when
-    # that is most likely to be true, and the only moment nothing is in flight.
-    sweep_stale_claims()
     started_remotes = start_remotes(
         load_remotes(node=",".join(sorted(names))), participants_from_registry
     )
@@ -1845,8 +1792,6 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                                     break
                                 if not peek_inbox_messages(p, 1):
                                     break
-                                if not _wake_retry_ready(p.name):
-                                    break
                                 if not _pause_ready_for_wake(p, definition):
                                     break
                             if async_wake and woke_index is not None:
@@ -1911,7 +1856,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         stop_remotes(started_remotes)
         # A wake that already exited still owes its settle: a second stop
         # signal kills it while the loop is between iterations, and without
-        # this its mail stays in trash and its wake record is never cleared.
+        # this its mail is never marked a dead letter.
         while _CURRENT_WAKE_PROC is not None:
             _service_in_flight_wake()
             _time.sleep(0.05)

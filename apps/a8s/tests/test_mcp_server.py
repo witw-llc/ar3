@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 
 import pytest
 
@@ -224,6 +225,32 @@ class TestDelivery:
         result = self._call("BOB", "anything")
         assert result["isError"] is True
         assert result["content"][0]["text"]
+
+
+    def test_a_timed_out_send_is_not_an_error_and_tell_finishes_on_its_own(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        slow_tell = tmp_path / "slow_tell.py"
+        landed = tmp_path / "landed.txt"
+        slow_tell.write_text(
+            "import sys, time\n"
+            "body = sys.stdin.read()\n"
+            "time.sleep(1)\n"
+            f"open({str(landed)!r}, 'w').write(body)\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mcp_server, "A8S_PY", slow_tell)
+        monkeypatch.setattr(mcp_server, "TELL_TIMEOUT_SECONDS", 0.2)
+
+        result = self._call("BOB", "anything")
+        assert result["isError"] is False
+        assert result["content"][0]["text"] == mcp_server.TELL_TIMED_OUT
+        assert "Do not send it again" in mcp_server.TELL_TIMED_OUT
+
+        deadline = time.monotonic() + 10
+        while not landed.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert landed.read_text(encoding="utf-8") == "anything"
 
 
 class TestMalformedRequests:

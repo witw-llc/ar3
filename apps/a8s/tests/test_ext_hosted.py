@@ -85,16 +85,13 @@ def test_ls_json_describes_nodes_with_real_directories(rig):
             assert Path(row[key]).is_absolute()
 
 
-def test_ls_json_matches_the_inboxes_the_router_uses(rig):
+def test_ls_json_matches_the_inboxes_the_router_uses(rig, monkeypatch):
     rig.node("alpha")
-    sys.path.insert(0, str(A8S_DIR))
-    os.environ["A8S_HOME"] = str(rig.home)
-    try:
-        import registry
+    monkeypatch.syspath_prepend(str(A8S_DIR))
+    monkeypatch.setenv("A8S_HOME", str(rig.home))
+    import registry
 
-        parts = {p.name: p for p in registry.participants_from_registry()}
-    finally:
-        os.environ.pop("A8S_HOME", None)
+    parts = {p.name: p for p in registry.participants_from_registry()}
     row = rig.json("ls", "--json")[0]
     assert row["inbox"] == str(parts["alpha"].inbox_path())
     assert row["outbox"] == str(parts["alpha"].outbox_path())

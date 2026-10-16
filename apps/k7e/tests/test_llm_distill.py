@@ -32,7 +32,8 @@ def _skip_if_no_ollama():
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Isolated K7E store with a stateless ollama stdin→stdout llm_command."""
+    """Isolated K7E store with a stateless ollama stdin→stdout llm_command,
+    on the suite's bottom-line model; nothing smaller is tested."""
     monkeypatch.setenv("K7E_HOME", str(tmp_path))
     monkeypatch.setenv("OLLAMA_URL", OLLAMA_URL)
 
@@ -42,7 +43,7 @@ def store(tmp_path, monkeypatch):
     wrapper = write_path_executable(tmp_path, "ollama-stdin", (
         "import json, os, sys, urllib.request\n"
         'url = os.environ.get("OLLAMA_URL", "http://localhost:11434")\n'
-        'model = os.environ.get("K7E_TEST_LLM_MODEL", "qwen3:0.6b")\n'
+        'model = os.environ.get("K7E_TEST_LLM_MODEL", "qwen3.6:latest")\n'
         "prompt = sys.stdin.read()\n"
         'data = json.dumps({"model": model, "prompt": prompt, "stream": False, "think": False}).encode()\n'
         'req = urllib.request.Request(f"{url}/api/generate", data=data, headers={"Content-Type": "application/json"})\n'
@@ -60,10 +61,10 @@ def store(tmp_path, monkeypatch):
 class TestLLMDistill:
     def test_extracts_knowledge_from_plain_text(self, store):
         text = (
-            "Kubernetes uses etcd as its backing store for all cluster data. "
-            "etcd is a consistent, distributed key-value store. "
-            "If etcd goes down, the entire control plane becomes read-only — "
-            "existing workloads keep running but no new scheduling occurs."
+            "Our staging cluster's etcd lives on the storage node, not the control "
+            "node. When that node rebooted on Tuesday, the cluster went read-only: "
+            "running workloads kept going but nothing new scheduled until etcd "
+            "came back. Restarts of the storage node now wait for a weekend window."
         )
         path = store / "input.txt"
         path.write_text(text)
@@ -73,10 +74,10 @@ class TestLLMDistill:
 
     def test_extracts_from_conversation(self, store):
         text = (
-            "I discovered that Python's asyncio.run() creates a new event loop "
-            "each time. If you call it from within an already-running loop, "
-            "you get RuntimeError. The fix is to use asyncio.ensure_future() or "
-            "loop.run_until_complete() when you're already inside an async context."
+            "I discovered that the ingest worker crashed with RuntimeError because "
+            "its retry hook called asyncio.run() inside the already-running loop. "
+            "We fixed it by scheduling the retry with asyncio.ensure_future(), and "
+            "the worker's retry hook must never call asyncio.run() again."
         )
         path = store / "convo.txt"
         path.write_text(text)
@@ -86,9 +87,9 @@ class TestLLMDistill:
 
     def test_dedup_on_second_run(self, store):
         text = (
-            "Git's reflog stores every position of HEAD for the last 90 days. "
-            "Even after a hard reset, you can recover commits via "
-            "git reflog and git cherry-pick."
+            "We found that the widget service's deploy key cannot push workflow "
+            "files, so since September its deploys push with the release-bot "
+            "token instead, and the old key is read-only."
         )
         path = store / "git.txt"
         path.write_text(text)

@@ -46,6 +46,9 @@ k7e get K7E-000-00001                         # full entry (counts as a "use")
 k7e recall "SSH bastion access"               # RAG answer over the store
 echo "we were discussing tunnels" | k7e recall
 k7e list --tag ssh --ids
+k7e search "deploy branch" --as-of 2026-09-01   # what the store held then
+k7e search "deploy branch" --valid-at 2026-09-01 # what was true then
+k7e graph K7E-000-00009                       # clocks, and what it replaced
 k7e stats
 
 # Write
@@ -56,7 +59,7 @@ k7e supersede K7E-000-00001 K7E-000-00009      # retire old, keep audit trail
 k7e asset screenshot.png                       # store binary (deduped)
 k7e distill notes.md [--dry-run]               # extract knowledge from raw files
 k7e consolidate [--dry-run]                    # merge duplicates
-k7e compile networking [--dry-run]             # synthesize a tag into a page
+k7e compile networking [--dry-run]             # fold a tag into one page
 
 # Maintain / inspect
 k7e embed-pending [--json]                      # give queued entries their vectors

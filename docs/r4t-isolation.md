@@ -32,8 +32,8 @@ reported by `r4t roster check`; the org degrades to no isolation):
 r4t **verifies** the prerequisites before every turn and fails closed with an
 action-first error; it never creates users, sudoers grants, workplace
 permissions, or images. Provisioning is the operator's, once, below. A failed
-check is an ordinary failed turn: the batch stays queued, the breaker counts
-it, and `r4t status` shows the member unhealthy with the real error.
+check is an ordinary failed turn: its batch is a dead letter, each sender hears
+once, and `r4t logs <member>` shows the real error.
 
 Set the boundary by editing the org's `r4t-org.json` (the same file that carries
 `comms` and `egress`):

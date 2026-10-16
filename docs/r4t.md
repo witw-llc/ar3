@@ -18,8 +18,10 @@ a8s **through**: name your members in one `r4t.md`, say what each one runs,
 and every turn is dispatched, budgeted,
 throttled, queued, and audited — no agent polices itself, and nothing ever
 waits on a human. Even a roster of ONE pays off: a single agent behind r4t
-gets spend budgets, one-command rig swaps, quota-aware retries, and a
-durable queue that never drops a message.
+gets spend budgets, one-command rig swaps, and a durable queue that holds
+its mail until a turn takes it. A turn runs once: when it fails or runs out of
+time, its batch is a dead letter and each sender hears that the member may have
+partly acted.
 
 The name is lineage: r4t reads as *runner for tells*. A tell arriving from
 a8s is the impetus for everything here, and a governed turn is what runs in
@@ -326,7 +328,7 @@ roster until its per-turn timeout ends it, which is why `r4t status` shows the
 running turn's elapsed time against that timeout.
 
 Every turn costs budget; a member out of
-budget rests while its queue holds, and refill is the retry, so the machine's
+budget rests while its queue holds and runs when the bucket refills, so the machine's
 one shared subscription never idles while any project has work. A member that
 answers in prose instead of sending gets its output delivered as the reply
 anyway — weak local models do this routinely, and strong models have done it

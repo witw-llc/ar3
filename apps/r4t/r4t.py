@@ -463,9 +463,7 @@ def _print_rig_summary(
     )
     print(
         f"{indent}governance: cell_budget={config.cell_budget_max:g}/"
-        f"+{config.cell_budget_earn_per_hour:g}per-h "
-        f"breaker_cap={config.breaker_cap} "
-        f"breaker_cooldown={config.breaker_cooldown_seconds:g}s"
+        f"+{config.cell_budget_earn_per_hour:g}per-h"
     )
     if roster_path and roster_path.is_file():
         print()
@@ -659,10 +657,13 @@ def cmd_clear(args: argparse.Namespace) -> int:
         return 2
     ctx = _context(args, node)
     summary = run_clear(ctx)
-    recovered = sum(count for _name, count in summary["recovered"])
+    orphaned = sum(count for _name, count in summary["dead_lettered"])
     print(
         f"pruned {summary['locks_pruned']} stale lock(s)"
-        + (f"; recovered {recovered} in-flight message(s)" if recovered else "")
+        + (
+            f"; dead-lettered {orphaned} message(s) from unfinished turns"
+            if orphaned else ""
+        )
         + f"; drained {summary['drained']} queued turn(s)"
         + _retention_line(summary)
     )
@@ -868,8 +869,6 @@ def _roster_rows(
         depth = state.queue_depth(node, m.name)
         if depth:
             detail += f"  {depth} queued"
-        healthy: bool | None = True
-        hint = None
         if level < 1.0 and depth:
             wait = state.budget_seconds_until(
                 node, m.name, rig.budget_max, rig.budget_earn_per_hour
@@ -880,16 +879,7 @@ def _roster_rows(
                 rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour
             )
             detail += f"  RESTING (rig {rig.name}, ready in ~{wait / 60:.0f} min)"
-        blocked, failures = state.breaker_open(
-            node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
-        )
-        if failures:
-            detail += f"  failures={failures}"
-        if blocked:
-            detail += "  BREAKER OPEN"
-            healthy = False
-            hint = f"fix the {rig.name} harness; turns retry when it closes"
-        rows.append((healthy, m.name, f"{detail}{suffix}", hint))
+        rows.append((True, m.name, f"{detail}{suffix}", None))
     return rows
 
 
@@ -944,8 +934,7 @@ def _rig_rows(
     rows.append((
         None, "governance",
         f"cell_budget={config.cell_budget_max:g}/"
-        f"+{config.cell_budget_earn_per_hour:g}per-h  "
-        f"breaker={config.breaker_cap}/{config.breaker_cooldown_seconds:g}s",
+        f"+{config.cell_budget_earn_per_hour:g}per-h",
         None,
     ))
     return rows
@@ -3531,8 +3520,8 @@ def build_parser() -> argparse.ArgumentParser:
     clear_p = sub.add_parser(
         "clear",
         description=(
-            "Maintenance: prune stale locks, drain, and apply "
-            "log retention."
+            "Maintenance: prune stale locks, dead-letter unfinished turns, "
+            "drain, and apply log retention."
         ),
     )
     _add_common(clear_p, with_node=True)

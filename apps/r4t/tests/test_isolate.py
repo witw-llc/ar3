@@ -318,7 +318,7 @@ def iso_ctx_factory(r4t_home, tmp_path, fake_harness, tells):
 
 
 class TestRunAsProbeFailsClosed:
-    def test_failed_grant_probe_fails_turn_and_requeues_and_trips_breaker(
+    def test_failed_grant_probe_fails_turn_and_dead_letters_its_batch(
         self, iso_ctx_factory, fakebin
     ):
         _fake_bin(fakebin, "sudo", "import sys\nsys.exit(1)\n")  # no NOPASSWD grant
@@ -328,8 +328,8 @@ class TestRunAsProbeFailsClosed:
         ran = drain(ctx, run_fn=run_harness)
 
         assert ran == 1  # the turn ran and failed closed (not skipped)
-        assert state.queue_depth(NODE, "phil") >= 1  # message returned to the queue
-        assert state.read_meta(NODE, "phil")["consecutive_failures"] == 1  # breaker counts it
+        assert state.queue_depth(NODE, "phil") == 0
+        assert [r["reason"] for r in state.list_dead_letters(NODE)] == ["turn-failed"]
 
     def test_probe_error_surfaces_the_fix(self, fakebin):
         _fake_bin(fakebin, "sudo", "import sys\nsys.exit(1)\n")

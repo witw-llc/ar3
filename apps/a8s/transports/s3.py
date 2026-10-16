@@ -38,11 +38,9 @@ path answers from the seen table, and the ledger takes the ULID.
 
 A node is not a process. Every daemon on the machine runs its own subscriber
 over the same registry, so `a8s run alice` and `a8s run bob` each poll every
-mailbox this node holds, and `network.claim_message` arbitrates which of them
-delivers. Only the receive path's answer stamps the ledger: a sibling daemon
-holding the claim, or a released claim after a failed delivery, answers False,
-and the envelope is offered again on the next poll. The wire is at-least-once,
-and `claim_message` plus the seen table collapse the repeats.
+mailbox this node holds, and the seen-table insert names the one of them that
+delivers. Each daemon offers an envelope to the receive path once and then
+records it in the ledger, whatever the delivery did.
 
 A machine that joins is owed the mail sent after it joined, as a new MQTT
 session is owed nothing published before it existed. `a8s remote` stamps a
@@ -55,8 +53,8 @@ sweeps every object in a mailbox this node polls — a consumed envelope, one
 nobody took, junk — once both the ULID mint time and the object's
 `LastModified` clear `retain_days` (default 3; `0` keeps forever). Both clocks,
 as the folder transport requires: `LastModified` alone can be pushed forward by
-a rewrite, and mint time alone would call a delayed send expired the moment a
-backoff retry republished it. A key carrying no ULID has only the object clock
+a rewrite, and mint time alone would call a delayed send expired the moment it
+was published. A key carrying no ULID has only the object clock
 to offer. A bucket lifecycle rule on the prefix is the durable backstop: it
 survives every node going away, which nothing in this process does, and it
 covers a mailbox no node polls any more. The transport owns its own key
@@ -87,7 +85,7 @@ from typing import Any, Optional
 from core import canonical_name, out, s3_ledger_path
 from delivery_receipt import parse_delivery_receipt
 from registry import load_aliases, load_namespaces, load_registry
-from transports import OnMessage, Transport, TransportError
+from transports import OnMessage, PublishAmbiguous, Transport, TransportError
 from transports.folder import JOIN_SKEW_GRACE_MS
 from transports.ledger import ConsumedLedger
 from ar3 import clock
@@ -142,6 +140,10 @@ PAGE_SIZE = 1000
 # still have an object. With `retain_days 0` nothing ever leaves, the ledger
 # stays over its cap, and every consumption would otherwise walk the bucket.
 COMPACT_INTERVAL_SECONDS = 3600.0
+
+# botocore errors raised after the request went out, so the bucket may hold
+# the object. Matched by class name so this module imports without botocore.
+AMBIGUOUS_PUT_ERRORS = frozenset({"ReadTimeoutError", "ConnectionClosedError"})
 
 
 class S3Transport(Transport):
@@ -419,6 +421,10 @@ class S3Transport(Transport):
         except TransportError:
             raise
         except Exception as e:
+            if type(e).__name__ in AMBIGUOUS_PUT_ERRORS:
+                raise PublishAmbiguous(
+                    f"{self._remote_id}: s3 put sent, no answer: {e}"
+                ) from e
             raise TransportError(f"{self._remote_id}: s3 put failed: {e}") from e
 
     # ---------- poll ----------
@@ -453,13 +459,14 @@ class S3Transport(Transport):
         The page is where the last one stopped. A poll is bounded to one page
         so a large mailbox cannot monopolise the worker, but the bound has to
         move: nothing leaves the mailbox until it expires, so its front holds
-        every envelope this machine already read, a delivery that failed, an
-        object it could not fetch, junk inside the retention window, and on
+        every envelope this machine already read, an object it could not
+        fetch, junk inside the retention window, and on
         AWS a `CommonPrefixes` entry, which spends the key budget the same as
         an object does. A cursor that did not move would stop at the first
         page of old mail and hide every envelope after it. At the end of the
         listing the cursor is dropped, so the next poll starts over and
-        revisits both the retries and whatever arrived meanwhile."""
+        revisits both the objects it could not fetch and whatever arrived
+        meanwhile."""
         client = self._client()
         prefix = f"{self._prefix}/{mailbox}/"
         token = self._cursor.get(mailbox)
@@ -529,31 +536,21 @@ class S3Transport(Transport):
             if cb is None:
                 continue
             try:
-                consumed = cb(body) is not False
+                cb(body)
             except Exception as e:
-                # The receive path answers rather than raises, so this is the
-                # guard for any other callback a transport may be handed — and
-                # a raise says the same thing an answer of False does.
-                consumed = False
                 self._warn_once(
                     f"deliver:{type(e).__name__}",
                     f"WARN: remote {self._remote_id}: delivery failed "
-                    f"({type(e).__name__}: {e}); retrying",
+                    f"({type(e).__name__}: {e}); dropped",
                 )
-            if not consumed:
-                # Not recorded. A sibling daemon on this machine polls the same
-                # mailbox and may hold the claim right now, and a ledger entry
-                # would skip this object on every later poll: if that sibling
-                # dies mid-delivery, nobody on this machine reads it again.
-                continue
             self._ledger.record(stem)
 
     def _expired(self, stem: str, item: dict, cutoff: float) -> bool:
         """Whether an object has outlived `retain_days` on both clocks.
 
         `LastModified` alone can be pushed forward by a rewrite, and the ULID's
-        mint time alone would call a delayed send expired the moment a backoff
-        retry republished it. A key with no ULID in it has only the one clock
+        mint time alone would call a delayed send expired the moment it was
+        published. A key with no ULID in it has only the one clock
         to offer.
         """
         if not cutoff:

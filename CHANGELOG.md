@@ -10,6 +10,160 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.106 — 2026-10-15
+
+### Added
+
+- **Memory has two clocks and a graph.** Every k7e entry records when the store
+  learned it and when it became true, the second taken from the turn that
+  stated it and never guessed by a model. A retirement is dated, and entries
+  are joined by edges: what replaced what, what a compiled page folded, and
+  what an entry links to. `k7e search --as-of <date>` answers what the store
+  held on that date, `--valid-at <date>` what was true then, and together
+  what the store believed then about another time. `k7e graph <id>` shows one
+  entry's clocks and edges.
+- **A new fact can retire the one it contradicts.** When a distilled fact is
+  close to a stored one, one model call per capture sorts the pair as a
+  repeat, an added detail, a replacement or a separate fact. A replacement
+  retires the old entry even when the turn never saw it, where word overlap
+  alone used to append a changed value to the entry it contradicted. A rule a
+  person corrected is retired only by another correction. A fact
+  or a decision that settles an open idea closes it. A member's memory marks
+  the entry that replaced another, so the newer claim wins.
+
+### Changed
+
+- **a8s says what it is: best effort.** The front page, `a8s --help`, the
+  a8s docs, the `tell` skill and both MCP `tell` tools say that a8s is
+  lightweight, best-effort messaging like UDP: each message is sent once with
+  no delivery guarantee, and it may be picked up by several nodes or by none.
+  Every `tell` tool adds: do not resend after a timeout; if no reply comes,
+  send a new message. Agent-facing guidance says an agent knows only that a
+  message was sent; `a8s tx` and `a8s trace` are operator tools for
+  debugging. No page promises delivery.
+- **A failed send simply fails.** Each remote gets one try per send. If any
+  remote took the envelope, the message is sent, and a remote that failed gets
+  one `DROPPED` row. If no path took it, the envelope moves to the sender's
+  trash with one `DISCARDED` row and a8s never sends it again; a sender that
+  wants it through sends again. Mail for a name no started remote can carry
+  drops at once. A publish whose outcome a8s cannot know — no PUBACK in time,
+  a link that dropped after the publish call, or an S3 put that timed out
+  reading the answer or lost its connection after the request went out —
+  counts as sent, is never
+  retried, and writes one `PUBLISH_AMBIGUOUS` row; `a8s health` shows each
+  remote's count over the last 24 hours. MQTT's own QoS 1 resend after a
+  reconnect and the S3 SDK's retries stay as configured. An MQTT remote with
+  no link is waited for once per routing pass, not once per message. A file no
+  storage service took fails the publish to every remote. A pass moves each
+  message out of `pending/` before it sends it, so a message whose removal
+  fails is never sent twice. A fan-out that reached some members is
+  delivered, with one `DROPPED` row for each member it missed. Every message
+  the router drops — unreadable, no `to`, a name that will not resolve —
+  writes one row.
+- **A failed wake is a dead letter at once.** A wake that exits nonzero, or is
+  killed by `max_wake_seconds`, the watchdog or `a8s stop --force`, leaves its
+  mail in trash as dead letters: one agent-log line names the ids, and each is
+  a `DROPPED` row. No wake is tried again. `a8s stop --force` dead-letters the
+  killed wake's mail instead of returning it to the inbox, and prints the ids.
+  `a8s ps` and `a8s health` count the dead letters of the last 24 hours, and
+  dead-letter markers older than 7 days are deleted. An inbox file that will
+  not parse, or a message whose definition will not load, is a dead letter
+  too. Nothing about a failure is written to an agent or sent across the network.
+- **A received message is offered once.** A transport hands each envelope to
+  the receive path once and consumes it whatever the delivery did: MQTT
+  acknowledges it, and the s3 and folder remotes record it in their ledger. An
+  inbox write that fails is one `DROPPED` row on the receiving machine. The
+  seen-table insert picks which of a machine's daemons delivers, in place of a
+  claim file. A message whose attachments are still on their way waits for
+  them up to `storage_receive_wait_seconds`, and a restart during that wait
+  loses it.
+- **A delivery receipt is sent once.** A receipt made while the MQTT link is
+  down is dropped, not held. Receipts report the inbox write and a failed
+  attachment; nothing waits for one.
+- **A roster turn runs once.** A turn that exits nonzero, times out, or was
+  killed mid-flight makes its batch an r4t dead letter, and each sender gets
+  one notice that the member failed or ran out of time and may have partly
+  acted. The notice never asks for a resend, and nothing runs the batch again.
+  A dispatch wake starts no turn that its remaining `max_wake_seconds` cannot
+  cover, checked again at each harness launch; a batch that no longer fits
+  goes back to the queue unrun and waits for the next wake. A member whose rig's
+  `timeout_seconds` is longer than any wake runs no turn and logs one
+  `NEVER-FITS` line per wake, the rest of the roster still runs, and
+  `r4t status` shows a red verdict that names the member, the rig's timeout
+  and the wake's limit.
+- **The Gmail connectors try each message once.** The cron records a
+  message's id before its `tell` and never tells it again, and a refused
+  `tell` is a stderr line. The send connector exits 0 with "may have been
+  sent" on any failure other than the bridge's own error answer, because the
+  bridge sends the mail before it answers.
+- **Memory keeps what outlives the task.** Distilling a roster turn reads the
+  messages routed into it and its output, never the standing prompt around
+  them, so a member's store no longer re-learns its persona and its own
+  injected entries every turn. Replayed over this machine's last 173 roster
+  turns, the model calls fell from 1,136 to about 240 and the store answered
+  about as many test questions. The extractor skips task telemetry (a
+  change's test counts, PR or branch status, one-off command output), keeps
+  one fact per entry, and marks each fact `durable` or `task`; a `task` fact stops being current a week
+  after its turn. Distilled entries start at the same confidence instead of
+  ranking higher for saying "failure".
+  Upgrading: a capture written by an older release has no routed-message
+  section, so the captures a member has not yet distilled at upgrade are
+  distilled from their human messages and output alone, and most of their
+  facts are lost, once.
+- **A compile replaces what it folds.** `k7e compile <tag>` writes an active
+  page that supersedes every entry it folded, so the page ranks in their place;
+  before, the page was stored where search never looked and the fragments kept
+  ranking. `k7e compile --due` folds the store's largest ready tag once a day,
+  and r4t runs it after every dream that wrote, for roster members and engine
+  agents alike.
+- **`k7e search --json` says what kind each hit is** (`null` for an
+  operational entry), so an agent that asks for archive records can tell an
+  idea from a decision.
+
+### Removed
+
+- **A node that owns none of a message's recipients sends nothing back.** a8s
+  is best effort: a message may be picked up by several nodes or by none. The
+  `no_local_recipient` receipt is gone. A send to a name that no node holds
+  ends at `PUBLISHED` in the sender's transaction log, with no receipt, and
+  each node that skipped it logs a rate-limited `NOT_LOCAL` row in its own
+  transaction log. That receipt from an older node is dropped. Closes #261.
+- **`a8s retry` is gone.** Nothing returns a dead letter or forces a parked
+  send: there are no parked sends. The outbound backoff ladder and its
+  `.retry` sidecars, the wake retry ladder, the receive re-offer, the
+  attachment-wait custody, the MQTT held-receipt queue and the claim files
+  under `claims/` go with it, and so do `remote.backoff_schedule` and
+  `wake.retry_schedule` in `a8s config`.
+- **`tells --sent` and the sender receipt files are gone.** An agent knows
+  only that it sent; `a8s tx --from <name>` shows an operator what the router
+  did. Receipts no longer carry the `attachment_fetched`, `deferred` or
+  `expired` stages.
+- **The r4t failure breaker is gone,** with `breaker_cap` and
+  `breaker_cooldown_seconds`. A failed turn runs once, and the budgets bound
+  how many turns a member can spend. Operators: delete both keys from
+  `~/.config/r4t/rigs.json`; `r4t status` lists each one left there as an
+  invalid rig.
+
+### Fixed
+
+- **An MCP `tell` that times out is not an error.** When `a8s tell` does not
+  finish within 30 seconds, `a8s mcp serve` answers that the message may have
+  gone out and must not be sent again; if no reply comes, the client sends a
+  new message. A client that reads an error resends, and the recipient gets
+  the message twice. The `tell` is left to finish on its own rather than
+  killed, so a slow send still goes out. The limit is 30 seconds, down from
+  60, so the answer comes before the 60-second default request timeout of
+  many MCP clients.
+- **A distill that finds one fact keeps it.** A model asked for a list often
+  answers a single fact as a lone object; distill read the object's tag list
+  as the answer and stored nothing. k7e's model-backed tests run on
+  `qwen3.6:latest`, the suite's bottom-line model.
+- **One failing capture no longer stalls dreaming.** A roster capture whose
+  distill times out at the full limit three passes in a row is set aside in
+  the store's `.dream-failed` and the sweep moves on; before, a capture that always timed
+  out spent the whole sweep budget every pass and starved every member after
+  it.
+
 ## 0.1.105 — 2026-10-08
 
 ### Fixed

@@ -41,7 +41,10 @@ Cached vectors are isolated by provider, model, dimension, exact input hash and
 input-format version. Missing or incompatible vectors count as pending work for
 `k7e embed-pending`; see [configuration](k7e-configuration.md#vector-coverage).
 
-All three filter to `status='active'` unless `include_superseded` is set.
+All three filter to `status='active'` and drop an expired `valid_to` unless
+`include_superseded` is set. `--as-of` and `--valid-at` replace that filter
+with a time slice, in the same SQL, so a row outside the slice never takes a
+rank ([two clocks](k7e-architecture.md#two-clocks-and-the-graph)).
 
 ### 2. Fusion (RRF)
 

@@ -1,9 +1,10 @@
 """Dispatch — enqueue delivered mail, then drain member queues as batch turns.
 
 Every inbound message to a member ENQUEUES, unconditionally, into that
-member's durable queue (state.enqueue). No gate ever drops or dead-letters a
-deliverable message; dead letters are for undeliverable mail only (unknown
-recipient, disabled member, no rig). External mail always enters at the top:
+member's durable queue (state.enqueue). No gate before a turn drops or
+dead-letters a deliverable message. Dead letters are for undeliverable mail
+(unknown recipient, disabled member, no rig) and for the batch of a turn that
+failed, timed out or never finished. External mail always enters at the top:
 the topmost leader IS the garden from outside, so outside senders cannot pick
 a member. A separate drain loop picks a runnable
 member with a non-empty queue and runs ONE turn that drains the WHOLE queue:
@@ -19,10 +20,14 @@ second node, not a second turn.
 
 Runnability is governed autonomously — no human gates. A member runs when its
 own spend bucket and the shared cell bucket both hold at least 1 unit (a turn
-costs 1 of each), its failure breaker is closed, it is not parked, and the
-cadence throttle admits another start. An empty bucket means the member is
-*resting*: its queue holds and it runs again when the bucket refills. Nothing is
-lost.
+costs 1 of each), it is not parked, and the cadence throttle admits another
+start. An empty bucket means the member is *resting*: its queue holds and it
+runs again when the bucket refills.
+
+A turn runs once. A turn that exits nonzero or runs out of time is not run
+again: its batch becomes an r4t dead letter and each sender gets one notice
+that the member may have partly acted. A batch left behind by a turn that
+never finished (the process was killed) is recorded the same way.
 
 The agent replies with the unmodified `tell`. Dispatch points the harness
 subprocess's $TELL_OUTBOX_DIR at a per-turn staging dir and reads the staged
@@ -33,13 +38,12 @@ structured fields, per-turn send quota, then either the node's real outbox
 recipient member's queue (intra-roster, no header, no round-trip). A reply is
 attributed to the thread of the message it answers.
 
-Requeueing note: a8s treats exit 0 as the only delivery ack and redelivers the
-envelope (with backoff) when a wake exits nonzero. `handle_message` therefore
-acks early — it enqueues durably, then returns 0 whatever the turn does — so a
-failed turn is retried by r4t's own quota-aware machinery rather than by a8s
-handing the same message to the queue again. Redelivery only happens when
-dispatch itself dies, and `state.enqueue`'s duplicate collapse absorbs it as
-long as the queue hasn't drained yet.
+Wake note: a8s dead-letters a wake's mail when the wake exits nonzero or is
+killed at `max_wake_seconds`. `handle_message` therefore returns 0 once the
+mail is durably enqueued, whatever the turn does, because a turn's outcome is
+r4t's to record. The drain starts no turn that the wake's remaining time could
+not cover, so a8s does not kill a dispatch wake in the middle of a turn; that
+mail waits in the queue for the next wake.
 """
 from __future__ import annotations
 
@@ -139,6 +143,11 @@ from notify import TellFn
 from roster import Member, Roster, RosterError, load_roster
 
 DRAIN_MAX_PASSES = 20
+
+# Covers the interpreter start before the context exists and a turn's own work
+# around the harness run (prompt build, capture, release).
+WAKE_MARGIN_SECONDS = 30.0
+WAKE_START_SLACK_SECONDS = 1.0
 
 # Twin of ATTACHED_FILE_PREFIX in apps/a8s/definitions.py — the marker a8s
 # injects into a wake message for each delivered file. Importing it would drag
@@ -245,15 +254,29 @@ PROMPT_DEFAULTS: dict[str, str] = {
 }
 
 
-def _load_prompt_overrides(definition_path: Path | None) -> dict[str, str]:
-    """Read the `prompts` object from the a8s node definition (sparse, by key).
-    Tolerates absence at every step → returns {} and all defaults apply."""
+def _read_definition(definition_path: Path | None) -> dict:
     if not definition_path:
         return {}
     try:
         data = json.loads(Path(definition_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _max_wake_seconds(data: dict) -> float | None:
+    """The a8s definition's `max_wake_seconds`: a8s kills a wake that runs
+    longer. None when absent or not positive, which a8s reads as no limit."""
+    try:
+        seconds = float(data.get("max_wake_seconds"))
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _load_prompt_overrides(data: dict) -> dict[str, str]:
+    """Read the `prompts` object from the a8s node definition (sparse, by key).
+    Tolerates absence at every step → returns {} and all defaults apply."""
     prompts = data.get("prompts") if isinstance(data, dict) else None
     if not isinstance(prompts, dict):
         return {}
@@ -269,12 +292,13 @@ RESTING = "resting"
 DEAD = "dead-letter"
 QUEUED = "queued"
 SKIPPED = "skipped"
-BREAKER = "breaker"
 PARKED = "parked"
+OUT_OF_TIME = "out-of-time"
+NEVER_FITS = "never-fits"
 
 # `run_harness` writes this when the OS refuses to start the harness at all —
 # ENOENT and its kin. It is the one failure r4t can be sure will recur
-# identically, so it is the one that parks a member instead of retrying it.
+# identically, so it is the one that takes a member out of the rotation.
 SPAWN_FAILURE_PREFIX = "failed to spawn harness "
 
 
@@ -295,6 +319,9 @@ class DispatchContext:
     isolation: isolate.Isolation = field(default_factory=isolate.Isolation)
     definition_path: Path | None = None
     ticker: bool = False
+    wake_started: float = field(default_factory=time.monotonic)
+    wake_spent: bool = False
+    never_fits_said: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         # `root` is where the roster's documents live (ROSTER.md, MISSION.md, the
@@ -303,7 +330,25 @@ class DispatchContext:
         # them equal.
         if self.workplace is None:
             self.workplace = self.root
-        self._prompts = _load_prompt_overrides(self.definition_path)
+        definition = _read_definition(self.definition_path)
+        self._prompts = _load_prompt_overrides(definition)
+        self.max_wake_seconds = _max_wake_seconds(definition)
+        if self.definition_path is not None:
+            state.stamp_wake_limit(self.node, self.max_wake_seconds, WAKE_MARGIN_SECONDS)
+
+    def fits_a_wake(self, rig: Rig) -> bool:
+        """Whether a turn on `rig` fits inside a fresh wake at all."""
+        if self.max_wake_seconds is None:
+            return True
+        return rig.timeout_seconds <= self.max_wake_seconds - WAKE_MARGIN_SECONDS
+
+    def wake_seconds_left(self) -> float | None:
+        """Seconds before a8s kills this wake, less the margin; None when the
+        wake has no limit."""
+        if self.max_wake_seconds is None:
+            return None
+        elapsed = time.monotonic() - self.wake_started
+        return self.max_wake_seconds - WAKE_MARGIN_SECONDS - elapsed
 
     def prompt(self, key: str, **fields: object) -> str:
         """Resolve a prompt bullet: the definition's override for `key`, else the
@@ -327,11 +372,12 @@ class DispatchContext:
             TURN      a turn started
             DONE      a turn ended
             RESTING   a member with mail did not run: budget
-            BREAKER   ... its breaker is open
             DEFERRED  ... the cadence throttle held the start
+            OUT-OF-TIME ... the wake has less time left than its rig's timeout
+            NEVER-FITS ... its rig's timeout is longer than any wake
             PARKED    a member left the rotation: its harness cannot start
             RESUME    ... and a free probe says it can again
-            RECOVERED a killed turn's batch went back to the queue
+            DEAD-LETTER a killed turn's batch became a dead letter
 
         `subject` is the member the line is about and is always the second
         field, so a reader — and a later `r4t logs <member>` — matches on the
@@ -790,8 +836,8 @@ def _run_harness_turn(
     When the org sets `run_as` or `container` (org.py)
     the choice rides in via the turn env and the argv is wrapped in the OS-level
     boundary — every member turn of that org, whatever rig. An isolation prereq
-    that fails closed returns a nonzero exit like any other failed turn — the
-    batch stays queued and the breaker counts it.
+    that fails closed returns a nonzero exit like any other failed turn, and
+    its batch becomes a dead letter.
 
     The rig's `env` map rides the turn environment on top of r4t's own controls,
     and is named to the isolation wrapper so it survives the boundary.
@@ -1633,19 +1679,42 @@ def _human_message_lines(
     The distill reads what this writes and may retire a stored entry these
     messages contradict. A roster that names nobody writes no section, and
     nothing is retired."""
+    return _message_lines(ctx, roster, batch, people=True)
+
+
+def _routed_message_lines(
+    ctx: DispatchContext, roster: Roster, batch: list[dict]
+) -> list[str]:
+    """The turn's other messages, verbatim, for the turn capture: everything
+    routed in that `_human_message_lines` does not claim. Together with the
+    output they are all the distill reads — the prompt around them is the
+    member's standing context (persona, scaffold, its own knowledge pack),
+    which is the same every turn and is not news."""
+    return _message_lines(ctx, roster, batch, people=False)
+
+
+def _message_lines(
+    ctx: DispatchContext, roster: Roster, batch: list[dict], *, people: bool
+) -> list[str]:
     lines: list[str] = []
     for env in batch:
-        if str(env.get("class", "")) != "human":
-            continue
         body = str(env.get("body", "")).strip()
         if not body:
             continue
         sender = _display_name(ctx.node, str(env.get("from", "?")))
-        if not roster.is_person(sender):
+        person = str(env.get("class", "")) == "human" and roster.is_person(sender)
+        if person != people:
             continue
         thread = str(env.get("thread", "")) or "?"
-        lines += [f"### From: {sender} (thread {thread})", "", body, ""]
+        lines += [f"### From: {sender} (thread {thread})", "", _HEADING.sub(r"\\\1", body), ""]
     return lines
+
+
+# A body line that opens with `#` is escaped (`\#`), so a message can never
+# write a section heading of the capture: a peer's text carrying
+# `## Human messages` would otherwise be read as a person's words, and one
+# carrying `## Prompt` would cut the capture's header short.
+_HEADING = re.compile(r"(?m)^(#)")
 
 
 def _review_recipients(
@@ -1691,6 +1760,7 @@ def _capture_turn(
     prompt_note: str = "",
     knowledge_ids: list[str],
     human_messages: list[str],
+    routed_messages: list[str],
     root: Path,
     delegated: list[str],
 ) -> None:
@@ -1707,7 +1777,10 @@ def _capture_turn(
     turn ran, so a path in the output below can be told from a path the model
     merely mentioned. `- delegated:` names who a mission review messaged, so
     an operator reading the day's captures sees which idle wake handed work
-    out without opening the transcript to find out."""
+    out without opening the transcript to find out. `## Routed messages`
+    follows the people's section and holds everything else routed in: with
+    the two message sections and the output, it is the whole of what the
+    distill reads — never the prompt."""
     stamp = state.turn_capture_stamp()
     meta = "\n".join(
         [
@@ -1724,12 +1797,16 @@ def _capture_turn(
         + ([f"- delegated: {', '.join(delegated)}"] if delegated else [])
         + ([f"- prompt: {prompt_note}"] if prompt_note else [])
     )
+    routed = (
+        "## Routed messages\n\n" + "\n".join(routed_messages).strip() + "\n\n"
+        if routed_messages else ""
+    )
     said = (
         "## Human messages\n\n" + "\n".join(human_messages).strip() + "\n\n"
         if human_messages else ""
     )
     content = (
-        f"# turn {stamp} ({member.name})\n\n{meta}\n\n{said}"
+        f"# turn {stamp} ({member.name})\n\n{meta}\n\n{said}{routed}"
         f"## Prompt\n\n{prompt}\n\n"
         f"## Output\n\n{output.strip() or '(no output)'}\n"
     )
@@ -1919,10 +1996,12 @@ def _run_turn(
     member: Member,
     rig: Rig,
     run_fn,
-) -> None:
+) -> bool:
+    """Run one turn for `member`. False when the wake ran out of time before
+    the harness launched: the batch is back in the queue, unrun."""
     batch = state.claim_queue(ctx.node, member.name)
     if not batch:
-        return
+        return True
     newest_thread = str(batch[-1].get("thread", "")) or "?"
     newest_hop = int(batch[-1].get("hop", 0) or 0)
     newest_sender = str(batch[-1].get("from", "")) or f"{ctx.node}"
@@ -2033,6 +2112,11 @@ def _run_turn(
         f"{len(batch)} msg rig={rig.name} {prompt_path} prompt={_kb(prompt_total)}",
     )
 
+    # Building the prompt can outrun the margin (a knowledge lookup alone may
+    # take a minute), so the wake is checked again at the launch itself.
+    if not _wake_time_for(ctx, member, rig):
+        _put_back_unrun(ctx, config, member, rig)
+        return False
     workdir.mkdir(parents=True, exist_ok=True)
     exit_code, output, duration, timed_out = run_fn(
         rig, prompt, workdir, env=env, variant=variant
@@ -2040,14 +2124,18 @@ def _run_turn(
 
     # Some CLIs (cursor) refuse to launch at all when asked to continue a
     # conversation that does not exist yet — the state every continuing member
-    # starts in. Retry that ONE failure cold: the turn founds the conversation
-    # every later turn continues. Any other failure falls through to the normal
-    # requeue-and-breaker path.
+    # starts in. That refusal did nothing, so run it once cold: the turn founds
+    # the conversation every later turn continues. Any other failure, a timeout
+    # included, dead-letters the batch below.
     if (
         "R4T_CONTINUE" in env
-        and (timed_out or exit_code != 0)
+        and not timed_out
+        and exit_code != 0
         and rig.had_no_prior_conversation(output)
     ):
+        if not _wake_time_for(ctx, member, rig):
+            _put_back_unrun(ctx, config, member, rig)
+            return False
         state.append_log(
             ctx.node,
             f"r4t: CONTINUE-COLD {member.name.lower()} (rig {rig.name}) exit "
@@ -2084,6 +2172,7 @@ def _run_turn(
         + ", ".join(f"{label} {size}" for label, size in stats),
         knowledge_ids=knowledge.packed_ids(dict(sections).get("knowledge")),
         human_messages=_human_message_lines(ctx, roster, batch),
+        routed_messages=_routed_message_lines(ctx, roster, batch),
         root=workdir.resolve(),
         delegated=_review_recipients(ctx, member, batch),
     )
@@ -2095,18 +2184,22 @@ def _run_turn(
         # all land here: the current CLI key, retired cleared.
         state.record_conversation(ctx.node, member.name, rig.cli)
     if failed:
-        # A failed turn releases nothing and returns its whole batch to the
-        # queue: the messages are never lost, and the breaker accumulates
-        # against repeated failures until it trips and the queue simply holds.
-        # The batch moves back from `.inflight/` under its original filenames,
-        # so it keeps its ids and its place in arrival order rather than being
-        # minted afresh behind whatever arrived while the turn ran.
-        shutil.rmtree(staging, ignore_errors=True)
-        returned = state.return_claim(ctx.node, member.name)
+        # The member may have partly acted, and each `tell` it ran returned
+        # sent, so what it staged is released like any other turn's.
+        release_staging(ctx, config, roster, member, rig, batch)
+        if timed_out:
+            reason = "turn-timed-out"
+            notice = f"{member.name} ran out of time; it may have partly acted."
+        else:
+            reason = "turn-failed"
+            notice = (
+                f"{member.name} failed (exit {exit_code}); it may have partly acted."
+            )
+        _dead_letter_batch(ctx, roster, member.name, batch, reason=reason, notice=notice)
         state.append_log(
             ctx.node,
-            f"r4t: RETRY {member.name.lower()} turn failed ({outcome}); "
-            f"{returned} message(s) returned to the queue",
+            f"r4t: DEAD-LETTER {member.name.lower()} turn failed ({outcome}); "
+            f"{len(batch)} message(s) dead-lettered, each sender told once",
         )
     else:
         for env_msg in batch:
@@ -2160,8 +2253,7 @@ def _run_turn(
                 # we treat ONLY a truly empty transcript as quota-suspect, never
                 # chrome-only output (a quiet-but-alive member still prints tool
                 # traces). Draining the rig bucket rests the whole rig; queued
-                # messages catch up once it refills — r4t is deliberately the
-                # retry system, so a8s can stay dumb delivery.
+                # messages run once it refills.
                 note = ""
                 if rig.rig_budget_max is not None:
                     state.rig_budget_drain(rig.name)
@@ -2182,8 +2274,8 @@ def _run_turn(
                     "worth relaying survived transcript cleaning",
                 )
         release_staging(ctx, config, roster, member, rig, batch)
-        # Last, so a kill anywhere above leaves the batch recoverable. Replaying
-        # a turn is survivable; losing the mail that asked for it is not.
+        # Last, so a kill anywhere above leaves the batch in `.inflight/`, where
+        # the next wake records it as a dead letter.
         state.release_claim(ctx.node, member.name)
 
     state.record_velocity(
@@ -2196,51 +2288,74 @@ def _run_turn(
         exit_code=exit_code,
     )
     completed = state.utc_now()
-    failures = int(
-        state.read_meta(ctx.node, member.name).get("consecutive_failures", 0) or 0
-    )
-    failures = failures + 1 if failed else 0
-    meta_fields = {
-        "last_completed_at": completed,
-        "consecutive_failures": failures,
-        "last_turn": {
+    state.update_meta(
+        ctx.node,
+        member.name,
+        last_completed_at=completed,
+        last_turn={
             "threads": sorted({str(b.get("thread", "")) for b in batch}),
             "messages": len(batch),
             "exit": exit_code,
             "timed_out": timed_out,
             "completed_at": completed,
         },
-    }
-    if failed:
-        meta_fields["last_failure_at"] = completed
-    state.update_meta(ctx.node, member.name, **meta_fields)
+    )
     state.clear_turn(ctx.node, member.name)
     ctx.event(
         "DONE", member.name.lower(),
-        outcome + (f" — {len(batch)} msg requeued" if failed else ""),
+        outcome + (f" — {len(batch)} msg dead-lettered" if failed else ""),
     )
     structural = _structural_reason(exit_code, output)
     if structural:
         _park(ctx, member, rig, structural)
-    elif failed and failures == config.breaker_cap:
-        state.append_log(
+    return True
+
+
+def _dead_letter_batch(
+    ctx: DispatchContext,
+    roster: Roster | None,
+    member_name: str,
+    batch: list[dict],
+    *,
+    reason: str,
+    notice: str,
+) -> None:
+    """Record every envelope of a claimed batch as a dead letter, drop the
+    claim, then tell each distinct sender `notice` once. The claim goes before
+    the notice so a kill between them cannot tell anyone twice. r4t's own
+    prompts (dump, review, error) have no sender to tell."""
+    member_addr = f"{ctx.node}:{member_name.lower()}"
+    for env_msg in batch:
+        state.record_dead_letter(
             ctx.node,
-            f"r4t: BREAKER {member.name.lower()} tripped ({failures} consecutive "
-            f"failed turns, rig {rig.name}) — turns pause; one probe per "
-            f"{config.breaker_cooldown_seconds:g}s until a turn succeeds",
+            reason=reason,
+            sender=str(env_msg.get("from", "")),
+            to=str(env_msg.get("to", "")) or member_addr,
+            thread=str(env_msg.get("thread", "")),
+            content=str(env_msg.get("body", "")),
+        )
+    state.release_claim(ctx.node, member_name)
+    internal_sender = f"r4t:{ctx.node}"
+    told: set[str] = set()
+    for env_msg in reversed(batch):
+        sender = str(env_msg.get("from", "")).strip()
+        if not sender or sender == internal_sender or sender.lower() in told:
+            continue
+        told.add(sender.lower())
+        _tell_error(
+            ctx, sender, notice,
+            thread=str(env_msg.get("thread", "")) or None, roster=roster,
         )
 
 
 # ---------- park: the failures that will recur identically ----------
 #
-# The transient breaker probes forever, which is right for a timeout and wrong
-# for a harness binary that is not installed. Nothing changes between probes, so
-# every probe fails the same way and — before this — every failure told the
-# sender about it: one tell in, an error every ten minutes out, forever. A
-# structural failure parks the member on its FIRST occurrence instead. One
-# ticker line, one day-log line, then silence. The queue holds untouched, which
-# is what makes the silence safe, and only a probe that costs nothing —
-# never a paid turn run to see what happens — brings the member back.
+# A harness binary that is not installed fails every turn the same way, and
+# each such turn dead-letters its batch. A structural failure parks the member
+# on its FIRST occurrence: one ticker line, one day-log line, then silence.
+# Mail that arrives while parked holds in the queue and runs no turn, and only
+# a probe that costs nothing — never a paid turn run to see what happens —
+# brings the member back.
 
 def _structural_reason(exit_code: int, output: str) -> str | None:
     """The one-line reason a turn failed structurally, or None when the failure
@@ -2329,14 +2444,18 @@ def _run_member_turn(
             # message after that enqueues in total silence — the silence is
             # the point, and `r4t status` is where it is paid for.
             return PARKED
-        blocked = "BREAKER" if reason.startswith("breaker") else "RESTING"
         queued = f"({state.queue_depth(ctx.node, member.name)} queued)"
         state.append_log(
             ctx.node,
-            f"r4t: {blocked} {member.name.lower()} — {reason} {queued}",
+            f"r4t: RESTING {member.name.lower()} — {reason} {queued}",
         )
-        ctx.event(blocked, member.name.lower(), f"{reason} {queued}")
-        return BREAKER if reason.startswith("breaker") else RESTING
+        ctx.event("RESTING", member.name.lower(), f"{reason} {queued}")
+        return RESTING
+    if not ctx.fits_a_wake(rig):
+        _say_never_fits(ctx, member, rig)
+        return NEVER_FITS
+    if not _wake_time_for(ctx, member, rig):
+        return OUT_OF_TIME
 
     lock = state.AgentLock(ctx.node, member.name)
     admission = state.admission_lock(ctx.node)
@@ -2391,10 +2510,65 @@ def _run_member_turn(
         return RESTING if not runnable else DEFERRED
 
     try:
-        _run_turn(ctx, config, roster, member, rig, run_fn)
-        return RAN
+        return RAN if _run_turn(ctx, config, roster, member, rig, run_fn) else OUT_OF_TIME
     finally:
         lock.release()
+
+
+def _put_back_unrun(ctx: DispatchContext, config: RigConfig, member: Member, rig: Rig) -> None:
+    """A turn whose harness never ran: its batch returns to the queue for the
+    next wake, the budgets admission charged are paid back, and nothing about
+    it is a failure."""
+    state.return_claim(ctx.node, member.name)
+    state.budget_charge(ctx.node, member.name, rig.budget_max, rig.budget_earn_per_hour, -1.0)
+    state.budget_charge(
+        ctx.node, state.CELL_BUDGET_KEY,
+        config.cell_budget_max, config.cell_budget_earn_per_hour, -1.0,
+    )
+    if rig.rig_budget_max is not None:
+        state.rig_budget_charge(rig.name, rig.rig_budget_max, rig.rig_budget_earn_per_hour, -1.0)
+    shutil.rmtree(state.staging_dir(ctx.node, member.name), ignore_errors=True)
+    state.clear_turn(ctx.node, member.name)
+
+
+def _say_never_fits(ctx: DispatchContext, member: Member, rig: Rig) -> None:
+    """A rig longer than any wake holds only its own member, once per wake; the
+    rest of the roster still runs."""
+    name = member.name.lower()
+    if name in ctx.never_fits_said:
+        return
+    ctx.never_fits_said.add(name)
+    queued = f"({state.queue_depth(ctx.node, member.name)} queued)"
+    detail = (
+        f"rig {rig.name} timeout_seconds {rig.timeout_seconds:g} does not fit "
+        f"max_wake_seconds {ctx.max_wake_seconds:g} less {WAKE_MARGIN_SECONDS:g}s; "
+        f"{name} runs no turn until one changes {queued}"
+    )
+    state.append_log(ctx.node, f"r4t: NEVER-FITS {name} — {detail}")
+    ctx.event("NEVER-FITS", name, detail)
+
+
+def _wake_time_for(ctx: DispatchContext, member: Member, rig: Rig) -> bool:
+    """Whether this wake has time left for a turn on `rig` before a8s kills it.
+    Only a rig that fits a fresh wake gets here, so the first refusal ends turn
+    starts for the rest of the wake and is logged once; the mail waits in the
+    queue for the next wake."""
+    if ctx.wake_spent:
+        return False
+    left = ctx.wake_seconds_left()
+    # The slack absorbs the moment between the wake starting and this check, so
+    # a rig set exactly at the limit fits_a_wake allows still runs early on.
+    if left is None or left + WAKE_START_SLACK_SECONDS >= rig.timeout_seconds:
+        return True
+    ctx.wake_spent = True
+    queued = f"({state.queue_depth(ctx.node, member.name)} queued)"
+    detail = (
+        f"{max(left, 0.0):.0f}s of the wake left, rig {rig.name} may take "
+        f"{rig.timeout_seconds:g}s; no more turns start in this wake {queued}"
+    )
+    state.append_log(ctx.node, f"r4t: OUT-OF-TIME {member.name.lower()} — {detail}")
+    ctx.event("OUT-OF-TIME", member.name.lower(), detail)
+    return False
 
 
 # ---------- dispatch entry points ----------
@@ -2552,7 +2726,10 @@ def drain(ctx: DispatchContext, *, run_fn=run_harness) -> int:
         member = roster.find(entry.member)
         rig, _err, _pinned = config.rig_for(member)
         done.add(entry.member.lower())
-        if _run_member_turn(ctx, config, roster, member, rig, run_fn) != RAN:
+        result = _run_member_turn(ctx, config, roster, member, rig, run_fn)
+        if result == OUT_OF_TIME:
+            break
+        if result != RAN:
             # Ready a moment ago and not now: the cadence window closed, or a
             # concurrent drainer took the lock or the last budget unit.
             entries = look()
@@ -2572,10 +2749,9 @@ def _narrate_held(ctx: DispatchContext, entries: list) -> None:
         if entry.state in (schedule.READY, schedule.PARKED) or not entry.depth:
             continue
         name = entry.member.lower()
-        blocked = "BREAKER" if entry.state == schedule.BREAKER else "RESTING"
         queued = f"({entry.depth} queued)"
-        state.append_log(ctx.node, f"r4t: {blocked} {name} — {entry.reason} {queued}")
-        ctx.event(blocked, name, f"{entry.reason} {queued}")
+        state.append_log(ctx.node, f"r4t: RESTING {name} — {entry.reason} {queued}")
+        ctx.event("RESTING", name, f"{entry.reason} {queued}")
 
 
 def _cadence_wait(ctx: DispatchContext) -> float:
@@ -2599,12 +2775,16 @@ def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
     message enqueues the next member and can enable another turn in the same
     invocation. A pass that runs nothing while queued work remains and no turn
     is live means either the cadence window is the only thing in the way (sleep
-    it out and retry) or every queued member is resting/broken (return; the
-    queue holds until the bucket refills or the breaker closes)."""
+    it out and drain again) or every queued member is resting or parked
+    (return; the queue holds until the bucket refills). The wake's own time
+    limit ends it too: once the next turn could outlast the wake, no turn
+    starts and the queue waits for the next wake."""
     total = 0
     for _ in range(DRAIN_MAX_PASSES):
         ran = drain(ctx, run_fn=run_fn)
         total += ran
+        if ctx.wake_spent:
+            break
         if ran:
             continue
         if not state.members_with_queue(ctx.node) or state.live_locks(ctx.node):
@@ -2618,12 +2798,12 @@ def drain_until_quiet(ctx: DispatchContext, *, run_fn=run_harness) -> int:
 
 def run_clear(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     pruned = state.prune_stale_locks(ctx.node)
-    recovered = _recover_inflight(ctx)
+    orphaned = _dead_letter_orphans(ctx)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
     days, months = _run_retention(ctx)
     return {
         "locks_pruned": pruned,
-        "recovered": recovered,
+        "dead_lettered": orphaned,
         "drained": drained,
         "log_days_pruned": days,
         "velocity_months_rotated": months,
@@ -3039,32 +3219,45 @@ def _mission_review(
     return {"fired": True, "leader": leader.name, "silent_reviews": silent, "dormant": dormant}
 
 
-def _recover_inflight(ctx: DispatchContext) -> list[tuple[str, int]]:
-    """Return every batch a killed turn left in `queue/.inflight/`. The live
-    PID lock is the liveness test, so a turn genuinely running is left alone.
-    First in the idle pass, because every step after it reads the queue and has
-    to read a true one."""
-    recovered = state.recover_inflight(ctx.node)
-    for name, count in recovered:
+def _dead_letter_orphans(ctx: DispatchContext) -> list[tuple[str, int]]:
+    """Dead-letter every batch a killed turn left in `queue/.inflight/`, with
+    one notice to each sender. The live PID lock is the liveness test, so a
+    turn genuinely running is left alone. Returns (member, count)."""
+    orphans = state.orphaned_inflight(ctx.node)
+    if not orphans:
+        return []
+    try:
+        roster = load_roster(ctx.roster_path, node=ctx.node)
+    except RosterError:
+        roster = None
+    out: list[tuple[str, int]] = []
+    for name, batch in orphans:
+        member = roster.find(name) if roster is not None else None
+        display = member.name if member is not None else name
+        _dead_letter_batch(
+            ctx, roster, name, batch,
+            reason="turn-unfinished",
+            notice=f"{display} stopped before its turn finished; it may have partly acted.",
+        )
         state.append_log(
             ctx.node,
-            f"r4t: RECOVERED {name} — {count} message(s) from a turn that never "
-            "finished went back to the queue",
+            f"r4t: DEAD-LETTER {name} — {len(batch)} message(s) from a turn "
+            "that never finished, each sender told once",
         )
-        ctx.event("RECOVERED", name, f"{count} msg from an unfinished turn")
-    return recovered
+        ctx.event("DEAD-LETTER", name, f"{len(batch)} msg from an unfinished turn")
+        out.append((name, len(batch)))
+    return out
 
 
 def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     """One idle pass, in a strict order, silent when nothing happened.
 
-    1. Recover in-flight batches a killed turn left behind — everything below
-       reads the queue, so the queue has to be true first.
+    1. Dead-letter in-flight batches a killed turn left behind, so no step
+       below mistakes them for a running turn's.
     2. Prune stale locks.
     3. Probe parked members; a free probe that now resolves un-parks one and it
        rejoins the rotation with its whole queue.
-    4. Drain: whatever arrived between wakes, was recovered in 1, or was
-       released in 3.
+    4. Drain: whatever arrived between wakes, or was released in 3.
     5. Dream, then — if the org is stalled — a budget-gated mission-review turn.
     6. Retire idle continuing conversations, last: a turn running after the
        sweep would re-record the conversation the sweep just retired.
@@ -3078,10 +3271,10 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     except (RosterError, RigError) as e:
         state.append_log(ctx.node, f"r4t: IDLE-SKIPPED {e}")
         return {
-            "drained": 0, "flushed": [], "dreamed": [], "recovered": [],
+            "drained": 0, "flushed": [], "dreamed": [], "dead_lettered": [],
             "resumed": [], "mission_review": {"fired": False}, "error": str(e),
         }
-    recovered = _recover_inflight(ctx)
+    orphaned = _dead_letter_orphans(ctx)
     state.prune_stale_locks(ctx.node)
     resumed = _park_probe_sweep(ctx, roster)
     drained = drain_until_quiet(ctx, run_fn=run_fn)
@@ -3092,5 +3285,5 @@ def run_idle(ctx: DispatchContext, *, run_fn=run_harness) -> dict:
     flushed = _flush_sweep(ctx, config, roster, run_fn)
     return {
         "drained": drained, "flushed": flushed, "dreamed": dreamed,
-        "recovered": recovered, "resumed": resumed, "mission_review": review,
+        "dead_lettered": orphaned, "resumed": resumed, "mission_review": review,
     }

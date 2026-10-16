@@ -7,13 +7,16 @@ courtesy, but no mechanism depends on an agent obeying it.
 
 Everything here runs autonomously. There are knobs (config) and lenses
 (`r4t status`, the dead-letter dir, a8s logs), and nothing gates a turn on a
-person being present. Member work never waits, and a deliverable message is
-never dropped.
+person being present. No gate before a turn drops a deliverable message.
 The economics are *budgets, not cuts* — an agent that is out of budget does
 not run (its mail queues), rather than having its mail thrown away. The point
 is not only that no roster overspends the plan, but that the plan you already
-pay for keeps earning: held queues mean refill is the retry, so capacity is
-spent on work rather than left idle.
+pay for keeps earning: a held queue runs when the bucket refills, so capacity
+is spent on work rather than left idle.
+
+A turn runs once. A turn that fails or runs out of time is not run again: its
+batch is a dead letter, and each sender hears once that the member may have
+partly acted. Whether to send again is the sender's call.
 
 Traffic is **fire-and-forget**, inside the walls as well as across them: a
 message carries no task and demands no answer. Nothing records whether one was
@@ -62,13 +65,13 @@ allowed to spend a turn draining it.
 Ordered from most to least load-bearing. Each layer names its prior art;
 parameters were verified against primary sources (references at bottom).
 
-### 1. The durable member queue (nothing is ever dropped)
+### 1. The durable member queue
 
 Every inbound message to a member enqueues, unconditionally, into
-`agents/<member>/queue/`. No gate drops or dead-letters a deliverable
-message — dead letters are reserved for genuinely *undeliverable* mail
-(unknown recipient, disabled member, a rig that will not resolve). Work
-waits; messages never die. This is the keystone the rest of the stack
+`agents/<member>/queue/`. No gate before a turn drops or dead-letters a
+deliverable message — a dead letter before a turn is *undeliverable* mail
+(unknown recipient, disabled member, a rig that will not resolve). Work waits
+in the queue until a turn takes it. This is the keystone the rest of the stack
 hangs off: budgets, no-cutting, and batch invoke are all one data structure.
 
 ### 2. Duplicate collapse (the only "suppression")
@@ -107,7 +110,7 @@ local rigs on a high one (near-free) so nothing goes to waste.
 Prior art: real AI subscription plans (a rolling window plus a shared cap);
 gRPC retry throttling (gRFC A6 — a token bucket that disables spend below a
 floor); IRC flood control's burst-credit model (RFC 1459 §8.10). The design
-lesson is graduated degradation: slow first, queue second, never drop.
+lesson is graduated degradation: slow first, queue second.
 
 ### 5. One turn at a time, and the cadence throttle
 
@@ -123,27 +126,30 @@ later pass.
 Prior art: IRC flood control — RFC 1459 §8.10 (burst credit, per-message
 penalty; excess queues rather than drops), UnrealIRCd fake lag.
 
-### 6. Per-member failure breaker
+### 6. A failed turn runs once
 
-A member whose turns keep failing outright (nonzero exit or timeout — a bad
-flag after a CLI update, a revoked key, a dead local model) would otherwise
-burn a full turn on every arrival. After `breaker_cap` consecutive failed
-turns the member's turns pause; its queue simply holds (nothing is dropped).
-One probe turn is let through per `breaker_cooldown_seconds`; the first
-clean turn closes the breaker.
+A turn that exits nonzero or is killed at its rig timeout is not run again.
+Its batch moves to the dead-letter dir (`turn-failed`, `turn-timed-out`), and
+each distinct sender in it gets one notice: `<member> failed (exit N); it may
+have partly acted.` or `<member> ran out of time; it may have partly acted.`
+The notice never asks for a resend; the sender decides. Anything the member
+staged with `tell` before it failed is released like any other turn's sends.
+A batch a killed process left in `queue/.inflight/` is recorded the same way
+on the next wake (`turn-unfinished`). Each failure costs one turn of budget,
+and the budgets bound how many a member can spend.
 
 A failure that will recur *identically* — an exec that never started, because
-the harness binary is not on `PATH` — skips the ladder entirely and **parks**
-the member on its first occurrence: one line, then silence, with the queue
-held. Retrying forever at the cap is the opposite lesson, and it is where the
-prior art divides.
+the harness binary is not on `PATH` — also **parks** the member on its first
+occurrence: one line, then silence. Mail that arrives while parked holds in the
+queue and runs no turn until a free probe finds the binary or `r4t resume`.
 
-Prior art: systemd start rate limiting (`StartLimitBurst`/
-`StartLimitIntervalSec`) for the transient ladder and systemd's `failed` state
-plus `systemctl reset-failed` for the park (`r4t resume`); the circuit-breaker
-pattern's closed/open/half-open probe cycle. Kubernetes CrashLoopBackOff is the
-anti-precedent — retry forever at the cap, so an operator watching restart 40
-still cannot tell whether anything is being learned.
+A dispatch wake starts no turn that could outlast it: when the time left before
+a8s's `max_wake_seconds` is less than the next rig's `timeout_seconds`, the
+drain stops and the queue waits for the next wake. A rig too long for any wake
+holds only its own member, and `r4t status` names it in red.
+
+Prior art: systemd's `failed` state plus `systemctl reset-failed` for the park
+(`r4t resume`).
 
 ### 7. The tree (information hiding + hard rerouting)
 
@@ -212,11 +218,11 @@ mission-command evidence lives in the wiki's Plans archive (ORG-LESSONS).
 
 ## Disposal and observability
 
-Undeliverable mail and per-turn send-quota overflow are never silently
-dropped: they move to a dead-letter directory under the roster's state dir
-with an x-death-style record (reason, count, sender, recipient, thread,
-time) — RabbitMQ's audit pattern. That is a lens and a replay source, not a
-queue anyone waits on. Deliverable messages never land here; they queue.
+Undeliverable mail, per-turn send-quota overflow and the batch of a failed,
+timed-out or unfinished turn move to a dead-letter directory under the
+roster's state dir with an x-death-style record (reason, count, sender,
+recipient, thread, time) — RabbitMQ's audit pattern. That is a lens for the
+operator, not a queue anyone waits on, and nothing in it runs again.
 
 Observability rides on a8s rather than duplicating it:
 
@@ -242,7 +248,6 @@ Observability rides on a8s rather than duplicating it:
 - RabbitMQ federation max-hops — https://www.rabbitmq.com/docs/federation-reference
 - RabbitMQ dead-letter exchanges — https://www.rabbitmq.com/docs/dlx
 - Erlang/OTP supervision principles — https://www.erlang.org/doc/system/sup_princ.html
-- systemd unit start rate limiting — https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#StartLimitIntervalSec=interval
 - AWS SQS dead-letter queue redrive (`maxReceiveCount`) — https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html
 - gRFC A6, gRPC client retries — https://github.com/grpc/proposal/blob/master/A6-client-retries.md
 - RFC 5681, TCP congestion control (AIMD) — https://www.rfc-editor.org/rfc/rfc5681

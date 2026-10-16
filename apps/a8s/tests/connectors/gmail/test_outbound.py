@@ -150,3 +150,82 @@ def test_main_argparse(monkeypatch):
     assert captured[0]["body"]["to"] == "x@y.com"
     assert captured[0]["body"]["subject"] == "S"
     assert captured[0]["body"]["body"] == "B"
+
+
+def _raising_urlopen(exc):
+    def _impl(req, timeout=None):
+        raise exc
+    return _impl
+
+
+@pytest.mark.parametrize("exc", [
+    TimeoutError("timed out"),
+    gmail_connector.urllib.error.URLError("connection reset"),
+    ConnectionResetError("reset by peer"),
+    gmail_connector.http.client.IncompleteRead(b"partial"),
+])
+def test_transport_error_may_have_been_sent(monkeypatch, capsys, exc):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    with patch.object(gmail_connector.urllib.request, "urlopen", _raising_urlopen(exc)):
+        rc = gmail_connector.send("rcpt@example.com", "S", "B")
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1
+    assert "may have been sent" in captured.err
+    assert "sent to" not in captured.out
+
+
+def _http_error(code: int, body: bytes):
+    return gmail_connector.urllib.error.HTTPError(
+        "https://example/exec", code, "err", {}, io.BytesIO(body)
+    )
+
+
+def test_http_error_without_bridge_json_may_have_been_sent(monkeypatch, capsys):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    exc = _http_error(502, b"<html>Bad Gateway</html>")
+    with patch.object(gmail_connector.urllib.request, "urlopen", _raising_urlopen(exc)):
+        rc = gmail_connector.send("rcpt@example.com", "S", "B")
+    assert rc == 0
+    assert "may have been sent" in capsys.readouterr().err
+
+
+def test_http_error_with_bridge_json_error_exits_1(monkeypatch, capsys):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    exc = _http_error(400, json.dumps({"error": "bad key"}).encode("utf-8"))
+    with patch.object(gmail_connector.urllib.request, "urlopen", _raising_urlopen(exc)):
+        rc = gmail_connector.send("rcpt@example.com", "S", "B")
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "bad key" in err
+    assert "may have been sent" not in err
+
+
+def test_non_json_answer_may_have_been_sent(monkeypatch, capsys):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+
+    def fake(req, timeout=None):
+        return _FakeResponse(b"<html>sign in</html>")
+
+    with patch.object(gmail_connector.urllib.request, "urlopen", fake):
+        rc = gmail_connector.send("rcpt@example.com", "S", "B")
+    assert rc == 0
+    assert "may have been sent" in capsys.readouterr().err
+
+
+def test_send_makes_one_post(monkeypatch):
+    monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
+    monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
+    calls: list = []
+
+    def fake(req, timeout=None):
+        calls.append(req)
+        raise TimeoutError("timed out")
+
+    with patch.object(gmail_connector.urllib.request, "urlopen", fake):
+        gmail_connector.send("rcpt@example.com", "S", "B")
+    assert len(calls) == 1

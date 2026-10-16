@@ -16,8 +16,6 @@
   },
   "cell_budget_max": 16,
   "cell_budget_earn_per_hour": 8,
-  "breaker_cap": 5,
-  "breaker_cooldown_seconds": 600,
 
   "leader": {
     "_notes": "Orchestrator rig — Cursor agent CLI. A frontier model on a low budget: high intelligence, few turns per hour, spends smart.",

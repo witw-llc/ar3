@@ -19,13 +19,11 @@ anything left over so an obvious typo in `network.json` fails loud.
 """
 from __future__ import annotations
 
-import collections
 import hashlib
 import os
 import queue
 import socket
 import threading
-import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -44,7 +42,7 @@ except ImportError:
 import paho.mqtt.client as mqtt
 
 from core import out
-from transports import OnMessage, Transport, TransportError
+from transports import OnMessage, PublishAmbiguous, Transport, TransportError
 
 
 # Aliases the option bag accepts in addition to the canonical names.
@@ -72,22 +70,8 @@ _KNOWN_OPTS: set[str] = {
 # Replaces the node tag in the default client id when set.
 _CLIENT_TAG_ENV = "A8S_CLIENT_TAG"
 
-# Receipts held while the link is down. A receipt is a few hundred bytes, and
-# a node that stays unreachable long enough to fill this has a bigger problem
-# than the oldest confirmation.
-_PENDING_CONTROL_MAX = 256
-
-# Received messages the receive path has not consumed yet. Each is re-offered
-# on its own backoff and acknowledged only once consumed. The broker's
-# in-flight window caps what it hands one session unacknowledged (mosquitto:
-# 20), so this bound matters only for a broker configured far wider.
-_RETRY_MAX = 256
-_RETRY_FIRST_S = 1.0
-_RETRY_CAP_S = 30.0
-
-# Worker-queue markers. A received message is a
+# Worker-queue marker. A received message is a
 # `(payload, mid, qos, connection)` tuple.
-_FLUSH = object()
 _STOP = object()
 
 
@@ -181,10 +165,10 @@ class MqttTransport(Transport):
         self._port = parsed.port or (8883 if parsed.scheme == "mqtts" else 1883)
         self._tls = parsed.scheme == "mqtts"
         self._client_id = client_id or _default_client_id(remote_id, node_tag)
-        # Manual ack: a message is acknowledged only once the receive path
-        # reports it consumed. One it has not consumed, or one that arrives
-        # while `stop()` drains, stays unacknowledged, and the broker offers
-        # it again next session rather than it being acknowledged and dropped.
+        # Manual ack: a message is acknowledged once the receive path has
+        # run on it. One that arrives while `stop()` drains, or one a crash
+        # interrupts, stays unacknowledged, and the broker offers it again
+        # next session.
         self._client = mqtt.Client(
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             client_id=self._client_id,
@@ -201,15 +185,10 @@ class MqttTransport(Transport):
         self._worker_thread: threading.Thread | None = None
         self._started = False
         self._stopping = False
-        self._pending_lock = threading.Lock()
-        self._pending_control: collections.deque[bytes] = collections.deque()
         # Bumped on every CONNACK. A packet id belongs to the connection that
         # carried it, so a message from an earlier connection is never acked
         # on this one; the broker offers it again instead.
         self._connection = 0
-        # `[payload, mid, qos, connection, due, delay]`, touched only by the
-        # worker.
-        self._retry: collections.deque[list[Any]] = collections.deque()
 
     @property
     def id(self) -> str:
@@ -220,10 +199,6 @@ class MqttTransport(Transport):
             self._connection += 1
             client.subscribe(self._topic, qos=1)
             self._connected.set()
-            # The worker sends what the outage held, in order, and forgets
-            # retries the broker now owns again. Never here: a QoS-1 publish
-            # waits for a PUBACK this network thread reads.
-            self._msg_queue.put(_FLUSH)
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         # Clear the readiness event so `publish()` can wait for the next
@@ -237,74 +212,29 @@ class MqttTransport(Transport):
         # echoes our publishes back through on_message, and receive_envelope
         # can do real work (registry I/O, file downloads, convo archive).
         # Blocking here delays PUBACK for the in-flight outbound publish and
-        # surfaces as "publish not acknowledged" at the routing layer.
+        # comes back from the routing layer as an ambiguous publish.
         if self._stopping:
             return
         self._msg_queue.put((msg.payload, msg.mid, msg.qos, self._connection))
 
     def _worker_loop(self) -> None:
         while True:
-            try:
-                item = self._msg_queue.get(timeout=self._next_retry_in())
-            except queue.Empty:
-                item = None
-            self._forget_earlier_connections()
+            item = self._msg_queue.get()
             if item is _STOP:
-                self._flush_pending_control()
                 return
-            if item is _FLUSH:
-                self._flush_pending_control()
-            elif item is not None:
-                self._offer([*item, 0.0, 0.0])
-            self._retry_due()
+            self._offer(item)
 
-    def _offer(self, entry: list[Any]) -> None:
-        """Hand one message to the receive path. Ack it when consumed;
-        otherwise hold it for another offer after a backoff."""
-        payload, mid, qos, connection, _due, delay = entry
+    def _offer(self, item: tuple[Any, ...]) -> None:
+        """Hand one message to the receive path once, then ack it."""
+        payload, mid, qos, connection = item
         cb = self._on_message
-        try:
-            consumed = cb is None or cb(payload) is not False
-        except Exception:
-            consumed = False
-        if consumed:
-            if connection == self._connection:
-                self._client.ack(mid, qos)
-            return
-        delay = min(delay * 2, _RETRY_CAP_S) if delay else _RETRY_FIRST_S
-        entry[4] = time.monotonic() + delay
-        entry[5] = delay
-        if len(self._retry) >= _RETRY_MAX:
-            self._retry.popleft()
-            out(
-                f"WARN remote {self._remote_id} retry list full ({_RETRY_MAX}); "
-                f"dropped 1 unconsumed message, the oldest, unacknowledged "
-                f"for the broker to offer again next session"
-            )
-        self._retry.append(entry)
-
-    def _next_retry_in(self) -> Optional[float]:
-        if not self._retry:
-            return None
-        return max(0.0, min(e[4] for e in self._retry) - time.monotonic())
-
-    def _retry_due(self) -> None:
-        now = time.monotonic()
-        due = [e for e in self._retry if e[4] <= now]
-        if not due:
-            return
-        self._retry = collections.deque(e for e in self._retry if e[4] > now)
-        for entry in due:
-            self._offer(entry)
-
-    def _forget_earlier_connections(self) -> None:
-        """Drop QoS-1 retries from a connection that has ended. The persistent
-        session still holds them unacknowledged, and the broker offers them
-        again on this connection."""
-        if any(e[2] and e[3] != self._connection for e in self._retry):
-            self._retry = collections.deque(
-                e for e in self._retry if not e[2] or e[3] == self._connection
-            )
+        if cb is not None:
+            try:
+                cb(payload)
+            except Exception as e:
+                out(f"WARN remote {self._remote_id} receive raised: {e}")
+        if connection == self._connection:
+            self._client.ack(mid, qos)
 
     def is_connected(self) -> bool:
         """True while the broker has answered CONNACK and the link is up."""
@@ -338,18 +268,15 @@ class MqttTransport(Transport):
         # rather than silently buffering publishes. After this, the loop
         # auto-reconnects on disconnect.
         if not self._connected.wait(timeout=self._connect_timeout_s):
-            # Don't raise — let the background loop keep retrying. publish()
-            # below will fail until the connection comes up, which is the
-            # right signal for the routing pass to log a warning and retry
-            # via the per-message backoff.
+            # Don't raise — the background loop keeps reconnecting, and a
+            # publish() before the link is up fails that one send.
             pass
 
     def stop(self) -> None:
-        """Drain, then disconnect. New arrivals, and taken messages the
-        receive path has not consumed, are left unacknowledged for the broker
-        to offer again next session; everything already taken is offered, its
-        receipts sent while the link is still up, and only then does the
-        client disconnect."""
+        """Drain, then disconnect. New arrivals are left unacknowledged for
+        the broker to offer again next session; everything already taken is
+        handed to the receive path, within a bounded wait, and only then does
+        the client disconnect."""
         if not self._started:
             return
         self._stopping = True
@@ -358,21 +285,6 @@ class MqttTransport(Transport):
         if worker is not None:
             worker.join(timeout=self._connect_timeout_s + self._ack_timeout_s)
             self._worker_thread = None
-        owed = len(self._retry)
-        self._retry.clear()
-        if owed:
-            out(
-                f"remote {self._remote_id} stopped with {owed} unconsumed "
-                f"message(s) unacknowledged; the broker offers them next session"
-            )
-        with self._pending_lock:
-            dropped = len(self._pending_control)
-            self._pending_control.clear()
-        if dropped:
-            out(
-                f"WARN remote {self._remote_id} stopped with the link down; "
-                f"dropped {dropped} held delivery receipt(s)"
-            )
         try:
             self._client.disconnect()
         except OSError:
@@ -380,70 +292,34 @@ class MqttTransport(Transport):
         self._client.loop_stop()
         self._started = False
 
-    def publish_control(self, envelope: bytes) -> bool:
-        """Send a receipt now, or hold it for the next CONNACK when the link
-        is down. Held receipts go out in the order they were made."""
+    def publish_control(self, envelope: bytes) -> None:
+        """Send a receipt once, without waiting for the link or the PUBACK.
+        Raises `TransportError` when the link is down; the receipt is dropped."""
         if not self._started:
             raise TransportError(f"{self._remote_id}: publish before start")
-        with self._pending_lock:
-            if self._pending_control or not self._client.is_connected():
-                self._hold_control(envelope)
-                return False
-        try:
-            self.publish(envelope)
-            return True
-        except TransportError:
-            if self._client.is_connected():
-                raise
-        with self._pending_lock:
-            self._hold_control(envelope)
-        return False
-
-    def _hold_control(self, envelope: bytes) -> None:
-        if len(self._pending_control) >= _PENDING_CONTROL_MAX:
-            self._pending_control.popleft()
-            out(
-                f"WARN remote {self._remote_id} held-receipt list full "
-                f"({_PENDING_CONTROL_MAX}); dropped 1 delivery receipt, the oldest"
-            )
-        self._pending_control.append(envelope)
-        # The link may have come back between the check and the append, with
-        # its CONNACK finding nothing to flush.
-        if self._client.is_connected():
-            self._msg_queue.put(_FLUSH)
-
-    def _flush_pending_control(self) -> None:
-        while True:
-            with self._pending_lock:
-                if not self._pending_control or not self._client.is_connected():
-                    return
-                envelope = self._pending_control[0]
-            try:
-                self.publish(envelope)
-            except TransportError:
-                if self._client.is_connected():
-                    out(
-                        f"WARN remote {self._remote_id} held delivery receipt "
-                        f"not acknowledged; kept for the next connection"
-                    )
-                return
-            with self._pending_lock:
-                if self._pending_control and self._pending_control[0] is envelope:
-                    self._pending_control.popleft()
+        if not self._client.is_connected():
+            raise TransportError(f"{self._remote_id}: broker not connected")
+        rc = self._client.publish(self._topic, payload=envelope, qos=self._publish_qos).rc
+        if rc != mqtt.MQTT_ERR_SUCCESS:
+            raise TransportError(f"{self._remote_id}: publish rc={rc}")
 
     def publish(self, envelope: bytes) -> None:
         if not self._started:
             raise TransportError(f"{self._remote_id}: publish before start")
         if not self._client.is_connected():
-            # Transient blip — paho's background loop auto-reconnects.
-            # Wait briefly for the next CONNACK before declaring failure
-            # so a normal NAT-timeout / broker-flap doesn't trigger a
-            # warn-and-backoff at the routing layer.
+            # A NAT timeout or broker flap: paho's loop reconnects in the
+            # background, so wait once, bounded, for the next CONNACK.
             self._connected.wait(timeout=self._connect_timeout_s)
         if not self._client.is_connected():
             raise TransportError(f"{self._remote_id}: broker not connected")
         info = self._client.publish(self._topic, payload=envelope, qos=self._publish_qos)
         rc = info.rc
+        if rc == mqtt.MQTT_ERR_NO_CONN and self._publish_qos:
+            # paho keeps a QoS 1 message it could not write and sends it
+            # after the reconnect.
+            raise PublishAmbiguous(
+                f"{self._remote_id}: link dropped at publish; paho sends it after the reconnect"
+            )
         if rc != mqtt.MQTT_ERR_SUCCESS:
             raise TransportError(f"{self._remote_id}: publish rc={rc}")
         if self._publish_qos == 0:
@@ -451,6 +327,8 @@ class MqttTransport(Transport):
         try:
             info.wait_for_publish(timeout=self._ack_timeout_s)
         except (RuntimeError, ValueError) as e:
-            raise TransportError(f"{self._remote_id}: wait_for_publish: {e}") from e
+            raise PublishAmbiguous(f"{self._remote_id}: wait_for_publish: {e}") from e
         if not info.is_published():
-            raise TransportError(f"{self._remote_id}: publish not acknowledged")
+            raise PublishAmbiguous(
+                f"{self._remote_id}: no PUBACK within {self._ack_timeout_s:g}s"
+            )

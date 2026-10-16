@@ -1,11 +1,11 @@
-"""a8s remote routing — config, publish-with-backoff, receive loop, dedup.
+"""a8s remote routing — config, one-try publish, receive loop, dedup.
 
 a8s only crosses cluster boundaries on outbound `tell` messages — every
 message has a force-stamped agent `from`, no senderless channel exists.
 State queries (`logs`, `ls`, `agents`) are strictly local.
 This module wires the message side: `~/.config/a8s/network.json` (dict-shaped:
 name → {transport, broker, topic, ...}) becomes a list of Transport
-instances. The routing pass uses `publish_with_backoff` as its
+instances. The routing pass uses `make_publish_remotes` as its
 `route_outboxes(publish_remotes=...)` hook; each running attached_loop
 spawns one subscriber thread per remote that calls into
 `receive_envelope`. Cluster-wide dedup lives in the `seen` table of the
@@ -36,7 +36,6 @@ from typing import Callable
 from core import (
     Participant,
     _preview,
-    claims_dir,
     inbox_dir,
     inbox_tmp_dir,
     network_config_path,
@@ -45,16 +44,16 @@ from core import (
     out_err,
     secrets_config_path,
 )
-import receipts
 from delivery_receipt import (
     build_delivery_receipt,
     local_node,
     is_control_envelope,
+    is_other_stage_receipt,
     parse_delivery_receipt,
 )
 from registry import resolve_name
 from services import StorageService
-from transports import OnMessage, Transport, TransportError
+from transports import OnMessage, PublishAmbiguous, Transport, TransportError
 import txlog
 from ar3.fsio import atomic_write_text
 from ar3.ulid import is_ulid, parse as parse_ulid
@@ -116,43 +115,23 @@ def _remote_not_local(
     recipient: str,
     reason: str,
     remote_id: str = "remote",
-    *,
-    original: dict | None = None,
-    publish_control: Callable[[bytes], None] | None = None,
 ) -> None:
     """Envelope observed on a shared remote that resolves to no local agent
-    here. Not a failure — some other node on the same topic owns delivery.
-
-    It is a failure when no node owns it, and the sender cannot tell the two
-    apart from silence. So say so out loud: publish a `no_local_recipient`
-    receipt naming this node. A sender that collects one from every node and a
-    delivery from none knows the message evaporated, which is the case
-    `DROPPED` never covered because a configured remote made the publish
-    succeed.
-
-    The id then goes into the seen table, before the caller releases the
-    claim. Every daemon on the machine receives the same envelope, and the
-    table is what turns the later ones away, so the machine answers once."""
+    here. Not a failure — some other node on the same topic may own delivery,
+    or none does. a8s is best effort, so nothing goes back to the sender either
+    way: the miss is a line in this node's own log and nothing more. The
+    receiver recorded the id in the seen table before it got here, so the
+    machine logs the miss once."""
     _remote_receive_diagnostic(
         msg_id, recipient, reason, remote_id, event="NOT_LOCAL", prefix="REMOTE_SKIP",
     )
-    if original is not None and publish_control is not None:
-        _publish_delivery_receipt(
-            original,
-            [recipient],
-            publish_control,
-            remote_id,
-            stage="no_local_recipient",
-            detail=reason,
-        )
-    seen_id_append(msg_id)
 
 
 def _remote_discarded(
     msg_id: str, recipient: str, reason: str, remote_id: str = "remote",
 ) -> None:
     """The received envelope itself is unusable (malformed/unsupported).
-    Nothing will retry it from this observation."""
+    Nothing tries it again."""
     _remote_receive_diagnostic(
         msg_id, recipient, reason, remote_id, event="DISCARDED", prefix="REMOTE_DROP",
     )
@@ -603,114 +582,6 @@ def detect_service_kind(url: str) -> str | None:
 
 # ---------- seen table ----------
 
-# How long a claim may sit before another receiver may take it over. The claim
-# covers one delivery attempt — a single download pass plus the inbox writes —
-# so this only has to outlast a network timeout, not the deferred retry window.
-# A process killed mid-delivery leaves a claim behind; past this it is assumed
-# dead and the message becomes deliverable again rather than lost.
-CLAIM_STALE_SECONDS = 300
-
-
-def _claims_dir() -> Path:
-    return claims_dir()
-
-
-def claim_message(ulid: str) -> bool:
-    """Take exclusive responsibility for delivering `ulid`, cluster-wide.
-
-    Every daemon on a machine runs its own subscriber and resolves recipients
-    from the shared registry, so one envelope arrives at every one of them and
-    any of them will deliver it. The seen table alone cannot arbitrate that:
-    it is read on entry and written after delivery, and everything in between —
-    a download attempt above all — is time in which a second receiver reads a
-    table that does not mention this message yet and starts delivering it too.
-
-    So the claim is taken up front and atomically. `O_CREAT | O_EXCL` is one
-    filesystem operation with one winner, which is what the process-local lock
-    around the table cannot be.
-
-    False means somebody else has it; the caller drops the envelope silently,
-    exactly as it would for a duplicate.
-    """
-    d = _claims_dir()
-    path = d / ulid
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-        return True
-    except FileExistsError:
-        pass
-    except OSError:
-        # Claiming is an optimisation over the table, never a gate on delivery.
-        # If the directory cannot be written, deliver and accept the duplicate.
-        return True
-    try:
-        age = time.time() - path.stat().st_mtime
-    except OSError:
-        return True  # vanished between the two calls: the holder finished
-    if age <= CLAIM_STALE_SECONDS:
-        return False
-    # The holder is gone, so somebody should take over. Re-stamp first, which
-    # turns away every arrival after this one.
-    #
-    # Two receivers racing the same expiry can still both get here and both
-    # conclude they won, and that is tolerated rather than fixed: the failure
-    # is a duplicate delivery, which this whole mechanism already accepts
-    # whenever the claims directory cannot be written, and the inbox write is
-    # idempotent. Removing the dead file and re-taking it with an exclusive
-    # create looks like the fix and is worse — unlink and create are two
-    # operations, so a slow racer's unlink deletes the fast racer's live claim
-    # and both still win, having destroyed custody of a delivery in progress.
-    # Making this genuinely exclusive needs a held lock rather than a file
-    # that exists, which is a larger change than the fault justifies.
-    try:
-        prior = path.stat().st_mtime
-        os.utime(path, None)
-        return path.stat().st_mtime != prior
-    except OSError:
-        return False
-
-
-def hold_claim(ulid: str) -> None:
-    """Keep a claim from going stale while the work it covers is still running.
-
-    A claim is stamped once and expires 300 seconds later, which covers one
-    delivery attempt. Deferred attachment delivery runs far longer than that —
-    `storage_receive_wait_seconds` defaults to 900 — so the thread doing that
-    work re-stamps its own claim as it goes. It has to be that thread: a
-    heartbeat from anywhere else would keep a dead holder's claim alive and
-    the message would never be redelivered.
-    """
-    try:
-        os.utime(_claims_dir() / ulid, None)
-    except OSError:
-        pass
-
-
-def release_claim(ulid: str) -> None:
-    """Give up a claim. Called once the message is durably recorded in the
-    seen table, and on every path that ends without delivering."""
-    try:
-        (_claims_dir() / ulid).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def sweep_stale_claims() -> None:
-    """Drop claim files left behind by processes that died mid-delivery."""
-    cutoff = time.time() - CLAIM_STALE_SECONDS
-    try:
-        entries = list(_claims_dir().iterdir())
-    except OSError:
-        return
-    for entry in entries:
-        try:
-            if entry.stat().st_mtime < cutoff:
-                entry.unlink(missing_ok=True)
-        except OSError:
-            continue
-
-
 def seen_id_contains(ulid: str) -> bool:
     return txlog.seen_contains(ulid)
 
@@ -728,68 +599,84 @@ def _expire_seen(now: float) -> None:
     )
 
 
-def seen_id_append(ulid: str, kind: str = "message") -> None:
+def seen_id_append(ulid: str, kind: str = "message") -> bool:
     """Remember a ULID, and at most once per ten minutes drop the ids that
-    have aged out. Best-effort: a missed append just means a possible
-    duplicate."""
+    have aged out. True when this call added the row, and on a store that
+    cannot be written; False when the id was already there.
+
+    The insert is the one cross-process winner on a machine: every daemon's
+    subscriber meets the same envelope, and only the one whose insert adds
+    the row goes on to deliver it."""
     global _seen_expiry_last
-    txlog.seen_insert(ulid, kind)
+    added = txlog.seen_insert(ulid, kind)
     with _SEEN_EXPIRY_LOCK:
         mono = time.monotonic()
         if (
             _seen_expiry_last is not None
             and mono - _seen_expiry_last < _SEEN_EXPIRY_INTERVAL_S
         ):
-            return
+            return added
         _seen_expiry_last = mono
     _expire_seen(time.time())
+    return added
 
 
-# ---------- send (publish_with_backoff) ----------
+# ---------- send ----------
+
+SENT = "sent"
+AMBIGUOUS = "ambiguous"
+FAILED = "failed"
+
 
 def make_publish_remotes(remotes: list[Transport]) -> Callable:
     """Build the `publish_remotes` callable that `route_outboxes` invokes.
-    For each not-yet-succeeded remote, attempts a publish; on success logs to
-    the sender's per-agent log and the global log (so diagnosing an outage
-    doesn't require reading every agent's log to rule out a quiet success);
-    on failure logs a warning to the per-agent log and leaves the remote in
-    the `pending_remotes` set for the next pass. Returns the updated
-    `succeeded_remotes` list."""
 
-    def publish_with_backoff(
+    Each call gives every remote one publish and answers
+    `{remote_id: (outcome, detail)}`. `SENT` is a remote that took the
+    envelope. `AMBIGUOUS` is one whose outcome is unknown (no PUBACK, a link
+    that dropped after the send); it counts as sent and is never retried.
+    `FAILED` is a definite failure. A remote found without a link goes into
+    the pass's `down` set, and a later message in the same pass fails at once
+    instead of waiting for that link again."""
+
+    def publish_once(
         msg: dict,
         sender_name: str,
-        succeeded_so_far: list[str],
-        attempt_count: int,
-    ) -> list[str]:
+        down: set[str],
+    ) -> dict[str, tuple[str, str]]:
         envelope = json.dumps(msg).encode("utf-8")
         recipient = (msg.get("to") or "").strip() or "?"
         preview = _preview(msg.get("content", ""))
-        succeeded = list(succeeded_so_far)
+        outcomes: dict[str, tuple[str, str]] = {}
         for remote in remotes:
-            if remote.id in succeeded:
+            if remote.id in down and not remote.is_connected():
+                outcomes[remote.id] = (FAILED, f"{remote.id}: broker not connected")
                 continue
             try:
                 remote.publish(envelope)
-                succeeded.append(remote.id)
+            except PublishAmbiguous as e:
+                outcomes[remote.id] = (AMBIGUOUS, str(e))
                 out_agent(
                     sender_name,
-                    f"remote {remote.id}: published -> {recipient}: {preview}",
+                    f"WARN remote {remote.id} publish outcome unknown, counted as sent: {e}",
                 )
-                out(f"{sender_name}: remote {remote.id}: published -> {recipient}")
-            except TransportError as e:
-                out_agent(
-                    sender_name,
-                    f"WARN remote {remote.id} publish failed (attempt {attempt_count + 1}): {e}",
-                )
+                continue
             except Exception as e:
-                out_agent(
-                    sender_name,
-                    f"WARN remote {remote.id} publish raised (attempt {attempt_count + 1}): {e}",
-                )
-        return succeeded
+                if not remote.is_connected():
+                    down.add(remote.id)
+                outcomes[remote.id] = (FAILED, str(e))
+                kind = "failed" if isinstance(e, TransportError) else "raised"
+                out_agent(sender_name, f"WARN remote {remote.id} publish {kind}: {e}")
+                continue
+            outcomes[remote.id] = (SENT, "")
+            out_agent(
+                sender_name,
+                f"remote {remote.id}: published -> {recipient}: {preview}",
+            )
+            out(f"{sender_name}: remote {remote.id}: published -> {recipient}")
+        return outcomes
 
-    return publish_with_backoff
+    return publish_once
 
 
 # ---------- receive ----------
@@ -800,28 +687,19 @@ def receive_envelope(
     services: list[StorageService] | None = None,
     publish_control: Callable[[bytes], None] | None = None,
     remote_id: str = "remote",
-) -> bool:
+) -> None:
     """Decode an incoming envelope, dedupe, filter against the local
     registry, and atomically write into each matched local recipient's
     inbox. Unknown local destinations emit bounded, rate-limited diagnostics;
     malformed or duplicate envelopes drop silently. Nothing should crash the
     subscriber thread.
 
-    Returns whether this call finished with the envelope. True says the
-    network is done with it here — delivered and recorded in the seen
-    table, already in that table, or rejected for good (malformed, or addressed
-    to nobody this node holds, which the table also records). False says it is
-    still owed an attempt: a sibling receiver holds the claim, or delivery
-    raised and the claim was released precisely so somebody can try again. A
-    transport that records what it consumed must not record the envelope on a
-    False.
-
-    A sibling's claim stays False because the folder and s3 transports keep
-    one consumed ledger per machine: a True here would stamp it for the
-    holder too, and a holder that then fails would never see the message
-    again. The re-offer that False buys is cheap, because the holder records
-    the id in the table before it releases the claim, and the re-offer is
-    answered from the table without a second receipt.
+    Every daemon on a machine runs its own subscriber over the same registry,
+    so one envelope reaches each of them. The seen-table insert names the one
+    that handles it: the insert that adds the row wins, and every other
+    sighting drops. The row goes in before delivery, so the transport
+    consumes the envelope whatever happens next, and a delivery that fails is
+    logged and lost.
 
     `services`: configured storage services. When set and the
     envelope's `files[i].storage` URLs point at a service we know, the
@@ -837,33 +715,20 @@ def receive_envelope(
             raise ValueError("envelope is not a JSON object")
     except (ValueError, UnicodeDecodeError) as e:
         out(f"WARN: dropped malformed envelope ({e})")
-        return True
+        return
     msg_id = msg.get("id", "")
     if not isinstance(msg_id, str) or not is_ulid(msg_id):
         out(f"WARN: envelope without valid id; dropping (id={msg_id!r})")
-        return True
+        return
     if _refuse_aged(msg, msg_id, all_agents, remote_id):
-        return True
-    if seen_id_contains(msg_id):
-        return True  # already delivered — silent dedup
-    if not claim_message(msg_id):
-        # A sibling receiver has it in flight — the same silent dedup, but the
-        # message is that receiver's to finish, not this one's to write off.
-        return False
-    if seen_id_contains(msg_id):
-        # A sibling finished and released between the table read and the
-        # claim. Running the path again would send a second receipt.
-        release_claim(msg_id)
-        return True
-    try:
-        return _deliver_claimed_envelope(
-            msg, msg_id, all_agents, services, publish_control, remote_id
-        )
-    except BaseException:
-        # Nothing was recorded, so the message must stay deliverable — by this
-        # receiver's transport redelivery or by a sibling.
-        release_claim(msg_id)
-        raise
+        return
+    control = is_control_envelope(msg)
+    if not seen_id_append(msg_id, kind="receipt" if control else "message"):
+        return
+    if control:
+        _receive_control_envelope(msg, all_agents, remote_id)
+        return
+    _deliver_envelope(msg, msg_id, all_agents, services, publish_control, remote_id)
 
 
 def _holds_recipient(msg: dict, all_agents: list[Participant]) -> bool:
@@ -903,54 +768,25 @@ def _refuse_aged(
     return True
 
 
-def _deliver_claimed_envelope(
+def _deliver_envelope(
     msg: dict,
     msg_id: str,
     all_agents: list[Participant],
     services: list[StorageService] | None,
     publish_control: Callable[[bytes], None] | None,
     remote_id: str,
-) -> bool:
-    """The body of `receive_envelope`, run while holding the claim on `msg_id`.
-
-    The answer is whether this node is finished with the envelope, and a
-    transport that can redeliver reads it as permission to drop its own copy.
-    True means the message reached every recipient's inbox, or that it never
-    could — a name this cluster does not hold is as finished as a delivery.
-    False means the work is unfinished and the copy on the wire is still the
-    only one worth having.
-
-    Only a path that answers True records the id in the seen table, because
-    the table suppresses every later attempt: appending it for work that failed
-    turns a disk that was full for a minute into a message nobody ever gets.
-    Local routing already draws the line in this place — `_process_pending`
-    appends only once at least one inbox write has committed.
-    """
-    if is_control_envelope(msg):
-        _receive_control_envelope(msg, all_agents, remote_id)
-        seen_id_append(msg_id, kind="receipt")
-        release_claim(msg_id)
-        return True
-    if _deferred_in_flight(msg_id):
-        # Reachable only when the claims directory cannot be written, where
-        # `claim_message` waves everything through rather than gate delivery
-        # on a directory. A worker in this process already holds this message;
-        # doing the fan-out again would double every receipt it will send.
-        return False
+) -> None:
+    """The body of `receive_envelope`, run by the one receiver whose insert
+    recorded `msg_id`. Each local recipient gets one inbox write."""
     recipient_name = (msg.get("to") or "").strip()
     if not recipient_name:
-        release_claim(msg_id)
-        return True  # malformed; no retry will ever make it addressable
+        return
     by_name = {p.name.lower(): p for p in all_agents}
     try:
         kind, member_names = resolve_name(recipient_name)
     except (KeyError, ValueError):
-        _remote_not_local(
-            msg_id, recipient_name, "not in local registry", remote_id,
-            original=msg, publish_control=publish_control,
-        )
-        release_claim(msg_id)
-        return True  # not ours; redelivering it here changes nothing
+        _remote_not_local(msg_id, recipient_name, "not in local registry", remote_id)
+        return
     recipients: list[Participant] = []
     for m in member_names:
         rp = by_name.get(m.lower())
@@ -961,15 +797,9 @@ def _deliver_claimed_envelope(
             recipients.append(rp)
     if not recipients:
         _remote_not_local(
-            msg_id,
-            recipient_name,
-            f"{kind} resolved to zero local recipients",
-            remote_id,
-            original=msg,
-            publish_control=publish_control,
+            msg_id, recipient_name, f"{kind} resolved to zero local recipients", remote_id,
         )
-        release_claim(msg_id)
-        return True  # not ours; redelivering it here changes nothing
+        return
     txlog.log(
         "RESOLVED_REMOTE",
         msg_id=msg_id,
@@ -1004,8 +834,6 @@ def _deliver_claimed_envelope(
     preview = _preview(msg.get("content", ""))
     delivered_names: list[str] = []
     delivered_envelopes: list[dict] = []
-    deferred: list[Participant] = []
-    failed = False
     for recipient in recipients:
         # Per-recipient download: each recipient has its own `.files/`, so
         # the bytes land in the right place even on alias fan-out. Imported
@@ -1015,10 +843,10 @@ def _deliver_claimed_envelope(
         if files_have_storage:
             from mailbox import _download_files_to_recipient
 
-            # One attempt only. Everything here runs on the transport's single
-            # subscriber worker, so a retry loop that sleeps would hold every
-            # later message — including plain text from another sender —
-            # behind one unreachable URL.
+            # The first fetch does not wait. Everything here runs on the
+            # transport's single subscriber worker, so a wait here would hold
+            # every later message — including plain text from another sender —
+            # behind one unreachable URL. The bounded wait runs off the worker.
             wait_s = _receive_wait_seconds()
             msg_for_recipient = _download_files_to_recipient(
                 msg, recipient, services or [],
@@ -1026,7 +854,10 @@ def _deliver_claimed_envelope(
                 announce_failures=wait_s <= 0,
             )
             if _attachments_missing(msg_for_recipient, msg) and wait_s > 0:
-                deferred.append(recipient)
+                _wait_for_attachments(
+                    msg, recipient, services or [], msg_id, sender_label, preview,
+                    remote_id, publish_control,
+                )
                 continue
         if _write_to_inbox(
             msg_for_recipient, recipient, msg_id, sender_label, preview, remote_id
@@ -1036,11 +867,6 @@ def _deliver_claimed_envelope(
             _report_attachment_outcome(
                 msg, msg_for_recipient, recipient, publish_control, remote_id
             )
-        else:
-            # The inbox would not take it — a full disk, a directory that is
-            # not writable. That is a condition somebody repairs, so the
-            # message has to still be there when they do.
-            failed = True
     if delivered_names:
         import convo
 
@@ -1055,45 +881,20 @@ def _deliver_claimed_envelope(
         )
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
-    if deferred:
-        # The claim stays held and the table stays empty until the last
-        # deferred recipient is done. Held, because a sibling daemon reading
-        # the same mailbox would otherwise start the same download again;
-        # empty, because the only full copy of this envelope is now a closure
-        # in a pool thread, and the copy on the wire is what a restart has to
-        # find. `False` is what keeps that copy there.
-        _begin_deferred(msg_id, len(deferred), failed)
-        for recipient in deferred:
-            _submit_deferred_delivery(
-                msg, recipient, services or [], msg_id, sender_label, preview,
-                remote_id, publish_control,
-            )
-        return False
-    if failed:
-        release_claim(msg_id)
-        return False
-    seen_id_append(msg_id)
-    release_claim(msg_id)
-    return True
 
 
-def _attachment_outcomes(delivered: dict) -> tuple[list[str], list[tuple[str, str]]]:
-    """Split a delivered envelope's files into fetched names and (name, reason)
-    failures. The download rewrites an entry it could not fetch with `error`,
-    so the envelope the recipient got is the record of what it got."""
-    fetched: list[str] = []
+def _attachment_failures(delivered: dict) -> list[tuple[str, str]]:
+    """The (name, reason) of each file a delivered envelope does not hold. The
+    download rewrites an entry it could not fetch with `error`, so the
+    envelope the recipient got is the record of what it got."""
     failed: list[tuple[str, str]] = []
     for entry in delivered.get("files") or []:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("filename") or "")
-        if not name:
-            continue
-        if entry.get("error"):
+        if name and entry.get("error"):
             failed.append((name, str(entry.get("detail") or entry.get("error"))))
-        else:
-            fetched.append(name)
-    return fetched, failed
+    return failed
 
 
 def _report_attachment_outcome(
@@ -1103,14 +904,15 @@ def _report_attachment_outcome(
     publish_control: Callable[[bytes], None] | None,
     remote_id: str,
 ) -> None:
-    """Tell the sender which files this recipient holds and which it never will.
+    """Record each file this recipient will never hold, and tell the sender's
+    node.
 
     Per recipient, because the download is per recipient: on an alias fan-out
     one seat can hold the bytes while another holds the reason it does not."""
     if not (original.get("files") or []):
         return
     msg_id = str(original.get("id") or "")
-    fetched, failed = _attachment_outcomes(delivered)
+    failed = _attachment_failures(delivered)
     for name, reason in failed:
         txlog.log(
             "ATTACHMENT_FAILED",
@@ -1121,14 +923,7 @@ def _report_attachment_outcome(
             remote=remote_id,
             detail=reason,
         )
-    if publish_control is None:
-        return
-    if fetched:
-        _publish_delivery_receipt(
-            original, [recipient.name], publish_control, remote_id,
-            stage="attachment_fetched", files=fetched,
-        )
-    if failed:
+    if failed and publish_control is not None:
         _publish_delivery_receipt(
             original, [recipient.name], publish_control, remote_id,
             stage="attachment_failed",
@@ -1150,21 +945,21 @@ def _attachments_missing(msg: dict, source: dict | None = None) -> bool:
     """Whether anything worth waiting for is still missing.
 
     A sender that could not upload publishes an entry carrying `error` and no
-    `storage`. That loss is already final — there is no URL to retry — so
-    deferring on it would hold the message for the whole retry window and then
+    `storage`. That loss is already final — there is no URL to fetch — so
+    waiting on it would hold the message for the whole fetch wait and then
     deliver exactly what was available at the start. Only an entry the sender
-    gave us somewhere to fetch from counts as retryable; pass `source` to make
-    that distinction, omit it to ask the flat question.
+    gave us somewhere to fetch from counts as worth the wait; pass `source` to
+    make that distinction, omit it to ask the flat question.
     """
-    retryable: set | None = None
+    fetchable: set | None = None
     if source is not None:
-        retryable = {
+        fetchable = {
             e.get("filename")
             for e in (source.get("files") or [])
             if isinstance(e, dict) and e.get("storage")
         }
     return any(
-        e.get("error") and (retryable is None or e.get("filename") in retryable)
+        e.get("error") and (fetchable is None or e.get("filename") in fetchable)
         for e in (msg.get("files") or [])
     )
 
@@ -1222,11 +1017,16 @@ def _write_to_inbox(
     remote_id: str,
 ) -> bool:
     """Atomically land one envelope in one recipient's inbox. True when the
-    message is there (already present counts)."""
+    message is there (already present counts); False when the write failed
+    and the message was dropped for this recipient."""
     # ensure_mailboxes lives in mailbox.py; importing it here would form
     # a cycle. Just create dirs.
-    inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)
-    inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
+    try:
+        inbox_dir(recipient.name).mkdir(parents=True, exist_ok=True)
+        inbox_tmp_dir(recipient.name).mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _dropped(msg_id, sender_label, recipient, remote_id, f"inbox write failed: {e}")
+        return False
     final = inbox_dir(recipient.name) / f"{msg_id}.json"
     if final.is_file():
         txlog.log(
@@ -1251,7 +1051,7 @@ def _write_to_inbox(
             json.dump(msg_for_recipient, f, indent=2)
         os.replace(str(staging), str(final))
     except OSError as e:
-        out_agent(recipient.name, f"WARN failed to write incoming envelope id={msg_id}: {e}")
+        _dropped(msg_id, sender_label, recipient, remote_id, f"inbox write failed: {e}")
         return False
     out_agent(recipient.name, f"received from {sender_label} (via remote): {preview}")
     file_names = [
@@ -1271,98 +1071,29 @@ def _write_to_inbox(
     return True
 
 
-# Attachment retries run here instead of on the subscriber worker. Bounded so a
-# burst of undeliverable attachments cannot spawn a thread apiece; queued work
-# still runs, just later. Daemon threads — a retry must never hold up exit.
-_ATTACHMENT_RETRY_WORKERS = 4
+def _dropped(
+    msg_id: str, sender_label: str, recipient: Participant, remote_id: str, reason: str,
+) -> None:
+    """A received message that will not reach this recipient. The seen row is
+    already written, so nothing here tries it again."""
+    out_agent(recipient.name, f"WARN dropped incoming envelope id={msg_id}: {reason}")
+    txlog.log(
+        "DROPPED",
+        msg_id=msg_id,
+        sender=sender_label,
+        recipient=recipient.name,
+        remote=remote_id,
+        detail=reason,
+    )
+
+
+# The bounded attachment wait runs here instead of on the subscriber worker.
+# Bounded so a burst of slow attachments cannot spawn a thread apiece; queued
+# waits still run, just later.
+_ATTACHMENT_WAIT_WORKERS = 4
 _attachment_pool: "ThreadPoolExecutor | None" = None
 _attachment_pool_lock = threading.Lock()
 _attachment_futures: list = []
-# Deferred deliveries still owed per message id, and the ids whose fan-out has
-# already lost a recipient. Both are read and written under the pool lock.
-_deferred_owed: dict[str, int] = {}
-_deferred_failed: set[str] = set()
-# How often the claims covering deferred work are re-stamped. A third of the
-# expiry leaves room for two missed beats before a live holder looks dead.
-CLAIM_HEARTBEAT_SECONDS = CLAIM_STALE_SECONDS / 3
-_claim_holder: "threading.Thread | None" = None
-
-
-def _begin_deferred(msg_id: str, owed: int, failed: bool) -> None:
-    """Record that `owed` deferred deliveries have to finish before this
-    message is done with. Called before the first one is submitted, so no
-    worker can reach zero while the rest are still being queued."""
-    with _attachment_pool_lock:
-        _deferred_owed[msg_id] = _deferred_owed.get(msg_id, 0) + owed
-        if failed:
-            _deferred_failed.add(msg_id)
-        _start_claim_holder()
-
-
-def _start_claim_holder() -> None:
-    """Keep every claim covering deferred work fresh, from one thread.
-
-    Called with `_attachment_pool_lock` held. One thread for the whole
-    process, not one per delivery: a thread per deferred recipient is a thread
-    per recipient per message, all of them alive for as long as a download may
-    run, and the way that ends is `RuntimeError: can't start new thread` in
-    the middle of the bookkeeping that is supposed to be protecting the
-    message.
-
-    Failing to start it costs freshness, not custody. The claims lapse, a
-    sibling takes the work over, and the message is delivered twice — which is
-    what this whole mechanism already accepts when it cannot write a claim at
-    all."""
-    global _claim_holder
-    if _claim_holder is not None and _claim_holder.is_alive():
-        return
-    try:
-        _claim_holder = threading.Thread(
-            target=_hold_deferred_claims, name="a8s-claims", daemon=True
-        )
-        _claim_holder.start()
-    except RuntimeError as e:
-        _claim_holder = None
-        out(f"WARN: cannot hold claims for deferred attachments ({e})")
-
-
-def _hold_deferred_claims() -> None:
-    global _claim_holder
-    while True:
-        time.sleep(CLAIM_HEARTBEAT_SECONDS)
-        with _attachment_pool_lock:
-            owed = list(_deferred_owed)
-            if not owed:
-                _claim_holder = None
-                return
-        for msg_id in owed:
-            hold_claim(msg_id)
-
-
-def _deferred_in_flight(msg_id: str) -> bool:
-    with _attachment_pool_lock:
-        return msg_id in _deferred_owed
-
-
-def _end_deferred(msg_id: str, ok: bool) -> None:
-    """One deferred delivery finished. The last one out settles the message.
-
-    Settling means the same thing it means everywhere else: the ring records
-    an id only when every recipient got a copy, and the claim is released only
-    once nothing is still working under it."""
-    with _attachment_pool_lock:
-        if not ok:
-            _deferred_failed.add(msg_id)
-        owed = _deferred_owed.get(msg_id, 0) - 1
-        if owed > 0:
-            _deferred_owed[msg_id] = owed
-            return
-        _deferred_owed.pop(msg_id, None)
-        clean = msg_id not in _deferred_failed
-        _deferred_failed.discard(msg_id)
-    if clean:
-        seen_id_append(msg_id)
-    release_claim(msg_id)
 
 
 def _get_attachment_pool() -> ThreadPoolExecutor:
@@ -1370,18 +1101,18 @@ def _get_attachment_pool() -> ThreadPoolExecutor:
     with _attachment_pool_lock:
         if _attachment_pool is None:
             _attachment_pool = ThreadPoolExecutor(
-                max_workers=_ATTACHMENT_RETRY_WORKERS,
+                max_workers=_ATTACHMENT_WAIT_WORKERS,
                 thread_name_prefix="a8s-attach",
             )
         return _attachment_pool
 
 
-def drain_attachment_retries(timeout_s: float | None = None) -> bool:
-    """Block until every deferred attachment delivery has finished.
+def drain_attachment_waits(timeout_s: float | None = None) -> bool:
+    """Block until every attachment wait has finished.
 
-    Returns False if `timeout_s` expired first. Deliveries are durable either
-    way — this is for callers that need the inbox settled before looking at
-    it (tests, and a shutdown that would rather not abandon a live download)."""
+    Returns False if `timeout_s` expired first. For callers that need the
+    inbox settled before looking at it: tests, and a shutdown that would
+    rather not abandon a live download."""
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     with _attachment_pool_lock:
         pending = [f for f in _attachment_futures if not f.done()]
@@ -1398,7 +1129,7 @@ def drain_attachment_retries(timeout_s: float | None = None) -> bool:
     return True
 
 
-def _submit_deferred_delivery(
+def _wait_for_attachments(
     msg: dict,
     recipient: Participant,
     services: list[StorageService],
@@ -1408,98 +1139,27 @@ def _submit_deferred_delivery(
     remote_id: str,
     publish_control: Callable[[bytes], None] | None,
 ) -> None:
-    """Finish a delivery whose attachments were not ready on the first try.
+    """Deliver once the attachments resolve or the bounded fetch wait ends.
 
-    The message is held out of the inbox until its files resolve — an agent
-    woken for a file it cannot open burns tokens hunting for it — but the
-    waiting happens off the subscriber worker so unrelated mail flows.
-
-    `_begin_deferred` has already recorded this delivery as owed, so nothing
-    here may return without settling it. A debt that is never paid is not a
-    lost attachment but a lost message: `_deferred_in_flight` turns away every
-    redelivery of an id that is still owed, so one leak silences that id for
-    the life of the process while the wire quietly ages the only copy out.
-    That is why the whole body runs under a guard and the settle is one-shot —
-    `submit` can queue `finish` and still raise, in which case both paths run
-    and only the first may count."""
-    settle_lock = threading.Lock()
-    settled = False
-
-    def settle(ok: bool) -> None:
-        nonlocal settled
-        with settle_lock:
-            if settled:
-                return
-            settled = True
-        _end_deferred(msg_id, ok)
-
-    try:
-        _queue_deferred_delivery(
-            msg, recipient, services, msg_id, sender_label, preview,
-            remote_id, publish_control, settle,
-        )
-    except BaseException as e:
-        try:
-            out_agent(
-                recipient.name,
-                f"WARN deferred attachment delivery for id={msg_id} "
-                f"could not be started: {e}",
-            )
-        except BaseException:
-            pass  # the reason it failed may be the reason this fails too
-        settle(False)
-
-
-def _queue_deferred_delivery(
-    msg: dict,
-    recipient: Participant,
-    services: list[StorageService],
-    msg_id: str,
-    sender_label: str,
-    preview: str,
-    remote_id: str,
-    publish_control: Callable[[bytes], None] | None,
-    settle: Callable[[bool], None],
-) -> None:
+    The message stays out of the inbox until then — an agent woken for a file
+    it cannot open burns tokens hunting for it — and the wait runs off the
+    subscriber worker so unrelated mail flows. The seen row is already written
+    and the transport consumes the envelope as soon as the worker returns, so
+    a restart during the wait loses this message."""
     out_agent(
         recipient.name,
-        f"attachment(s) for id={msg_id} not ready; retrying in the background",
+        f"attachment(s) for id={msg_id} not ready; waiting in the background",
     )
-    # Custody without delivery used to live only in this thread's stack, so a
-    # restart lost the fact that anyone was holding the message at all. The
-    # event and the receipt are the durable half: the sender sees `deferred`
-    # instead of nothing, and a window that runs out reports `expired`.
-    txlog.log(
-        "DEFERRED",
-        msg_id=msg_id,
-        sender=sender_label,
-        recipient=recipient.name,
-        remote=remote_id,
-        detail="attachments not ready; retrying off the subscriber worker",
-    )
-    if publish_control is not None:
-        _publish_delivery_receipt(
-            msg, [recipient.name], publish_control, remote_id,
-            stage="deferred",
-            files=[
-                str(e.get("filename") or "")
-                for e in (msg.get("files") or [])
-                if isinstance(e, dict) and e.get("filename")
-            ],
-            detail="attachment download deferred",
-        )
 
     def finish() -> None:
         from mailbox import _download_files_to_recipient
 
-        ok = False
         try:
             resolved = _download_files_to_recipient(msg, recipient, services)
             if not _write_to_inbox(
                 resolved, recipient, msg_id, sender_label, preview, remote_id
             ):
                 return
-            ok = True
             import convo
 
             # `resolved`, not `msg`: this path exists because the first
@@ -1513,26 +1173,14 @@ def _queue_deferred_delivery(
             _report_attachment_outcome(
                 msg, resolved, recipient, publish_control, remote_id
             )
-            _, failed = _attachment_outcomes(resolved)
-            if failed:
-                txlog.log(
-                    "EXPIRED",
-                    msg_id=msg_id,
-                    sender=sender_label,
-                    recipient=recipient.name,
-                    files=[name for name, _ in failed],
-                    remote=remote_id,
-                    detail="retry window exhausted",
-                )
         except Exception as e:
-            out_agent(
-                recipient.name,
-                f"WARN deferred attachment delivery failed for id={msg_id}: {e}",
-            )
-        finally:
-            settle(ok)
+            _dropped(msg_id, sender_label, recipient, remote_id, f"attachment wait failed: {e}")
 
-    future = _get_attachment_pool().submit(finish)
+    try:
+        future = _get_attachment_pool().submit(finish)
+    except RuntimeError as e:
+        _dropped(msg_id, sender_label, recipient, remote_id, f"attachment wait not started: {e}")
+        return
     with _attachment_pool_lock:
         _attachment_futures[:] = [f for f in _attachment_futures if not f.done()]
         _attachment_futures.append(future)
@@ -1555,10 +1203,7 @@ def _receipt_sender(sender: str, all_agents: list[Participant]) -> Participant |
 
 _RECEIPT_LOG_LINE = {
     "inbox_write": "delivered",
-    "attachment_fetched": "attachments fetched",
     "attachment_failed": "attachment delivery failed",
-    "expired": "delivery expired",
-    "deferred": "delivery deferred",
 }
 
 
@@ -1569,6 +1214,8 @@ def _receive_control_envelope(
 ) -> None:
     receipt = parse_delivery_receipt(message)
     if receipt is None:
+        if is_other_stage_receipt(message):
+            return
         _remote_discarded(
             str(message.get("id", "?")),
             str(message.get("to", "?")),
@@ -1596,16 +1243,9 @@ def _receive_control_envelope(
         remote=remote_id,
         detail=f"{receipt.stage}{node}; receipt_id={receipt.receipt_id}",
     )
-    _EVENT_FOR_STAGE = {
-        "attachment_failed": "ATTACHMENT_FAILED",
-        "expired": "EXPIRED",
-        "no_local_recipient": "NO_LOCAL_RECIPIENT",
-        "deferred": "DEFERRED",
-    }
-    event = _EVENT_FOR_STAGE.get(receipt.stage)
-    if event is not None:
+    if receipt.stage == "attachment_failed":
         txlog.log(
-            event,
+            "ATTACHMENT_FAILED",
             msg_id=receipt.for_id,
             sender=local_sender.name,
             recipient=recipients,
@@ -1613,24 +1253,12 @@ def _receive_control_envelope(
             remote=remote_id,
             detail=receipt.detail or receipt.stage,
         )
-    # The receipt file is written here, on the router's side of the seam, for
-    # each recipient the receiving node reported on. `tell` and `tells` only
-    # ever read it.
-    for name in receipt.recipients:
-        receipts.record_event(
-            local_sender.outbox_path(),
-            receipt.for_id,
-            receipt.stage,
-            recipient=name,
-            files=list(receipt.files),
-            detail=receipt.detail,
-        )
 
 
 def _publish_delivery_receipt(
     original: dict,
     delivered_names: list[str],
-    publish_control: Callable[[bytes], bool | None],
+    publish_control: Callable[[bytes], None],
     remote_id: str,
     *,
     stage: str = "inbox_write",
@@ -1644,16 +1272,13 @@ def _publish_delivery_receipt(
     if receipt is None:
         return
     try:
-        sent = publish_control(json.dumps(receipt).encode("utf-8"))
+        publish_control(json.dumps(receipt).encode("utf-8"))
     except Exception as e:
         out(
             f"WARN remote {remote_id} delivery receipt publish failed; "
             f"dropped 1 receipt id={original.get('id', '?')}: {e}"
         )
         return
-    # A transport whose link is down holds the receipt and sends it on the
-    # next connection; the row says so rather than claiming it is out.
-    held = "; held until the link is back" if sent is False else ""
     txlog.log(
         "RECEIPT_PUBLISHED",
         msg_id=original["id"],
@@ -1661,7 +1286,7 @@ def _publish_delivery_receipt(
         recipient=",".join(delivered_names),
         remote=remote_id,
         files=files or None,
-        detail=f"{stage}; receipt_id={receipt['id']}{held}",
+        detail=f"{stage}; receipt_id={receipt['id']}",
     )
 
 
@@ -1680,13 +1305,12 @@ def make_receive_callback(
     pins it instead, which is what the tests want. `publish_control` enables
     content-free delivery receipts on that same transport.
 
-    The callback passes `receive_envelope`'s answer back to the transport,
-    which acknowledges only what that answer reports consumed. A raise is the
-    same answer as a released claim: nobody consumed it."""
+    The transport consumes every envelope it hands this callback, whatever
+    the callback does with it."""
 
-    def callback(envelope: bytes) -> bool:
+    def callback(envelope: bytes) -> None:
         try:
-            return receive_envelope(
+            receive_envelope(
                 envelope,
                 get_participants(),
                 services=load_services() if services is None else services,
@@ -1695,7 +1319,6 @@ def make_receive_callback(
             )
         except Exception as e:
             out(f"WARN: receive_envelope raised: {e}")
-            return False
 
     return callback
 

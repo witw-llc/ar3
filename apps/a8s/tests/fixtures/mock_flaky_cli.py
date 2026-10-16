@@ -1,7 +1,7 @@
-"""Mock agent CLI that fails on purpose so wake-retry tests can exercise the
+"""Mock agent CLI that fails on purpose so wake tests can exercise the
 nonzero-exit path. Exits $MOCK_FAIL_RC (default 3) unless $MOCK_OK_FILE names
 an existing file, in which case it behaves like mock_cli — that lets a test
-flip a broken CLI into a working one mid-loop and watch delivery recover.
+flip a broken CLI into a working one mid-loop.
 
 Python rather than bash for the reason in mock_cli.py.
 """

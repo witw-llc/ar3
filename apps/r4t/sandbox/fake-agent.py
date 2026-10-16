@@ -130,6 +130,12 @@ def main() -> int:
                 "5x5 game with 3 ships and Tester confirmed a winning "
                 "playthrough exits 0. Play it with: python3 battleship.py",
             )
+        elif "may have partly acted" in incoming:
+            send(
+                first_external_sender(prompt),
+                "Status: Dev's turn did not complete and may have partly "
+                "acted, so nothing is verified yet.",
+            )
         elif "gone quiet" in incoming:
             # What the nudge asks for: report current state, not a claim the
             # work finished.

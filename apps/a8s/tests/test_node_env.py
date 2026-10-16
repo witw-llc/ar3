@@ -396,14 +396,16 @@ class TestTheWakeSubprocess:
         assert cmd_vars(["A", "unset", "env.Stage"]) == 0
         assert "Stage" not in _wake_once(out)
 
-    def test_a_malformed_registry_name_requeues_the_message(self, fake_home, tmp_path):
+    def test_a_malformed_registry_name_dead_letters_the_message(self, fake_home, tmp_path):
         out = tmp_path / "env.json"
         _register(tmp_path, _dump_definition(out), {"env.A=B": "x"})
         _queue()
         attached_loop(["A"], 0.05, single_pass=True)
         assert not out.exists()
-        assert "wake aborted" in agent_log_path("A").read_text()
-        assert len(list(inbox_dir("A").glob("*.json"))) == 1
+        log = agent_log_path("A").read_text()
+        assert "wake aborted" in log
+        assert "1 dead letter(s) left in trash" in log
+        assert not list(inbox_dir("A").glob("*.json"))
 
 
 class TestHarnessProbe:
@@ -440,7 +442,7 @@ class TestHarnessProbe:
         _warn_unresolvable_harnesses(["probe"])
         err = capsys.readouterr().err
         assert "`a8s vars probe set env.PATH <value>`" in err
-        assert "a8s retry" not in err
+        assert "a8s restart" not in err
 
     def test_exit_127_names_the_node_var_as_the_source(self, fake_home, tmp_path):
         from daemon import _settle_wake

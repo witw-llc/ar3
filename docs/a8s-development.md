@@ -5,6 +5,21 @@ Read [a8s.md](a8s.md) first for concept and usage.
 
 ## Hard constraints when refactoring
 
+- **a8s is best-effort messaging.** a8s is lightweight, best-effort messaging
+  between agents, like UDP: each message is sent once with no delivery
+  guarantee, and it may be picked up by several nodes or by none. Never add a
+  delivery guarantee, a retry on a timeout, or a step that makes an agent check
+  whether a message was received; an agent knows only that it sent.
+- **A failed send or wake simply fails.** Keep decisions simple: the initiator
+  is in control, and a sender that wants a message through sends again. Give a
+  send one try per hop and never retry across passes: no backoff ladder, no
+  parked send, no re-offer of a received envelope, no held receipt, no wake
+  ladder, and no verb that returns a dead letter. Keep failure reports on the
+  machine that failed — the agent log, one transaction row, a dead-letter
+  count in `a8s ps` and `a8s health`. Never write a message to an agent about a
+  failure, and send nothing about a failure across the network. Write no
+  delivery promise in a doc: no at-least-once, and no claim that a dropped
+  message can be recovered. Owner ruling, 2026-10-15.
 - **`cmd_start` re-execs via `core.ENTRYPOINT`**, not `__file__`.
 - **Argv interpolation** (`$SENDER`, `$RECIPIENT`, `$MESSAGE`, `$TIMESTAMP`,
   `$AGE`, `$A8S_DIR`, `$PYTHON`, `$DEFINITION_PATH`, plus per-node a8s vars as `$KEY`)
@@ -42,8 +57,8 @@ Read [a8s.md](a8s.md) first for concept and usage.
   nature; past a remote the envelope is gone the way a UDP packet is gone. No
   flag makes it wait, retry, confirm, or declare a wire, because a script that
   treats "no answer yet" as failure resends and doubles the message. A sender
-  that wants to know what became of a message reads the router's receipt
-  later, loosely, with `tells` (`-f`, `--sent`). `tell` is the one thing every
+  knows only that it sent; it reads replies with `tells`, and the router's
+  transaction rows (`a8s tx --from NAME`) are for an operator debugging the network. `tell` is the one thing every
   harness and every remote seat shares, so every convenience goes on `tells`
   or on the roster, never on `tell`. Owner ruling, 2026-09-03.
 - **Plain `tells` never times out by default.** It waits for the next
@@ -60,12 +75,12 @@ Read [a8s.md](a8s.md) first for concept and usage.
   nothing). A new kind implements `StorageService` and
   registers in two places in `network.py` — `_build_service` and
   `detect_service_kind`.
-- **Upload is any-of.** Every send attempts every service; a message publishes
-  once each file landed somewhere, and only services that accepted a file
-  contribute a URL. Requiring all-of made a second storage service a second way
-  to lose mail — one unreachable remote pushed the envelope through the whole
-  backoff schedule and into the trash while a working remote held a copy. The
-  floor is one, not zero: zero successes keeps the retry (#93).
+- **Upload is any-of.** Every send attempts every service once; a message
+  publishes once each file landed somewhere, and only services that accepted a
+  file contribute a URL. Do not require all-of: a second storage service must
+  add a path, not a second way to fail. The floor is one, not zero: a file no
+  service took fails the publish to every remote, and the message drops unless
+  local delivery took it.
 - **A stored secret is bound to the destination it was typed for.** `secrets.json`
   keeps beside each secret a digest of the entry's non-secret fields
   (`network.spec_binding`), written by every writer that stores a secret. A
@@ -169,37 +184,29 @@ Read [a8s.md](a8s.md) first for concept and usage.
   endpoint: the reap deletes under the transport's prefix, and
   `services/s3.py` never deletes at all. Do not default the transport's prefix;
   a default would land on the storage service's.
-- **Only the receive path may say an envelope was consumed.** `receive_envelope`
-  returns that answer and `make_receive_callback` passes it to the transport.
-  Returning without raising is not the answer: a sibling daemon holding the
-  claim, and a released claim after a failed delivery, both return normally and
-  both mean the message is still owed an attempt. A transport acknowledges only
-  what the receive path reports consumed: MQTT redelivers the rest on the next
-  session, and s3 and folder leave the object or file. The `OnMessage`
-  contract lets a callback give no answer at all, which reads as consumed.
-- **Consumed means an inbox holds it.** Only a path that answers `True` appends
-  to the `seen` table, because the table suppresses every later attempt: recording an
-  id whose write failed converts a disk that was full for a minute into a
-  message nobody ever receives. An envelope addressed to a name this cluster
-  does not hold is the exception and answers `True` — no retry can make it
-  deliverable, and a wire that kept it would offer it again every poll forever.
-- **A deferred attachment download holds its claim and leaves the wire copy
-  alone.** Between the decision to wait and the inbox write, the only complete
-  copy of the envelope is a closure on a pool thread, so the message is not
-  acknowledged and the claim is not released until the last deferred recipient
-  finishes. One thread per process re-stamps every claim that covers deferred
-  work, because `storage_receive_wait_seconds` outlasts `CLAIM_STALE_SECONDS`
-  by design and a job can also wait in a four-worker pool for that long. One
-  thread, not one per delivery: a thread per recipient per message ends in
-  `can't start new thread` inside the bookkeeping that protects the message.
-  It is a thread of this process and no more, so killing the process stops the
-  stamping and the claims lapse on schedule.
-- **A deferred delivery that is recorded as owed must always be settled.**
-  `_deferred_in_flight` turns away every redelivery of an id still owed, so a
-  debt that is never paid silences that id for the life of the process while
-  the wire ages out the only copy. Everything between `_begin_deferred` and
-  the worker's `finally` runs under a guard, and the settle is one-shot
-  because `submit` can queue the job and still raise.
+- **A transport offers each envelope once and consumes it.** The receive
+  callback answers nothing. After it returns or raises, MQTT acknowledges the
+  message, and folder and s3 record the ULID in the consumed ledger. Never add
+  an answer that withholds the acknowledgement or leaves an envelope for the
+  next poll: a8s makes no delivery promise, and a re-offer delivers twice.
+- **The seen-table insert names the one receiver.** Several daemons on one
+  machine subscribe to the same remote and resolve recipients from the same
+  registry. `receive_envelope` runs `INSERT OR IGNORE` on the ULID before it
+  delivers; the call whose insert adds the row delivers, and every other call
+  drops the envelope. A store that cannot be written answers as the winner, so
+  a broken store costs a possible duplicate and never every message. An
+  envelope for a name this node does not hold is recorded the same way, so the
+  machine logs the miss once.
+- **A failed delivery drops, once.** The seen row is written before delivery,
+  so a failed inbox write is never tried again. It is one `WARN dropped` line
+  in the agent log and one `DROPPED` row. Do not move the insert after the
+  delivery to make a failure retryable.
+- **The attachment wait is bounded and holds nothing.** The first fetch runs on
+  the subscriber worker and does not wait. A file worth waiting for moves that
+  recipient to a four-worker pool, which waits up to
+  `storage_receive_wait_seconds`. The seen row is written and the envelope is
+  consumed when the wait starts, so a restart during the wait loses that
+  message. A wait that raises or cannot start is a `DROPPED` row.
 - **Storage option names fold dashes to underscores** (`--base-url` and
   `--base_url` are one option), and `a8s storage` builds the service before
   writing config so a bad option fails at the CLI rather than as a silently
@@ -215,53 +222,59 @@ Read [a8s.md](a8s.md) first for concept and usage.
 - **Persistent MQTT sessions.** `clean_session=False` + QoS 1, hash-derived `client_id`.
 - **`publish` waits for readiness event before raising.** Don't drop the
   disconnect handler.
-- **MQTT acknowledges a message only when the callback reports it consumed**
-  (`manual_ack`). A refused message waits in a worker-only retry list (256,
-  oldest dropped with a WARN) and is offered again from 1 s, doubling to 30 s.
-  Never ack a message from an earlier connection: a packet id belongs to its
-  session, so the broker redelivers it instead. `stop()` drains: new arrivals
-  and unconsumed retries stay unacknowledged for the broker to replay, the
-  worker finishes its queue and sends its receipts, and only then does the
+- **MQTT acknowledges every message after the callback** (`manual_ack`). Never
+  ack a message from an earlier connection: a packet id belongs to its session,
+  so the broker redelivers it instead, and the seen table drops the copy.
+  `stop()` drains: new arrivals stay unacknowledged for the broker to replay,
+  the worker finishes its queue within a bounded join, and only then does the
   client disconnect. Don't move `disconnect()` ahead of the worker join.
-- **A receipt never waits on the link.** `publish_control` holds a receipt
-  while the link is down and the worker sends the held list on the next
-  CONNACK. The flush never runs on paho's network thread: a QoS-1 publish
-  there waits for a PUBACK that same thread has to read.
+- **A receipt is sent once and never waits.** `publish_control` publishes when
+  the link is up and raises when it is down, and the receipt is dropped with a
+  `WARN` line. It does not wait for the PUBACK. Receipts are for the operator;
+  nothing waits for one.
 - **The agent log shows delivery outcomes only.** One line per message for
-  `inbox_write`, one for attachments fetched, failed, expired or deferred. A
-  `no_local_recipient` receipt never writes to the agent log; it goes to the
-  transaction log, which names the reporting node.
-- **Per-message backoff retry.** BACKOFF_SCHEDULE drives `.retry` sidecars.
-- **Exit 0 is the only delivery ack.** Any other wake outcome — nonzero exit,
-  timeout kill, failed spawn, unexpanded vars — moves the envelopes back into
-  the inbox and arms the agent's `wake-retry` record, and after
-  MAX_WAKE_ATTEMPTS they stay in trash as logged dead letters, named in the
-  agent's `dead-letters/` directory. A dead letter is recoverable with one
-  command: `a8s retry <name>` returns every marked dead letter still in
-  trash to the inbox with a full set of attempts, and logs a `REQUEUED` row
-  for each. Nothing requeues a dead letter automatically, and a marked file
-  that retention removed is reported as gone and is not an error. Keep one
-  empty marker file per envelope, named as its trash file, and never a
-  shared list: a shared list loses a record written while a retry runs.
-  Rename the envelope first and remove its marker second, so a crash leaves
-  a stale marker and never a lost letter. Do not delete the envelope at the
-  cap.
-  `_wake_retry_ready` gates dispatch, so a permanently broken CLI backs off
-  instead of spinning the handler. `a8s stop` clears the `wake-retry` record of
-  every member once the handlers are gone, and prints one line when it cleared
-  one; clear it only after the handler has detached or been killed, or the
-  handler writes it back. A stop never touches trash, dead letters or their
-  markers: only `a8s retry` returns those. `a8s retry` also asks for every backed-off
-  pending send to run: the CLI drops a `.retry-now` request marker in the node's
-  pending directory and writes no sidecar. The router, the only writer of a
-  `.retry` sidecar, treats every parked send as due on its next pass and removes
-  the marker at the start of that pass. Nothing else changes in a sidecar, so
-  `attempts` continues the backoff schedule and `succeeded_remotes`,
-  `local_delivered` and `uploaded` keep a destination that already took the
-  message from getting it twice. Delivery is at-least-once: a wake command
-  must tolerate the same envelope twice. r4t dispatch already does — it
-  enqueues durably and returns 0 before any turn runs, so a8s retries
-  delivery without re-running turns.
+  `inbox_write`, and one for attachments that failed.
+- **A node that owns no recipient sends nothing back.** a8s is best effort: a
+  message may be picked up by several nodes or by none. Never add a receipt,
+  acknowledgement or report for a message a node does not deliver; the miss is
+  a rate-limited `NOT_LOCAL` row in that node's own transaction log.
+- **A publish has three outcomes, and none is tried again.**
+  `make_publish_remotes` gives each remote one publish per send. `SENT` is a
+  remote that took it. `FAILED` is a definite failure, one `DROPPED` row for
+  that remote when another path took the message. `AMBIGUOUS` is a
+  `PublishAmbiguous` from the transport — no PUBACK within `ack_timeout_s`, or
+  paho's `MQTT_ERR_NO_CONN` after the publish call, which paho keeps queued and
+  sends after the reconnect, or an S3 put that ends in botocore's
+  `ReadTimeoutError` or `ConnectionClosedError` (matched by class name; a
+  connect, DNS or endpoint error and an error response stay `FAILED`): count it as sent, write one `PUBLISH_AMBIGUOUS`
+  row, and never retry it. If any path took the message it is sent; if none
+  did, it moves to trash with one `DISCARDED` row and is never sent again.
+- **A remote's own resend stays, and so do bounded waits inside one try.**
+  Leave paho's QoS 1 resend after a reconnect and the S3 SDK's `max_attempts`
+  as configured. The waits that stay: the MQTT reconnect wait before a publish
+  (once per remote per pass; the pass's `down` set fails the rest at once),
+  the folder rename retry, the attachment fetch wait, and the SQLite busy
+  retry. Do not add another.
+- **Exit 0 is the only delivery ack, and a failed wake is a dead letter at
+  once.** Any other wake outcome — nonzero exit, a kill by the timeout, the
+  watchdog or `stop --force`, a failed spawn, unexpanded vars — leaves the
+  envelopes in trash, marks each one in the agent's `dead-letters/` directory
+  (one empty file named as its trash file), writes one `DROPPED` row each and
+  one agent-log line naming the ids. Never requeue a wake's envelopes, never
+  arm a wake backoff, and never add a verb that returns a dead letter: the
+  sender is in control and sends again. Never write a message to an agent
+  about a failure, and send nothing about it across the network. `a8s ps` and
+  `a8s health` count the markers whose mtime falls in the last 24 hours, and
+  the count deletes markers older than 7 days. An inbox file that will not
+  parse and a definition that will not load are dead letters too.
+- **A routing pass claims a pending message before it sends it.** Rename it
+  from `pending/` into `sending/` first, and settle it from there. A file
+  that will not move is not sent; a settle step that fails leaves the file in
+  `sending/`, which no pass scans, so nothing is sent twice. Every message the
+  router drops writes one `DROPPED` or `DISCARDED` row, and a fan-out that
+  reached some members is delivered, with one `DROPPED` row per member it
+  missed.
+  Trash-after-spawn stays: the envelopes move to trash once the wake starts.
 - **`stop --force` ends in seconds, and plain `stop` never kills.** A plain stop
   sends one SIGTERM and waits for the wake as long as it runs. `--force` sends a
   second SIGTERM, which makes the handler kill its wake group; a handler that has
@@ -274,15 +287,17 @@ Read [a8s.md](a8s.md) first for concept and usage.
   first (its group on POSIX; the process on Windows, which has no group), then
   the handler. Never `killpg` the handler: `a8s run` in a terminal shares its
   group with the shell. After a kill, clear the pid files and any request files,
-  return the wake's envelopes from trash to the inbox (nothing else will), and
-  write a `RUN_STOP` row, so the node starts again at once.
+  dead-letter the wake's envelopes when its `wake-pid` record shows it never
+  settled (nothing else will), and write a `RUN_STOP` row, so the node starts
+  again at once. Either way the stop prints the ids of the killed wake's dead
+  letters.
 - **A detach routes the outbox once.** `attached_loop`'s `finally:` runs one
   `route_outboxes` pass over the agents whose pid file still names this
   process, before `stop_remotes`. Reuse the loop's own routing call; write no
   second routing path. A failure in it is logged to the agent log and never
   holds the detach. `a8s step` and `--drain` add no final pass, and an agent
   released to a take-over or a kill is left to its new holder. `tell` stays
-  non-blocking: the guarantee lives in the stop, not in the sender.
+  non-blocking: the final pass lives in the stop, not in the sender.
 - **Local routing claims the ULID in the `seen` table** to prevent MQTT round-trip dupes.
 - **Wake environment is declared and learned, not only inherited from the start shell.**
   Without a knob a node's `PATH` is whatever shell ran `a8s start`, forever —
@@ -299,7 +314,7 @@ Read [a8s.md](a8s.md) first for concept and usage.
   whole `PATH`, not one resolved binary: an agent turn calls tools nobody
   listed. Do not make a login shell the default source of the `PATH`; rc
   files are programs, and `wake_shell` stays opt-in. Every message about a
-  program that was not found names one command, `a8s retry <name>`.
+  program that was not found names one command, `a8s restart <name>`.
 - **Remember only what lasts.** `durable_path` drops a directory that does
   not exist and stores a per-shell fnm directory as the alias it links to.
 - **`wake_path` adds to the handler's `PATH` and never removes from it.** A
@@ -340,22 +355,13 @@ Read [a8s.md](a8s.md) first for concept and usage.
   is refused without a receipt, with an `EXPIRED` row only when the recipient
   is an agent this node holds, so the memory always outlasts what any wire
   can replay. Never put receipts and messages under one count budget.
-- **Receive-side dedup needs the claim as well as the table.** The `seen` table is read
-  on entry and written after delivery, and the gap between the two is a whole
-  download. Several daemons on one machine each subscribe and each resolve
-  recipients from the shared registry, so they all read a table that does not
-  mention the message yet and all deliver it. `claim_message` takes the ULID
-  first, with a single `O_CREAT | O_EXCL`; the loser drops the envelope exactly
-  as it would a duplicate. Claiming is an optimisation over the table and never
-  a gate on delivery: if the claims directory cannot be written, deliver and
-  accept the duplicate. A claim expires after `CLAIM_STALE_SECONDS`, and
-  `sweep_stale_claims` runs at daemon startup, so a process killed mid-delivery
-  cannot turn a duplicate-delivery bug into a lost-message bug. Taking over an
-  expired claim is *not* exclusive — two receivers racing one expiry can both
-  conclude they won — and that is deliberate. The cost is a duplicate delivery,
-  which this mechanism already accepts whenever the claims directory cannot be
-  written; unlinking the dead file and re-taking it exclusively is two
-  operations, so a slow racer deletes a live claim and both still win.
+- **One cross-process mutex idiom remains: the consumed ledger's sidecar.**
+  `transports/ledger.py` takes `<ledger>.lock` with one `O_CREAT | O_EXCL` and
+  breaks a holder dead longer than `LEDGER_LOCK_STALE_SECONDS` by its mtime.
+  Appends never wait for it; only compaction does, and compaction may give up.
+  The receive winner is not a lock: it is the seen table's `INSERT OR IGNORE`,
+  which SQLite makes atomic across processes. Do not add a claim file, a
+  second lock shape, or a takeover.
 - **`settings.json` is the stable operator config.** `a8s config set` persists
   machine-wide keys; `a8s config` (no args) catalogs every knob including
   definition, registry, and network fields. Env vars apply only when a key

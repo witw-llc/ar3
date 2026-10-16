@@ -87,7 +87,10 @@ retries it, even when the engine's idle latch suppresses a model turn.
 After three failed attempts its queue marker moves to `queue/failed/`, the
 capture stays in `turns/`, and the worker continues with the next capture.
 `failure.json` and `worker.log` explain failures; the next turn reports a
-pending failure on stderr. An unavailable memory service does not reverse a
+pending failure on stderr. After a pass that distilled, the worker runs
+`k7e compile --due` through the same writer, which folds a store's largest
+ready tag into one page about once a day; a failed compile is
+noted in `worker.log` and costs the queue nothing. An unavailable memory service does not reverse a
 completed engine turn's success. Engine stdout remains the engine's output.
 
 ## Conversation corrects recalled facts

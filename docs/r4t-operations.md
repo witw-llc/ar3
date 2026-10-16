@@ -40,10 +40,11 @@ r4t: DONE gerry exit 0 in 192.4s
 r4t: RESTING phil resting (member budget 0.4, ready in ~7 min) (1 queued)
 ```
 
-`BREAKER` and `DEFERRED` join `RESTING` for a member that had mail and did not
-run — the reason is on the line. `PARKED` and `RESUME` bracket a member leaving
-and rejoining the rotation, and `RECOVERED` reports a killed turn's batch going
-back to its queue. The member is always the second field, so a name greps
+`DEFERRED`, `OUT-OF-TIME` and `NEVER-FITS` join `RESTING` for a member that had
+mail and did not run — the reason is on the line. `PARKED` and `RESUME` bracket a member
+leaving and rejoining the rotation, and `DEAD-LETTER` reports a killed turn's
+batch recorded as a dead letter. A failed turn's `DONE` line ends `— N msg
+dead-lettered`. The member is always the second field, so a name greps
 cleanly. Message bodies and transcripts never reach the ticker; they are what
 `r4t logs --full` is for.
 
@@ -129,21 +130,45 @@ deliberately not in the score.
 
 | State | Meaning | Clears when |
 |---|---|---|
-| `RESTING` | a spend bucket is empty (member, cell, or rig) | the bucket refills — refill is the retry |
-| `BREAKER` | `breaker_cap` consecutive failed turns | one probe turn per `breaker_cooldown_seconds` succeeds |
+| `RESTING` | a spend bucket is empty (member, cell, or rig) | the bucket refills |
+| `OUT-OF-TIME` | the wake has less time left than the rig's `timeout_seconds` | the next wake |
+| `NEVER-FITS` | the rig's `timeout_seconds` is longer than `max_wake_seconds` less the 30 s margin, so no wake can hold its turn | the operator lowers the rig's `timeout_seconds` or raises the definition's `max_wake_seconds` |
 | `PARKED` | the harness could not start at all | a free probe finds the command, or `r4t resume <member>` |
+
+### A failed turn runs once
+
+A turn that exits nonzero or is killed at its rig timeout is not run again.
+Its batch moves to the dead-letter dir (`turn-failed`, `turn-timed-out`), and
+each distinct sender in it gets one notice — `<member> failed (exit N); it may
+have partly acted.` or `<member> ran out of time; it may have partly acted.`
+What the member staged with `tell` before it failed is released. The notice
+asks for nothing; the sender decides whether to send again. The member stays in
+the rotation, and its next message runs a new turn.
+
+A dispatch wake starts no turn that could outlast it. When the time left before
+the a8s definition's `max_wake_seconds` is less than the next rig's
+`timeout_seconds`, the drain logs one `OUT-OF-TIME` line and stops; the queue
+waits for the next wake. The check runs again at each harness launch, after the
+prompt is built and before a cold retry. A turn that no longer fits there puts
+its batch back in the queue unrun and pays back the budgets admission
+charged; nothing is dead-lettered.
+
+A rig whose `timeout_seconds` is longer than `max_wake_seconds` less a 30 s
+margin can never run in any wake. Its member is skipped with one `NEVER-FITS`
+line per wake, the rest of the roster runs, and the wake goes on. `r4t status`
+shows a red `never runs` verdict naming the member, the rig's
+`timeout_seconds` and the wake's `max_wake_seconds`.
 
 ### Parking: the failures that will recur
 
 A structural failure — the harness binary is not on `PATH`, the exec never
-started — fails identically every time it is retried. Retrying it forever is a
-stream of identical errors about a fact that has not changed. So the **first**
-one parks the member instead:
+started — fails identically every time. So the **first** one also parks the
+member. Its batch is a dead letter like any failed turn's, and then:
 
 - one `r4t: PARKED <member> <reason>` line, one day-log line, then silence.
   Every later message to that member enqueues without a word.
-- **the queue holds.** Nothing is dead-lettered, nothing is dropped. That is
-  what makes the silence safe.
+- **the queue holds.** Mail that arrives while parked runs no turn, so it is
+  not spent on a harness that cannot start.
 - the member leaves the rotation: not scored, not selected, no `passes`.
 
 It comes back one of two ways. Every idle wake probes the rig's command with
@@ -154,17 +179,19 @@ queue. Where there is no free probe, `r4t resume <member>` (or `r4t resume
 fixed must not spend your money finding out on a timer.
 
 A timeout, a nonzero exit with output, a network error and an exhausted quota
-are all *transient* and keep the ordinary breaker.
+are all *transient*: the batch is a dead letter and the member stays in the
+rotation.
 
 ### Crash safety
 
 A turn claims its whole batch by MOVING the envelopes to
 `agents/<member>/queue/.inflight/`, not by deleting them. On a clean end they
-are dropped; on a failed turn they move back under their original names, so
-they keep their ids and their place in arrival order. On a `SIGKILL`, an OOM or
-a closed lid they simply stay there, and the next idle wake returns every
-in-flight batch whose member holds no live lock. The PID lock is the liveness
-test; a turn genuinely running is left alone.
+are dropped; on a failed turn they become dead letters first. On a `SIGKILL`,
+an OOM or a closed lid they stay there, and the next idle wake or `r4t clear`
+records every in-flight batch whose member holds no live lock as a
+`turn-unfinished` dead letter and tells each sender once. The batch never runs
+again. The PID lock is the liveness test; a turn genuinely running is left
+alone.
 
 ### Parallelism
 
@@ -179,8 +206,9 @@ back. The cost is two rotations, two log streams, and no ordering guarantee
 Everything above reads out of `~/.config/r4t/rosters/<node>/`, which grows with
 every turn. Maintenance passes (`r4t idle` — one
 [idle pass](r4t-idle.md) — and `r4t clear` on its own) hold
-it to a shape a roster can run for months on. `r4t clear` does three things
-and no more: prune stale locks, drain what is runnable, apply log retention.
+it to a shape a roster can run for months on. `r4t clear` does four things
+and no more: prune stale locks, dead-letter the batches of unfinished turns,
+drain what is runnable, apply log retention.
 
 - **Day logs** (`log/<date>.md`, the stream behind `r4t logs`) are kept for
   `log_retention_days` UTC days — 14 by default, `0` to keep every day
@@ -195,7 +223,7 @@ and no more: prune stale locks, drain what is runnable, apply log retention.
 - **Dead letters** wait for you. Nothing prunes them.
 
 The retention window is a governance knob in the rig config, alongside the
-budgets and the breaker: see the table in [r4t-rigs.md](r4t-rigs.md#governance-knobs).
+budgets: see the table in [r4t-rigs.md](r4t-rigs.md#governance-knobs).
 
 ## What zone the roster speaks
 

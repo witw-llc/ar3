@@ -159,7 +159,7 @@ class TestARetiredEntryIsNeverAnAppendTarget:
         self._llm(tmp_path, monkeypatch, old_id)
         monkeypatch.setattr(
             distill, "diff_against_store",
-            lambda candidates: [dict(c, _append_to=old_id) for c in candidates],
+            lambda candidates, *_: [dict(c, _append_to=old_id) for c in candidates],
         )
         results = distill.distill([str(self._capture(tmp_path, old_id))])
         assert [r["action"] for r in results] == ["refused"], results

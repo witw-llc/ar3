@@ -8,10 +8,30 @@
 - **The member's knowledge pack carries no node ids and no store vocabulary;
   ids live in the turn capture.** A member that can name its memory's
   machinery narrates it to the person correcting it.
+- **Distill never reads a turn capture's `## Prompt`; it reads the routed
+  messages, the human messages and the output.** The prompt is standing
+  context the member sees every turn, and distilling it re-extracts the
+  persona and the store's own injected entries.
+- **A capture whose distill times out at the full limit `DREAM_ATTEMPTS`
+  times in a row is set aside, never retried forever.** One always-failing
+  capture otherwise spends every sweep's budget.
+- **A message body never writes a capture heading.** r4t escapes a `#` that
+  opens a body line; k7e reads the capture's sections by those headings.
 - **The correction pass reads only messages from senders the roster's
   `People:` line names; absent, it is off.** The envelope's `class` never
   decides it alone — a8s stamps none, so an unnamed seat's mail is `human` on
   the wire's silence.
+- **A turn runs once. A turn that exits nonzero, times out or never finishes
+  makes its batch a dead letter, and each sender gets one notice that the
+  member may have partly acted.** The notice never asks for a resend, and no
+  breaker or requeue runs the batch again; the sender decides.
+- **A wake starts no turn that its remaining `max_wake_seconds` (read from the
+  a8s definition) cannot cover at the rig's `timeout_seconds`.** a8s kills a
+  wake at that limit and dead-letters its mail.
+- **Only a rig that fits a fresh wake can end a wake.** A rig whose
+  `timeout_seconds` exceeds `max_wake_seconds` less `WAKE_MARGIN_SECONDS`
+  skips its member alone (`NEVER-FITS`), and `r4t status` reports it as a
+  red verdict.
 
 ## Testing
 
@@ -44,9 +64,9 @@ lands somewhere different in dispatch:
 
 | SHAPE | The member | r4t must |
 |---|---|---|
-| `exit` (default) | exits nonzero every turn | requeue the batch, trip the breaker, hold the queue |
-| `hang` | sleeps past its rig timeout | kill the process group at the timeout, requeue, trip the breaker |
-| `silent` | does the work, then answers on stdout without ever calling `tell` | stage the cleaned stdout as one reply to the sender, breaker closed, deliverable intact |
+| `exit` (default) | exits nonzero every turn | dead-letter the batch, tell the sender once that it may have partly acted |
+| `hang` | sleeps past its rig timeout | kill the process group at the timeout, dead-letter the batch, tell the sender it ran out of time |
+| `silent` | does the work, then answers on stdout without ever calling `tell` | stage the cleaned stdout as one reply to the sender, no dead letter, deliverable intact |
 | `mute` | prints tool chrome, stages nothing, exits 0 | nudge nobody — the turn is spent and the message is gone; the mission-review heartbeat is what re-engages the org |
 
 Every shape also checks the turn was charged to the member's budget: a member

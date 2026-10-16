@@ -8,7 +8,8 @@ honors A8S_HOME).
     │                              ULID-named; a turn drains the whole queue at once
     ├── agents/<name>/queue/.inflight/  the batch a running turn claimed — moved,
     │                              never deleted, so a SIGKILL mid-turn cannot
-    │                              lose it; an orphan with no live lock goes back
+    │                              lose it; an orphan with no live lock becomes
+    │                              a dead letter
     ├── agents/<name>/.lock        PID lockfile — one turn per agent at a time
     ├── agents/<name>/.turn.json   in-flight turn: thread/hop/sender;
     │                              a leftover file with no live lock = crashed turn
@@ -33,6 +34,8 @@ honors A8S_HOME).
     │                              `r4t add --trust` — the one thing a repo cannot
     │                              write, which is the whole point of it
     ├── dead-letter/               undeliverable mail (unknown recipient, malformed)
+    │                              and the batch of a turn that failed, timed out
+    │                              or never finished
     ├── buckets.json               per-member + roster spend budgets (turns, not tokens)
     ├── rotation.json              per-rig round-robin index for harness pools
     ├── last-turn-start            cadence stamp for the roster throttle
@@ -222,6 +225,39 @@ def read_trust(node: str) -> str | None:
     except OSError:
         return None
     return text.lower() or None
+
+
+def wake_limit_path(node: str) -> Path:
+    return roster_dir(node) / "wake.json"
+
+
+def stamp_wake_limit(node: str, max_wake_seconds: float | None, margin_seconds: float) -> None:
+    """Record the wake limit the node's a8s definition carries, so `r4t status`
+    can judge a rig against it without the definition in hand."""
+    path = wake_limit_path(node)
+    if max_wake_seconds is None:
+        path.unlink(missing_ok=True)
+        return
+    payload = {"max_wake_seconds": max_wake_seconds, "margin_seconds": margin_seconds}
+    if read_wake_limit(node) == payload:
+        return
+    atomic_write_json(path, payload)
+
+
+def read_wake_limit(node: str) -> dict | None:
+    try:
+        data = json.loads(wake_limit_path(node).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return {
+            "max_wake_seconds": float(data["max_wake_seconds"]),
+            "margin_seconds": float(data["margin_seconds"]),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def node_for_root(cwd: Path) -> str | None:
@@ -548,12 +584,11 @@ def claim_queue(node: str, name: str) -> list[dict]:
     this snapshot and ride the next turn.
 
     The claim MOVES rather than deletes, keeping the filename so arrival order
-    survives. A turn that ends — cleanly or not — either drops the in-flight
-    copies (`release_claim`) or returns them (`return_claim`). A turn that never
-    ends at all, because the process was killed, leaves them where
-    `recover_inflight` finds them. Deleting at claim time made a SIGKILL between
-    claim and completion lose the batch outright: `.turn.json` records counts
-    and thread ids, not bodies."""
+    survives. A turn that ends, cleanly or not, drops the in-flight copies
+    (`release_claim`); a failed one records them as dead letters first. A turn
+    that never ends at all, because the process was killed, leaves them where
+    `orphaned_inflight` finds them, so the bodies reach a dead-letter record:
+    `.turn.json` records counts and thread ids, not bodies."""
     d = inflight_dir(node, name)
     d.mkdir(parents=True, exist_ok=True)
     entries: list[dict] = []
@@ -571,6 +606,14 @@ def claim_queue(node: str, name: str) -> list[dict]:
     return entries
 
 
+def return_claim(node: str, name: str) -> None:
+    """Put an in-flight batch back in the queue unrun, under the same file
+    names, so it rides the next turn in arrival order."""
+    q = queue_dir(node, name)
+    for path in list_inflight(node, name):
+        os.replace(path, q / path.name)
+
+
 def release_claim(node: str, name: str) -> None:
     """Drop the in-flight batch — the turn is over and its messages are spent."""
     for path in list_inflight(node, name):
@@ -580,39 +623,32 @@ def release_claim(node: str, name: str) -> None:
             pass
 
 
-def return_claim(node: str, name: str) -> int:
-    """Move the in-flight batch back to the queue, names intact, so the next
-    turn sees the same envelopes in the same order. Returns how many moved.
-    A returned envelope keeps its id, so it does not re-trigger duplicate
-    collapse against whatever arrived while the turn ran."""
-    q = queue_dir(node, name)
-    q.mkdir(parents=True, exist_ok=True)
-    moved = 0
-    for path in list_inflight(node, name):
-        try:
-            os.replace(path, q / path.name)
-        except OSError:
-            continue
-        moved += 1
-    return moved
-
-
-def recover_inflight(node: str) -> list[tuple[str, int]]:
-    """Return every orphaned in-flight batch to its queue: the visibility
-    timeout, with the live PID lock as the liveness test. A member whose turn is
-    genuinely running holds its lock and is left alone. Returns (member, count)
-    for each recovery, so the caller can say what it found."""
+def orphaned_inflight(node: str) -> list[tuple[str, list[dict]]]:
+    """Every in-flight batch whose member holds no live lock: a turn that was
+    killed before it ended. The live PID lock is the liveness test, so a turn
+    genuinely running is left alone. Returns (member, envelopes) and changes
+    nothing; the caller records the batch and then calls `release_claim`. An
+    unreadable file has no envelope to report and is dropped with the rest."""
     agents_root = roster_dir(node) / "agents"
     if not agents_root.is_dir():
         return []
     running = {lock["agent"] for lock in live_locks(node)}
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, list[dict]]] = []
     for entry in sorted(agents_root.iterdir()):
-        if entry.name in running or not list_inflight(node, entry.name):
+        if entry.name in running:
             continue
-        moved = return_claim(node, entry.name)
-        if moved:
-            out.append((entry.name, moved))
+        paths = list_inflight(node, entry.name)
+        if not paths:
+            continue
+        batch: list[dict] = []
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                batch.append(data)
+        out.append((entry.name, batch))
     return out
 
 
@@ -1196,40 +1232,13 @@ def rig_budget_seconds_until(
     return (target - level) / earn_per_hour * 3600.0
 
 
-# ---------- per-agent failure breaker ----------
-
-def breaker_open(
-    node: str, name: str, cap: int, cooldown_seconds: float
-) -> tuple[bool, int]:
-    """systemd-StartLimitBurst-style breaker: `cap` consecutive failed turns
-    (nonzero exit or timeout, tracked in meta.json by dispatch) opens it.
-    While open, turns are blocked until `cooldown_seconds` have passed since
-    the last failure — then one probe turn is let through (half-open); a
-    clean turn resets the count and closes it. Returns (blocked, count)."""
-    meta = read_meta(node, name)
-    count = int(meta.get("consecutive_failures", 0) or 0)
-    if cap <= 0 or count < cap:
-        return False, count
-    raw = str(meta.get("last_failure_at", ""))
-    try:
-        last = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return False, count
-    return (time.time() - last) < cooldown_seconds, count
-
-
-def clear_failures(node: str, name: str) -> None:
-    update_meta(node, name, consecutive_failures=0)
-
-
-# ---------- park (the breaker's third state, for failures that will recur) ----------
+# ---------- park (for failures that will recur) ----------
 #
-# The transient breaker probes forever, which is right for a timeout and wrong
-# for a harness binary that is not installed: nothing changes between probes, so
-# every probe fails identically and every failure speaks. PARKED is systemd's
-# `failed` — entered on the FIRST structural failure, left only when a probe that
-# costs nothing says the precondition holds, or by `r4t resume`. The member's
-# queue holds untouched the whole time, which is what makes parking safe.
+# A harness binary that is not installed fails every turn the same way, and
+# each failed turn costs its batch. PARKED is systemd's `failed`: entered on
+# the FIRST structural failure, left only when a probe that costs nothing says
+# the precondition holds, or by `r4t resume`. Mail that arrives while parked
+# holds in the queue and runs no turn, the same as an empty budget.
 
 def read_parked(node: str, name: str) -> dict:
     data = read_meta(node, name).get("parked")
@@ -1248,13 +1257,11 @@ def park_member(node: str, name: str, *, reason: str, rig: str, probe: str) -> d
 
 
 def unpark_member(node: str, name: str) -> dict:
-    """Clear the park and return the record that was cleared ({} if none).
-    Failures are cleared with it: the structural cause is gone, so the count
-    that accumulated against it is not evidence about anything."""
+    """Clear the park and return the record that was cleared ({} if none)."""
     record = read_parked(node, name)
     if not record:
         return {}
-    update_meta(node, name, parked=None, consecutive_failures=0)
+    update_meta(node, name, parked=None)
     return record
 
 

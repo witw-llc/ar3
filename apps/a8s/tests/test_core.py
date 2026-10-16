@@ -9,10 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core import (
-    BACKOFF_SCHEDULE,
-    MAX_ATTEMPTS,
     MAX_SEEN_IDS,
-    claims_dir,
     _a8s_dir,
     _pid_alive,
     agent_dir,
@@ -22,7 +19,6 @@ from core import (
     pending_dir,
     read_last_active,
     registry_path,
-    retry_sidecar_path,
     touch_last_active,
 )
 from conftest import set_home
@@ -58,36 +54,10 @@ class TestPendingDir:
         assert p.parent == agent_dir("claude")
 
 
-class TestRetrySidecarPath:
-    def test_appends_retry_suffix(self):
-        f = Path("/tmp/01HX.json")
-        assert retry_sidecar_path(f) == Path("/tmp/01HX.json.retry")
-
-
-class TestClaimsDir:
-    def test_cluster_wide(self, fake_home):
-        assert claims_dir() == fake_home / ".a8s" / "claims"
-
-
 class TestNetworkConfigPath:
     def test_under_a8s(self, fake_home):
         p = network_config_path()
         assert p == fake_home / ".a8s" / "network.json"
-
-
-class TestBackoffConstants:
-    def test_schedule_is_strictly_increasing(self):
-        for a, b in zip(BACKOFF_SCHEDULE, BACKOFF_SCHEDULE[1:]):
-            assert a < b
-
-    def test_first_step_is_30s(self):
-        assert BACKOFF_SCHEDULE[0] == 30
-
-    def test_last_step_is_24h(self):
-        assert BACKOFF_SCHEDULE[-1] == 86400
-
-    def test_max_attempts_matches_schedule_length(self):
-        assert MAX_ATTEMPTS == len(BACKOFF_SCHEDULE)
 
 
 class TestSeenIdsCap:

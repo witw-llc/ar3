@@ -8,11 +8,11 @@ no broker, no port, no account and no host that either machine has to reach:
 
 The wire is one file per message, named for the message's own ULID and
 holding the same envelope bytes MQTT would carry. Nothing new is invented at
-the boundary, so a network can mix a folder remote and a broker remote. What
-this wire promises is at-least-once delivery — the ledger and the inbox
-claim collapse the repeats — and nothing about order: a sync client
-materializes files on its own schedule, so two machines publishing into one
-folder arrive interleaved.
+the boundary, so a network can mix a folder remote and a broker remote. Each
+machine reads each envelope once — the ledger and the seen table drop the
+repeats — and nothing about order holds: a sync client materializes files
+on its own schedule, so two machines publishing into one folder arrive
+interleaved.
 
 The path is the base, exactly as `a8s storage` reads it, so one folder can
 carry both the envelopes and the attachment bundles they refer to:
@@ -422,12 +422,12 @@ class FolderTransport(Transport):
             # Retried: a sync client or a scanner opens a new file in a watched
             # folder the moment it appears, and on Windows a rename of a file
             # somebody else holds fails outright. Losing the race here would
-            # cost the message a full backoff cycle.
+            # drop the message.
             replace_with_retry(staging, self._base / f"{msg_id}.json")
         except OSError as e:
             # Single attempt: the replace retry already spent its budget, and a
             # .part left behind is inert — the envelope glob never matches it,
-            # and a retry of the same envelope overwrites the same name.
+            # and a later send of the same envelope overwrites the same name.
             try:
                 staging.unlink(missing_ok=True)
             except OSError:
@@ -477,29 +477,13 @@ class FolderTransport(Transport):
             if cb is None:
                 continue
             try:
-                consumed = cb(raw) is not False
+                cb(raw)
             except Exception as e:
-                # Retried on the next pass, and the ledger is not stamped — so
-                # a handler that fails every time is an invisible 15-second
-                # loop unless it says so.
                 self._warn_once(
                     f"deliver:{type(e).__name__}",
                     f"WARN: remote {self._remote_id}: delivery failed "
-                    f"({type(e).__name__}: {e}); retrying",
+                    f"({type(e).__name__}: {e}); dropped",
                 )
-                continue
-            if not consumed:
-                # The receive path says it is not finished: an inbox that
-                # would not take the envelope, or a sibling holding the claim.
-                # Stamping the ledger here is what makes a file the only copy
-                # of a message and then forgets it, because this loop skips
-                # every stem the ledger names and never reads the file again.
-                self._warn_once(
-                    "unconsumed",
-                    f"WARN: remote {self._remote_id}: delivery unfinished; "
-                    f"retrying until it is taken",
-                )
-                continue
             self._ledger.record(stem)
 
     def _warn_once(self, key: str, message: str) -> None:

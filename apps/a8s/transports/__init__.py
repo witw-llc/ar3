@@ -19,28 +19,27 @@ Lifecycle:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable
 
 
 # `on_message` callback signature. Receives raw envelope bytes (the JSON the
 # sender published). Implementations must be safe to call from a network thread.
-#
-# The callback may answer whether this node finished with the envelope. `False`
-# says it did not — a sibling receiver holds it, or delivery failed and the
-# message was deliberately left deliverable. A transport acknowledges only what
-# the receive path reports consumed: `folder` and `s3` leave the file or object
-# unrecorded and offer it again on the next poll, and `mqtt` withholds the
-# PUBACK, re-offers the message on a backoff while it runs, and leaves the rest
-# for the broker to redeliver on the next session. `None` is no answer at all,
-# which is what a transport gets from any receive path it cannot interrogate,
-# and it reads as a plain delivery.
-OnMessage = Callable[[bytes], Optional[bool]]
+# A transport offers each envelope once and consumes it after the callback
+# returns or raises: `folder` and `s3` record it in the consumed ledger, and
+# `mqtt` acknowledges it.
+OnMessage = Callable[[bytes], None]
 
 
 class TransportError(Exception):
-    """Raised by `publish` when the message couldn't be delivered to the
-    transport (broker unreachable, auth fail, in-flight queue full, etc).
-    Callers warn-and-continue and rely on the per-message retry sidecar."""
+    """Raised by `publish` when the transport did not take the message
+    (broker unreachable, auth fail, in-flight queue full, etc). The send
+    fails; a8s does not try it again."""
+
+
+class PublishAmbiguous(TransportError):
+    """Raised by `publish` when the envelope may have gone out and the
+    transport cannot say: no acknowledgement in time, or a link that dropped
+    after the send. The router counts it as sent and never retries it."""
 
 
 class Transport(ABC):
@@ -50,8 +49,7 @@ class Transport(ABC):
     @abstractmethod
     def id(self) -> str:
         """Stable identifier matching the user's `network.json` entry name.
-        Used as the dedup key in the per-message retry sidecar so multiple
-        runs against the same broker don't double-publish."""
+        Names the remote in log lines and transaction rows."""
 
     @abstractmethod
     def start(self, on_message: OnMessage) -> None:
@@ -59,14 +57,8 @@ class Transport(ABC):
         each incoming envelope. Implementations should be re-entrant; the
         caller may invoke `start` once per process lifetime.
 
-        `False` means the receive path did not finish with the envelope: a
-        sibling holds the claim, an inbox would not take it, or a download is
-        still running. The transport must not acknowledge it. A transport that
-        polls a wire it shares — an object in a bucket, a file in a folder —
-        leaves it unrecorded and offers it again; MQTT withholds the PUBACK,
-        offers it again while it runs, and leaves it for the broker to
-        redeliver on the next session. `None` and `True` are both consent to
-        acknowledge it."""
+        Each envelope is offered once and consumed after the callback, whether
+        it returns or raises."""
 
     @abstractmethod
     def stop(self) -> None:
@@ -74,18 +66,17 @@ class Transport(ABC):
 
     @abstractmethod
     def publish(self, envelope: bytes) -> None:
-        """Send one envelope. Raises `TransportError` on failure."""
+        """Send one envelope. Raises `TransportError` on a definite failure
+        and `PublishAmbiguous` when the outcome is unknown."""
 
     def is_connected(self) -> bool:
         """Whether the link is up now. A transport with no link to lose is
         always connected."""
         return True
 
-    def publish_control(self, envelope: bytes) -> bool:
-        """Send one control envelope (a delivery receipt). Returns True when
-        it went out, False when the transport holds it to send once its link
-        is back. Raises `TransportError` when it can do neither.
+    def publish_control(self, envelope: bytes) -> None:
+        """Send one control envelope (a delivery receipt) once. Raises
+        `TransportError` when it did not go out; the receipt is dropped.
 
         A transport with no link to lose sends it the same way as `publish`."""
         self.publish(envelope)
-        return True

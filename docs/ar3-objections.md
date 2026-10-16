@@ -58,8 +58,9 @@ Duplicate collapse folds a burst of identical arrivals into one turn. Spend
 budgets are token buckets, one per member and one for the cell, and an empty
 bucket rests the member while its queue holds. A node runs one turn at a time,
 with no number to raise, and an optional cadence floor degrades a perfect storm
-into a slow visible drip. A failing member trips a breaker instead of burning a
-turn per arrival. See [r4t-governance.md](r4t-governance.md).
+into a slow visible drip. A failed turn runs once and is never retried, so a
+failing member spends only what its budget holds. See
+[r4t-governance.md](r4t-governance.md).
 
 `Status: answered`
 

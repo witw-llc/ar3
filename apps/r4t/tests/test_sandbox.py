@@ -166,40 +166,40 @@ def test_fake_sandbox_end_to_end():
     assert "human" in report
 
 
-def test_fake_sandbox_breaker_trips_and_task_still_closes():
+def test_fake_sandbox_failed_member_dead_letters_and_task_still_closes():
     report, _ = _run_sandbox("--break", "dev")
 
     mechanical = _mechanical(report)
     for check in (
-        "Breaker tripped",
-        "Breaker held queued message(s)",
+        "Failed batch dead-lettered",
+        "Sender told it may have partly acted",
         "Leader answered the originator",
         "Zero orphan processes",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
-    assert "BREAKER dev tripped" in report  # governance events section
-    assert "breaker open" in report  # queue held while the breaker is open
+    assert "DEAD-LETTER dev turn failed (exit 1" in report
+    assert "BREAKER" not in report
 
 
-def test_fake_sandbox_timeout_member_is_killed_and_requeued():
+def test_fake_sandbox_timeout_member_is_killed_and_dead_lettered():
     report, _ = _run_sandbox("--break", "dev:hang")
 
     mechanical = _mechanical(report)
     for check in (
         "Turn killed at its timeout",
-        "Timed-out batch requeued",
-        "Breaker tripped on timeouts",
+        "Timed-out batch dead-lettered",
+        "Sender told it ran out of time",
         "Budget charged for dev's turn(s)",
     ):
         assert check in mechanical
     assert "| FAIL |" not in mechanical
     # A killed turn, not one that finished on its own: the sleeper is SIGKILLed
-    # at the rig's timeout and its whole batch goes back to the queue.
+    # at the rig's timeout and its batch is a dead letter, never run again.
     assert "killed at timeout" in report
     assert re.search(r"\| dev \| hung \|[^|]*\|[^|]*\|[^|]*\| -9 \|", report)
-    assert "message(s) returned to the queue" in report
-    assert "Dead letters | 0" in mechanical
+    assert "returned to the queue" not in report
+    assert "Dead letters | 0" not in mechanical
 
 
 def test_fake_sandbox_silent_member_answers_on_stdout():
@@ -208,7 +208,7 @@ def test_fake_sandbox_silent_member_answers_on_stdout():
     mechanical = _mechanical(report)
     for check in (
         "Stdout answer relayed as a reply",
-        "Breaker stayed closed",
+        "No turn dead-lettered",
         "Program runs and exits 0",
     ):
         assert check in mechanical
@@ -228,7 +228,7 @@ def test_fake_sandbox_mute_member_is_never_nudged():
     for check in (
         "Silent turn logged",
         "Heartbeat re-engaged the org, no watchdog nudge",
-        "Breaker stayed closed",
+        "No turn dead-lettered",
         "Leader answered the originator",
     ):
         assert check in mechanical

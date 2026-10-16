@@ -180,6 +180,32 @@ def test_worker_failure_keeps_capture_and_retries(isolated, monkeypatch):
     assert not (t.home / "failure.json").exists()
 
 
+def test_worker_runs_the_scheduled_compile_only_after_it_distilled(isolated, monkeypatch):
+    t = turn(isolated)
+    t.finish("A useful result.", 0)
+    compiled = []
+    monkeypatch.setattr(memory, "_run_job", lambda *a: None)
+    monkeypatch.setattr(memory, "_run_compile", lambda home, capture, timeout: compiled.append(capture.name))
+    monkeypatch.setattr(memory, "kick", lambda home: None)
+    assert memory.worker(t.home) == 0
+    assert compiled == [f"{t.stamp}.json"]
+    assert memory.worker(t.home) == 0
+    assert compiled == [f"{t.stamp}.json"]
+
+
+def test_a_failed_compile_costs_the_worker_nothing(isolated, monkeypatch):
+    t = turn(isolated)
+    t.finish("A useful result.", 0)
+    monkeypatch.setattr(memory, "_run_job", lambda *a: None)
+    def fail(*a):
+        raise RuntimeError("compile timed out")
+    monkeypatch.setattr(memory, "_run_compile", fail)
+    monkeypatch.setattr(memory, "kick", lambda home: None)
+    assert memory.worker(t.home) == 0
+    assert not list((t.home / "queue").glob("*.json"))
+    assert not (t.home / "failure.json").exists()
+
+
 def test_undistillable_head_moves_to_failed_and_the_queue_progresses(isolated, monkeypatch):
     head, tail = sorted([turn(isolated), turn(isolated)], key=lambda t: t.stamp)
     head.finish("Poison.", 0)

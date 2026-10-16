@@ -24,16 +24,16 @@ dreaming in [r4t-knowledge.md](r4t-knowledge.md#distill-on-the-way-out--dreaming
 
 | # | Vernacular | Log tag | What it does |
 |---|---|---|---|
-| 1 | **recover** | `RECOVERED` | Return every `queue/.inflight/` batch whose member holds no live lock — a turn that was killed mid-flight |
+| 1 | **orphans** | `DEAD-LETTER` | Dead-letter every `queue/.inflight/` batch whose member holds no live lock — a turn that was killed mid-flight — and tell each sender once |
 | 2 | **prune** | (silent) | Drop lock files whose PID is gone |
 | 3 | **probe** | `RESUME` | Check each parked member's command with `shutil.which`; one that resolves rejoins the rotation with its whole queue |
-| 4 | **drain** | (ordinary turn logs) | Run every runnable queued turn until a pass runs nothing |
+| 4 | **drain** | (ordinary turn logs) | Run every runnable queued turn until a pass runs nothing, or until the next turn could outlast the wake (`OUT-OF-TIME`) |
 | 5 | **dream** | `DREAM` | Distill fresh turn captures into each knowledge-carrying member's k7e store |
 | 6 | **heartbeat** | `MISSION-REVIEW` | If the org is structurally stalled — quiet for half an hour, not merely between messages — ask the top leader whether the mission is met |
 | 7 | **flush** | `FLUSH` | Retire continuing conversations idle past their `Continue: <duration>` window |
 
-Recovery is first because everything after it reads the queue and has to read a
-true one. The probe is free — no subprocess, no tokens, no engine wake — which
+Orphans go first so no later step mistakes a dead turn's batch for a running
+one. The probe is free — no subprocess, no tokens, no engine wake — which
 is what earns it a place on every pass.
 
 If the heartbeat fires a review turn that stages work, `run_idle` drains
@@ -47,9 +47,10 @@ A load error (roster or rig config) logs `IDLE-SKIPPED` and runs nothing.
 ### 1. Drain
 
 Not a sweep — queued turns simply run via `drain_until_quiet`. Members out of
-budget, on an open breaker, or blocked by the cadence floor keep their queue;
-refill or cooldown is the retry. Mentioned here because any work the heartbeat
-stages rides this same drain.
+budget, parked, or blocked by the cadence floor keep their queue and run when
+the bucket refills or the floor opens. A turn that would outlast the wake's
+`max_wake_seconds` does not start; its queue waits for the next wake. Mentioned
+here because any work the heartbeat stages rides this same drain.
 
 ### 2. Dream (`DREAM`)
 
@@ -151,10 +152,10 @@ member / cell / (optional) rig budget like any other turn.
 
 | Mechanism | Budget-gated? | Empty budget |
 |---|---|---|
-| Drain | Yes | Queued work holds; next pass retries |
+| Drain | Yes | Queued work holds and runs on a later pass |
 | Dream | No r4t spend-bucket gate — k7e distill uses the distill rig directly | N/A to member/cell budget; a missing or failing distill rig logs `DREAM-SKIP` / `DREAM-FAIL` and captures wait |
 | Heartbeat | Yes — checks `_runnable` on the leader | Logs `MISSION-REVIEW deferred`; holds the stall counter at the threshold so the review fires as soon as the bucket refills |
-| Flush | Yes — checks `_runnable` before the dump turn | Logs `FLUSH deferred`; retries next pass when budget refills |
+| Flush | Yes — checks `_runnable` before the dump turn | Logs `FLUSH deferred`; a later pass starts the dump turn when budget refills |
 
 ## Knobs
 

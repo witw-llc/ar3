@@ -28,6 +28,7 @@ from settings import DEFAULTS, get_int, get_setting
 __all__ = [
     "EVENTS",
     "TransactionLogError",
+    "count_by_remote",
     "hold_open",
     "inbox_activity",
     "log",
@@ -46,14 +47,12 @@ Event = Literal[
     "FILE_DELIVERED",
     "FILE_UPLOAD_FAILED",
     "ENQUEUED",
-    "DEFERRED",
     "ATTACHMENT_FAILED",
     "EXPIRED",
-    "NO_LOCAL_RECIPIENT",
     "PUBLISHED",
+    "PUBLISH_AMBIGUOUS",
     "DISCARDED",
     "DROPPED",
-    "REQUEUED",
     "PROXY_DELIVERED",
     "RUN_START",
     "RUN_STOP",
@@ -73,14 +72,12 @@ EVENTS: tuple[str, ...] = (
     "FILE_DELIVERED",
     "FILE_UPLOAD_FAILED",
     "ENQUEUED",
-    "DEFERRED",
     "ATTACHMENT_FAILED",
     "EXPIRED",
-    "NO_LOCAL_RECIPIENT",
     "PUBLISHED",
+    "PUBLISH_AMBIGUOUS",
     "DISCARDED",
     "DROPPED",
-    "REQUEUED",
     "PROXY_DELIVERED",
     "RUN_START",
     "RUN_STOP",
@@ -275,21 +272,24 @@ def seen_contains(msg_id: str) -> bool:
         return False
 
 
-def seen_insert(msg_id: str, kind: str, seen_at: float | None = None) -> None:
-    """Remember `msg_id`. Best-effort: a missed insert means a possible
-    duplicate, never a lost message."""
+def seen_insert(msg_id: str, kind: str, seen_at: float | None = None) -> bool:
+    """Remember `msg_id`. True when this call added the row, False when it
+    was already there. One INSERT OR IGNORE has one winner across every
+    process sharing the store. Best-effort: a store that cannot be written
+    answers True, which costs a possible duplicate, never a lost message."""
     when = time.time() if seen_at is None else seen_at
     try:
-        def insert() -> None:
+        def insert() -> bool:
             with closing(_connect()) as conn, conn:
-                conn.execute(
+                cur = conn.execute(
                     "INSERT OR IGNORE INTO seen(id, kind, seen_at) VALUES (?, ?, ?)",
                     (msg_id, kind, when),
                 )
+                return cur.rowcount == 1
 
-        sqlite_store.retry_busy(insert)
+        return sqlite_store.retry_busy(insert)
     except (OSError, sqlite3.Error):
-        pass
+        return True
 
 
 def seen_expire(message_cutoff: float, receipt_cutoff: float) -> None:
@@ -326,12 +326,10 @@ def read_events(msg_id: str) -> list[dict[str, str]]:
 
 
 # Rows a node writes about a message it may not own: a shared topic makes
-# every node log NOT_LOCAL, and publish a no_local_recipient receipt, for
-# every envelope addressed to somebody else, and a remote discard is about
-# whatever arrived. Every other row is this node's own routing or lifecycle.
-_MAYBE_FOREIGN = (
-    "(event IN ('NOT_LOCAL', 'RECEIPT_PUBLISHED') OR (event = 'DISCARDED' AND remote != ''))"
-)
+# every node log NOT_LOCAL for every envelope addressed to somebody else, and a
+# remote discard is about whatever arrived. Every other row is this node's own
+# routing or lifecycle.
+_MAYBE_FOREIGN = "(event = 'NOT_LOCAL' OR (event = 'DISCARDED' AND remote != ''))"
 _LOCAL_ONLY = (
     f"NOT ({_MAYBE_FOREIGN} AND msg_id NOT IN "
     f"(SELECT msg_id FROM transactions WHERE msg_id != '' AND NOT {_MAYBE_FOREIGN}))"
@@ -418,6 +416,22 @@ def inbox_activity(since: str) -> dict[str, tuple[int, str]]:
     except (OSError, sqlite3.Error) as e:
         raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
     return {name: (int(count), newest) for name, count, newest in rows}
+
+
+def count_by_remote(event: str, since: str) -> dict[str, int]:
+    """`{remote: rows}` of one event at or after `since`, a stamp in the
+    log's own form (`2026-10-05T12:00:00.000Z`). Rows with no remote are not
+    counted."""
+    try:
+        with closing(open_for_read()) as conn:
+            rows = conn.execute(
+                "SELECT remote, COUNT(*) FROM transactions "
+                "WHERE event = ? AND timestamp >= ? AND remote != '' GROUP BY remote",
+                (event, since),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
+    return {str(remote): int(count) for remote, count in rows}
 
 
 def last_heard() -> dict[str, str]:

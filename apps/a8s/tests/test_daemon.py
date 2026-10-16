@@ -599,8 +599,8 @@ class TestDeclaredWakeEnv:
 
         assert attached_loop(["A", "B"], 0.1, single_pass=True) == 0
         assert "wake aborted" in _read_log("B")
-        # Requeued, never dropped: the operator fixes the knob and it delivers.
-        assert list(inbox_dir("B").glob("*.json"))
+        assert not list(inbox_dir("B").glob("*.json"))
+        assert "1 dead letter(s) left in trash" in _read_log("B")
 
 
 class TestFilesDirContract:
@@ -1826,17 +1826,17 @@ class TestSharedHandlerWakeFairness:
 
         monkeypatch.setattr(daemon_mod, "wake_once", instant_wake)
 
-        real_ready = daemon_mod._wake_retry_ready
+        real_ready = daemon_mod._pause_ready_for_wake
         armed = True
 
-        def skip_b_once(name, **kw):
+        def skip_b_once(p, definition, **kw):
             nonlocal armed
-            if armed and name == "B" and len(woke) == 1:
+            if armed and p.name == "B" and len(woke) == 1:
                 armed = False
                 return False
-            return real_ready(name, **kw)
+            return real_ready(p, definition, **kw)
 
-        monkeypatch.setattr(daemon_mod, "_wake_retry_ready", skip_b_once)
+        monkeypatch.setattr(daemon_mod, "_pause_ready_for_wake", skip_b_once)
 
         wait_calls = 0
 
@@ -1975,7 +1975,7 @@ class TestLoopSurvivesTransientErrors:
 
 
 class TestRemoteThatFailedToStart:
-    def test_mail_for_a_remote_name_parks_instead_of_trashing(
+    def test_mail_for_a_remote_name_drops_naming_the_remote(
         self, fake_home, tmp_path, fixtures_dir, monkeypatch
     ):
         import daemon as daemon_mod
@@ -2001,6 +2001,8 @@ class TestRemoteThatFailedToStart:
 
         assert attached_loop(["A"], 0.01, single_pass=True) == 0
 
-        assert len(list(pending_dir("A").glob("*.json"))) == 1
-        assert not list(trash_dir("A").glob("*.json"))
-        assert "unknown recipient" not in _read_log("A")
+        assert not list(pending_dir("A").glob("*.json"))
+        assert len(list(trash_dir("A").glob("*.json"))) == 1
+        log = _read_log("A")
+        assert "unknown recipient" not in log
+        assert "remote broker did not start" in log

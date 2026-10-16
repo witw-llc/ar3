@@ -116,16 +116,15 @@ class TestMemberVerdicts:
         verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert any("member(s) healthy" in v.text for v in verdicts)
 
-    def test_breaker_open_is_bad(self, r4t_home, roster, config):
-        state.update_meta(
-            NODE, "phil",
-            consecutive_failures=config.breaker_cap,
-            last_failure_at=state.utc_now(),
+    def test_a_failed_turn_warns_through_its_dead_letter(self, r4t_home, roster, config):
+        state.record_dead_letter(
+            NODE, reason="turn-failed", sender="boss", to=f"{NODE}:phil",
+            thread="t", content="work",
         )
         verdicts = verdict.roster_verdicts(NODE, roster, config)
-        bad = by_level(verdicts, verdict.BAD)
-        assert any("Phil broken" in v.text for v in bad)
-        assert not any("member(s) healthy" in v.text for v in verdicts)
+        warn = by_level(verdicts, verdict.WARN)
+        assert any("1 turn-failed dead letter(s)" in v.text for v in warn)
+        assert not by_level(verdicts, verdict.BAD)
 
     def test_resting_member_with_queue_warns(self, r4t_home, roster, config):
         rig, _e, _p = config.rig_for(next(m for m in roster.members if m.name == "Phil"))
@@ -140,6 +139,21 @@ class TestMemberVerdicts:
         empty_budget(NODE, "phil", rig.budget_max, rig.budget_earn_per_hour)
         verdicts = verdict.roster_verdicts(NODE, roster, config)
         assert "resting" not in texts(verdicts)
+
+    def test_a_rig_longer_than_any_wake_is_bad(self, r4t_home, roster, config):
+        state.stamp_wake_limit(NODE, 40.0, 30.0)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
+        bad = by_level(verdicts, verdict.BAD)
+        names = {v.text.split()[0] for v in bad}
+        assert names == {"Gerry", "Phil"}
+        phil = next(v for v in bad if v.text.startswith("Phil"))
+        assert "timeout_seconds 30" in phil.text and "max_wake_seconds 40" in phil.text
+        assert "member(s) healthy" not in texts(verdicts)
+
+    def test_a_rig_that_fits_the_wake_is_quiet(self, r4t_home, roster, config):
+        state.stamp_wake_limit(NODE, 2700.0, 30.0)
+        verdicts = verdict.roster_verdicts(NODE, roster, config)
+        assert not by_level(verdicts, verdict.BAD)
 
     def test_deep_queue_backs_up(self, r4t_home, roster, config):
         enqueue_n("phil", verdict.QUEUE_DEPTH_WARN)

@@ -522,7 +522,7 @@ Roster  (repo settings: /home/you/ar3/silo/r4t.md)
 Rigs  (your configuration: /home/you/.config/r4t/rigs.json)
   ✓ silo        ollama launch opencode --model qwen3.6 -- run --auto --dir {workdir} {prompt}  (timeout=900s budget=8/+4per-h sends=6)
     contract    one turn at a time  (cadence 0s)
-    governance  cell_budget=16/+8per-h  breaker=5/600s
+    governance  cell_budget=16/+8per-h
 
 Activity
     dead letters  0

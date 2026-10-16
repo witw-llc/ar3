@@ -17,9 +17,6 @@ optional — every knob has a sane default; see README.md for the table):
   bucket. A turn costs 1 cell unit; when it is empty no member runs.
 - `"log_retention_days"` — how many UTC days of roster transcript `r4t clear`
   keeps; older day files are deleted whole. 0 keeps every day forever.
-- `"breaker_cap"` / `"breaker_cooldown_seconds"` — per-member failure breaker:
-  consecutive failed turns (nonzero exit or timeout) that trip it, and how
-  long turns stay paused per failure before one probe turn is let through.
 
 Per-rig keys (defaults for every member on that rig; per-member override
 later): `budget_max` / `budget_earn_per_hour` — the member spend bucket. A
@@ -138,8 +135,6 @@ RESERVED_CONFIG_KEYS = frozenset({
     "throttle",
     "cell_budget_max",
     "cell_budget_earn_per_hour",
-    "breaker_cap",
-    "breaker_cooldown_seconds",
     "log_retention_days",
 })
 
@@ -1184,8 +1179,6 @@ DEFAULT_ECHO_MAX_CHARS = 1500
 DEFAULT_MIN_SECONDS_BETWEEN_TURN_STARTS = 0.0
 DEFAULT_CELL_BUDGET_MAX = 16.0
 DEFAULT_CELL_BUDGET_EARN_PER_HOUR = 8.0
-DEFAULT_BREAKER_CAP = 5
-DEFAULT_BREAKER_COOLDOWN_SECONDS = 600.0
 DEFAULT_LOG_RETENTION_DAYS = 14
 
 
@@ -1451,8 +1444,6 @@ class RigConfig:
     throttle: Throttle = field(default_factory=Throttle)
     cell_budget_max: float = DEFAULT_CELL_BUDGET_MAX
     cell_budget_earn_per_hour: float = DEFAULT_CELL_BUDGET_EARN_PER_HOUR
-    breaker_cap: int = DEFAULT_BREAKER_CAP
-    breaker_cooldown_seconds: float = DEFAULT_BREAKER_COOLDOWN_SECONDS
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
     missing: bool = False
 
@@ -3013,7 +3004,10 @@ def _normalize_invoke(invoke: object) -> tuple[list, str | None]:
 def _parse_rig(name: str, raw: object) -> Rig:
     rig = Rig(name=name.lower())
     if not isinstance(raw, dict):
-        rig.error = "rig definition must be an object"
+        rig.error = (
+            f"top-level key {name!r} is not a setting r4t reads, so it must be "
+            "a rig object; delete the key if it is not a rig"
+        )
         return rig
     invoke, err = _normalize_invoke(raw.get("invoke"))
     if err:
@@ -3241,22 +3235,12 @@ def load_rig_config(path: Path) -> RigConfig:
         if key == "throttle":
             config.throttle = _parse_throttle(value)
             continue
-        if key == "breaker_cap":
-            n = _non_negative_number(value, 0, key)
-            if n <= 0:
-                raise RigError(f"{key} must be positive, got {value!r}")
-            setattr(config, key, int(n))
-            continue
         if key == "log_retention_days":
             config.log_retention_days = int(
                 _non_negative_number(value, DEFAULT_LOG_RETENTION_DAYS, key)
             )
             continue
-        if key in (
-            "cell_budget_max",
-            "cell_budget_earn_per_hour",
-            "breaker_cooldown_seconds",
-        ):
+        if key in ("cell_budget_max", "cell_budget_earn_per_hour"):
             n = _non_negative_number(value, 0, key)
             if n <= 0:
                 raise RigError(f"{key} must be positive, got {value!r}")

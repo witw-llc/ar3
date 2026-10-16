@@ -20,7 +20,7 @@ member's queue and back out. For governance rationale see
 2. r4t opens or continues a thread (a conversation label; a fresh thread
    opens for external mail) and ENQUEUES the message into the leader's
    durable queue — unconditionally. When the leader is runnable (both its
-   spend bucket and the cell bucket hold ≥1, its breaker is closed, the
+   spend bucket and the cell bucket hold ≥1, it is not parked, the
    throttle admits a start), ONE turn drains its whole queue: the prompt
    carries its persona, rolling history, and every waiting message at once.
    A member's `- **Reinforce:** <short line>` roster field closes every one
@@ -79,12 +79,14 @@ member's queue and back out. For governance rationale see
 
 ## The durable queue
 
-Every inbound message to a member enqueues unconditionally — no gate ever
-drops or dead-letters a deliverable message. Dead letters are for
-*undeliverable* mail only (unknown recipient, disabled member, a rig that
-will not resolve) plus a per-turn send-quota overflow: each becomes one JSON
-record (reason, count, from, to, thread, time) in
-`~/.config/r4t/rosters/<node>/dead-letter/`. Duplicate collapse replaces pair
+Every inbound message to a member enqueues unconditionally — no gate before a
+turn drops or dead-letters a deliverable message. Dead letters are for
+*undeliverable* mail (unknown recipient, disabled member, a rig that will not
+resolve), a per-turn send-quota overflow, and the batch of a turn that failed,
+timed out or never finished: each becomes one JSON record (reason, count,
+from, to, thread, time) in `~/.config/r4t/rosters/<node>/dead-letter/`. A
+failed turn's senders each get one notice that the member may have partly
+acted, and the batch never runs again. Duplicate collapse replaces pair
 suppression: when the newest queued entry has the same sender and identical
 normalized body, the arrival collapses into it with a `repeats` count rather
 than adding noise. A turn drains the WHOLE queue at once (batch invoke): one

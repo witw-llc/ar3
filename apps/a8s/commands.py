@@ -29,7 +29,6 @@ from pathlib import Path
 
 from core import (
     ENTRYPOINT,
-    MAX_WAKE_ATTEMPTS,
     SCRIPT_DIR,
     _pid_alive,
     _preview,
@@ -37,21 +36,18 @@ from core import (
     agent_log_path,
     canonical_name,
     clear_wake_pid,
-    clear_wake_retry,
-    clear_dead_letter,
-    read_dead_letters,
+    count_dead_letters,
+    dead_letters_dir,
     folder_ledger_path,
     inbox_dir,
     out,
-    out_agent,
     pid_path,
     read_wake_pid,
-    read_wake_retry,
     s3_ledger_path,
     trash_dir,
     unique_path,
     user_definitions_dir,
-    wake_retry_wait,
+    wake_pid_path,
 )
 from definitions import (
     MAILBOX_PATH_FIELDS,
@@ -84,10 +80,10 @@ from daemon import (
     _clear_kill_request,
     _read_handler_pid,
     _unlink_pid_files,
+    _dead_letter,
     _write_kill_request,
     attached_loop,
 )
-from mailbox import request_parked_sends
 from network import (
     PAIRED_KEY,
     _build_service as build_service,
@@ -1729,13 +1725,10 @@ def _stop_one(name: str, force: bool) -> int:
 
     One handler may serve multiple alias members; we dedupe by PID so each
     unique handler is signaled once. Detaches the WHOLE handler, so every node
-    attached to it is stopped, named or not: a forced kill returns their wakes'
-    mail and clears their backoff, and the nodes that were not named are
-    reported.
-
-    Once the handlers are gone the name's wake-retry record is cleared: a stop
-    is the operator's cue that the cause was dealt with, so the next start
-    delivers waiting mail at once. Trash and dead letters are left alone.
+    attached to it is stopped, named or not, and the nodes that were not named
+    are reported. A wake the force kills is a failed wake: its mail is a dead
+    letter, and the stop prints the message ids. A handler killed outright
+    cannot settle its wake, so the stop marks that wake's mail itself.
     """
     members = _expand_to_agents(name)
     if members is None:
@@ -1795,9 +1788,10 @@ def _stop_one(name: str, force: bool) -> int:
             print(f"{label}: killed PID {pid}")
         stopped = _wait_handlers_stopped(members, set(seen_pids), STOP_KILL_WAIT_S)
         for n in affected:
+            unsettled = n in wakes and wake_pid_path(n).is_file()
             _clear_dead_handler_files(n)
-            if n in wakes:
-                _return_killed_wake(n, wakes[n][2])
+            if unsettled and _read_handler_pid(n) is None:
+                _dead_letter(n, wakes[n][2], "wake killed by `a8s stop --force`")
     if not stopped:
         print(
             f"still running after {wait_s:g}s"
@@ -1813,31 +1807,11 @@ def _stop_one(name: str, force: bool) -> int:
     for n in affected:
         if n not in members:
             print(f"{n}: stopped too; it shared the handler with {name}")
-    for n in affected:
-        if read_wake_retry(n) is not None:
-            clear_wake_retry(n)
-            print(f"{n}: backoff cleared; waiting mail wakes on the next start")
+    for n, (_, _, unit) in wakes.items():
+        dead = [Path(f).stem for f in unit if (dead_letters_dir(n) / f).is_file()]
+        if dead:
+            print(f"{n}: the killed wake's {len(dead)} message(s) are dead letters: {', '.join(dead)}")
     return 0
-
-
-def _return_killed_wake(name: str, unit: list[str]) -> None:
-    """Put back the envelopes a killed wake had consumed. A handler that
-    detaches on its own does this when the wake settles; one that was killed
-    outright cannot, and the mail would sit in trash with nothing to say so."""
-    inbox = inbox_dir(name)
-    inbox.mkdir(parents=True, exist_ok=True)
-    returned = 0
-    for fname in unit:
-        src = trash_dir(name) / fname
-        if not src.is_file() or (inbox / fname).exists():
-            continue
-        try:
-            src.rename(inbox / fname)
-        except OSError:
-            continue
-        returned += 1
-    if returned:
-        print(f"{name}: returned {returned} message(s) from the killed wake to the inbox")
 
 
 def _clear_dead_handler_files(name: str) -> None:
@@ -2064,29 +2038,12 @@ def cmd_exit() -> int:
     return 0
 
 
-def _duration_left(seconds: float) -> str:
-    """A wait still to run, rounded up: `45s`, `2m`, `1h`."""
-    secs = max(1, int(seconds + 0.999))
-    if secs < 60:
-        return f"{secs}s"
-    mins = (secs + 59) // 60
-    if mins < 60:
-        return f"{mins}m"
-    return f"{(mins + 59) // 60}h"
-
-
 def _node_status(name: str) -> str:
-    """`failed, backoff 2m (attempt 3/4)` while a failed wake's backoff runs,
-    `busy` while a wake is in flight, else `ok` — the node wakes on its next
-    pass. The backoff reads first: it is what keeps the mail waiting."""
-    wait = wake_retry_wait(name)
-    if wait is not None:
-        left, failed = wait
-        attempt = f" (attempt {failed + 1}/{MAX_WAKE_ATTEMPTS})" if failed is not None else ""
-        return f"failed, backoff {_duration_left(left)}{attempt}"
-    if read_wake_pid(name) is not None:
-        return "busy"
-    return "ok"
+    """`busy` while a wake is in flight, else `ok` — the node wakes on its
+    next pass — followed by the dead letters of the last 24 hours."""
+    state = "busy" if read_wake_pid(name) is not None else "ok"
+    dead = count_dead_letters(name, datetime.now(timezone.utc) - timedelta(hours=24))
+    return f"{state}, {dead} dead letter(s) in 24 h" if dead else state
 
 
 def _inbox_activity_by_node() -> dict[str, tuple[str, str]]:
@@ -2194,80 +2151,6 @@ def cmd_drain(args: list[str]) -> int:
         count += 1
 
     print(f"{name}: drained {count} message(s)")
-    return 0
-
-
-# ---------- retry ----------
-
-def cmd_retry(args: list[str]) -> int:
-    """`a8s retry <name>` — try a failed wake and parked sends again now.
-
-    Ends the backoff a failed wake armed, makes every backed-off pending send
-    due, and returns every dead letter still in trash to the inbox. The
-    handler tries that mail on its next pass, with a full set of attempts: the
-    operator runs this after fixing what failed, so the earlier failures say
-    nothing about the next one. The handler reads the record on every pass,
-    which is why a running node needs no restart. A parked send is made due by
-    a request marker in the node's pending directory that the router consumes;
-    the router is the only writer of a sidecar, so the send keeps its attempt
-    count and the destinations that already took it, and nothing publishes
-    twice. Each dead letter has its own marker, removed
-    after its envelope is back in the inbox, so a dead letter recorded while
-    this runs is never lost. A dead letter whose trash file is gone is
-    reported, not an error."""
-    if len(args) != 1:
-        print("usage: a8s retry <name>", file=sys.stderr)
-        return 2
-    match = resolve_recipient(args[0])
-    if match is None:
-        print(f"a8s: no agent named {args[0]!r}", file=sys.stderr)
-        return 1
-    name = match[0]
-    record = read_wake_retry(name)
-    dead = read_dead_letters(name)
-    parked = request_parked_sends(name)
-    if record is None and not dead and not parked:
-        print(f"{name}: no wake is waiting on a backoff, no pending send is parked, and no dead letters")
-        return 0
-    if _read_handler_pid(name) is None:
-        when = "wait for the node to start"
-    else:
-        when = "wake on the next pass"
-    if record is not None:
-        clear_wake_retry(name)
-        waiting = len(record.get("unit") or [])
-        out_agent(name, f"[{name}] backoff ended by `a8s retry`; {waiting} message(s) {when}")
-    if parked:
-        out_agent(name, f"[{name}] {parked} pending send(s) due now; {when}")
-    if dead:
-        trash = trash_dir(name)
-        inbox = inbox_dir(name)
-        inbox.mkdir(parents=True, exist_ok=True)
-        returned = 0
-        gone = 0
-        for fname in dead:
-            src = trash / fname
-            if not src.is_file():
-                clear_dead_letter(name, fname)
-                gone += 1
-                continue
-            try:
-                src.rename(inbox / fname)
-            except OSError as e:
-                out_agent(name, f"[{name}] could not return {fname}: {e}")
-                continue
-            returned += 1
-            txlog.log(
-                "REQUEUED",
-                msg_id=Path(fname).stem,
-                recipient=name,
-                detail="dead letter returned to the inbox by `a8s retry`",
-            )
-            clear_dead_letter(name, fname)
-        if returned:
-            out_agent(name, f"[{name}] {returned} dead letter(s) returned to the inbox; {when}")
-        if gone:
-            out_agent(name, f"[{name}] {gone} dead letter(s) gone from trash; nothing to return")
     return 0
 
 
@@ -2596,8 +2479,8 @@ def cmd_transactions(args: list[str]) -> int:
             "  a8s tx --from my-phone --to iris\n"
             "  a8s tx --all --event NOT_LOCAL\n\n"
             "By default only rows about this node's own messages show; --all adds\n"
-            "the NOT_LOCAL rows and receipts every node logs for other nodes'\n"
-            "traffic on a shared remote. --msg always shows the whole envelope.\n\n"
+            "the rows every node logs for other nodes' traffic on a shared\n"
+            "remote. --msg always shows the whole envelope.\n\n"
             "`a8s trace <ULID>` follows one envelope end to end; this is the view\n"
             "for when you do not have a ULID yet. Retention is `txlog_max_rows`.\n"
         ),
@@ -3881,19 +3764,25 @@ def cmd_health() -> int:
     )
     if not remotes:
         print("remotes: (none configured)")
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    try:
+        ambiguous = txlog.count_by_remote("PUBLISH_AMBIGUOUS", since)
+    except txlog.TransactionLogError:
+        ambiguous = {}
     for t in remotes:
         name = t.id
+        unknown = f"; {ambiguous.get(name, 0)} send(s) with unknown outcome in 24 h"
         try:
             t.start(lambda *_: None)
             connected = t.is_connected()
             t.stop()
             if connected:
-                print(f"remote {name}: OK")
+                print(f"remote {name}: OK{unknown}")
             else:
-                print(f"remote {name}: FAIL (not connected)")
+                print(f"remote {name}: FAIL (not connected){unknown}")
                 errors += 1
         except Exception as e:
-            print(f"remote {name}: FAIL ({e})")
+            print(f"remote {name}: FAIL ({e}){unknown}")
             errors += 1
 
     services = load_services()
@@ -3950,17 +3839,20 @@ def cmd_health() -> int:
 
     agents = load_registry()
     problems = unresolved_mailboxes()
+    day_ago = datetime.now(timezone.utc) - timedelta(hours=24)
     print(f"agents: {len(agents)} registered")
     for name, info in agents.items():
         root = Path(info.get("root", ""))
+        dead = count_dead_letters(name, day_ago)
+        failed = f"; {dead} dead letter(s) in 24 h" if dead else ""
         if not root.is_dir():
-            print(f"  {name}: WARN (root missing: {root})")
+            print(f"  {name}: WARN (root missing: {root}){failed}")
             errors += 1
         elif name in problems:
-            print(f"  {name}: WARN (not routing: {problems[name]})")
+            print(f"  {name}: WARN (not routing: {problems[name]}){failed}")
             errors += 1
         else:
-            print(f"  {name}: OK ({root})")
+            print(f"  {name}: OK ({root}){failed}")
 
     errors += _report_orphan_mailboxes()
     return 1 if errors else 0

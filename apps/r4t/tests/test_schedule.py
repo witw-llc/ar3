@@ -289,7 +289,7 @@ class TestOneFunctionTwoCallers:
         assert picked in next_line
 
 
-class TestInflightRecovery:
+class TestInflightOrphans:
     def test_a_claim_moves_rather_than_deletes(self, ctx):
         queue("Phil")
         batch = state.claim_queue(NODE, "Phil")
@@ -304,33 +304,37 @@ class TestInflightRecovery:
         assert state.list_inflight(NODE, "Phil") == []
         assert state.queue_depth(NODE, "Phil") == 0
 
-    def test_return_puts_it_back_under_the_same_names(self, ctx):
-        queue("Phil")
-        before = [p.name for p in state.list_queue(NODE, "Phil")]
-        state.claim_queue(NODE, "Phil")
-        assert state.return_claim(NODE, "Phil") == 1
-        assert [p.name for p in state.list_queue(NODE, "Phil")] == before
-
     def test_a_live_lock_protects_its_in_flight_batch(self, ctx):
         queue("Phil")
         state.claim_queue(NODE, "Phil")
         lock = state.AgentLock(NODE, "Phil")
         assert lock.acquire("junior-dev")
-        assert state.recover_inflight(NODE) == []
-        assert state.queue_depth(NODE, "Phil") == 0
+        assert state.orphaned_inflight(NODE) == []
         lock.release()
-        assert state.recover_inflight(NODE) == [("phil", 1)]
+        ((name, batch),) = state.orphaned_inflight(NODE)
+        assert name == "phil" and [m["body"] for m in batch] == ["work"]
+        assert len(state.list_inflight(NODE, "Phil")) == 1  # reading changes nothing
 
-    def test_idle_recovers_an_orphan_and_says_so(self, ctx, fake_harness):
+    def test_idle_dead_letters_an_orphan_and_tells_its_sender(self, ctx, tells):
+        sent, _ = tells
         queue("Phil")
         state.claim_queue(NODE, "Phil")  # a turn that will never finish
+        result = run_idle(ctx, run_fn=ok_turn)
+        assert result["dead_lettered"] == [("phil", 1)]
+        assert "DEAD-LETTER phil" in read_log()
+        assert state.list_inflight(NODE, "Phil") == []
+        assert state.queue_depth(NODE, "Phil") == 0
+        assert [r["reason"] for r in state.list_dead_letters(NODE)] == ["turn-unfinished"]
+        assert sent == [
+            ("boss", "[r4t acme] Phil stopped before its turn finished; it may have partly acted.")
+        ]
         run_idle(ctx, run_fn=ok_turn)
-        assert "RECOVERED phil" in read_log()
+        assert len(sent) == 1
 
-    def test_a_sigkill_mid_turn_loses_nothing(self, ctx, tmp_path, r4t_home):
+    def test_a_sigkill_mid_turn_leaves_a_dead_letter(self, ctx, tmp_path, r4t_home):
         """The real thing: a turn is killed with SIGKILL between claim and
-        completion. Before the claim moved instead of deleting, the batch was
-        gone — `.turn.json` records counts and thread ids, not bodies."""
+        completion. The claim moved the batch rather than deleting it, so its
+        body reaches the dead-letter record; `.turn.json` holds no bodies."""
         script = tmp_path / "killer.py"
         script.write_text(
             textwrap.dedent(
@@ -353,10 +357,10 @@ class TestInflightRecovery:
         assert proc.returncode == -signal.SIGKILL
         assert state.queue_depth(NODE, "Phil") == 0  # claimed, in flight, orphaned
         state.prune_stale_locks(NODE)
-        assert state.recover_inflight(NODE) == [("phil", 1)]
-        assert state.read_queue(NODE, "Phil")[0]["body"] == (
-            "the message that must survive"
-        )
+        run_idle(ctx, run_fn=ok_turn)
+        (record,) = state.list_dead_letters(NODE)
+        assert record["content"] == "the message that must survive"
+        assert state.queue_depth(NODE, "Phil") == 0
 
 
 class TestPark:
@@ -388,7 +392,7 @@ class TestPark:
         queue("Phil")
         drain(ctx, run_fn=missing_binary_turn)
         queue("Phil", body="more")
-        assert state.queue_depth(NODE, "Phil") == 2  # nothing dropped
+        assert state.queue_depth(NODE, "Phil") == 1  # held, no turn runs
         entries = look(ctx)
         assert entry_for(entries, "phil").state == schedule.PARKED
         assert schedule.next_up(entries) is None
@@ -404,14 +408,14 @@ class TestPark:
         assert len(lines) == 1
         assert lines[0].split()[2] == "phil"
 
-    def test_a_transient_failure_uses_the_breaker_not_the_park(self, ctx):
+    def test_a_transient_failure_does_not_park(self, ctx):
         def timed_out(rig, prompt, workdir, *, env=None, variant=0):
             return 1, "the model went away", 30.0, True
 
         queue("Phil")
         drain(ctx, run_fn=timed_out)
         assert state.read_parked(NODE, "Phil") == {}
-        assert state.read_meta(NODE, "Phil")["consecutive_failures"] == 1
+        assert [r["reason"] for r in state.list_dead_letters(NODE)] == ["turn-timed-out"]
 
     def test_a_free_probe_unparks_on_idle(self, ctx, tmp_path, fake_harness):
         self._break_junior(ctx)
@@ -448,6 +452,7 @@ class TestPark:
         self._break_junior(ctx)
         queue("Phil")
         drain(ctx, run_fn=missing_binary_turn)
+        queue("Phil", body="held while parked")
         assert r4t_main(
             ["resume", "phil", "--node", NODE, "--root", str(ctx.root),
              "--rig-config", str(ctx.config_path)]
@@ -455,7 +460,6 @@ class TestPark:
         out = capsys.readouterr().out
         assert "resumed phil" in out and "1 message(s) waiting" in out
         assert state.read_parked(NODE, "Phil") == {}
-        assert state.read_meta(NODE, "Phil")["consecutive_failures"] == 0
 
     def test_resume_all_clears_every_park(self, ctx, capsys):
         self._break_junior(ctx)
@@ -548,18 +552,6 @@ class TestStatusRotationBlock:
         _out, block = self._status(ctx, capsys)
         held = next(ln for ln in block.splitlines() if "phil" in ln)
         assert "RESTING" in held and "member budget" in held and "1 queued" in held
-
-    def test_an_open_breaker_is_held_with_its_reason(self, ctx, capsys):
-        config = load_rig_config(ctx.config_path)
-        state.update_meta(
-            NODE, "Phil",
-            consecutive_failures=config.breaker_cap,
-            last_failure_at=state.utc_now(),
-        )
-        queue("Phil")
-        _out, block = self._status(ctx, capsys)
-        held = next(ln for ln in block.splitlines() if "phil" in ln)
-        assert "BREAKER" in held and "consecutive failed turns" in held
 
     def test_a_parked_member_is_held_with_its_next_verb(self, ctx, capsys):
         state.park_member(

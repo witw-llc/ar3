@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import replace
 
 import pytest
@@ -89,10 +90,10 @@ class TestTurnBoundaries:
         done = events(capsys, "DONE")
         assert done == ["r4t: DONE gerry exit 0 in 1.5s"]
 
-    def test_turn_end_reports_a_failure_and_its_requeue(self, ticker_ctx, capsys):
+    def test_turn_end_reports_a_failure_and_its_dead_letter(self, ticker_ctx, capsys):
         run_one(ticker_ctx, "boss", "acme", "ship it", failed_turn)
         (done,) = events(capsys, "DONE")
-        assert done == "r4t: DONE gerry exit 1 in 0.5s — 1 msg requeued"
+        assert done == "r4t: DONE gerry exit 1 in 0.5s — 1 msg dead-lettered"
 
     def test_start_precedes_end(self, ticker_ctx, capsys):
         run_one(ticker_ctx, "boss", "acme", "ship it", ok_turn)
@@ -135,17 +136,33 @@ class TestBlocks:
         assert resting.endswith("(1 queued)")
         assert events(capsys, "TURN") == []
 
-    def test_an_open_breaker_emits_its_reason(self, ticker_ctx, capsys):
-        config = load_rig_config(ticker_ctx.config_path)
-        state.update_meta(
-            NODE, "Gerry",
-            consecutive_failures=config.breaker_cap,
-            last_failure_at=state.utc_now(),
+    def test_a_turn_that_could_outlast_the_wake_emits_its_reason(
+        self, ticker_ctx, tmp_path, capsys
+    ):
+        definition = tmp_path / "bounded.json"
+        definition.write_text(json.dumps({"max_wake_seconds": 100}), encoding="utf-8")
+        bounded = replace(
+            ticker_ctx, definition_path=definition, wake_started=time.monotonic() - 60
         )
-        run_one(ticker_ctx, "boss", "acme", "ship it", ok_turn)
-        (breaker,) = events(capsys, "BREAKER")
-        assert breaker.startswith("r4t: BREAKER gerry breaker open (")
-        assert breaker.endswith("(1 queued)")
+        run_one(bounded, "boss", "acme", "ship it", ok_turn)
+        (held,) = events(capsys, "OUT-OF-TIME")
+        assert held.startswith("r4t: OUT-OF-TIME gerry ")
+        assert held.endswith("(1 queued)")
+        assert events(capsys, "TURN") == []
+
+    def test_a_rig_longer_than_any_wake_emits_never_fits(
+        self, ticker_ctx, tmp_path, capsys
+    ):
+        definition = tmp_path / "bounded.json"
+        definition.write_text(json.dumps({"max_wake_seconds": 50}), encoding="utf-8")
+        bounded = replace(ticker_ctx, definition_path=definition)
+        run_one(bounded, "boss", "acme", "ship it", ok_turn)
+        (held,) = events(capsys, "NEVER-FITS")
+        assert held.startswith("r4t: NEVER-FITS gerry ")
+        assert "timeout_seconds 30" in held and "max_wake_seconds 50" in held
+        assert held.endswith("(1 queued)")
+        assert events(capsys, "OUT-OF-TIME") == []
+        assert events(capsys, "TURN") == []
 
     def test_the_cadence_throttle_emits_its_reason(
         self, ctx, tmp_path, rig_config, capsys

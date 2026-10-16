@@ -192,6 +192,13 @@ block, before the body:
 Status: possibly superseded -- do not treat as current unless corroborated.
 ```
 
+An entry that replaced another carries one more line, so the member reads it
+as the newer of two claims without reading an id:
+
+```
+Replaces an earlier entry on this subject.
+```
+
 Both the relative-age form and the status line's threshold and wording are
 the measured production change from the `k-age-presentation` experiment
 (#62): the absolute-date stamp this section carried scored worse than no
@@ -321,6 +328,35 @@ the mark advances past captures no model ever read, and because captures are
 pruned to the most recent 50 they are then gone. The day-log line reports what
 k7e stored rather than how many captures it was handed — a pass that changed
 nothing reads `no new knowledge`.
+
+k7e reads a capture's `## Routed messages`, `## Human messages` and
+`## Output`, and never its `## Prompt`. The prompt is the member's standing
+context — persona, scaffold, the knowledge pack its own store injected — and
+it is the same every turn: across 173 captures it was 95% of the bytes. The
+capture keeps it for an operator. `## Routed messages` follows
+`## Human messages`, and a `#` that opens a line of any message body is
+written `\#`, so no message can write a section heading of the capture.
+
+A capture whose distill times out or crashes at the full
+`DISTILL_TIMEOUT_SECONDS` three passes in a row (`DREAM_ATTEMPTS`) is set
+aside: its name goes to `.dream-failed` in the member's store, the watermark
+moves past it, and the day log carries one line:
+
+```
+r4t: DREAM-QUARANTINE wren 20260930T082750644769Z-01M3RG5SRFMMV24HB2A8YXE3VJ.md after 3 failed attempts; set aside in …/k7e/.dream-failed
+```
+
+A call the sweep's leftover budget cut short does not count, and neither does
+a non-zero exit, which is k7e reporting a store or model fault. To retry a
+set-aside capture by hand, run `K7E_HOME=<store> k7e distill <capture>` with a
+distill command configured (`K7E_DISTILL_COMMAND` or the store's
+`distill_command`).
+
+After a pass that distilled, the sweep runs `k7e compile --due` through the
+same bridge: once one tag has five entries no page has folded, k7e folds the
+largest such tag into one page that supersedes them, about once a day per
+store. A compile logs `DREAM-COMPILE`; a pass with nothing due logs
+nothing.
 
 ### Conversation corrects the store
 

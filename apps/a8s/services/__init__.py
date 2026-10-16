@@ -45,8 +45,8 @@ def resolve_prefix(opts: dict, default: str = DEFAULT_PREFIX) -> str:
 
 class StorageError(Exception):
     """Raised by `store` / `retrieve` when an upload or download genuinely
-    failed (network, auth, oversize, server 5xx). Callers warn-and-continue
-    and rely on the per-message retry sidecar to drive backoff."""
+    failed (network, auth, oversize, server 5xx). The caller records the
+    failure; a8s does not try it again."""
 
 
 class StorageService(ABC):

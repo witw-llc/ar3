@@ -1,5 +1,5 @@
 """`a8s ps` STATUS and activity columns, and what `a8s stop` does to a node's
-backoff. The real-process tests for `stop --force` live in test_stop_force.py."""
+wake. The real-process tests for `stop --force` live in test_stop_force.py."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,6 @@ import pytest
 
 import txlog
 from commands import (
-    _duration_left,
     _hard_kill,
     _hard_kill_targets,
     cmd_ps,
@@ -20,23 +19,16 @@ from commands import (
     cmd_stop,
 )
 from core import (
+    dead_letters_dir,
     inbox_dir,
     mark_dead_letter,
     pid_path,
-    read_dead_letters,
-    read_wake_retry,
     trash_dir,
     transactions_path,
     wake_pid_path,
     write_wake_pid,
-    write_wake_retry,
 )
-from cli import dispatch
 from registry import save_registry
-
-
-def _in(seconds: float) -> datetime:
-    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
 
 
 @pytest.fixture
@@ -54,46 +46,23 @@ def _row(out: str, name: str) -> list[str]:
     return next(line for line in out.splitlines() if line.startswith(name)).split()
 
 
-class TestDurationLeft:
-    @pytest.mark.parametrize("seconds,shown", [
-        (0.2, "1s"), (29.4, "30s"), (59.0, "59s"), (60.0, "1m"), (61.0, "2m"),
-        (119.0, "2m"), (600.0, "10m"), (3600.0, "1h"),
-    ])
-    def test_rounds_up_to_the_unit(self, seconds, shown):
-        assert _duration_left(seconds) == shown
-
-
 class TestPsStatus:
-    def test_ok_when_no_backoff_is_armed(self, node, capsys):
+    def test_ok_when_nothing_failed(self, node, capsys):
         assert cmd_ps([]) == 0
         out = capsys.readouterr().out
         assert "STATUS" in out
         assert _row(out, "alpha")[3] == "ok"
 
-    def test_a_running_backoff_shows_what_is_left_and_the_attempt(self, node, capsys):
-        write_wake_retry(node, ["a.json"], 2, _in(120))
-        cmd_ps([])
-        assert "failed, backoff 2m (attempt 3/4)" in capsys.readouterr().out
-
-    def test_the_time_shown_is_what_remains(self, node, capsys):
-        write_wake_retry(node, ["a.json"], 1, _in(30))
-        write_wake_retry("beta", ["a.json"], 3, _in(5))
+    def test_dead_letters_of_the_last_day_are_counted(self, node, capsys):
+        mark_dead_letter(node, "a.json")
+        mark_dead_letter(node, "b.json")
+        mark_dead_letter(node, "old.json")
+        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        os.utime(dead_letters_dir(node) / "old.json", (old, old))
         cmd_ps([])
         out = capsys.readouterr().out
-        assert "failed, backoff 30s (attempt 2/4)" in out
-        assert "failed, backoff 5s (attempt 4/4)" in out
-
-    def test_an_elapsed_backoff_is_ok(self, node, capsys):
-        write_wake_retry(node, ["a.json"], 2, _in(-5))
-        cmd_ps([])
-        assert _row(capsys.readouterr().out, "alpha")[3] == "ok"
-
-    def test_a_corrupt_record_is_ok(self, node, capsys):
-        from core import wake_retry_path
-
-        wake_retry_path(node).write_text("{not json")
-        cmd_ps([])
-        assert _row(capsys.readouterr().out, "alpha")[3] == "ok"
+        assert "ok, 2 dead letter(s) in 24 h" in out
+        assert _row(out, "beta")[3] == "ok"
 
     def test_a_wake_in_flight_is_busy(self, node, capsys):
         write_wake_pid(node, os.getpid(), ["a.json"])
@@ -106,7 +75,7 @@ class TestPsStatus:
         assert _row(capsys.readouterr().out, "alpha")[3] == "ok"
 
     def test_quiet_is_still_names_only(self, node, capsys):
-        write_wake_retry(node, ["a.json"], 2, _in(120))
+        mark_dead_letter(node, "a.json")
         cmd_ps(["-q"])
         assert capsys.readouterr().out.splitlines() == ["alpha", "beta"]
 
@@ -166,14 +135,13 @@ class TestPsActivity:
 
 @pytest.fixture
 def stoppable(fake_home, tmp_path, monkeypatch):
-    """A node whose handler detaches on the first SIGTERM, with an armed
-    backoff, a dead letter in trash and a returned message in the inbox."""
+    """A node whose handler detaches on the first SIGTERM, with a dead letter
+    in trash."""
     root = tmp_path / "root"
     root.mkdir()
     save_registry({"alpha": {"root": str(root)}})
     pid_path("alpha").parent.mkdir(parents=True, exist_ok=True)
     pid_path("alpha").write_text(str(os.getppid()))
-    write_wake_retry("alpha", ["a.json"], 2, _in(300))
     trash_dir("alpha").mkdir(parents=True, exist_ok=True)
     (trash_dir("alpha") / "dead.json").write_text("{}")
     mark_dead_letter("alpha", "dead.json")
@@ -194,45 +162,29 @@ def stoppable(fake_home, tmp_path, monkeypatch):
     return "alpha"
 
 
-class TestStopClearsTheBackoff:
-    def test_stop_clears_the_record_and_says_so(self, stoppable, capsys):
-        assert cmd_stop([stoppable]) == 0
-        assert read_wake_retry(stoppable) is None
-        assert "alpha: backoff cleared" in capsys.readouterr().out
-
-    def test_stop_leaves_trash_and_dead_letters_alone(self, stoppable):
+class TestStopLeavesDeadLettersDead:
+    def test_stop_leaves_trash_and_dead_letters_alone(self, stoppable, capsys):
         assert cmd_stop([stoppable]) == 0
         assert (trash_dir(stoppable) / "dead.json").is_file()
-        assert read_dead_letters(stoppable) == ["dead.json"]
+        assert (dead_letters_dir(stoppable) / "dead.json").is_file()
         assert not (inbox_dir(stoppable) / "dead.json").exists()
+        assert "dead letter" not in capsys.readouterr().out
 
-    def test_retry_still_returns_the_dead_letters_after_a_stop(self, stoppable, capsys):
-        cmd_stop([stoppable])
-        assert dispatch("retry", [stoppable], 1.0) == 0
-        assert (inbox_dir(stoppable) / "dead.json").is_file()
-        assert read_dead_letters(stoppable) == []
-
-    def test_a_stop_with_no_backoff_prints_no_such_line(self, stoppable, capsys):
-        from core import clear_wake_retry
-
-        clear_wake_retry(stoppable)
-        assert cmd_stop([stoppable]) == 0
-        assert "backoff" not in capsys.readouterr().out
-
-    def test_a_stop_that_timed_out_keeps_the_record(self, stoppable, monkeypatch, capsys):
-        for mod in ("commands", "daemon", "core"):
-            monkeypatch.setattr(f"{mod}.os.kill", lambda pid, sig: None)
-        monkeypatch.setattr("commands.STOP_WAIT_S", 0.05)
-        assert cmd_stop([stoppable]) == 1
-        assert read_wake_retry(stoppable) is not None
-
-    def test_restart_clears_it_too(self, stoppable, monkeypatch, capsys):
+    def test_restart_leaves_them_dead_too(self, stoppable, monkeypatch, capsys):
         class FakeProc:
             pid = 4242
 
         monkeypatch.setattr("commands.subprocess.Popen", lambda *a, **k: FakeProc())
         assert cmd_restart([stoppable]) == 0
-        assert read_wake_retry(stoppable) is None
+        assert (trash_dir(stoppable) / "dead.json").is_file()
+        assert not (inbox_dir(stoppable) / "dead.json").exists()
+
+    def test_retry_is_not_a_verb(self, stoppable, capsys):
+        from cli import main
+
+        assert main(["retry", stoppable]) == 2
+        assert "unknown command: 'retry'" in capsys.readouterr().err
+        assert not (inbox_dir(stoppable) / "dead.json").exists()
 
 
 class TestForceEscalation:
@@ -261,7 +213,7 @@ class TestForceEscalation:
         monkeypatch.setattr(os, "kill", gone)
         _hard_kill([("pid", 10)])
 
-    def test_a_handler_that_never_detaches_is_killed_and_its_mail_returned(
+    def test_a_handler_that_never_detaches_is_killed_and_its_mail_dead_lettered(
         self, fake_home, tmp_path, monkeypatch, capsys
     ):
         root = tmp_path / "root"
@@ -269,10 +221,9 @@ class TestForceEscalation:
         save_registry({"alpha": {"root": str(root)}})
         pid_path("alpha").parent.mkdir(parents=True, exist_ok=True)
         pid_path("alpha").write_text(str(os.getppid()))
-        write_wake_pid("alpha", os.getpid(), ["m.json"])
         trash_dir("alpha").mkdir(parents=True, exist_ok=True)
-        (trash_dir("alpha") / "m.json").write_text("{}")
-        write_wake_retry("alpha", ["m.json"], 1, _in(300))
+        (trash_dir("alpha") / "01KILLED.json").write_text("{}")
+        write_wake_pid("alpha", os.getpid(), ["01KILLED.json"])
 
         killed = []
 
@@ -292,13 +243,16 @@ class TestForceEscalation:
         assert cmd_stop(["alpha", "--force"]) == 0
         assert ("pid", os.getppid()) in killed
         assert any(k in ("group", "pid") and pid == os.getpid() for k, pid in killed)
-        assert (inbox_dir("alpha") / "m.json").is_file()
-        assert not (trash_dir("alpha") / "m.json").exists()
+        assert (trash_dir("alpha") / "01KILLED.json").is_file()
+        assert not (inbox_dir("alpha") / "01KILLED.json").exists()
+        assert (dead_letters_dir("alpha") / "01KILLED.json").is_file()
         assert not wake_pid_path("alpha").exists()
-        assert read_wake_retry("alpha") is None
+        events = txlog.read_events("01KILLED")
+        assert [e["event"] for e in events] == ["DROPPED"]
+        assert "killed by `a8s stop --force`" in events[0]["detail"]
         out = capsys.readouterr()
         assert "killing it" in out.err
-        assert "returned 1 message(s) from the killed wake" in out.out
+        assert "alpha: the killed wake's 1 message(s) are dead letters: 01KILLED" in out.out
 
     def test_a_plain_stop_never_kills(self, fake_home, tmp_path, monkeypatch, capsys):
         root = tmp_path / "root"

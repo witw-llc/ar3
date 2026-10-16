@@ -19,9 +19,9 @@ strips Gmail's `Re:` / `Fwd:` prefixes and shells `tell <stripped> <body>`.
   `gmail.send` to the bridge with `subject=$SENDER` and `body=$MESSAGE`.
 - **Inbound**: every `idle.timeout` seconds of quiet, a8s fires
   `gmail_cron.py --from <address>` from the agent's registered root.
-  The script polls the bridge for `is:unread from:<address>`, strips
-  `Re:`/`Fwd:` from each subject, and shells `tell <stripped-subject>
-  <body>`. cwd is set by a8s, so the shelled `tell` force-stamps `from`
+  The script polls the bridge for `is:unread from:<address>`, takes the
+  newest message of each unread thread, strips `Re:`/`Fwd:` from its
+  subject, and shells `tell <stripped-subject> <body>`. cwd is set by a8s, so the shelled `tell` force-stamps `from`
   to the connector's participant name.
 
 There is no separate cron install — the schedule is the agent
@@ -81,17 +81,28 @@ to route the reply to. Examples:
 - `Fwd: NEIL` → `NEIL`
 - `re: fwd: NEIL` → `NEIL`
 - `NEIL urgent` → left as `NEIL urgent`; `tell` rejects it (registry +
-  canonical-name validation) and the email stays unread with a warning
-  to stderr.
+  canonical-name validation) and the cron writes a warning to stderr.
 
-Unknown / malformed subjects are NOT marked read — fix the subject in
-Gmail and the next idle tick picks them up.
+## One try per message
+
+Each message gets one `tell`. Before the tell, the cron writes the
+message id to `.gmail-told` in the connector's root; a message whose id
+is in that file is only marked read, never told again. A refused `tell`
+(unknown or malformed subject) fails with a line on stderr, and that
+message is not told again. To reach the agent, reply again with a
+correct subject. The cron never clears `.gmail-told`.
+
+Outbound, the connector makes one POST to the bridge. It exits 1 only
+when the bridge answers with its own JSON error. The bridge sends the
+mail before it answers, so any other failure (timeout, dropped
+connection, HTTP error, an answer that is not JSON) exits 0 with one
+stderr line that the mail may have been sent.
 
 ## Limitations
 
-- No attachments yet. `FILE:` payloads in a8s messages are stringified
-  into the email body but no MIME attachment is created. (Cross-cluster
-  files / attachment passthrough is tracked in bin#62.)
+- Outbound only for attachments. An `ATTACHED FILE: <path>` line in an
+  a8s message becomes a MIME attachment; attachments on inbound email
+  are not passed into a8s.
 - No HTML email — body is plain text only.
 - Polling, not push. Reply latency is bounded by `idle.timeout`.
 - One Gmail account per connector instance. Multiple bridges = multiple

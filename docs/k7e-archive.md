@@ -72,7 +72,7 @@ Similar titles do
 not merge archive records: fuzzy deduplication and consolidation apply only
 to operational records. This deliberately retains more near duplicates. Operational `compile` excludes
 typed records, preventing an exploratory claim from becoming an authoritative
-compiled reference. A tag needs at least three untyped operational entries
+reference page. A tag needs at least three untyped operational entries
 to compile; archive synthesis remains a separate future feature.
 
 Recall returns provenance, kind, status and supersession metadata with each

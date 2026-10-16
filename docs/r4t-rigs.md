@@ -640,17 +640,15 @@ idiom's env is — re-exported past sudoers `env_reset`, passed as `docker run -
 A member runs while its own spend bucket, the shared cell bucket, and (if the
 rig declares one) the rig's own bucket all hold ≥1 unit (a turn costs 1 of
 each). An empty bucket means the member is *resting* — its queue holds and it
-runs again when the bucket refills. Messages are never dropped for lack of
-budget.
+runs again when the bucket refills. No message is dropped for lack of budget.
 
 The rig bucket is the quota answer. A rig maps to a real subscription (an
 Antigravity plan good for ~20 prompts an hour, a Claude seat), so its ceiling
 is set **on the rig** and is **machine-global**: it binds every r4t roster on
 the machine that shares the rig, so one subscription is safely shared across
 projects. Its bucket lives in `~/.config/r4t/rig-buckets.json` (outside any
-roster) and every node charges it atomically. Budget refill IS the retry: an
-exhausted rig rests every member on it, on every roster, and the held queues
-catch up when it refills — r4t is the retry system so a8s stays dumb delivery.
+roster) and every node charges it atomically. An exhausted rig rests every
+member on it, on every roster, and the held queues run when it refills.
 
 A subscription can run dry mid-plan without any error: agy/claude/opencode all
 exit 0 with a **blank** response when out of quota. So a turn that exits 0,
@@ -678,7 +676,7 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `effort` (rig) | unset — embedded model effort or engine default | Reasoning depth translated through the preset; runtime `--effort` overrides it for one turn. Invalid values and unsupported engines error | Tune routine turns cheaply or increase reasoning for difficult work |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
-| `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed | Hung harnesses |
+| `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed and the batch is a dead letter. A dispatch wake starts no turn whose timeout exceeds the time left before the a8s definition's `max_wake_seconds` | Hung harnesses |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |
 | `throttle.min_seconds_between_turn_starts` | 0 | Cadence floor between turn starts; a member that can't start yet keeps its queue and runs later. Off by default: one turn at a time already rules out pile-ups, so a standing gap is dead air. Opt in to watch a rotation in slow motion | Invisible burn — a storm degrades into a watchable drip |
 
@@ -686,7 +684,6 @@ There is no concurrency knob at either level. One turn at a time per node is a
 contract held by the admission lock, not a setting (see
 [the rotation](r4t-operations.md#the-rotation)); parallelism is a second node.
 | `log_retention_days` | 14 | Days of roster transcript kept under `log/`; maintenance deletes older days whole and says so in the log. 0 keeps everything. Turn economics is not pruned — finished months rotate into `velocity-<month>.csv` and stay | Weeks of full prompts and transcripts filling the disk |
-| `breaker_cap` / `breaker_cooldown_seconds` | 5 / 600 | Failure breaker: after N consecutive failed turns (nonzero exit or timeout) the member's turns pause; one probe runs per cooldown until a turn succeeds. Queued messages hold — nothing is dropped | A broken harness (bad flag, revoked key, dead local model) burning turn after turn while messages pile up |
 
 ## Memory on a direct rig run
 

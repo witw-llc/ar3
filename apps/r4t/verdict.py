@@ -35,6 +35,9 @@ REASON_GLOSS = {
     "no-leader": "a bare-node message with no leader marked to receive it",
     "member-disabled": "mail to a member disabled by a roster problem",
     "no-rig": "mail to a member whose rig will not resolve",
+    "turn-failed": "a turn exited nonzero; it ran once and its sender was told",
+    "turn-timed-out": "a turn ran out of time; it ran once and its sender was told",
+    "turn-unfinished": "a turn was killed before it ended; its sender was told",
 }
 
 
@@ -101,8 +104,8 @@ def roster_verdicts(
     node: str, roster=None, config=None, *, now: float | None = None
 ) -> list[Verdict]:
     """One plain-English line per operator concern: is the roster runaway, is
-    a member broken or resting with work queued, is the shared cell budget
-    spent, is any queue backing up. Roster/config are optional; concerns that
+    a member resting with work queued, is the shared cell budget
+    spent, is any queue backing up, does a member's rig outlast every wake. Roster/config are optional; concerns that
     need them are skipped when they are unavailable."""
     now = time.time() if now is None else now
     out: list[Verdict] = []
@@ -143,22 +146,24 @@ def roster_verdicts(
     if roster is not None and config is not None:
         flagged = 0
         members = [m for m in roster.members if not m.errors]
+        wake = state.read_wake_limit(node)
         for m in members:
             rig, _err, _pinned = config.rig_for(m)
             depth = state.queue_depth(node, m.name)
-            blocked, failures = state.breaker_open(
-                node, m.name, config.breaker_cap, config.breaker_cooldown_seconds
-            )
-            if blocked:
-                out.append(Verdict(
-                    BAD,
-                    f"{m.name} broken — {failures} straight harness failures; "
-                    f"turns paused ({depth} queued)",
-                    f"fix the {rig.name if rig else '?'} rig; "
-                    "turns retry when the breaker closes",
-                ))
-                flagged += 1
-                continue
+            if rig is not None and wake is not None:
+                room = wake["max_wake_seconds"] - wake["margin_seconds"]
+                if rig.timeout_seconds > room:
+                    out.append(Verdict(
+                        BAD,
+                        f"{m.name} never runs — rig {rig.name} timeout_seconds "
+                        f"{rig.timeout_seconds:g} does not fit max_wake_seconds "
+                        f"{wake['max_wake_seconds']:g} less "
+                        f"{wake['margin_seconds']:g}s, {depth} queued",
+                        f"lower timeout_seconds to {room:g} or less, or raise "
+                        "max_wake_seconds in the node's a8s definition",
+                    ))
+                    flagged += 1
+                    continue
             if rig is not None and depth:
                 level = state.budget_level(
                     node, m.name, rig.budget_max, rig.budget_earn_per_hour, now=now

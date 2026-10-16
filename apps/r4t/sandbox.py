@@ -129,8 +129,8 @@ MAX_TURNS = 15
 
 
 FAILURE_SHAPES = {
-    "exit": "rig always exits nonzero — breaker trips, queue holds",
-    "hang": "rig sleeps past its timeout — turn killed, batch requeued",
+    "exit": "rig always exits nonzero — batch dead-lettered, sender told once",
+    "hang": "rig sleeps past its timeout — turn killed, batch dead-lettered",
     "silent": "member works but answers on stdout, never tells — stdout fallback",
     "mute": "member's first turn stages nothing — the heartbeat re-engages it",
 }
@@ -261,10 +261,6 @@ def _write_rig_config(
         rig_name = FAILURE_RIG_NAMES[shape]
         config[rig_name] = _failure_rig(shape)
         config["pins"] = {member: rig_name}
-        # Kept low for every shape, not just the failing ones: a shape that
-        # exits 0 must reach its recovery path with the breaker still closed,
-        # and a cap of 2 makes any stray trip visible.
-        config["breaker_cap"] = 2
     state.atomic_write_json(path, config)
 
 
@@ -317,14 +313,10 @@ def _final_answer(a8s_home: Path) -> dict | None:
     return None
 
 
-def _busy(a8s_home: Path, repo: Path, *, parked: str = "") -> bool:
+def _busy(a8s_home: Path, repo: Path) -> bool:
     if state.live_locks(ROSTER):
         return True
-    if any(
-        state.queue_depth(ROSTER, m)
-        for m in state.members_with_queue(ROSTER)
-        if m != parked
-    ):
+    if state.members_with_queue(ROSTER):
         return True
     for d in (
         a8s_home / "agents" / NODE / "inbox",
@@ -541,18 +533,6 @@ def _emit_progress(
     return seen_velocity, seen_gov, seen_locks
 
 
-def _parked_member(failure: tuple[str, str] | None) -> str:
-    """The member whose queue is meant to sit still. Once its breaker has
-    tripped, the held message IS the scenario's end state — counting it as work
-    in flight would keep the run waiting for a turn that can never come."""
-    if not failure or failure[1] not in ("exit", "hang"):
-        return ""
-    member = failure[0]
-    if any(f"BREAKER {member} tripped" in line for line in _governance_lines()):
-        return member
-    return ""
-
-
 def _scenario_pending(failure: tuple[str, str] | None) -> bool:
     """A failure scenario is over when the recovery path it targets has fired,
     not when the roster first goes quiet — the leader's early ack to the human
@@ -562,10 +542,7 @@ def _scenario_pending(failure: tuple[str, str] | None) -> bool:
     member, shape = failure
     gov = _governance_lines()
     if shape in ("exit", "hang"):
-        return not (
-            any("BREAKER" in line and "tripped" in line for line in gov)
-            and any("BREAKER" in line and "breaker open" in line for line in gov)
-        )
+        return not any(line.startswith(f"r4t: DEAD-LETTER {member}") for line in gov)
     if shape == "silent":
         return not any(f"STDOUT-REPLY {member}" in line for line in gov)
     # Nothing watches for a reply that never came — a message carries no task
@@ -585,31 +562,26 @@ def _failure_checks(
     path r4t is supposed to take, so a governance regression reads as FAIL."""
     member, shape = failure
     gov = _governance_lines()
-    tripped = [line for line in gov if "BREAKER" in line and "tripped" in line]
-    held = [line for line in gov if "BREAKER" in line and "breaker open" in line]
+    dead = [line for line in gov if line.startswith(f"r4t: DEAD-LETTER {member}")]
+    told = [line for line in gov if "may have partly acted" in line]
     level = state.budget_level(ROSTER, member, FAILURE_BUDGET_MAX, FAILURE_BUDGET_MAX)
     checks: list[tuple[str, object, str]] = []
 
     if shape == "exit":
         checks += [
             (
-                "Breaker tripped",
-                bool(tripped),
-                f"{member} pinned to an always-failing rig (breaker_cap 2)",
+                "Failed batch dead-lettered",
+                bool(dead),
+                _gov_detail(dead) if dead else f"{member} never recorded a failed turn",
             ),
             (
-                "Breaker held queued message(s)",
-                bool(held),
-                "messages hold in the queue while the breaker is open — none dropped",
+                "Sender told it may have partly acted",
+                bool(told),
+                _gov_detail(told) if told else "no sender heard about the failed turn",
             ),
         ]
     elif shape == "hang":
-        killed = [
-            line
-            for line in gov
-            if line.startswith(f"r4t: RETRY {member}") and "killed at timeout" in line
-        ]
-        requeued = [line for line in killed if "returned to the queue" in line]
+        killed = [line for line in dead if "killed at timeout" in line]
         checks += [
             (
                 "Turn killed at its timeout",
@@ -617,19 +589,14 @@ def _failure_checks(
                 _gov_detail(killed) if killed else f"{member} never recorded a timed-out turn",
             ),
             (
-                "Timed-out batch requeued",
-                bool(requeued),
-                "a killed turn returns its whole batch to the queue — nothing lost",
+                "Timed-out batch dead-lettered",
+                bool(killed),
+                "a killed turn runs once; its batch is a dead letter, not run again",
             ),
             (
-                "Breaker tripped on timeouts",
-                bool(tripped),
-                "repeated timeouts count as failures until the breaker trips",
-            ),
-            (
-                "Breaker held queued message(s)",
-                bool(held),
-                "messages hold in the queue while the breaker is open — none dropped",
+                "Sender told it ran out of time",
+                any("ran out of time" in line for line in told),
+                _gov_detail(told) if told else "no sender heard about the timed-out turn",
             ),
         ]
     elif shape == "silent":
@@ -641,9 +608,9 @@ def _failure_checks(
                 _gov_detail(relayed) if relayed else f"{member}'s stdout reached nobody",
             ),
             (
-                "Breaker stayed closed",
-                not tripped,
-                "answering on stdout is not a failed turn — exit 0 must not trip it",
+                "No turn dead-lettered",
+                not dead,
+                "answering on stdout is not a failed turn",
             ),
         ]
     else:
@@ -667,8 +634,8 @@ def _failure_checks(
                 _gov_detail(reviewed) if reviewed else "nothing re-engaged the leader",
             ),
             (
-                "Breaker stayed closed",
-                not tripped,
+                "No turn dead-lettered",
+                not dead,
                 "a turn that exits 0 without staging is not a failure",
             ),
         ]
@@ -834,9 +801,8 @@ def run_sandbox(
         final = None
         while True:
             now = time.time()
-            parked = _parked_member(failure)
             if now >= deadline:
-                if _busy(a8s_home, repo, parked=parked):
+                if _busy(a8s_home, repo):
                     _log("timeout with work in flight — killing harness processes")
                     killed = _kill_sandbox_processes(tmp)
                     if killed:
@@ -850,7 +816,7 @@ def run_sandbox(
                             seen_locks=seen_locks,
                         )
                         final = _final_answer(a8s_home) or final
-                        if not _busy(a8s_home, repo, parked=parked):
+                        if not _busy(a8s_home, repo):
                             _log("drained after timeout kill")
                             break
                 else:
@@ -866,7 +832,7 @@ def run_sandbox(
             final = _final_answer(a8s_home)
             if final is not None:
                 _log("leader answered the human")
-            if _busy(a8s_home, repo, parked=parked):
+            if _busy(a8s_home, repo):
                 quiet_polls = 0
                 continue
             quiet_polls += 1

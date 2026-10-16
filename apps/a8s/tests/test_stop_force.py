@@ -160,9 +160,10 @@ def test_force_ends_a_node_whose_wake_ignores_sigterm_within_seconds(rig):
     assert elapsed < 10, f"stop --force took {elapsed:.1f}s"
     assert not (rig.agent / "pid").exists()
     rig.wait_for(lambda: not _alive(wake) and not _alive(helper), "the wake group to end", 5)
-    assert (rig.agent / "inbox" / f"{msg_id}.json").is_file()
-    assert not (rig.agent / "wake-retry").exists()
-    assert "backoff cleared" in stopped.stdout
+    assert (rig.agent / "trash" / f"{msg_id}.json").is_file()
+    assert not (rig.agent / "inbox" / f"{msg_id}.json").exists()
+    assert (rig.agent / "dead-letters" / f"{msg_id}.json").is_file()
+    assert f"n1: the killed wake's 1 message(s) are dead letters: {msg_id}" in stopped.stdout
 
 
 def test_force_kills_a_handler_that_cannot_act_on_a_signal(rig):
@@ -186,9 +187,10 @@ def test_force_kills_a_handler_that_cannot_act_on_a_signal(rig):
     )
     assert not (rig.agent / "pid").exists()
     assert not (rig.agent / "wake-pid").exists()
-    assert (rig.agent / "inbox" / f"{msg_id}.json").is_file()
-    assert not (rig.agent / "trash" / f"{msg_id}.json").exists()
-    assert "returned 1 message(s) from the killed wake" in stopped.stdout
+    assert (rig.agent / "trash" / f"{msg_id}.json").is_file()
+    assert not (rig.agent / "inbox" / f"{msg_id}.json").exists()
+    assert (rig.agent / "dead-letters" / f"{msg_id}.json").is_file()
+    assert f"n1: the killed wake's 1 message(s) are dead letters: {msg_id}" in stopped.stdout
 
     ps = rig.a8s("ps")
     assert "no nodes running" in ps.stdout
@@ -217,8 +219,8 @@ def test_a_plain_stop_waits_for_the_wake_and_does_not_kill_it(rig):
 
 def test_force_stopping_one_member_of_a_shared_handler_ends_the_other_members_wake(rig):
     """One handler serves both members, so killing it ends the wake of the
-    member that was not named too. That member's mail goes back to its inbox
-    and its backoff clears, as it would had both been named."""
+    member that was not named too. That member's mail is a dead letter, as it
+    would be had both been named."""
     n2_pids = rig.tmp / "n2-wake.pids"
     rig.add_node("n2", rig.tmp / "node2", n2_pids)
     n2 = rig.home / "agents" / "n2"
@@ -248,7 +250,8 @@ def test_force_stopping_one_member_of_a_shared_handler_ends_the_other_members_wa
     assert not (rig.agent / "pid").exists()
     assert not (n2 / "pid").exists()
     assert not (n2 / "wake-pid").exists()
-    assert (n2 / "inbox" / f"{msg_id}.json").is_file()
-    assert not (n2 / "trash" / f"{msg_id}.json").exists()
-    assert "n2: returned 1 message(s) from the killed wake" in stopped.stdout
+    assert (n2 / "trash" / f"{msg_id}.json").is_file()
+    assert not (n2 / "inbox" / f"{msg_id}.json").exists()
+    assert (n2 / "dead-letters" / f"{msg_id}.json").is_file()
+    assert f"n2: the killed wake's 1 message(s) are dead letters: {msg_id}" in stopped.stdout
     assert "no nodes running" in rig.a8s("ps").stdout

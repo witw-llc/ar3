@@ -12,26 +12,19 @@ Routing runs in two phases per pass:
    one-way (agent writes, a8s renames out, never read-modify-write). After
    this phase the agent's outbox dir is empty for the duration of the pass.
 
-2. PROCESS — for each pending file, load (or initialize) a `<f>.json.retry`
-   sidecar that tracks attempts, next-attempt time, which configured remotes
-   already accepted the publish, and whether local delivery has happened.
-   Local delivery uses the existing maildir-style staging (`inbox.tmp/` →
-   `inbox/` via `os.replace`). Remote publishing is the chunk-7 hook —
-   the no-remote path is exactly what it was before remotes existed:
-   deliver locally, unlink.
-
-Backoff / retry: when some configured remote hasn't yet
-accepted, attempts increment and the sidecar's `next_attempt` is bumped
-according to `BACKOFF_SCHEDULE`. After `MAX_ATTEMPTS` failures the
-message is moved to trash with a "discarded after backoff exhausted"
-log.
+2. PROCESS — each pending file gets one try per hop: local delivery uses the
+   maildir-style staging (`inbox.tmp/` → `inbox/` via `os.replace`), and
+   every configured remote gets one publish. If any path took the message,
+   it is sent; a path that failed gets one transaction row. If no path took
+   it, the message drops: it moves to trash with one `DISCARDED` row (or
+   `DROPPED` when it had no path at all), and a8s never sends it again.
 
 Atomic alias fan-out: each routed copy is written into
 `<recipient>/inbox.tmp/<source-fname>` first, then renamed into
 `<recipient>/inbox/` only after every recipient has staged. A crash mid-
 fan-out leaves no partial state. Source filename (a ULID) is preserved
 across staging so a recipient whose final inbox already has the file is
-skipped — retries are idempotent.
+skipped — the write is idempotent.
 
 FILE: payload transfer: tell stages outgoing attachments in
 `.outbox/<msg_id>/` (basename only in the JSON). Ingest moves each bundle
@@ -44,13 +37,11 @@ import json
 import os
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from core import (
-    BACKOFF_SCHEDULE,
-    MAX_ATTEMPTS,
     Participant,
     _preview,
     inbound_bundle_dir,
@@ -61,17 +52,16 @@ from core import (
     out_agent,
     pending_bundle_dir,
     pending_dir,
-    retry_sidecar_path,
+    sending_dir,
     trash_dir,
     unique_path,
 )
-from network import seen_id_append
+from network import AMBIGUOUS, SENT, seen_id_append
 from ar3.fsio import atomic_write_text
 from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
 from services.attachment_errors import ATTACHMENT_UNAVAILABLE
 from services.attachment_path import bundle_file_path
-import receipts
 import txlog
 from ar3.ulid import new as new_ulid
 
@@ -100,11 +90,12 @@ def _storage_fetch_poll_seconds() -> float:
         return 5.0
 
 
-# A function that publishes one routed-and-from-stamped message envelope to
-# every configured remote that hasn't yet accepted it. Returns the updated
-# `succeeded_remotes` list. Daemon wires this up at startup; passing None
-# keeps the path purely local (no remotes configured).
-PublishRemotes = Callable[[dict, str, list[str], int], list[str]]
+# A function that publishes one routed-and-from-stamped message envelope once
+# to every configured remote. Takes the envelope, the sender name and the
+# pass's set of remotes already found down, and answers
+# `{remote_id: (outcome, detail)}`. Daemon wires this up at startup; passing
+# None keeps the path purely local (no remotes configured).
+PublishRemotes = Callable[[dict, str, set[str]], dict[str, tuple[str, str]]]
 
 
 # ---------- mailboxes ----------
@@ -248,15 +239,23 @@ def _build_routed_message(
     return routed
 
 
-def _commit_staged_inboxes(staged: list[tuple[Path, Path]]) -> None:
-    """Atomically promote each `(staging, final)` pair from `inbox.tmp/` into
-    `inbox/`. Uses `os.replace` so the rename is atomic on POSIX even if the
-    final already exists (re-route after partial crash). Skips entries whose
-    staging file is already gone (already promoted by a prior partial commit)."""
-    for staging, final in staged:
-        if not staging.is_file():
-            continue
-        os.replace(str(staging), str(final))
+def _commit_staged_inboxes(
+    staged: list[tuple[Participant, Path, Path]],
+) -> dict[str, str]:
+    """Atomically promote each staged copy from `inbox.tmp/` into `inbox/`.
+    Returns the recipients whose copy did not move, each with its error; their
+    staged copy is removed."""
+    failed: dict[str, str] = {}
+    for recipient, staging, final in staged:
+        try:
+            os.replace(str(staging), str(final))
+        except OSError as e:
+            failed[recipient.name] = str(e)
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+    return failed
 
 
 # ---------- routing ----------
@@ -295,6 +294,22 @@ def _ingest_owner(
         if peer is not None:
             return peer
     return default
+
+
+def _log_enqueued(owner: Participant, pending_file: Path) -> None:
+    try:
+        msg = json.loads(pending_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(msg, dict):
+        return
+    txlog.log(
+        "ENQUEUED",
+        msg_id=str(msg.get("id") or pending_file.stem),
+        sender=owner.name,
+        recipient=str(msg.get("to") or ""),
+        detail=_preview(str(msg.get("content") or "")),
+    )
 
 
 def _ingest_outboxes(
@@ -347,6 +362,7 @@ def _ingest_outboxes(
                     out_agent(owner.name, f"ingest copy failed on {f.name}: {e}")
                     continue
             pending_owners[owner.name.lower()] = owner
+            _log_enqueued(owner, dest)
             bundle_src = outbox_bundle_dir(outbox, msg_id)
             bundle_dest = pending_bundle_dir(owner.name, msg_id)
             try:
@@ -356,155 +372,92 @@ def _ingest_outboxes(
     return list(pending_owners.values())
 
 
-def _load_or_init_sidecar(pending_file: Path) -> dict:
-    p = retry_sidecar_path(pending_file)
-    if p.is_file():
-        try:
-            with p.open("r", encoding="utf-8") as fp:
-                data = json.load(fp)
-            if isinstance(data, dict):
-                data.setdefault("attempts", 0)
-                data.setdefault("next_attempt", "")
-                data.setdefault("succeeded_remotes", [])
-                data.setdefault("local_delivered", False)
-                data.setdefault("uploaded", {})
-                return data
-        except (OSError, json.JSONDecodeError):
-            pass  # corrupt sidecar — start fresh
-    return {
-        "attempts": 0,
-        "next_attempt": "",
-        "succeeded_remotes": [],
-        "local_delivered": False,
-        # Per-file × per-service upload cache for cross-cluster `FILE:`
-        # payloads. Shape: {"<filename>": {"<service_id>": "<download_url>"}}.
-        # A backoff retry only re-uploads to services still missing.
-        "uploaded": {},
-    }
-
-
-def _save_sidecar(pending_file: Path, sidecar: dict) -> None:
-    p = retry_sidecar_path(pending_file)
-    try:
-        atomic_write_text(p, json.dumps(sidecar, indent=2))
-    except OSError:
-        pass  # best-effort — bad write means we'll retry on the next pass
-
-
-def retry_request_path(name: str) -> Path:
-    return pending_dir(name) / ".retry-now"
-
-
-def request_parked_sends(name: str) -> int:
-    """Ask the node's router to treat every parked send of `name` as due.
-
-    The router is the only process that writes a sidecar, so this reads them
-    and writes none: it counts the sends still behind a backoff and, when
-    there are any, drops the request marker the router consumes at the start
-    of its next pass. A sidecar the router cannot read is not counted; the
-    router owns it. Returns the count."""
-    pending = pending_dir(name)
-    if not pending.is_dir():
-        return 0
-    now = datetime.now(timezone.utc)
-    parked = 0
-    for f in sorted(pending.iterdir()):
-        if not (f.is_file() and f.name.endswith(".json")):
-            continue
-        try:
-            sidecar = json.loads(retry_sidecar_path(f).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(sidecar, dict) or not sidecar.get("next_attempt"):
-            continue
-        try:
-            due_at = datetime.fromisoformat(str(sidecar["next_attempt"]).replace("Z", "+00:00"))
-            if now >= due_at:
-                continue
-        except (TypeError, ValueError):
-            continue
-        parked += 1
-    if parked:
-        try:
-            retry_request_path(name).touch()
-        except OSError:
-            return 0
-    return parked
-
-
-def _drop_sidecar(pending_file: Path) -> None:
-    p = retry_sidecar_path(pending_file)
-    try:
-        p.unlink()
-    except OSError:
-        pass
-
-
 def _trash_pending(sender: Participant, pending_file: Path) -> None:
-    """Retire a dead pending message into the agent's trash — envelope and
-    attachment bundle both. Attachment bytes are the sender's only copy once
-    ingest has moved them out of the outbox, so a failed delivery parks them
-    for recovery instead of destroying them."""
+    """Retire a message that did not send into the agent's trash — envelope
+    and attachment bundle both. The copy is a local record for the operator;
+    a8s never sends it again."""
     trash = trash_dir(sender.name)
     trash.mkdir(parents=True, exist_ok=True)
     bad = unique_path(trash / pending_file.name)
     try:
         pending_file.rename(bad)
-    except OSError:
-        pass
+    except OSError as e:
+        out_agent(sender.name, f"could not move {pending_file.name} to trash: {e}")
     msg_id = _msg_id_from_pending_json(pending_file.name)
     bundle = pending_bundle_dir(sender.name, msg_id)
     if bundle.is_dir():
         _move_dir(bundle, unique_path(trash / msg_id))
 
 
+_unclaimable: set[Path] = set()
+
+
+def _claim_pending(sender: Participant, queued: Path, claimed_dir: Path) -> Path | None:
+    """Move a pending file out of the scanned directory before it is sent.
+    A file that will not move is not sent; another daemon that claimed it
+    first leaves nothing to move."""
+    claimed = claimed_dir / queued.name
+    try:
+        claimed_dir.mkdir(parents=True, exist_ok=True)
+        os.rename(str(queued), str(claimed))
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if queued not in _unclaimable:
+            _unclaimable.add(queued)
+            out_agent(sender.name, f"could not claim {queued.name} for sending: {e}")
+        return None
+    _unclaimable.discard(queued)
+    return claimed
+
+
 def _finalize_pending(sender: Participant, pending_file: Path) -> None:
     msg_id = _msg_id_from_pending_json(pending_file.name)
     try:
         pending_file.unlink()
-    except OSError:
+    except FileNotFoundError:
         pass
-    _drop_sidecar(pending_file)
+    except OSError as e:
+        out_agent(sender.name, f"could not remove sent {pending_file.name}: {e}")
     _remove_dir(pending_bundle_dir(sender.name, msg_id))
 
 
-def _schedule_retry(
-    pending_file: Path,
-    sidecar: dict,
+def _shape_error(msg: dict) -> str:
+    """Why a pending message cannot be routed as written, or '' when it can."""
+    for key in ("to", "from", "id", "content"):
+        if not isinstance(msg.get(key) or "", str):
+            return f"'{key}' is not a string"
+    files = msg.get("files") or []
+    if not isinstance(files, list) or not all(isinstance(e, dict) for e in files):
+        return "'files' is not a list of objects"
+    return ""
+
+
+def _drop_pending(
     sender: Participant,
+    pending_file: Path,
+    event: txlog.Event,
     *,
     msg_id: str,
     recipient: str,
     files: list[str],
     reason: str,
+    remote: str = "",
 ) -> None:
-    """Increment attempts and either set the next-attempt time per
-    BACKOFF_SCHEDULE or trash the message if the schedule is exhausted.
-
-    Exhaustion is the end of a message's life, so it is recorded where a
-    sender can find it after the fact: the agent log, and a `DISCARDED` row
-    naming the last failure so `a8s trace <ULID>` explains the death."""
-    sidecar["attempts"] += 1
-    if sidecar["attempts"] > MAX_ATTEMPTS:
-        out_agent(
-            sender.name,
-            f"discarded {pending_file.name} after backoff exhausted: {reason}",
-        )
-        txlog.log(
-            "DISCARDED",
-            msg_id=msg_id,
-            sender=sender.name,
-            recipient=recipient,
-            files=files or None,
-            detail=f"backoff exhausted after {MAX_ATTEMPTS} attempts; last failure: {reason}",
-        )
-        _trash_pending(sender, pending_file)
-        _drop_sidecar(pending_file)
-        return
-    delay_idx = min(sidecar["attempts"] - 1, len(BACKOFF_SCHEDULE) - 1)
-    next_dt = datetime.now(timezone.utc) + timedelta(seconds=BACKOFF_SCHEDULE[delay_idx])
-    sidecar["next_attempt"] = next_dt.isoformat().replace("+00:00", "Z")
-    _save_sidecar(pending_file, sidecar)
+    """A message no path took: the agent log, one transaction row, and the
+    trash. `DROPPED` is a message that had no path; `DISCARDED` is one whose
+    every path failed."""
+    out_agent(sender.name, f"dropped {pending_file.name}: {reason}")
+    txlog.log(
+        event,
+        msg_id=msg_id,
+        sender=sender.name,
+        recipient=recipient,
+        files=files or None,
+        remote=remote,
+        detail=reason,
+    )
+    _trash_pending(sender, pending_file)
 
 
 def _resolve_file_source(sender_name: str, msg_id: str, entry: dict) -> Path | None:
@@ -514,22 +467,16 @@ def _resolve_file_source(sender_name: str, msg_id: str, entry: dict) -> Path | N
 def _record_upload_failure(
     msg: dict,
     sender: Participant,
-    sidecar: dict,
     filename: str,
     detail: str,
     *,
     blocking: bool = True,
 ) -> None:
-    """One attachment-upload failure, on all three surfaces: the agent log for
-    a tailing operator, a `FILE_UPLOAD_FAILED` row so `a8s trace` sees it, and
-    the sidecar so an eventual discard can name what kept killing the send.
-    Fires once per attempt per service — the attempt number is in the detail,
-    so a repeated network fault reads as a sequence rather than a duplicate.
+    """One attachment-upload failure, on the agent log for a tailing operator
+    and as a `FILE_UPLOAD_FAILED` row so `a8s trace` sees it.
 
-    `blocking` is False when another service already carries this file. The
-    operator still hears about the dead service, but it is not what the send
-    is waiting on, so it must not become the discard diagnostic."""
-    tail = "will retry" if blocking else "another service carries this file"
+    `blocking` is False when another service already carries this file."""
+    tail = "the message is not published" if blocking else "another service carries this file"
     out_agent(sender.name, f"FILE: upload failed for {filename!r}: {detail}; {tail}")
     txlog.log(
         "FILE_UPLOAD_FAILED",
@@ -539,49 +486,30 @@ def _record_upload_failure(
         files=[filename],
         detail=detail,
     )
-    if blocking:
-        sidecar["last_error"] = detail
 
 
 def _upload_files_for_remote(
     msg: dict,
     sender: Participant,
     services: list[StorageService],
-    sidecar: dict,
-) -> bool:
-    """Try every configured storage service for every file, and publish once
-    each file has at least one copy somewhere.
+) -> str:
+    """Store every file in every configured storage service, once each, and
+    answer why the message cannot be published, or "" when it can.
 
-    Redundancy is any-of, not all-of. Every send still attempts every service,
-    so the good case is a copy in all of them — but one dead service must not
-    take the others down with it. Requiring all-of meant a single unreachable
-    remote pushed the whole message through `BACKOFF_SCHEDULE` and into the
-    trash, which is precisely the failure configuring a second remote was
-    supposed to survive.
+    Redundancy is any-of, not all-of: every service is tried, so the good case
+    is a copy in all of them, but one dead service does not stop the others.
+    The floor is one: a file no service took fails the whole publish, because
+    an envelope whose attachment nobody can fetch is a silent loss.
 
-    The floor is one, not zero. A file no service accepted is a real failure
-    and keeps the backoff: publishing an envelope whose attachment nobody can
-    fetch is a silent loss.
-
-    Results cache in `sidecar["uploaded"][filename][service_id] = url`, so a
-    backoff retry only re-attempts services still missing.
-
-    Side-effects:
-      - Mutates `sidecar["uploaded"]` with each successful upload.
-      - On success, rewrites `msg["files"]` in-place to the wire shape:
-        `[{"filename": ..., "storage": [url1, url2, ...]}]` (drops `path`).
-        Only services that accepted the file contribute a URL, so a failed
-        service publishes nothing rather than a link that cannot resolve.
-
-    Returns True when every file has at least one URL (caller proceeds to
-    publish), False otherwise (caller schedules retry; `msg["files"]` stays in
-    its on-disk shape)."""
+    On success, rewrites `msg["files"]` in place to the wire shape
+    `[{"filename": ..., "storage": [url1, url2, ...]}]` (drops `path`). Only
+    services that took the file contribute a URL."""
     files = msg.get("files") or []
     if not files or not services:
-        return True  # no work to do
+        return ""
 
-    uploaded: dict = sidecar.setdefault("uploaded", {})
-    every_file_covered = True
+    uploaded: dict[str, dict[str, str]] = {}
+    blocked = ""
     msg_id = (msg.get("id") or "").strip()
     for entry in files:
         filename = entry.get("filename") or ""
@@ -593,53 +521,33 @@ def _upload_files_for_remote(
             if msg_id
             else (None, "missing message id")
         )
-        # Whether a failure blocks the send depends on what the other services
-        # manage, so the details are collected and graded after the loop.
         failures: list[str] = []
         if src is None:
-            # Unreadable bytes only matter while nothing has been uploaded; a
-            # copy placed by an earlier attempt still covers this file.
-            if not per_file:
-                failures.append(src_reason)
+            failures.append(src_reason)
         else:
-            attempt = sidecar.get("attempts", 0) + 1
             for service in services:
-                if service.id in per_file:
-                    continue
                 try:
-                    url = service.store(src, msg_id=msg_id)
+                    per_file[service.id] = service.store(src, msg_id=msg_id)
                 except StorageError as e:
-                    failures.append(
-                        f"storage {service.id} upload failed (attempt {attempt}): {e}"
-                    )
-                    continue
+                    failures.append(f"storage {service.id} upload failed: {e}")
                 except Exception as e:
-                    failures.append(
-                        f"storage {service.id} upload raised (attempt {attempt}): {e}"
-                    )
-                    continue
-                per_file[service.id] = url
+                    failures.append(f"storage {service.id} upload raised: {e}")
 
         blocking = not per_file
         for detail in failures:
-            _record_upload_failure(
-                msg, sender, sidecar, filename, detail, blocking=blocking
-            )
-        if blocking:
-            every_file_covered = False
+            _record_upload_failure(msg, sender, filename, detail, blocking=blocking)
+        if blocking and not blocked:
+            blocked = f"no storage service took {filename!r}: {failures[-1] if failures else 'no copy'}"
 
-    if not every_file_covered:
-        return False
-    sidecar.pop("last_error", None)
+    if blocked:
+        return blocked
 
-    # Every file has a copy somewhere — rewrite to the wire shape.
-    new_files: list[dict] = []
-    for entry in files:
-        filename = entry.get("filename") or ""
-        urls = list(uploaded.get(filename, {}).values())
-        new_files.append({"filename": filename, "storage": urls})
-    msg["files"] = new_files
-    return True
+    msg["files"] = [
+        {"filename": entry.get("filename") or "",
+         "storage": list(uploaded.get(entry.get("filename") or "", {}).values())}
+        for entry in files
+    ]
+    return ""
 
 
 def _attempt_download_file(
@@ -840,30 +748,6 @@ def _stamp_from(
     return prefix
 
 
-def _record_enqueued(sender: Participant, pending_file: Path) -> None:
-    """First sight of an outbound envelope: open its receipt.
-
-    The router opens it, not `tell` — a sender asserting its own delivery is
-    the thing the receipt exists to replace."""
-    try:
-        msg = json.loads(pending_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
-        return
-    if not isinstance(msg, dict):
-        return
-    outbox = sender.outbox_path()
-    if receipts.read(outbox, str(msg.get("id") or "")) is not None:
-        return  # already opened; this is a retry pass, not a first sight
-    receipts.record_enqueued(outbox, msg)
-    txlog.log(
-        "ENQUEUED",
-        msg_id=str(msg.get("id") or pending_file.stem),
-        sender=sender.name,
-        recipient=str(msg.get("to") or ""),
-        detail=_preview(str(msg.get("content") or "")),
-    )
-
-
 def _process_pending(
     sender: Participant,
     by_name: dict[str, Participant],
@@ -871,278 +755,232 @@ def _process_pending(
     configured_remote_ids: list[str],
     services: Optional[list[StorageService]] = None,
     unstarted_remote_ids: Optional[list[str]] = None,
+    down: Optional[set[str]] = None,
 ) -> int:
-    """Phase 2: iterate `~/.config/a8s/agents/<sender>/pending/`, deliver each
-    pending file locally and/or publish to not-yet-succeeded remotes. The
-    sidecar tracks per-message progress so a partial pass can be resumed
-    cheaply on the next routing iteration. Returns the count of completed
-    local deliveries this pass (matches the legacy `route_outboxes` count
-    for the local-only path)."""
+    """Phase 2: give each file in `~/.config/a8s/agents/<sender>/pending/` one
+    try per hop — local delivery and one publish to each configured remote —
+    and settle it in this pass. If any path took it, it is sent and leaves
+    pending; a path that failed gets one row. If none took it, it drops to
+    trash. Returns the count of local deliveries this pass.
+
+    `down` collects the remotes this pass found without a link, so a later
+    message in the same pass does not wait for that link again."""
     routed = 0
     pending = pending_dir(sender.name)
     if not pending.is_dir():
         return 0
+    if down is None:
+        down = set()
     owned_prefixes = {
         p.lower(): p for p, a in load_namespaces().items()
         if a.lower() == sender.name.lower()
     }
     opaque = opaque_prefixes()
-    now = datetime.now(timezone.utc)
-    marker = retry_request_path(sender.name)
-    force_due = marker.is_file()
-    if force_due:
-        # Removed before the pass, not after: a request dropped while this pass
-        # runs survives to the next one, and a crash mid-pass loses at most a
-        # request the operator repeats.
-        try:
-            marker.unlink()
-        except OSError:
-            pass
     files = sorted(
         f for f in pending.iterdir()
         if f.is_file() and f.name.endswith(".json")
     )
-    for f in files:
-        sidecar = _load_or_init_sidecar(f)
-        _record_enqueued(sender, f)
-        # Backoff gate. A sidecar is operator-editable, so `next_attempt` is a
-        # boundary: anything unparseable — wrong type included — means due now,
-        # never an exception that would abort the whole pass and strand every
-        # message behind this one, inbound proxy delivery included.
-        raw_next_attempt = sidecar["next_attempt"]
-        if raw_next_attempt and not force_due:
-            try:
-                next_dt = datetime.fromisoformat(str(raw_next_attempt).replace("Z", "+00:00"))
-                if now < next_dt:
-                    continue
-            except (TypeError, ValueError):
-                out_agent(
-                    sender.name,
-                    f"unparseable next_attempt {raw_next_attempt!r} in {f.name} sidecar; treating as due",
-                )
+    claimed_dir = sending_dir(sender.name)
+    for queued in files:
+        f = _claim_pending(sender, queued, claimed_dir)
+        if f is None:
+            continue
         try:
             with f.open("r", encoding="utf-8") as fp:
                 msg = json.load(fp)
         except (OSError, json.JSONDecodeError) as e:
-            out_agent(sender.name, f"pending parse error on {f.name}: {e}; trashing")
-            _trash_pending(sender, f)
-            _drop_sidecar(f)
+            _drop_pending(
+                sender, f, "DROPPED",
+                msg_id=_msg_id_from_pending_json(f.name), recipient="", files=[],
+                reason=f"unreadable message: {e}",
+            )
+            continue
+        if not isinstance(msg, dict):
+            _drop_pending(
+                sender, f, "DROPPED",
+                msg_id=_msg_id_from_pending_json(f.name), recipient="", files=[],
+                reason="unreadable message: not a JSON object",
+            )
+            continue
+        shape_error = _shape_error(msg)
+        if shape_error:
+            msg_id = msg.get("id")
+            _drop_pending(
+                sender, f, "DROPPED",
+                msg_id=msg_id if isinstance(msg_id, str) and msg_id else _msg_id_from_pending_json(f.name),
+                recipient="", files=[],
+                reason=f"malformed message: {shape_error}",
+            )
             continue
         recipient_name = (msg.get("to") or "").strip()
         msg["from"] = _stamp_from(
             sender.name, str(msg.get("from") or "").strip(),
             recipient_name, owned_prefixes, opaque,
         )
+        msg_id = msg.get("id", "")
         preview = _preview(msg.get("content", ""))
         msg_files = [e.get("filename", "") for e in (msg.get("files") or []) if e.get("filename")]
         if not recipient_name:
-            out_agent(sender.name, f"empty 'to' in {f.name}; rejecting")
-            _trash_pending(sender, f)
-            _drop_sidecar(f)
+            _drop_pending(
+                sender, f, "DROPPED",
+                msg_id=msg_id, recipient="", files=msg_files,
+                reason="empty 'to'",
+            )
             continue
         # ----- LOCAL ROUTING -----
         local_target_known = False
-        if not sidecar["local_delivered"]:
-            kind = None
-            member_names: list[str] = []
-            try:
-                kind, member_names = resolve_name(recipient_name)
-                local_target_known = True
-            except KeyError:
-                pass  # unknown locally — remotes (if any) might still deliver
-            except ValueError as e:
-                out_agent(sender.name, f"{e} in {f.name}; trashing")
-                _trash_pending(sender, f)
-                _drop_sidecar(f)
-                continue
-            if local_target_known:
-                recipients: list[Participant] = []
-                for m in member_names:
-                    rp = by_name.get(m.lower())
-                    if rp is not None and rp.name != sender.name:
-                        recipients.append(rp)
-                if recipients:
-                    staged: list[tuple[Path, Path]] = []
-                    stage_failed = False
-                    try:
-                        for recipient in recipients:
-                            ensure_mailboxes(recipient)
-                            final = inbox_dir(recipient.name) / f.name
-                            if final.is_file():
-                                continue
-                            routed_msg = _build_routed_message(msg, sender, recipient)
-                            staging = inbox_tmp_dir(recipient.name) / f.name
-                            with staging.open("w", encoding="utf-8") as out_f:
-                                json.dump(routed_msg, out_f, indent=2)
-                            staged.append((staging, final))
-                    except OSError as e:
-                        out_agent(sender.name, f"stage failed on {f.name}: {e}")
-                        for staging, _ in staged:
-                            try:
-                                staging.unlink()
-                            except OSError:
-                                pass
-                        stage_failed = True
-                    if not stage_failed:
+        local_delivered = False
+        local_failure = ""
+        kind = None
+        member_names: list[str] = []
+        try:
+            kind, member_names = resolve_name(recipient_name)
+            local_target_known = True
+        except KeyError:
+            pass  # unknown locally — remotes (if any) might still deliver
+        except ValueError as e:
+            _drop_pending(
+                sender, f, "DROPPED",
+                msg_id=msg_id, recipient=recipient_name, files=msg_files,
+                reason=str(e),
+            )
+            continue
+        if local_target_known:
+            recipients: list[Participant] = []
+            for m in member_names:
+                rp = by_name.get(m.lower())
+                if rp is not None and rp.name != sender.name:
+                    recipients.append(rp)
+            if recipients:
+                staged: list[tuple[Participant, Path, Path]] = []
+                try:
+                    for recipient in recipients:
+                        ensure_mailboxes(recipient)
+                        final = inbox_dir(recipient.name) / f.name
+                        if final.is_file():
+                            continue
+                        routed_msg = _build_routed_message(msg, sender, recipient)
+                        staging = inbox_tmp_dir(recipient.name) / f.name
+                        with staging.open("w", encoding="utf-8") as out_f:
+                            json.dump(routed_msg, out_f, indent=2)
+                        staged.append((recipient, staging, final))
+                except OSError as e:
+                    local_failure = f"stage failed: {e}"
+                    out_agent(sender.name, f"stage failed on {f.name}: {e}")
+                    for _, staging, _ in staged:
                         try:
-                            if staged:
-                                _commit_staged_inboxes(staged)
-                            if staged:
-                                sidecar["local_delivered"] = True
-                                local_msg_id = msg.get("id", "")
-                                if local_msg_id:
-                                    seen_id_append(local_msg_id)
-                                msg_id = msg.get("id", "")
-                                delivered = len(staged)
-                                if kind == "alias":
-                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
-                                    for recipient in recipients:
-                                        out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
-                                        txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
-                                    routed += delivered
-                                elif kind == "namespace":
-                                    recipient = recipients[0]
-                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (namespace via {recipient.name}): {preview}")
-                                    if staged:
-                                        out_agent(recipient.name, f"received from {sender.name} (to {recipient_name}): {preview}")
-                                    txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
-                                    routed += delivered
-                                else:
-                                    recipient = recipients[0]
-                                    out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
-                                    if staged:
-                                        out_agent(recipient.name, f"received from {sender.name}: {preview}")
-                                    txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
-                                    routed += delivered
-                                import convo
+                            staging.unlink()
+                        except OSError:
+                            pass
+                if not local_failure:
+                    failed = _commit_staged_inboxes(staged)
+                    committed = [r for r, _, _ in staged if r.name not in failed]
+                    if staged and not committed:
+                        local_failure = "commit failed: " + "; ".join(failed.values())
+                        out_agent(sender.name, f"commit failed on {f.name}: {local_failure}")
+                    else:
+                        local_delivered = True
+                        for name, err in failed.items():
+                            out_agent(sender.name, f"commit failed on {f.name} for {name}: {err}")
+                            txlog.log("DROPPED", msg_id=msg_id, sender=sender.name, recipient=name, files=msg_files or None, detail=f"local delivery failed: commit failed: {err}")
+                    if committed:
+                        if msg_id:
+                            seen_id_append(msg_id)
+                        if kind == "alias":
+                            out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (alias of {len(recipients)}): {preview}")
+                            for recipient in committed:
+                                out_agent(recipient.name, f"received from {sender.name} (via {recipient_name} alias): {preview}")
+                                txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
+                        elif kind == "namespace":
+                            recipient = committed[0]
+                            out_agent(sender.name, f"routed: {sender.name} -> {recipient_name} (namespace via {recipient.name}): {preview}")
+                            out_agent(recipient.name, f"received from {sender.name} (to {recipient_name}): {preview}")
+                            txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
+                        else:
+                            recipient = committed[0]
+                            out_agent(sender.name, f"routed: {sender.name} -> {recipient.name}: {preview}")
+                            out_agent(recipient.name, f"received from {sender.name}: {preview}")
+                            txlog.log("ROUTED", msg_id=msg_id, sender=sender.name, recipient=recipient.name, files=msg_files or None, detail=preview)
+                        routed += len(committed)
+                        import convo
 
-                                delivered_names = [
-                                    r.name for r in recipients
-                                    if (inbox_dir(r.name) / f.name).is_file()
-                                ]
-                                convo.record(msg, recipients=delivered_names)
-                                for name in delivered_names:
-                                    receipts.record_event(
-                                        sender.outbox_path(),
-                                        msg_id,
-                                        "inbox_write",
-                                        recipient=name,
-                                        to=recipient_name,
-                                        queued_at=str(msg.get("date") or ""),
-                                    )
-                        except OSError as e:
-                            out_agent(sender.name, f"commit failed on {f.name}: {e}")
-                            # leave for retry
-                else:
-                    # Local target resolved but no recipients (alias with only
-                    # the sender as a member, or the sender targeting themselves).
-                    # Nothing to deliver locally; mark done so we don't loop.
-                    out_agent(sender.name, f"{recipient_name!r} has no local recipients (excluding self)")
-                    sidecar["local_delivered"] = True
+                        delivered_names = [
+                            r.name for r in recipients
+                            if (inbox_dir(r.name) / f.name).is_file()
+                        ]
+                        convo.record(msg, recipients=delivered_names)
+            else:
+                # An alias whose only member is the sender, or the sender
+                # addressing itself: nothing to deliver here.
+                out_agent(sender.name, f"{recipient_name!r} has no local recipients (excluding self)")
+                local_delivered = True
         # ----- REMOTE ROUTING -----
         has_files = bool(msg.get("files"))
+        took_remotes: list[str] = []
+        remote_failures: dict[str, str] = {}
+        files_stay_local = False
         if publish_remotes is not None and configured_remote_ids:
             services_list = services or []
             if has_files and not services_list:
-                # No storage services configured — file payloads can't make
-                # the trip. Mark all remotes "succeeded" so the message
-                # finalizes after local delivery instead of looping on
-                # retries — local-only with files when no services, full
-                # pipeline when services are configured.
-                if sidecar["attempts"] == 0:
-                    out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (no storage configured)")
-                sidecar["succeeded_remotes"] = list(configured_remote_ids)
+                # No storage service: file payloads cannot make the trip, so
+                # the message stays local-only and the remotes are skipped.
+                out_agent(sender.name, f"FILE: payloads in {f.name} not published to remotes (no storage configured)")
+                files_stay_local = True
             else:
-                # Upload any files first (per-file × per-service cache lives
-                # in the sidecar). On full success the in-memory msg gets
-                # rewritten to the wire shape; on partial failure we fall
-                # through to schedule a retry without publishing this pass.
                 publish_msg = dict(msg)
-                upload_ok = True
+                blocked = ""
                 if has_files:
                     publish_msg["files"] = list(msg.get("files") or [])
-                    upload_ok = _upload_files_for_remote(
-                        publish_msg, sender, services_list, sidecar,
-                    )
-                if upload_ok:
-                    prev_remotes = list(sidecar["succeeded_remotes"])
-                    sidecar["succeeded_remotes"] = publish_remotes(
-                        publish_msg, sender.name, prev_remotes, sidecar["attempts"]
-                    )
-                    newly_published = [r for r in sidecar["succeeded_remotes"] if r not in prev_remotes]
-                    for rid in newly_published:
-                        txlog.log("PUBLISHED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files if has_files else None, detail=preview)
-                        receipts.record_published(
-                            sender.outbox_path(), msg.get("id", ""), recipient_name, rid,
-                        )
-                # else: leave succeeded_remotes alone; backoff retry will
-                # finish the uploads and try the publish next pass.
+                    blocked = _upload_files_for_remote(publish_msg, sender, services_list)
+                if blocked:
+                    remote_failures = {rid: blocked for rid in configured_remote_ids}
+                else:
+                    outcomes = publish_remotes(publish_msg, sender.name, down)
+                    for rid, (outcome, detail) in outcomes.items():
+                        if outcome == SENT:
+                            txlog.log("PUBLISHED", msg_id=msg_id, sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files if has_files else None, detail=preview)
+                        elif outcome == AMBIGUOUS:
+                            txlog.log("PUBLISH_AMBIGUOUS", msg_id=msg_id, sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files if has_files else None, detail=detail)
+                        else:
+                            remote_failures[rid] = detail
+                            continue
+                        took_remotes.append(rid)
         # ----- OUTCOME -----
-        remaining_remotes = [
-            rid for rid in configured_remote_ids
-            if rid not in sidecar["succeeded_remotes"]
-        ]
-        no_path_at_all = (
-            not local_target_known
-            and not sidecar["local_delivered"]
-            and not configured_remote_ids
-        )
-        if no_path_at_all and unstarted_remote_ids:
-            down = ", ".join(unstarted_remote_ids)
-            if sidecar["attempts"] == 0:
-                out_agent(
-                    sender.name,
-                    f"{recipient_name!r} is not local and remote {down} did not start; "
-                    f"holding {f.name} for retry",
+        if not local_target_known and not configured_remote_ids:
+            if unstarted_remote_ids:
+                down_ids = ", ".join(unstarted_remote_ids)
+                _drop_pending(
+                    sender, f, "DROPPED",
+                    msg_id=msg_id, recipient=recipient_name, files=msg_files,
+                    reason=f"{recipient_name!r} is not local and remote {down_ids} did not start",
+                    remote=down_ids,
                 )
-            _schedule_retry(
-                f, sidecar, sender,
-                msg_id=msg.get("id", ""),
-                recipient=recipient_name,
-                files=msg_files,
-                reason=f"not local; remote {down} did not start",
-            )
+            else:
+                _drop_pending(
+                    sender, f, "DROPPED",
+                    msg_id=msg_id, recipient=recipient_name, files=msg_files,
+                    reason=f"unknown recipient {recipient_name!r}",
+                )
             continue
-        if no_path_at_all:
-            out_agent(sender.name, f"unknown recipient {recipient_name!r} in {f.name}; trashing")
-            txlog.log("DROPPED", msg_id=msg.get("id", ""), sender=sender.name, recipient=recipient_name, detail="unknown recipient")
-            receipts.record_event(
-                sender.outbox_path(),
-                msg.get("id", ""),
-                "no_local_recipient",
-                recipient=recipient_name,
-                to=recipient_name,
-                detail="unknown recipient and no remote configured",
-            )
-            _trash_pending(sender, f)
-            _drop_sidecar(f)
-            continue
-        all_done = (
-            not remaining_remotes
-            and (not local_target_known or sidecar["local_delivered"])
-        )
-        if all_done:
-            remote_published = bool(sidecar["succeeded_remotes"])
-            if has_files and not (services or []):
-                # v1 fallback: remotes marked succeeded without a wire publish.
-                remote_published = False
-            if remote_published:
+        if local_delivered or took_remotes:
+            if took_remotes:
                 import convo
 
                 convo.record(msg, recipients=[recipient_name])
+            if local_failure:
+                txlog.log("DROPPED", msg_id=msg_id, sender=sender.name, recipient=recipient_name, files=msg_files or None, detail=f"local delivery failed: {local_failure}")
+            for rid, reason in remote_failures.items():
+                txlog.log("DROPPED", msg_id=msg_id, sender=sender.name, recipient=recipient_name, remote=rid, files=msg_files or None, detail=reason)
             _finalize_pending(sender, f)
             continue
-        # Still pending — schedule a retry with backoff.
-        if remaining_remotes:
-            stalled = f"remotes did not accept: {', '.join(remaining_remotes)}"
-        else:
-            stalled = "local delivery incomplete"
-        _schedule_retry(
-            f, sidecar, sender,
-            msg_id=msg.get("id", ""),
-            recipient=recipient_name,
-            files=msg_files,
-            reason=sidecar.get("last_error") or stalled,
+        reasons = [f"local delivery failed: {local_failure}"] if local_failure else []
+        if files_stay_local:
+            reasons.append("its files cannot reach a remote: no storage service configured")
+        reasons += [f"remote {rid}: {reason}" for rid, reason in remote_failures.items()]
+        _drop_pending(
+            sender, f, "DISCARDED",
+            msg_id=msg_id, recipient=recipient_name, files=msg_files,
+            reason="; ".join(reasons) or "no path took it",
         )
     return routed
 
@@ -1162,27 +1000,23 @@ def route_outboxes(
          `all_agents`, so a single-name handler still attributes a claimed peer.
          The agent's directory is touched only by the rename — never
          read-modified-rewritten.
-      2. Process: deliver each pending message to local recipients (via
-         `inbox.tmp/` → `inbox/` atomic stage→commit) and/or publish to any
-         configured remote that hasn't yet accepted it. Per-message retry
-         state lives in `<f>.json.retry` alongside the pending file. Phase 2
-         covers handled senders plus any co-registered peer that received
-         pending this pass.
+      2. Process: give each pending message one try at local delivery (via
+         `inbox.tmp/` → `inbox/` atomic stage→commit) and one publish to each
+         configured remote, then finalize or trash it. Phase 2 covers handled
+         senders plus any co-registered peer that received pending this pass.
 
     `publish_remotes` and `configured_remote_ids` are the daemon-wired
     hooks for cross-cluster routing; both default to None / [] so an
-    install with no remotes configured behaves as it did before remotes
-    existed, except for the on-disk location of in-flight messages.
+    install with no remotes configured routes locally only.
 
     `services` is the storage-service hook for cross-cluster `FILE:`
     payloads. When set and a message has files, each service uploads its
     bytes and the wire envelope carries `files[i].storage = [...]`. None /
-    empty falls back to the v1 limitation (files local-only, remote skip).
+    empty keeps files local-only and skips the remotes for that message.
 
-    `unstarted_remote_ids` names configured remotes that failed to start.
-    With none started, mail for a name this node does not hold would have no
-    path at all; while any configured remote is down it parks on the retry
-    schedule instead of being trashed as an unknown recipient."""
+    `unstarted_remote_ids` names configured remotes that failed to start. With
+    none started, mail for a name this node does not hold drops with a
+    `DROPPED` row that names the remote that did not start."""
     if all_agents is None:
         all_agents = senders
     by_name = {p.name.lower(): p for p in all_agents}
@@ -1192,11 +1026,12 @@ def route_outboxes(
     process: dict[str, Participant] = {p.name.lower(): p for p in senders}
     for owner in pending_owners:
         process.setdefault(owner.name.lower(), owner)
+    down: set[str] = set()
     routed = 0
     for sender in process.values():
         routed += _process_pending(
             sender, by_name, publish_remotes, configured_remote_ids, services,
-            unstarted_remote_ids or [],
+            unstarted_remote_ids or [], down,
         )
     return routed
 

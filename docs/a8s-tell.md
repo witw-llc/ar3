@@ -37,39 +37,31 @@ All recipients are validated before any envelope or attachment bundle is
 written, wherever registry validation applies. Sends then happen in list
 order, with a confirmation line per envelope. An I/O failure stops the send
 and removes the failed envelope's partial bundle; earlier envelopes remain
-queued, so retry only the recipients whose sends did not succeed.
+queued, so send again only to the recipients whose sends did not succeed.
 
 ## What the sender learns
 
-A send is asynchronous, so the outcome comes back as a receipt the router
-writes at `<agent root>/.outbox/.receipts/<ULID>.json`, updated on every event
-the router sees for that ULID. **The router writes it; the sender only reads
-it** — a sender that writes its own receipt is asserting an outcome it cannot
-observe, the same reason the filesystem and not the envelope settles `from`.
+`tell` returns once the envelope is in the outbox, and that is all the sender
+learns: the message is sent. a8s makes no delivery promise and keeps no
+per-message record for the sender. An agent never spends effort on what became
+of a message; if no reply comes, it sends a new message.
 
-The sender's agent log shows one `delivered id=<ULID> -> <recipients>` line per
-message, plus a line for attachments fetched, failed, expired or deferred.
-No-local-recipient reports from the other nodes on a shared topic go to the
-transaction log only (`a8s tx`), each row naming the reporting node.
+## What the operator sees
 
-| State | Meaning |
-|-------|---------|
-| `enqueued` | the envelope is in the sender's own outbox |
-| `published` | it left this machine for a remote — not a delivery |
-| `deferred` | a receiver holds it while its attachments resolve |
-| `delivered` | a receiver wrote it to an inbox |
-| `unconfirmed` | some node reported it owns nobody by that name, and none has claimed it |
-| `failed` | an attachment will never arrive, or a retry window ran out |
-
-`tell` never blocks for one of these states — a send that flew off to a
-remote cluster has no "received" to wait for, the way a UDP packet does not.
-Nothing promotes `published` to `delivered`: a publish says the transport
-took the envelope, not that anything read it. Read the outcome later, and
-asynchronously, with `tells --sent`.
-
-`tells --sent [--since 2h]` lists the seat's recent outbound ULIDs with state,
-age and recipient from those same files. `a8s trace <ULID>` is the operator's
-machine-wide view of the same events.
+What the router did is in the transaction log of the machine that did it.
+`a8s tx --from <name>` lists a sender's recent rows — `ENQUEUED` when the
+router takes the envelope from the outbox, then `ROUTED`, `PUBLISHED`,
+`PUBLISH_AMBIGUOUS` or `DROPPED` — and `a8s trace <ULID>` shows one message.
+A node that writes a remote message to an inbox sends one receipt back; the
+sender's node logs it as `DELIVERY_RECEIPT`, plus `ATTACHMENT_FAILED` for a
+file the recipient will never hold, and writes one
+`delivered id=<ULID> -> <recipients>` line to the sender's agent log. A node
+that owns none of the recipients sends nothing back, so with a remote
+configured a message to a name that no node holds ends at `PUBLISHED`. A
+publish says the transport took the envelope, not that anything read it. With
+no remote, `tell` refuses the unknown name at the terminal (see "Who validates
+the recipient" below). No row is a delivery promise, and none of them reaches
+an agent.
 
 ## What argv guarantees, and where it does not
 
@@ -214,7 +206,7 @@ when several registered agents share one physical outbox directory, a claimed
 
 ## `tells` (receive side)
 
-`tells [-f] [--timeout SEC] [--body-max N] [--glow [THEME]] [--heading-out|in …] [--sent [--since D]]` (`apps/a8s/tells.py`)
+`tells [-f] [--timeout SEC] [--body-max N] [--glow [THEME]] [--heading-out|in …]` (`apps/a8s/tells.py`)
 is the receive-side complement of `tell`. It resolves the node the same way
 `tell` does — the file-proxy inbox is `.inbox` beside the outbox
 (`<outbox-parent>/.inbox`).
@@ -240,9 +232,6 @@ A message whose delivery is more than 10 minutes after the `date` its sender
 stamped prints with a `[late 32h]` prefix, computed from the envelope's own
 `date` and the `delivered_at` the receiving node stamps at the inbox write. A
 monitor can tell replay from live traffic without asking anyone.
-
-`--sent` does not watch the inbox at all: it lists what this seat sent and
-what became of it, from the receipt files in its own outbox.
 
 Non-destructive: it observes new arrivals without consuming them, so it never competes to remove `.inbox` files and each run waits from its own baseline. Partial writes (mid-delivery on a cross-mount move) are tolerated — an unreadable file is skipped and retried on the next poll. It only reports messages that land after it starts; anything already waiting is ignored.
 

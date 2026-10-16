@@ -204,40 +204,28 @@ class TestPoll:
         t._poll_once()
         assert len(seen) == 1
 
-    def test_an_unconsumed_envelope_is_not_stamped(self, fake_home, folder, capsys):
-        """A receive path that answers False has not finished with the message.
-
-        Stamping the ledger here is worse than losing the answer, because the
-        ledger is consulted before the file is ever read again: the envelope
-        stays on disk looking delivered and is never offered to anybody.
-        """
+    def test_every_offered_envelope_is_stamped_once(self, fake_home, folder):
         msg_id = new_ulid()
         (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
-        answers = [False, True]
         seen: list[str] = []
 
-        def cb(raw: bytes) -> bool:
-            seen.append(json.loads(raw)["id"])
-            return answers.pop(0)
-
         t = _transport(folder)
-        t._on_message = cb
+        t._on_message = lambda raw: seen.append(json.loads(raw)["id"])
         t._poll_once()
-        assert msg_id not in t._ledger.ids, "nobody took it"
         t._poll_once()
-        assert seen == [msg_id, msg_id], "offered again"
+        assert seen == [msg_id]
         assert msg_id in t._ledger.ids
-        t._poll_once()
-        assert seen == [msg_id, msg_id], "and now it is done"
-        assert capsys.readouterr().out.count("delivery unfinished") == 1
 
-    def test_a_failing_callback_says_so_once(self, fake_home, folder, capsys):
-        """Nothing arriving is this transport's whole failure surface, so a
-        handler that raises every fifteen seconds owes the log one line."""
-        msg_id = new_ulid()
-        (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
+    def test_a_failing_callback_says_so_once_and_drops(self, fake_home, folder, capsys):
+        """The envelope is consumed whatever the handler did, and the log
+        gets one line for the kind of failure."""
+        first, second = new_ulid(), new_ulid()
+        for msg_id in (first, second):
+            (folder / f"{msg_id}.json").write_bytes(_envelope(msg_id))
+        offered: list[str] = []
 
-        def boom(_raw: bytes) -> None:
+        def boom(raw: bytes) -> None:
+            offered.append(json.loads(raw)["id"])
             raise RuntimeError("inbox is read-only")
 
         t = _transport(folder)
@@ -246,9 +234,9 @@ class TestPoll:
         t._poll_once()
         printed = capsys.readouterr().out
         assert printed.count("delivery failed") == 1
-        assert "inbox is read-only" in printed
-        # Not recorded: the envelope is retried, not lost.
-        assert msg_id not in t._ledger.ids
+        assert "inbox is read-only" in printed and "dropped" in printed
+        assert sorted(offered) == sorted([first, second])
+        assert {first, second} <= t._ledger.ids
 
     def test_an_unwritable_ledger_says_so_once(
         self, fake_home, folder, monkeypatch, capsys

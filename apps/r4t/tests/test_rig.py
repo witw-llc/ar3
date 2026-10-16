@@ -96,8 +96,6 @@ class TestLoading:
         assert (
             config.cell_budget_earn_per_hour == DEFAULT_CELL_BUDGET_EARN_PER_HOUR == 8.0
         )
-        assert config.breaker_cap == 5
-        assert config.breaker_cooldown_seconds == 600.0
         assert config.log_retention_days == 14
 
     def test_explicit_limits(self, tmp_path):
@@ -127,8 +125,6 @@ class TestLoading:
                     "throttle": {"min_seconds_between_turn_starts": 3},
                     "cell_budget_max": 4,
                     "cell_budget_earn_per_hour": 2,
-                    "breaker_cap": 2,
-                    "breaker_cooldown_seconds": 30,
                     "log_retention_days": 3,
                 },
             )
@@ -136,8 +132,6 @@ class TestLoading:
         assert config.throttle.min_seconds_between_turn_starts == 3
         assert config.cell_budget_max == 4
         assert config.cell_budget_earn_per_hour == 2
-        assert config.breaker_cap == 2
-        assert config.breaker_cooldown_seconds == 30
         assert config.log_retention_days == 3
 
     def test_log_retention_zero_means_keep_forever(self, tmp_path):
@@ -162,8 +156,6 @@ class TestLoading:
         for key, value in (
             ("cell_budget_max", 0),
             ("cell_budget_earn_per_hour", -1),
-            ("breaker_cap", 0),
-            ("breaker_cooldown_seconds", -5),
         ):
             with pytest.raises(RigError):
                 load_rig_config(
@@ -231,6 +223,14 @@ class TestFailClosed:
         config = load_rig_config(write_config(tmp_path, {"t": {"invoke": []}}))
         rig, err, _ = config.rig_for(member(rig="t"))
         assert rig is None
+
+    def test_a_stray_top_level_key_names_itself(self, tmp_path):
+        config = load_rig_config(
+            write_config(tmp_path, {"breaker_cap": 5, "t": {"invoke": ["x", "{prompt}"]}})
+        )
+        error = config.rigs["breaker_cap"].error
+        assert "'breaker_cap'" in error and "delete the key" in error
+        assert config.rigs["t"].error is None
 
     def test_bad_limit_invalidates_rig(self, tmp_path):
         config = load_rig_config(

@@ -112,9 +112,6 @@ def test_remote_round_trip(tmp_path, mqtt_broker, monkeypatch):
         deadline = time.time() + 5.0
         receipt_events = []
         while time.time() < deadline:
-            # A shared topic means every node reports on this ULID, and a
-            # node that owns no TARGET reports `no_local_recipient` — cluster
-            # A's own subscriber included, since it hears its own publish.
             # The delivery is the one stage that says a recipient has it.
             receipt_events = [
                 event for event in read_events(msg_id)

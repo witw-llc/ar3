@@ -30,8 +30,36 @@ raw file ─┬─ text  ─ LLM via distill_command (chunked, stdin→stdout)
 1. **LLM extraction** — the text is chunked (~3000 chars, 200 overlap) and each
    chunk is sent to the model with a strict "extract only genuinely novel
    knowledge" prompt (max 3 items/chunk). Output is parsed as a JSON array of
-   `{title, content, tags}`.
+   `{title, content, tags, lifespan}`.
 2. **Dedup** — candidates are deduplicated across chunks before storage.
+
+A response that is one JSON object rather than an array is read as a
+one-item answer.
+
+An r4t roster turn capture is read as its `## Routed messages`,
+`## Human messages` and `## Output` sections; its `## Prompt` is the member's
+standing context and is never distilled. An engine capture is read as its
+input and output. Any other file is read whole.
+
+### What an item keeps, and how long
+
+The prompt skips task telemetry — test counts for one change, CI, PR or branch
+status, one-off command output, line numbers in a file being edited — and asks
+for one fact per item, titled by the component, tool or rule it is about,
+never by a PR or ticket number.
+
+Each item says `lifespan: durable` or `lifespan: task`. A `task` item is
+stored with `valid_to: YYYY-MM-DD` seven days past the day its turn ran (the
+capture's stamp; today for a plain file). Past that day, default search and
+recall pass it over; the file stays, and `--include-superseded` shows it
+with the retired entries. A `task` item is never appended to a durable entry,
+where it would outlive its task, and a durable item is never deduplicated
+against or appended to an expiring one, where it would leave with the task.
+Consolidation and compile leave expiring entries alone.
+
+Every distilled entry takes `valid_from` from its turn: the capture's stamp,
+never a date the model proposes. Every distilled entry starts at confidence
+0.5. A correction from the turn's people starts at 0.7.
 
 ### Distilled notes are descriptive by contract
 
@@ -129,14 +157,50 @@ extraction succeeds.
 
 Before storing, candidates are diffed against the existing store so distillation
 is idempotent-ish: re-running over the same input doesn't pile up duplicates.
-Genuinely new or changed knowledge becomes new entries.
+
+A candidate whose title matches an active entry's, or whose words overlap one
+by 45% or more, is a **pair**. One model call per capture sorts every pair:
+
+| Verdict | Effect |
+|---|---|
+| `duplicate` | the candidate is dropped |
+| `detail` | the candidate is appended to the entry's `## Edge Cases` |
+| `replacement` | the candidate is stored and supersedes the entry |
+| `separate` | the candidate is stored beside the entry |
+
+A replacement retires the entry whether or not it was in the turn's knowledge
+pack. These limits hold:
+
+- A `task` candidate never grows or replaces a durable entry, and never closes
+  an idea.
+- A replacement never retires an entry at confidence 0.7 or above: a person's
+  correction, or a compiled page. Against a correction the candidate is stored
+  beside it; against a compiled page it is appended to the page.
+- A candidate older than its target (its turn's `valid_from` is earlier) is
+  stored already retired by the target: it was replaced before it arrived.
+- One capture retires an entry once. A correction in the same capture wins,
+  and the candidate is stored beside it.
+- When the stored candidate turns out to be the target, or an entry retired
+  earlier (a value that flips back), nothing is retired.
+- A pair the model leaves unanswered falls back to overlap alone (a title
+  match or 70% overlap drops it; 45% overlap appends it when more than 40% of
+  its words are new, and drops it otherwise; a `task` candidate at 45% is
+  stored).
+
+A replacement starts at confidence 0.5, as any distilled entry.
+
+**Ideas close.** A candidate, or a `decision` archive record, close to an
+active `idea` record is paired with it too. `replacement` means the candidate
+settles the idea, and the idea is superseded, so the open ideas are only the
+open ones; any other verdict leaves it open.
 
 ## Related write operations
 
 - `k7e consolidate [--dry-run]` — find and merge duplicate nodes by title
   similarity (uses `supersede` under the hood).
-- `k7e compile <tag> [--dry-run]` — synthesize the active entries for a tag into
-  a single `compiled` reference page (LLM).
+- `k7e compile <tag> [--dry-run]` — fold the active entries for a tag into one
+  reference page that supersedes them (LLM). `k7e compile --due` is the
+  scheduled consolidation pass r4t runs from idle.
 
 See [k7e-cli.md](k7e-cli.md) for full command/flag reference.
 

@@ -34,4 +34,6 @@ tell [--attach PATH]... [--split] [--verbatim] [--] <recipient> [<message...>|-]
 - `--verbatim` sends the body exactly as given, so trailing `FILE:` lines stay text; `--` ends options, so a recipient that starts with a dash is still a name.
 - Oversized attachments fail immediately unless `--split` chunks them under the size limit.
 - Returns immediately. Delivery may take seconds or longer; do not expect a reply in-session.
+- Best effort: the message is sent once, with no delivery guarantee. Do not resend after a timeout; if no reply comes, send a new message.
+- Once `tell` returns, the message is sent, and that is all you know. Do not spend time checking whether it was received (`a8s tx` and `a8s trace` are operator tools).
 - If `tell` fails with “cannot send from this directory”, tell the user — do not `cd` to work around it.

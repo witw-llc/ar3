@@ -14,6 +14,7 @@ from txlog import (
     TransactionLogError,
     _one_line,
     _ts,
+    count_by_remote,
     log,
     prune_transactions,
     read_events,
@@ -188,6 +189,25 @@ class TestReadEvents:
     def test_unknown_id_returns_empty(self, fake_home):
         log("ROUTED", msg_id="01ABC", sender="A", recipient="B")
         assert read_events("09ZZZ") == []
+
+
+class TestCountByRemote:
+    def test_counts_one_event_per_remote_since_a_stamp(self, fake_home):
+        log("PUBLISH_AMBIGUOUS", msg_id="01OLD", remote="hub")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("UPDATE transactions SET timestamp = '2000-01-01T00:00:00.000Z'")
+        log("PUBLISH_AMBIGUOUS", msg_id="01A", remote="hub")
+        log("PUBLISH_AMBIGUOUS", msg_id="01B", remote="hub")
+        log("PUBLISH_AMBIGUOUS", msg_id="01C", remote="relay")
+        log("PUBLISHED", msg_id="01D", remote="hub")
+        log("PUBLISH_AMBIGUOUS", msg_id="01E")
+        assert count_by_remote("PUBLISH_AMBIGUOUS", "2001-01-01T00:00:00.000Z") == {
+            "hub": 2, "relay": 1,
+        }
+
+    def test_a_missing_store_is_said(self, fake_home):
+        with pytest.raises(TransactionLogError):
+            count_by_remote("PUBLISH_AMBIGUOUS", "2001-01-01T00:00:00.000Z")
 
 
 class TestLogSwallowsErrors:
@@ -473,9 +493,9 @@ class TestRemoteAddressBook:
 
 
 class TestTransactionsNodeScope:
-    """On a shared topic every node logs NOT_LOCAL, and publishes a
-    no_local_recipient receipt, for each message it does not own. Those rows
-    are about other nodes' traffic; `a8s tx` hides them unless asked."""
+    """On a shared topic every node logs NOT_LOCAL for each message it does not
+    own. Those rows are about other nodes' traffic; `a8s tx` hides them unless
+    asked."""
 
     @pytest.fixture
     def mixed(self, fake_home):
@@ -490,8 +510,6 @@ class TestTransactionsNodeScope:
             remote="hub", detail="inbox_write; receipt_id=01R2")
         # Another node's traffic, heard on the shared topic.
         log("NOT_LOCAL", msg_id="01FOREIGN", sender="Far", recipient="Other", remote="hub")
-        log("RECEIPT_PUBLISHED", msg_id="01FOREIGN", sender="Far", recipient="Other",
-            remote="hub", detail="no_local_recipient; receipt_id=01R3")
         log("DISCARDED", msg_id="01FOREIGN2", sender="Far", recipient="Other", remote="hub",
             detail="unsupported or malformed a8s control envelope")
         # Local-only rows: routing and lifecycle.
@@ -510,12 +528,18 @@ class TestTransactionsNodeScope:
     def test_all_shows_every_row(self, mixed, capsys):
         assert cmd_transactions(["--limit", "50", "--all"]) == 0
         out = capsys.readouterr().out
-        assert out.count("01FOREIGN") == 3
+        assert out.count("01FOREIGN") == 2
         assert "01OWNSENT" in out
 
     def test_msg_shows_a_foreign_envelope_whole(self, mixed, capsys):
         assert cmd_transactions(["--msg", "01FOREIGN"]) == 0
-        assert capsys.readouterr().out.count("01FOREIGN") == 2
+        assert capsys.readouterr().out.count("01FOREIGN") == 1
+
+    def test_a_receipt_this_node_published_is_its_own(self, fake_home, capsys):
+        log("RECEIPT_PUBLISHED", msg_id="01OWNRECEIPT", sender="Far", recipient="Bob",
+            remote="hub", detail="inbox_write; receipt_id=01R4")
+        assert cmd_transactions([]) == 0
+        assert "01OWNRECEIPT" in capsys.readouterr().out
 
     def test_limit_counts_shown_rows_only(self, mixed, capsys):
         log("NOT_LOCAL", msg_id="01FOREIGN3", sender="Far", recipient="Other", remote="hub")

@@ -963,7 +963,7 @@ def wake_path_repair(
             f"This node declares its own PATH: add the directory that holds "
             f"{program} to `definition.env`."
         )
-    return f"Run `a8s retry {member}` from a terminal where {program} runs."
+    return f"Run `a8s restart {member}` from a terminal where {program} runs."
 
 
 def wake_shell(definition: dict) -> str | None:

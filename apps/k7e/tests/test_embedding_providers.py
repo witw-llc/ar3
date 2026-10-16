@@ -369,7 +369,7 @@ def test_archive_replacement_never_changes_the_classified_input_snapshot(
         assert archive_marker not in json.loads(request.data)['input']
 
 
-@pytest.mark.parametrize('status', ['superseded', 'compiled'])
+@pytest.mark.parametrize('status', ['superseded'])
 def test_explicit_rebuild_retains_untyped_historical_vectors(openai, monkeypatch, status):
     calls = transport(monkeypatch, response())
     historical = engine.store_entry('Synthetic historical', 'An earlier synthetic procedure')

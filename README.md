@@ -5,6 +5,10 @@ your machine into a team: you write the team down in one file, hand it work,
 and go do something else. Apache-2.0, macOS, pre-1.0. No account, no server,
 and no subscription you do not already pay for.
 
+AR3 turns the AI agents on your machine into a team that talks over a8s:
+lightweight, best-effort messaging with no delivery guarantee, where a message
+may be picked up by several nodes or by none.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/witw-llc/ar3/main/get.sh | sh
 ```
@@ -90,6 +94,9 @@ defect in the loop, so technical steps never carry your name.
 ### The four apps
 
 - **a8s**, the router. Any CLI agent reaches any other through one verb, `tell`.
+  a8s is lightweight, best-effort messaging between agents, like UDP: each
+  message is sent once with no delivery guarantee, and it may be picked up by
+  several nodes or by none.
 - **r4t**, the roster. Every turn dispatched, budgeted, throttled and audited.
 - **k7e**, the knowledge engine. Flat markdown and search, so nothing gets
   learned twice.

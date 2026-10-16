@@ -2,9 +2,13 @@
 
 Polls the GAS Bridge for unread mail FROM `--from <address>` (the human's
 address — replies to the connector come back from there). For each
-unread thread: strips `Re:` / `Fwd:` repeats from the subject and shells
-`tell <stripped-subject> <body>` from cwd, then marks the thread read
-iff the tell exited 0.
+unread thread it takes the newest message, strips `Re:` / `Fwd:` repeats
+from the subject and shells `tell <stripped-subject> <body>` from cwd, then
+marks the thread read.
+
+Before the tell, the message id goes into `.gmail-told` in cwd. A message
+whose id is already there is only marked read, never told again, so each
+message gets one try: a refused tell fails to stderr and is not repeated.
 
 Intended invocation: as an `idle.invoke` in the agent's a8s definition.
 a8s fires idle with cwd = the agent's own root, so the `tell` shell-out
@@ -32,6 +36,23 @@ TIMEOUT_S = 30
 # resolves the a8s entry point relative to its own file, the same way
 # apps/r4t/notify.py does.
 A8S_PY = Path(__file__).resolve().parent.parent.parent / "a8s.py"
+
+TOLD_FILE = ".gmail-told"
+
+
+def _told_ids() -> set[str]:
+    try:
+        text = Path(TOLD_FILE).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def _record_told(message_id: str) -> None:
+    with open(TOLD_FILE, "a", encoding="utf-8") as f:
+        f.write(message_id + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 # ---------- subject parse ----------
@@ -95,6 +116,22 @@ def _body_of(msg: dict) -> str:
     return (msg.get("plain") or msg.get("body") or "").strip()
 
 
+def _mark_read(bridge_url: str, bridge_key: str, thread_id: str) -> bool:
+    try:
+        read = _bridge_post(bridge_url, {
+            "action": "gmail.read",
+            "key": bridge_key,
+            "thread_id": thread_id,
+        })
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+        print(f"[gmail-cron] gmail.read failed for {thread_id}: {e}", file=sys.stderr)
+        return False
+    if isinstance(read, dict) and read.get("error"):
+        print(f"[gmail-cron] gmail.read error: {read['error']}", file=sys.stderr)
+        return False
+    return True
+
+
 def _process_thread(
     thread_summary: dict,
     *,
@@ -103,9 +140,8 @@ def _process_thread(
 ) -> tuple[bool, bool]:
     """Process a single thread. Returns (attempted, succeeded).
 
-    `attempted` is True if we ran a `tell` (i.e. parsed a non-empty
-    target name). `succeeded` is True iff the tell exited 0 AND the
-    subsequent gmail.read succeeded.
+    `attempted` is True if we ran a `tell`. `succeeded` is True iff the
+    tell exited 0 AND the subsequent gmail.read succeeded.
     """
     thread_id = thread_summary.get("id")
     if not thread_id:
@@ -129,6 +165,17 @@ def _process_thread(
         print(f"[gmail-cron] thread {thread_id} has no messages", file=sys.stderr)
         return False, False
 
+    message_id = msg.get("id")
+    if not message_id:
+        print(
+            f"[gmail-cron] newest message on thread {thread_id} has no id; left unread",
+            file=sys.stderr,
+        )
+        return False, False
+    if message_id in _told_ids():
+        _mark_read(bridge_url, bridge_key, thread_id)
+        return False, False
+
     subject = msg.get("subject") or ""
     body = _body_of(msg)
     target = parse_subject_to_name(subject)
@@ -139,38 +186,27 @@ def _process_thread(
         )
         return False, False
 
+    _record_told(message_id)
     try:
         # No explicit cwd: a8s fired idle with cwd = the connector's
         # registered root, which is what tell needs for force-stamping.
         result = subprocess.run(
             [sys.executable, str(A8S_PY), "tell", target, body], check=False
         )
-    except (OSError, FileNotFoundError) as e:
+    except OSError as e:
         print(f"[gmail-cron] tell shell-out failed: {e}", file=sys.stderr)
+        _mark_read(bridge_url, bridge_key, thread_id)
         return True, False
     if result.returncode != 0:
-        # tell rejects unknown recipients (registry / canonical-name
-        # validation). Leave unread so the operator can register the
-        # agent and the next tick picks it up.
         print(
-            f"[gmail-cron] tell {target!r} returned {result.returncode}; left unread",
+            f"[gmail-cron] tell {target!r} returned {result.returncode}; "
+            f"message {message_id} dropped",
             file=sys.stderr,
         )
+        _mark_read(bridge_url, bridge_key, thread_id)
         return True, False
 
-    try:
-        read = _bridge_post(bridge_url, {
-            "action": "gmail.read",
-            "key": bridge_key,
-            "thread_id": thread_id,
-        })
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-        print(f"[gmail-cron] gmail.read failed for {thread_id}: {e}", file=sys.stderr)
-        return True, False
-    if isinstance(read, dict) and read.get("error"):
-        print(f"[gmail-cron] gmail.read error: {read['error']}", file=sys.stderr)
-        return True, False
-    return True, True
+    return True, _mark_read(bridge_url, bridge_key, thread_id)
 
 
 def run(from_address: str) -> int:

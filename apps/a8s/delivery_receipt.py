@@ -4,10 +4,11 @@ Receipts retain the normal envelope fields and add ``a8s_control``.  The
 reserved destination is deliberately not a participant: older subscribers
 drop the envelope, while upgraded subscribers consume it before routing.
 
-Version 2 reports every stage of a message's life, not only the inbox write.
-The attachment leg is per recipient because the download is per recipient, so
-one recipient holding bytes and another holding nothing is representable in
-one conversation between two nodes.
+Version 2 reports the inbox write and each attachment the receiver could not
+fetch. The attachment leg is per recipient because the download is per
+recipient, so one recipient holding bytes and another holding nothing is
+representable in one conversation between two nodes. Receipts are for the
+operator: each is sent once, and nothing waits for one.
 """
 from __future__ import annotations
 
@@ -24,30 +25,12 @@ CONTROL_TYPE = "delivery_receipt"
 CONTROL_VERSION = 2
 RECEIPT_TARGET = "__a8s_receipt__"
 
-# The stages a receiver can report. `inbox_write` is delivery; the attachment
-# pair is per file; `deferred` is custody without delivery; `expired` and
-# `no_local_recipient` are the two ways a message ends with nobody holding it.
-STAGES: tuple[str, ...] = (
-    "inbox_write",
-    "attachment_fetched",
-    "attachment_failed",
-    "deferred",
-    "expired",
-    "no_local_recipient",
-)
-
-# Stages after which nothing more will arrive for that recipient. A sender
-# waiting on an outcome stops here; everything else is still in flight.
-# `no_local_recipient` is in neither set on purpose. On a shared topic every
-# node that owns none of the recipients reports one, including nodes that were
-# never meant to deliver — it is evidence that a node owns nobody, not a
-# verdict on the message. Only the absence of any delivery makes it terminal,
-# which is the window, not this stage.
-TERMINAL_STAGES: frozenset[str] = frozenset(
-    {"inbox_write", "attachment_failed", "expired"}
-)
-
-FAILURE_STAGES: frozenset[str] = frozenset({"attachment_failed", "expired"})
+# The stages a receiver can report. `inbox_write` is delivery;
+# `attachment_failed` names the files a recipient will never hold. A node that
+# owns none of a message's recipients reports nothing: a8s is best effort, and
+# a receipt with any other stage, such as one from a node on an older release,
+# is dropped quietly.
+STAGES: tuple[str, ...] = ("inbox_write", "attachment_failed")
 
 
 @dataclass(frozen=True)
@@ -112,6 +95,17 @@ def build_delivery_receipt(
             **({"node": control_node} if control_node else {}),
         },
     }
+
+
+def is_other_stage_receipt(message: dict) -> bool:
+    """A receipt of this version whose stage this release does not send."""
+    control = message.get(CONTROL_FIELD)
+    return (
+        isinstance(control, dict)
+        and control.get("type") == CONTROL_TYPE
+        and control.get("version") == CONTROL_VERSION
+        and control.get("stage") not in STAGES
+    )
 
 
 def parse_delivery_receipt(message: dict) -> DeliveryReceipt | None:

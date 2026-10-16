@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 
-from network import drain_attachment_retries
+from network import drain_attachment_waits
 from registry import save_registry
 from ar3.ulid import new as new_ulid
 
@@ -12,7 +12,7 @@ from test_mailbox import Participant, _StubStorage, inbox_dir
 
 
 class TestReceiveWait:
-    def test_retries_until_download_succeeds(self, fake_home, tmp_path):
+    def test_waits_until_download_succeeds(self, fake_home, tmp_path):
         import json
         from core import settings_path
 
@@ -55,10 +55,10 @@ class TestReceiveWait:
             "files": [{"filename": "doc.txt", "storage": ["stub://slow/1"]}],
         }).encode()
         receive_envelope(envelope, [b], services=[svc])
-        # The retry runs off the subscriber worker; the message is still held
+        # The wait runs off the subscriber worker; the message is still held
         # out of the inbox until its bytes land.
         assert not (inbox_dir("B") / f"{msg_id}.json").exists()
-        assert drain_attachment_retries(timeout_s=30) is True
+        assert drain_attachment_waits(timeout_s=30) is True
         assert (b.files_bundle_dir(msg_id) / "doc.txt").read_bytes() == b"late-bytes"
         body = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert body["files"] == [{"filename": "doc.txt"}]
@@ -66,9 +66,9 @@ class TestReceiveWait:
     def test_a_stalled_attachment_does_not_hold_up_other_mail(
         self, fake_home, tmp_path
     ):
-        """The regression that motivated deferring: everything below runs on
-        the transport's single subscriber worker, so an inline retry loop made
-        one unreachable URL stall every message behind it."""
+        """Everything below runs on the transport's single subscriber worker,
+        so an inline wait would let one unreachable URL stall every message
+        behind it."""
         import json as _json
         import queue
         import threading
@@ -76,7 +76,7 @@ class TestReceiveWait:
 
         settings_path().write_text(
             _json.dumps({
-                "storage_receive_wait_seconds": 10,
+                "storage_receive_wait_seconds": 3,
                 "storage_fetch_poll_seconds": 1,
             }) + "\n",
             encoding="utf-8",
@@ -129,3 +129,5 @@ class TestReceiveWait:
             f"plain mail waited {finished['plain'] - started:.1f}s behind a "
             "stalled attachment"
         )
+        # Settle the wait while this test's config home is still in place.
+        assert drain_attachment_waits(timeout_s=30) is True

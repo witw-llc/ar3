@@ -1,6 +1,7 @@
-"""A delivery receipt survives the receiver's stop and a broker blip.
+"""A delivery receipt goes out once: a stop right after the inbox write does
+not cut it off, and a receipt that meets a dropped link is dropped.
 
-Both tests run the real receive wiring (`start_remotes`) against a local
+The tests run the real receive wiring (`start_remotes`) against a local
 mosquitto and watch the topic from a second client, so a receipt counts only
 once it is on the wire.
 """
@@ -141,11 +142,17 @@ def test_receipt_is_published_when_stop_follows_the_inbox_write(
     assert [r.stage for r in receipts] == ["inbox_write"]
 
 
-def test_receipt_held_during_a_broker_blip_goes_out_after_reconnect(
+def test_a_receipt_that_meets_a_dropped_link_is_dropped(
     mqtt_broker, target, monkeypatch,
 ):
     topic = f"a8s/test-receipt-blip-{new_ulid()}"
     receiver = _receiver(mqtt_broker, topic, connect_timeout_s=0.3)
+    lines: list[str] = []
+    real_out = network.out
+
+    def watch(line: str) -> None:
+        lines.append(line)
+        real_out(line)
 
     def sever_link() -> None:
         sock = receiver._client.socket()
@@ -159,6 +166,7 @@ def test_receipt_held_during_a_broker_blip_goes_out_after_reconnect(
             time.sleep(0.01)
         assert not receiver._client.is_connected(), "link never dropped"
 
+    monkeypatch.setattr(network, "out", watch)
     _slow_receipts(monkeypatch, sever_link)
     msg_id = new_ulid()
     with _Observer(mqtt_broker, topic) as observer:
@@ -166,25 +174,26 @@ def test_receipt_held_during_a_broker_blip_goes_out_after_reconnect(
         try:
             wait_connected(rx)
             _send(mqtt_broker, topic, msg_id)
-            receipts = observer.wait_for(msg_id, timeout=8.0)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any("dropped 1 receipt" in ln for ln in lines):
+                    break
+                time.sleep(0.02)
+            receipts = observer.wait_for(msg_id, timeout=2.0)
         finally:
             network.stop_remotes(rx)
-    assert [r.stage for r in receipts] == ["inbox_write"]
+    assert receipts == []
     assert (inbox_dir("TARGET") / f"{msg_id}.json").exists()
-    published = [e for e in read_events(msg_id) if e["event"] == "RECEIPT_PUBLISHED"]
-    assert len(published) == 1
-    assert "held until the link is back" in published[0]["detail"]
+    assert [e for e in read_events(msg_id) if e["event"] == "RECEIPT_PUBLISHED"] == []
+    assert sum("dropped 1 receipt" in ln for ln in lines) == 1
 
 
-def test_an_envelope_refused_while_the_registry_is_unreadable_lands_once_it_reads(
+def test_an_envelope_offered_while_the_registry_is_unreadable_is_not_offered_again(
     mqtt_broker, target, monkeypatch,
 ):
-    """The receive path answers False while the registry will not parse, so
-    the transport keeps the message unacknowledged and offers it again; once
-    the registry reads, the next offer delivers it."""
-    import transports.mqtt as mqtt_mod
-
-    monkeypatch.setattr(mqtt_mod, "_RETRY_FIRST_S", 0.2)
+    """The transport consumes every envelope it offers. One that meets an
+    unreadable registry is logged and acknowledged, and a registry that reads
+    again later does not bring it back."""
     refused = threading.Event()
     real_out = network.out
 
@@ -204,15 +213,9 @@ def test_an_envelope_refused_while_the_registry_is_unreadable_lands_once_it_read
     try:
         wait_connected(rx)
         _send(mqtt_broker, topic, msg_id)
-        assert refused.wait(timeout=5.0), "the receive path never refused it"
-        assert not (inbox_dir("TARGET") / f"{msg_id}.json").exists()
+        assert refused.wait(timeout=5.0), "the receive path never met the registry"
         registry_path().write_text(good)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if (inbox_dir("TARGET") / f"{msg_id}.json").exists():
-                break
-            time.sleep(0.02)
-        else:
-            pytest.fail("envelope never reached the inbox after the registry read")
+        time.sleep(1.5)
+        assert not (inbox_dir("TARGET") / f"{msg_id}.json").exists()
     finally:
         network.stop_remotes(rx)

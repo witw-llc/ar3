@@ -1052,7 +1052,7 @@ class TestANodeNamesItsSource:
         # the branch stamps the turn on the entry it grew.
         monkeypatch.setattr(
             distill, "diff_against_store",
-            lambda candidates: [dict(c, _append_to=node_id) for c in candidates],
+            lambda candidates, *_: [dict(c, _append_to=node_id) for c in candidates],
         )
         results = distill.distill([str(self._capture(tmp_path))])
         assert [r["action"] for r in results] == ["appended"], results

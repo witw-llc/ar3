@@ -10,12 +10,15 @@ Distillation requires a configured LLM command. The CLI fails fast when
 distill_command (or llm_command) is unset.
 """
 
+import calendar
 import json
 import hashlib
+from ar3 import ulid
 from ar3.fsio import atomic_write_text
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,22 +70,14 @@ def _should_reject(text):
     return False
 
 
-def _score_importance(title, content):
-    """Score 1-10 based on content patterns. Higher = more operationally important."""
-    score = 5  # default
-    text = (title + " " + content).lower()
-    # Boost patterns
-    if any(w in text for w in ["error", "fix", "bug", "crash", "failure"]):
-        score += 2
-    if any(w in text for w in ["security", "credential", "secret", "auth"]):
-        score += 2
-    if any(w in text for w in ["never", "always", "must", "critical"]):
-        score += 1
-    if any(w in text for w in ["prefer", "suggestion", "might", "could"]):
-        score -= 1
-    if any(w in text for w in ["til", "today i learned", "interesting"]):
-        score -= 1
-    return max(1, min(10, score))
+# Every distilled entry starts at the store's neutral prior, and a
+# correction from the turn's people starts above it. Keyword scoring raised any
+# entry that said "failure" to 0.7, so a PR's test count outranked a rule.
+IMPORTANCE = 5
+CORRECTION_IMPORTANCE = 7
+# A `task` fact matters until the task it came from closes; a week past the
+# turn it stops being current and leaves default retrieval.
+TASK_LIFESPAN_DAYS = 7
 
 
 # An r4t turn capture writes both facts above its `## Prompt` block: the ids
@@ -96,7 +91,11 @@ _CAPTURE_STAMP = re.compile(r"^- stamp:\s*(\S+)$", re.MULTILINE)
 # people put spaces in directory names — `\S+` read `/srv/Project With Spaces`
 # as `/srv/Project` and then matched nothing under it.
 _CAPTURE_ROOT = re.compile(r"^- root:[ \t]*(.+)$", re.MULTILINE)
-_CAPTURE_HUMAN = re.compile(r"(?ms)^## Human messages\n+(.*?)\s*\Z")
+# r4t escapes a `#` that opens a line of a message body, so these headings
+# are r4t's own and each section ends where the next begins.
+_CAPTURE_HUMAN = re.compile(r"(?ms)^## Human messages\n+(.*?)\s*(?=^## Routed messages\n|\Z)")
+_CAPTURE_ROUTED = re.compile(r"(?ms)^## Routed messages\n+(.*?)\s*\Z")
+_CAPTURE_OUTPUT_MARK = "\n## Output\n\n"
 _CAPTURE_OUTPUT = re.compile(r"(?ms)^## Output\n+(.*)\Z")
 _NODE_ID = re.compile(r"K7E-\d{3}-\d{5}")
 # A path inside a delimiter ends where the delimiter does — a Markdown link
@@ -177,11 +176,15 @@ def distill(paths, dry_run=False, job_id=None, archive=False):
                     corrections = [] if archive else corrections_from_capture(f)
                     source, sources = capture_provenance(f)
                     candidates = [c for c in candidates if not _should_reject(c["content"])]
-                    new_knowledge = diff_against_store(candidates)
+                    new_knowledge = diff_against_store(candidates, None if archive else _valid_from(f))
                     if corrections:
-                        new_knowledge = corrections + _without_restatements(
-                            new_knowledge, [c["_supersedes"] for c in corrections]
-                        )
+                        corrected = [c["_supersedes"] for c in corrections]
+                        new_knowledge = corrections + _without_restatements(new_knowledge, corrected)
+                        # What a person retired is theirs; a fact the model
+                        # judged a replacement of it is stored beside it.
+                        for item in new_knowledge:
+                            if item.get("_triage") and item.get("_supersedes") in corrected:
+                                del item["_supersedes"], item["_triage"]
                     if plan_path and not dry_run:
                         if engine.llm_failures("distill"):
                             continue
@@ -211,7 +214,9 @@ def distill(paths, dry_run=False, job_id=None, archive=False):
                             return engine.run_operation(f"{plan_key}/{item_index}/{step}", fn, *args, **kwargs)
                         return fn(*args, **kwargs)
 
-                    importance = _score_importance(item["title"], item["content"])
+                    importance = CORRECTION_IMPORTANCE if item.get("_supersedes") and not item.get("_triage") else IMPORTANCE
+                    valid_to = _task_expiry(f) if not archive and item.get("lifespan") == "task" else None
+                    valid_from = None if archive else _valid_from(f)
                     # Store asset and embed link for media files
                     asset_ref = ""
                     if item.get("_asset_path"):
@@ -228,9 +233,17 @@ def distill(paths, dry_run=False, job_id=None, archive=False):
                             source=source,
                             sources=sources,
                             kind=item.get("kind"), source_refs=item.get("source_refs"),
+                            valid_to=valid_to, valid_from=valid_from,
                         )
                         if item.get("_provenance"):
                             mutate("history", engine.append_entry, node_id, "History", item["_provenance"])
+                        # Content-hash dedup can answer with the entry being
+                        # retired, or with one retired before: a value that
+                        # flips back. Superseding then would leave the
+                        # subject with no active entry at all.
+                        if not _may_replace(node_id, item["_supersedes"]):
+                            results.append({"action": "matched-retired", "id": node_id, "title": item["title"], "source": str(f)})
+                            continue
                         mutate("supersede", engine.supersede, item["_supersedes"], node_id)
                         results.append({"action": "superseded", "id": node_id, "old_id": item["_supersedes"], "title": item["title"], "source": str(f)})
                     elif item.get("_append_to"):
@@ -257,9 +270,13 @@ def distill(paths, dry_run=False, job_id=None, archive=False):
                             source=source,
                             sources=sources,
                             kind=item.get("kind"), source_refs=item.get("source_refs"),
+                            valid_to=valid_to, valid_from=valid_from,
                         )
                         action = "matched-retired" if archive and engine._parse_frontmatter(
                             engine.get(node_id, track_usage=False)).get("status", "active") != "active" else "stored"
+                        if item.get("_retired_by") and _may_replace(item["_retired_by"], node_id):
+                            mutate("retire", engine.supersede, node_id, item["_retired_by"])
+                            action = "stored-retired"
                         results.append({"action": action, "id": node_id, "title": item["title"], "source": str(f)})
     return results
 
@@ -707,8 +724,65 @@ def extract_from_file(path):
     if capture is not None:
         text = json.dumps({"input": capture["input"], "output": capture["output"]}, ensure_ascii=False)
     else:
-        text = Path(path).read_text(encoding="utf-8")
+        text = _roster_turn_text(Path(path).read_text(encoding="utf-8"))
     return _llm_extract(text)
+
+
+def _turn_time(path):
+    """When the source turn ran, from the capture's own stamp, or None for a
+    file that is not a turn capture."""
+    try:
+        capture = read_engine_capture(path)
+        if capture is not None:
+            return ulid.parse(capture["stamp"])[0] / 1000
+        head = Path(path).read_text(encoding="utf-8").partition(CAPTURE_PROMPT_MARK)[0]
+        stamp = _CAPTURE_STAMP.search(head)
+        if stamp:
+            return calendar.timegm(time.strptime(stamp.group(1)[:15], "%Y%m%dT%H%M%S"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        pass
+    return None
+
+
+def _valid_from(path):
+    """A fact became true no later than the turn that stated it. The model
+    never proposes this date."""
+    when = _turn_time(path)
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when)) if when is not None else None
+
+
+def _task_expiry(path):
+    """`YYYY-MM-DD`, TASK_LIFESPAN_DAYS past the day the source turn ran, or
+    past today for a file that is not a turn capture."""
+    when = _turn_time(path)
+    when = time.time() if when is None else when
+    return time.strftime("%Y-%m-%d", time.localtime(when + TASK_LIFESPAN_DAYS * 86400))
+
+
+def _roster_turn_text(text):
+    """What a roster turn capture contributes: the messages routed into the
+    turn and its output. Its `## Prompt` is the member's standing context —
+    persona, scaffold, the knowledge pack this store injected — repeated every
+    turn; measured across 173 captures it was 95% of the bytes and the output
+    3%, so distilling it whole filled the store with the prompt, re-read the
+    store's own entries back into it, and timed out on large captures. Any
+    other file is distilled as it stands."""
+    head, mark, body = text.partition(CAPTURE_PROMPT_MARK)
+    if not mark or not _CAPTURE_STAMP.search(head):
+        return text
+    parts = []
+    for label, pattern in (("Human messages", _CAPTURE_HUMAN), ("Routed messages", _CAPTURE_ROUTED)):
+        found = pattern.search(head)
+        if found and found.group(1).strip():
+            parts.append(f"## {label}\n\n{found.group(1).strip()}")
+    # The output is written last and the prompt carries routed text verbatim,
+    # so the last heading is r4t's: a heading inside the prompt must not hand
+    # the rest of the prompt to the extractor. One inside the output costs
+    # only the output above it.
+    _, out_mark, output = body.rpartition(_CAPTURE_OUTPUT_MARK)
+    if out_mark and output.strip():
+        parts.append(f"## Output\n\n{output.strip()}")
+    return "\n\n".join(parts)
 
 
 def _multimodal_extract(path):
@@ -989,8 +1063,17 @@ def _title_similarity(a, b):
     return len(words_a & words_b) / len(words_a | words_b)
 
 
-def diff_against_store(candidates):
-    """Which candidates are new, and which existing entry each grows.
+def _may_replace(new_id, old_id):
+    if new_id == old_id:
+        return False
+    try:
+        return engine._parse_frontmatter(engine.get(new_id, track_usage=False)).get("status", "active") == "active"
+    except FileNotFoundError:
+        return False
+
+
+def diff_against_store(candidates, valid_from=None):
+    """Which candidates are new, and what each one does to the store.
 
     Every decision here picks a node to write to, so it sees active entries
     only. A candidate that names a retired id — a later turn quoting an old
@@ -998,18 +1081,26 @@ def diff_against_store(candidates):
     through the id lookup and be appended to it, which re-indexed the retired
     claim and put it back in front of the correction that replaced it. A
     retired entry is not a dedup target either: the correction that replaced
-    it is the entry a restatement belongs to."""
-    new = []
+    it is the entry a restatement belongs to.
+
+    A candidate close to an active entry is a pair for `_triage`, which asks
+    the model whether the candidate repeats the entry, adds to it, replaces
+    it, or is about something else. Word overlap alone appended a changed
+    value to the entry it contradicted. A pair the model does not answer
+    falls back to the overlap rule. `valid_from` is when the candidates
+    became true: a capture distilled late never retires a newer fact."""
+    slots, pairs = [], []
     for candidate in candidates:
         if candidate.get("kind"):
-            new.append(candidate)
+            slots.append(candidate)
+            if candidate["kind"] == "decision":
+                pairs += _idea_pairs(candidate, len(slots) - 1)
             continue
+        task = candidate.get("lifespan") == "task"
         # Stage 0: title-based dedup — catches paraphrases with same topic
         title_results = engine.search(candidate["title"], limit=8, active_only=True)
-        title_results = [r for r in title_results if not engine.is_archive_record(engine._parse_frontmatter(
-            engine.get(r["id"], track_usage=False)))]
-        if _is_title_duplicate(candidate, title_results):
-            continue
+        title_results = [r for r in title_results if _is_target(r["id"], task)]
+        title_match = _title_duplicate(candidate, title_results)
 
         # Stage 1: search by content keywords
         content_terms = " ".join(
@@ -1019,31 +1110,17 @@ def diff_against_store(candidates):
         search_query = content_terms or candidate["title"]
         results = engine.search(search_query, limit=8, active_only=True)
 
-        if not results:
-            new.append(candidate)
-            continue
-
         # Stage 2: content overlap with normalized terms
-        candidate_terms = set(
-            w.lower() for w in re.findall(r"\b\w{4,}\b", candidate["content"])
-        )
-        if not candidate_terms:
-            new.append(candidate)
-            continue
-
-        best_overlap = 0.0
-        best_match_id = None
-        best_match_terms = None
-        for result in results:
+        candidate_terms = _terms(candidate["content"])
+        best_overlap, best_match_id, best_match_terms = 0.0, None, None
+        for result in results if candidate_terms else []:
             try:
                 existing_text = engine.get(result["id"])
             except FileNotFoundError:
                 continue
-            if engine.is_archive_record(engine._parse_frontmatter(existing_text)):
+            if not _is_target(result["id"], task, existing_text):
                 continue
-            existing_terms = set(
-                w.lower() for w in re.findall(r"\b\w{4,}\b", existing_text)
-            )
+            existing_terms = _terms(existing_text)
             if not existing_terms:
                 continue
             # Bidirectional overlap: max of either direction
@@ -1051,40 +1128,176 @@ def diff_against_store(candidates):
             backward = len(candidate_terms & existing_terms) / len(existing_terms)
             overlap = max(forward, backward)
             if overlap > best_overlap:
-                best_overlap = overlap
-                best_match_id = result["id"]
-                best_match_terms = existing_terms
+                best_overlap, best_match_id, best_match_terms = overlap, result["id"], existing_terms
 
-        if best_overlap >= 0.7:
-            continue
-        elif best_overlap >= 0.45:
+        if title_match or best_overlap >= 0.7:
+            fallback = "skip"
+        # A task fact appended to a durable entry would outlive the task
+        # inside it; it is stored on its own so it can expire.
+        elif best_overlap >= 0.45 and not task:
             novel_terms = candidate_terms - best_match_terms
-            if len(novel_terms) > len(candidate_terms) * 0.4:
-                candidate["_append_to"] = best_match_id
-                new.append(candidate)
+            fallback = "append" if len(novel_terms) > len(candidate_terms) * 0.4 else "skip"
+        elif best_overlap >= 0.45:
+            fallback = "new"
         else:
-            new.append(candidate)
+            fallback = None
+        target = title_match if title_match and best_overlap < 0.45 else best_match_id
+        slots.append(candidate)
+        if fallback:
+            pairs.append({"slot": len(slots) - 1, "target": target, "fallback": fallback, "idea": False})
+        pairs += _idea_pairs(candidate, len(slots) - 1)
 
-    return new
+    verdicts = _triage(slots, pairs)
+    drop, claimed = set(), set()
+    for pair, verdict in zip(pairs, verdicts):
+        candidate, target = slots[pair["slot"]], pair["target"]
+        if verdict is None and not pair["idea"]:
+            verdict = {"skip": "duplicate", "append": "detail", "new": "separate"}[pair["fallback"]]
+        if pair["idea"] and verdict != "replacement":
+            continue
+        if verdict == "duplicate":
+            drop.add(pair["slot"])
+        elif verdict == "detail" and not _lifespans_differ(candidate, target):
+            candidate["_append_to"] = target
+        elif verdict == "replacement" and not _lifespans_differ(candidate, target):
+            _replace(candidate, target, valid_from, claimed)
+    return [c for i, c in enumerate(slots) if i not in drop]
 
 
-def _is_title_duplicate(candidate, search_results):
-    """Check if candidate's title matches an existing node closely enough to skip."""
-    if not search_results:
+# A person's correction is stored at 0.7 and a compiled page at 0.8. Neither
+# is retired on one model verdict about text that may have come from a peer.
+PROTECTED_CONFIDENCE = CORRECTION_IMPORTANCE / 10
+
+
+def _replace(candidate, target, valid_from, claimed):
+    """Apply a `replacement` verdict, within what a triage may retire."""
+    if candidate.get("_supersedes") or target in claimed:
+        return
+    try:
+        meta = engine._parse_frontmatter(engine.get(target, track_usage=False))
+    except FileNotFoundError:
+        return
+    if "compiled" in (meta.get("tags") or []):
+        # One fact never retires a page and everything folded into it; it is
+        # recorded on the page, and the next compile weighs it.
+        candidate["_append_to"] = target
+    elif float(meta.get("confidence") or 0) >= PROTECTED_CONFIDENCE:
+        return
+    elif valid_from and valid_from < engine._clock_columns(meta)[1]:
+        # The candidate is older news: it was replaced before it arrived.
+        candidate["_retired_by"] = target
+    else:
+        candidate["_supersedes"], candidate["_triage"] = target, True
+        claimed.add(target)
+
+
+TRIAGE_MAX_PAIRS = 12
+TRIAGE_ENTRY_CHARS = 800
+TRIAGE_VERDICTS = ("duplicate", "detail", "replacement", "separate")
+
+
+def _triage(slots, pairs):
+    """One verdict per pair, or None where the model gave none. One call per
+    capture, made only when some candidate is close to an active entry."""
+    import config
+    verdicts = [None] * len(pairs)
+    asked = pairs[:TRIAGE_MAX_PAIRS]
+    if not asked or not config.resolve_command("distill"):
+        return verdicts
+    blocks = []
+    for n, pair in enumerate(asked, 1):
+        candidate = slots[pair["slot"]]
+        try:
+            existing = engine._extract_body(engine.get(pair["target"], track_usage=False)).strip()
+        except FileNotFoundError:
+            existing = ""
+        label = "EXISTING (an open idea)" if pair["idea"] else "EXISTING"
+        blocks.append(f"Pair {n}\nNEW: {candidate['title']} — {candidate['content']}\n"
+                      f"{label}: {existing[:TRIAGE_ENTRY_CHARS]}")
+    prompt = (
+        "Each pair holds a NEW fact from recent work and an EXISTING entry from memory "
+        "on a similar subject. Classify each pair:\n"
+        "- duplicate: NEW says nothing that EXISTING does not already say.\n"
+        "- detail: NEW adds a detail to EXISTING, and both stay true.\n"
+        "- replacement: NEW makes EXISTING wrong or out of date — a changed value, a "
+        "reversed decision, or a settled open idea.\n"
+        "- separate: NEW and EXISTING are about different things.\n"
+        'Return only a JSON array with one object per pair: [{"pair": 1, "verdict": "replacement"}].\n\n'
+        + "\n\n".join(blocks)
+    )
+    response = engine._call_llm(prompt, purpose="distill", timeout=180) or ""
+    wrapped = _object_answer(response)
+    match = None if wrapped else re.search(r"\[.*\]", response, re.DOTALL)
+    try:
+        items = wrapped or (json.loads(match.group()) if match else [])
+    except ValueError:
+        items = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or item.get("verdict") not in TRIAGE_VERDICTS:
+            continue
+        n = item.get("pair")
+        if isinstance(n, int) and 1 <= n <= len(asked):
+            verdicts[n - 1] = item["verdict"]
+    return verdicts
+
+
+def _lifespans_differ(candidate, node_id):
+    """A task fact never grows or replaces a durable entry: it would take the
+    durable fact down with it when it expires."""
+    try:
+        meta = engine._parse_frontmatter(engine.get(node_id, track_usage=False))
+    except FileNotFoundError:
+        return True
+    return candidate.get("lifespan") == "task" and not meta.get("valid_to")
+
+
+def _idea_pairs(candidate, slot):
+    """An open idea this candidate may settle. An operational fact or a
+    decision can close an idea; the triage verdict decides whether it does."""
+    terms = _terms(candidate["content"])
+    if not terms:
+        return []
+    for hit in engine.search(candidate["title"] + " " + candidate["content"][:200], limit=5,
+                             active_only=True, include_archive=True):
+        if hit.get("kind") != "idea":
+            continue
+        try:
+            existing = _terms(engine.get(hit["id"], track_usage=False))
+        except FileNotFoundError:
+            continue
+        if existing and len(terms & existing) / min(len(terms), len(existing)) >= 0.45:
+            return [{"slot": slot, "target": hit["id"], "fallback": None, "idea": True}]
+    return []
+
+
+def _is_target(node_id, task, text=None):
+    """Whether an entry may absorb a candidate as its duplicate or its edge
+    case. Never an archive record; and a durable fact never lands in an entry
+    that expires, where it would be lost with the task it was filed under."""
+    try:
+        meta = engine._parse_frontmatter(text if text is not None else engine.get(node_id, track_usage=False))
+    except FileNotFoundError:
         return False
-    for result in search_results:
-        sim = _title_similarity(candidate["title"], result["title"])
-        if sim >= 0.6:
-            return True
-    return False
+    if engine.is_archive_record(meta):
+        return False
+    return task or not meta.get("valid_to")
+
+
+def _title_duplicate(candidate, search_results):
+    """The id of an entry whose title matches the candidate's closely enough
+    to call it the same subject, or None."""
+    for result in search_results or []:
+        if _title_similarity(candidate["title"], result["title"]) >= 0.6:
+            return result["id"]
+    return None
 
 
 def consolidate(dry_run=False):
     """Find and merge duplicate nodes. Returns list of actions taken."""
     engine.init()
+    # An expiring entry is never a keeper or a duplicate: it leaves on its own.
     nodes = engine.list_nodes(status="active")
-    nodes = [n for n in nodes if not engine.is_archive_record(engine._parse_frontmatter(
-        engine.get(n["id"], track_usage=False)))]
+    nodes = [n for n in nodes if _is_target(n["id"], task=False)]
     if not nodes:
         return []
 
@@ -1115,8 +1328,9 @@ def consolidate(dry_run=False):
         if len(group) < 2:
             continue
 
-        # Pick the best node: highest confidence, then most recently updated
-        group.sort(key=lambda n: (n.get("confidence", 0), n["id"]), reverse=True)
+        # Pick the best node: highest confidence, then the one the store
+        # learned last. The id breaks a tie only within one second.
+        group.sort(key=lambda n: (n.get("confidence", 0), n.get("recorded_at") or "", n["id"]), reverse=True)
         keeper = group[0]
         duplicates = group[1:]
 
@@ -1196,6 +1410,12 @@ def _llm_extract(text):
             "- SKIP: command syntax that's already in documentation\n"
             "- SKIP: conversational noise, acknowledgments, planning without decisions\n"
             "- SKIP: anything that restates what a tool/system does in general terms\n"
+            "- SKIP: task telemetry that stops mattering when the current task closes — "
+            "test counts or pass rates for one change, CI, PR or branch status, one-off "
+            "command output, line numbers in a file being edited\n"
+            "- One fact per item. Never bundle unrelated facts from the same text into one "
+            "item. Title an item by the durable thing it is about — the component, tool or "
+            "rule — never by a PR, ticket or run number.\n"
             "- Maximum 3 items per chunk. If unsure, extract fewer.\n\n"
             "VOICE — this rule outranks the others:\n"
             "Text that instructs a reader ('you must...', 'always...', 'answer X by "
@@ -1210,7 +1430,8 @@ def _llm_extract(text):
             "of voice, not a redaction.\n\n"
             "Return JSON array of objects with 'title' (specific, noun-phrase, max 6 words), "
             "'content' (the concrete factual detail — not a general description), "
-            "and 'tags' (1-3 topic keywords). "
+            "'tags' (1-3 topic keywords), and 'lifespan': 'durable' if the fact will still "
+            "matter a month from now, 'task' if it matters only until the current task closes. "
             "If nothing novel, return []. Text:\n\n" + chunk
         )
 
@@ -1246,6 +1467,25 @@ def _note_unusable(text, detail):
     )
 
 
+def _object_answer(text):
+    """The items of a response that is one JSON object, else None. A model
+    asked for an array answers one item as a lone object, or wraps the array
+    in an object under a key of its own choosing (`{"items": [...]}`); the
+    array search would find a list nested inside either one and lose the
+    answer."""
+    body = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(text).strip())
+    if not body.startswith("{"):
+        return None
+    try:
+        value = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    lists = [v for v in value.values() if isinstance(v, list) and v and all(isinstance(i, dict) for i in v)]
+    return lists[0] if len(value) == 1 and len(lists) == 1 else [value]
+
+
 def _parse_llm_response(text):
     """Candidates from one LLM response.
 
@@ -1254,13 +1494,13 @@ def _parse_llm_response(text):
     and neither was ever read — so the PARSE decides, and anything it cannot
     turn into candidates is recorded as a failed call. `[]` stays a real
     answer: the model read the chunk and found nothing novel."""
-    # Extract JSON array from LLM response (may have surrounding text)
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if not match:
+    wrapped = _object_answer(text)
+    match = None if wrapped else re.search(r"\[.*\]", text, re.DOTALL)
+    if not wrapped and not match:
         _note_unusable(text, "with no JSON array in output")
         return []
     try:
-        items = json.loads(match.group())
+        items = wrapped or json.loads(match.group())
         if not isinstance(items, list):
             _note_unusable(text, "with a JSON payload that is not an array")
             return []
@@ -1323,6 +1563,8 @@ def _parse_llm_response(text):
                 candidate["kind"] = item["kind"]
             if isinstance(item.get("source_quote"), str):
                 candidate["source_quote"] = item["source_quote"]
+            if str(item.get("lifespan", "")).strip().lower() == "task":
+                candidate["lifespan"] = "task"
             valid.append(candidate)
         return valid
     except (json.JSONDecodeError, TypeError) as e:

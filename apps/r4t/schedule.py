@@ -75,7 +75,6 @@ DEFAULT_PRIORITY_SENDERS: tuple[str, ...] = ()
 
 READY = "ready"
 RESTING = "resting"
-BREAKER = "breaker"
 PARKED = "parked"
 
 
@@ -175,11 +174,6 @@ def runnable(node: str, config, member, rig) -> tuple[bool, str]:
     parked = state.read_parked(node, member.name)
     if parked:
         return False, f"parked — {parked.get('reason', 'structural failure')}"
-    blocked, failures = state.breaker_open(
-        node, member.name, config.breaker_cap, config.breaker_cooldown_seconds
-    )
-    if blocked:
-        return False, f"breaker open ({failures} consecutive failed turns)"
     m = state.budget_level(node, member.name, rig.budget_max, rig.budget_earn_per_hour)
     t = state.budget_level(
         node, state.CELL_BUDGET_KEY,
@@ -220,8 +214,6 @@ def runnable(node: str, config, member, rig) -> tuple[bool, str]:
 def _blocked_state(reason: str) -> str:
     if reason.startswith("parked"):
         return PARKED
-    if reason.startswith("breaker"):
-        return BREAKER
     return RESTING
 
 
