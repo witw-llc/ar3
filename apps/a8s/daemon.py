@@ -71,6 +71,7 @@ from core import (
     pid_path,
     pid_start_path,
     process_start_token,
+    stop_hook_path,
     clear_inbox_waiting_since,
     clear_wake_pid,
     mark_dead_letter,
@@ -88,6 +89,7 @@ from definitions import (
     build_batch_command,
     build_command,
     build_idle_command,
+    build_stop_command,
     files_ttl_seconds,
     has_batch_invoke,
     idle_timeout_seconds,
@@ -1160,6 +1162,126 @@ def acquire(name: str) -> None:
         _time.sleep(DETACH_POLL_S)
 
 
+STOP_HOOK_SECONDS = 30.0
+
+
+def run_stop_hook(name: str) -> None:
+    """Run the node's `stop.invoke`, if it declares one, in the node's root
+    with its wake environment. It runs outside the wake slot, so it never
+    waits on, or is refused by, another node's wake in flight. Writes the
+    `stop-hook` mark when done, whether or not there was a hook to run."""
+    try:
+        _run_stop_hook(name)
+    finally:
+        _mark_stop_hook_ran(name)
+
+
+def _run_stop_hook(name: str) -> None:
+    try:
+        p = next((q for q in participants_from_registry() if q.name == name), None)
+    except RegistryUnreadable as e:
+        out_agent(name, f"[{name}] stop hook skipped: {e}")
+        return
+    if p is None:
+        return
+    try:
+        definition = load_definition(name)
+        cmd = build_stop_command(
+            definition, name, resolve_definition_path(name), vars=load_agent_vars(name)
+        )
+        if cmd is None:
+            return
+        cmd = wrap_wake_argv(definition, cmd)
+        env = {**os.environ, **_wake_env(p, definition)}
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
+        out_agent(name, f"[{name}] stop hook skipped: {e}")
+        return
+    out_agent(name, f"[{name}] stop exec: {shlex.join(cmd)}")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(p.root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as e:
+        out_agent(name, f"[{name}] stop hook failed: {e}")
+        return
+    # Named right after the spawn, before the wait: a handler killed mid-hook
+    # leaves the hook running, and the stop that killed it waits for it
+    # instead of a replay.
+    _write_stop_hook_mark(
+        name, {"state": "running", "pid": proc.pid, "start": process_start_token(proc.pid)}
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=STOP_HOOK_SECONDS)
+    except subprocess.TimeoutExpired as e:
+        proc.kill()
+        proc.communicate()
+        out_agent(name, f"[{name}] stop hook failed: {e}")
+        return
+    ts = clock.time_stamp()
+    for line in (stdout + stderr).splitlines():
+        out_agent(name, f"{name}> [{ts}] {line}")
+    if proc.returncode != 0:
+        out_agent(name, f"{name}> [{ts}] stop hook (exit {proc.returncode})")
+
+
+def _write_stop_hook_mark(name: str, mark: dict) -> None:
+    try:
+        stop_hook_path(name).write_text(json.dumps(mark) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _mark_stop_hook_ran(name: str) -> None:
+    _write_stop_hook_mark(name, {"state": "done", "pid": os.getpid()})
+
+
+def read_stop_hook_mark(name: str) -> dict | None:
+    try:
+        mark = json.loads(stop_hook_path(name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return mark if isinstance(mark, dict) else None
+
+
+def clear_stop_hook_mark(name: str) -> None:
+    stop_hook_path(name).unlink(missing_ok=True)
+
+
+def _hook_process_alive(mark: dict) -> bool:
+    pid = mark.get("pid")
+    if not (isinstance(pid, int) and _pid_alive(pid)):
+        return False
+    start = mark.get("start")
+    return not start or process_start_token(pid) in (None, start)
+
+
+def run_stop_hook_if_owed(name: str, handler: int) -> None:
+    """Run the hook the stopped `handler` did not: one ended outright (Windows
+    `os.kill`, SIGKILL) never reaches its own cleanup. The caller clears the
+    mark before it signals, so a hook the handler ran is never run twice. A
+    handler still alive may be running its hook now, after its release. A
+    hook the handler started before it was killed is waited for, never run
+    beside it."""
+    if _pid_alive(handler):
+        return
+    mark = read_stop_hook_mark(name)
+    if mark is not None and mark.get("state") == "running":
+        deadline = _time.monotonic() + STOP_HOOK_SECONDS
+        while _hook_process_alive(mark) and _time.monotonic() < deadline:
+            _time.sleep(0.1)
+        return
+    if mark is None and _read_handler_pid(name) is None:
+        run_stop_hook(name)
+
+
 def release(name: str) -> None:
     """Unlink the pid file iff it points at our pid. Safe to call repeatedly.
     Also clears any pending detach-request for `name` since the request was
@@ -1698,6 +1820,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                             _kill_wake_subprocess_group()
                         out_agent(name, f"[a8s] {name}: killed by PID {kill_req}")
                         release(name)
+                        run_stop_hook(name)
                         _clear_kill_request(name)
                         names.remove(name)
                         continue
@@ -1872,6 +1995,7 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
             holder = _read_handler_pid(n)
             if holder is None or holder == pid:
                 release(n)
+                run_stop_hook(n)
                 out_agent(n, f"[a8s] {n}: detached")
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)

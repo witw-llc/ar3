@@ -691,6 +691,28 @@ def build_idle_command(
     )
 
 
+def build_stop_command(
+    definition: dict,
+    agent_name: str,
+    definition_path: str = "",
+    vars: dict[str, str] | None = None,
+) -> list[str] | None:
+    """Pick the `stop.invoke` argv from `definition`, expanded like
+    `idle.invoke`. A node whose wake leaves a long-lived process of its own
+    names here how to end it; a8s runs it whenever it releases the node, so a
+    stop, restart or kill never leaves that process running. Returns None when
+    the definition declares none."""
+    stop = definition.get("stop")
+    if not isinstance(stop, dict):
+        return None
+    argv = stop.get("invoke")
+    if not argv:
+        return None
+    return _expand_argv(
+        list(argv), "", agent_name, "", "", "", definition_path, vars=vars
+    )
+
+
 DEFAULT_BATCH_PAUSE_SECONDS = 3.0
 
 

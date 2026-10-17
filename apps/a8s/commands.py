@@ -76,6 +76,10 @@ from definitions import (
     wrap_wake_argv,
 )
 from daemon import (
+    STOP_HOOK_SECONDS,
+    clear_stop_hook_mark,
+    read_stop_hook_mark,
+    run_stop_hook_if_owed,
     _clear_detach_request,
     _clear_kill_request,
     _read_handler_pid,
@@ -1758,6 +1762,9 @@ def _stop_one(name: str, force: bool) -> int:
             handler, wake = _read_handler_pid(n), read_wake_pid(n)
             if handler in seen_pids and wake is not None:
                 wakes[n] = (handler, wake[0], wake[1])
+    held = {n: _read_handler_pid(n) for n in affected if n not in not_running}
+    for n in held:
+        clear_stop_hook_mark(n)
     for pid, label in seen_pids.items():
         try:
             os.kill(pid, signal.SIGTERM)
@@ -1792,6 +1799,9 @@ def _stop_one(name: str, force: bool) -> int:
             _clear_dead_handler_files(n)
             if unsettled and _read_handler_pid(n) is None:
                 _dead_letter(n, wakes[n][2], "wake killed by `a8s stop --force`")
+    for n, handler in held.items():
+        if handler is not None:
+            run_stop_hook_if_owed(n, handler)
     if not stopped:
         print(
             f"still running after {wait_s:g}s"
@@ -1985,6 +1995,7 @@ def cmd_kill(args: list[str]) -> int:
         if holder is None:
             print(f"{name}: not running")
             continue
+        clear_stop_hook_mark(name)
         _write_kill_request(name, os.getpid())
         print(f"{name}: kill request → PID {holder}")
         if hasattr(signal, "SIGUSR1"):
@@ -2003,38 +2014,66 @@ def cmd_kill(args: list[str]) -> int:
                 released = True
                 break
             time.sleep(KILL_POLL_S)
-        if not released:
+        if released:
+            _wait_stop_hook(name, holder)
+        else:
             print(
                 f"{name}: holder PID {holder} did not honor kill within {KILL_TIMEOUT_S}s — "
                 f"escalating to whole-process SIGTERM",
                 file=sys.stderr,
             )
+            held = _running_nodes_by_pid().get(holder, [name])
+            for n in held:
+                clear_stop_hook_mark(n)
             try:
                 os.kill(holder, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            _wait_handlers_stopped(held, {holder}, STOP_KILL_WAIT_S)
+            for n in held:
+                run_stop_hook_if_owed(n, holder)
             rc = 1
         _clear_kill_request(name)
     return rc
 
 
+def _wait_stop_hook(name: str, holder: int) -> None:
+    """A kill-request release runs the hook just after it; return once it
+    has, so a `start` that follows never races a late hook."""
+    deadline = time.time() + STOP_HOOK_SECONDS + KILL_TIMEOUT_S
+    while (
+        time.time() < deadline
+        and _pid_alive(holder)
+        and (read_stop_hook_mark(name) or {}).get("state") != "done"
+    ):
+        time.sleep(KILL_POLL_S)
+    run_stop_hook_if_owed(name, holder)
+
+
 def cmd_exit() -> int:
     """`a8s exit` — SIGTERM every running agent's handler. Each daemon
-    detaches gracefully on its own."""
+    detaches gracefully on its own. A handler gone within `STOP_KILL_WAIT_S`
+    without running its stop hook gets it run here; a busy one still running
+    then runs its own."""
     parts = participants_from_registry()
-    sent = 0
+    signaled: dict[str, int] = {}
     for p in parts:
         pid = _read_handler_pid(p.name)
         if pid is None:
             continue
+        clear_stop_hook_mark(p.name)
         try:
             os.kill(pid, signal.SIGTERM)
             print(f"{p.name}: SIGTERM PID {pid}")
-            sent += 1
+            signaled[p.name] = pid
         except OSError as e:
             print(f"{p.name}: could not signal PID {pid}: {e}", file=sys.stderr)
-    if sent == 0:
+    if not signaled:
         print("no agents running")
+        return 0
+    _wait_handlers_stopped(list(signaled), set(signaled.values()), STOP_KILL_WAIT_S)
+    for name, pid in signaled.items():
+        run_stop_hook_if_owed(name, pid)
     return 0
 
 

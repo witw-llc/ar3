@@ -205,6 +205,12 @@ def kill_request_path(name: str) -> Path:
     return agent_dir(name) / "kill-request"
 
 
+def stop_hook_path(name: str) -> Path:
+    """Written once the node's `stop.invoke` has run. A stop clears it first
+    and runs the hook itself when the handler ended without writing it."""
+    return agent_dir(name) / "stop-hook"
+
+
 def last_active_path(name: str) -> Path:
     """Per-agent last-activity timestamp. Single-line ISO-8601 UTC string,
     updated at the start of every wake and at the end of every idle-invoke

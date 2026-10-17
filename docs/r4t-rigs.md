@@ -109,6 +109,7 @@ r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M] [--effort LE
                   [--echo] [--lessons-cap N] [--lessons-cap-bytes N]
                   [--continue]
                   [--permissions MODE] [--allowed-tools SPEC]
+                  [--resident]
                   [--rig-config PATH] [--] PROMPT
 ```
 

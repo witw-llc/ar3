@@ -1545,7 +1545,7 @@ def cmd_engine(args: argparse.Namespace) -> int:
         return 0
     if not args.action:
         print(
-            "r4t engine: expected an action (quota, run, check, models, efforts)",
+            "r4t engine: expected an action (quota, run, check, stop, models, efforts)",
             file=sys.stderr,
         )
         return 2
@@ -1555,6 +1555,8 @@ def cmd_engine(args: argparse.Namespace) -> int:
         return _cmd_engine_run(args)
     if args.action == "check":
         return _cmd_engine_check(args, args.target.strip().lower())
+    if args.action == "stop":
+        return _cmd_engine_stop(args)
     try:
         # The explicit quota command is the opt-in: engines whose live read
         # spends (muse) mint it here and nowhere else.
@@ -1626,6 +1628,7 @@ def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
         permissions=args.permissions,
         allowed_tools=args.allowed_tools,
         continue_conversation=args.continue_conversation,
+        resident=args.resident,
         workdir=Path(args.dir).expanduser().resolve() if args.dir else Path.cwd(),
     )
     reports = (
@@ -1674,7 +1677,9 @@ def _turn_prompt(
         if getattr(args, "memory", "off") != "off":
             from engine_memory import kick_idle
             kick_idle(args, dir_path)
-        if marker.exists():
+        # A resident session wraps itself up at the end of its window, so an
+        # idle wake never boots or feeds one.
+        if marker.exists() or getattr(args, "resident", False):
             return None, 0
         marker.touch()
         prompt = args.prompt if args.prompt else engine_run.DEFAULT_IDLE_PROMPT
@@ -1689,8 +1694,25 @@ def _turn_prompt(
     return prompt, 0
 
 
+def _cmd_engine_stop(args: argparse.Namespace) -> int:
+    from engines import resident as resident_mod
+
+    engine = args.target.strip().lower()
+    if engine not in resident_mod.RESIDENT_ENGINES:
+        print(
+            f"r4t engine: {engine} has no resident session to stop (engines "
+            f"that do: {', '.join(sorted(resident_mod.RESIDENT_ENGINES))})",
+            file=sys.stderr,
+        )
+        return 2
+    stopped = resident_mod.stop_resident(_turn_dir(args), args.agent)
+    print(f"r4t engine: resident session {'stopped' if stopped else 'not running'}")
+    return 0
+
+
 def _cmd_engine_run(args: argparse.Namespace) -> int:
     from engines import run as engine_run
+    from engines import resident as resident_mod
 
     # RUN_ENGINES holds preset ids directly (`ollama-claude`, not the quota
     # engine `ollama` it shares with the other three launchers), so this
@@ -1729,7 +1751,11 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             model=args.model,
             effort=args.effort,
             agent=args.agent,
-            timeout=args.timeout,
+            timeout=(
+                args.timeout if args.timeout is not None
+                else resident_mod.DEFAULT_RESIDENT_SECONDS if args.resident
+                else DEFAULT_TIMEOUT_SECONDS
+            ),
             scaffold=not args.no_scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
@@ -1742,6 +1768,7 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             max_credits=args.max_credits,
             git_name=args.git_name,
             git_email=args.git_email,
+            resident=args.resident,
             **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
@@ -1840,6 +1867,7 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
     rig's machine-global budget. The engine layer is bare metal; this layer is
     what the rig has been tuned to."""
     from engines import run as engine_run
+    from engines import resident as resident_mod
 
     config_path = resolve_config_path(args.rig_config)
     try:
@@ -1892,7 +1920,7 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
 
     # Peeked before the gate so `--wait` never blocks for a turn the latch
     # would skip anyway; `_turn_prompt` is what actually arms it.
-    if args.idle and (dir_path / engine_run.IDLE_MARKER_NAME).exists():
+    if args.idle and (args.resident or (dir_path / engine_run.IDLE_MARKER_NAME).exists()):
         if getattr(args, "memory", "off") != "off":
             from engine_memory import kick_idle
             kick_idle(args, dir_path)
@@ -1954,7 +1982,9 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             effort=resolve_override(args.effort, rig.effort),
             agent=args.agent,
             timeout=(
-                args.timeout if args.timeout is not None else int(rig.timeout_seconds)
+                args.timeout if args.timeout is not None
+                else resident_mod.DEFAULT_RESIDENT_SECONDS if args.resident
+                else int(rig.timeout_seconds)
             ),
             scaffold=not args.no_scaffold,
             echo=args.echo,
@@ -1969,6 +1999,7 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             max_credits=resolve_override(args.max_credits, rig.max_ai_credits),
             record=report,
             memory_rig_context={"rig": rig.name, "config": str(config_path)},
+            resident=args.resident,
             **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
@@ -3018,7 +3049,8 @@ def build_parser() -> argparse.ArgumentParser:
     rig_run_p.add_argument(
         "--timeout",
         type=int,
-        help="Turn timeout in seconds (default: the rig's timeout_seconds).",
+        help="Turn timeout in seconds (default: the rig's timeout_seconds); "
+        "with --resident, how long the session stays up (default: 2700).",
     )
     rig_run_p.add_argument(
         "--no-scaffold",
@@ -3084,6 +3116,12 @@ def build_parser() -> argparse.ArgumentParser:
     rig_run_p.add_argument(
         "--rig-config",
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
+    )
+    rig_run_p.add_argument(
+        "--resident",
+        action="store_true",
+        help="Run or feed a detached long-running stream-json session "
+        "(claude, ollama-claude, and agy).",
     )
     _memory_options(rig_run_p)
     rig_run_p.set_defaults(func=cmd_rig_run)
@@ -3252,7 +3290,8 @@ def build_parser() -> argparse.ArgumentParser:
         "roster or dispatcher involved; check — ask the installed CLI whether "
         "the argv r4t composes for it still parses, spending no turn. "
         "Accepts an engine id or any rig preset id; `list` shows both, and "
-        "bare `check` probes every run-capable engine. models / efforts — the "
+        "bare `check` probes every run-capable engine. stop — end the "
+        "agent's resident session now (see --resident). models / efforts — the "
         "values --model and --effort accept, one per line, spending no turn.",
     )
     _memory_options(engine_p)
@@ -3263,7 +3302,7 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "action",
         nargs="?",
-        choices=["quota", "run", "check", "models", "efforts"],
+        choices=["quota", "run", "check", "stop", "models", "efforts"],
         help="What to ask the engine.",
     )
     engine_p.add_argument(
@@ -3296,13 +3335,15 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "--agent",
         metavar="NAME",
-        help="run: adds an `a8s convo NAME` reconcile step to the scaffold.",
+        help="run: adds an `a8s convo NAME` reconcile step to the scaffold; "
+        "stop: the agent whose resident session ends.",
     )
     engine_p.add_argument(
         "--timeout",
         type=int,
-        default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"run: turn timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}).",
+        help=f"run: turn timeout in seconds (default: {DEFAULT_TIMEOUT_SECONDS}); "
+        "with --resident, how long the session stays up before it wraps up "
+        "(default: 2700).",
     )
     engine_p.add_argument(
         "--no-scaffold",
@@ -3391,6 +3432,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="EMAIL",
         dest="git_email",
         help="run: author and committer email for each new commit the turn makes.",
+    )
+    engine_p.add_argument(
+        "--resident",
+        action="store_true",
+        help="run: run or feed a detached long-running stream-json session "
+        "(claude, ollama-claude, and agy).",
     )
     engine_p.set_defaults(func=cmd_engine)
 
@@ -3660,7 +3707,7 @@ def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> lis
     for tok in extras:
         if tok != "-" and tok.startswith("-"):
             remaining.append(tok)
-        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check", "models", "efforts"):
+        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check", "stop", "models", "efforts"):
             args.action = tok
         elif (
             getattr(args, "prompt", "") is None

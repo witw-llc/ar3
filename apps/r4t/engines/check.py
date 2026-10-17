@@ -210,6 +210,7 @@ def check_engine(
     permissions: str | None = None,
     allowed_tools: str | None = None,
     continue_conversation: bool = False,
+    resident: bool = False,
     timeout: int = 900,
     workdir: Path | None = None,
 ) -> EngineReport:
@@ -229,7 +230,12 @@ def check_engine(
             continue_conversation=continue_conversation,
             permissions=permissions,
             allowed_tools=allowed_tools,
+            resident=resident,
         )
+        if resident:
+            from engines import resident as resident_mod
+
+            template = resident_mod.compose_resident_argv(template, {}, engine=engine)
     except RunError as exc:
         # r4t refused to compose it at all, which is a rejection the caller
         # needs to see in the same table as a CLI's.

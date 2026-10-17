@@ -625,6 +625,7 @@ def _build_argv_template(
     session: str | None = None,
     instruments: copilot_engine.TurnInstruments | None = None,
     max_credits: int | None = None,
+    resident: bool = False,
 ) -> tuple[list[str], str | None]:
     """The final argv for one turn with `{prompt}` still unsubstituted, plus
     the one stderr note a requested permissions mode earns: the preset's own
@@ -648,6 +649,19 @@ def _build_argv_template(
             f"--session and --continue contradict for {engine}: the session id "
             "IS the continuation, and it says which conversation"
         )
+    if resident:
+        from engines.resident import RESIDENT_ENGINES
+
+        if engine not in RESIDENT_ENGINES:
+            raise RunError(
+                f"{engine} does not support --resident (engines that do: "
+                f"{', '.join(sorted(RESIDENT_ENGINES))})"
+            )
+        if continue_conversation or session is not None:
+            raise RunError(
+                "--resident cannot be combined with --continue or --session: "
+                "a resident session holds its own live conversation"
+            )
     try:
         argv = build_preset_invoke(engine, model=model, effort=effort)
         argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")
@@ -818,6 +832,7 @@ def execute(
     memory_rig_context: dict | None = None,
     git_name: str | None = None,
     git_email: str | None = None,
+    resident: bool = False,
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
@@ -840,6 +855,66 @@ def execute(
     LESSONS.md over the soft cap, it carries the fold (`prepare_lessons_fold`)
     whatever its routed input says."""
     identity = git_identity_env(git_name, git_email)
+    if resident:
+        from engines import resident as resident_mod
+
+        template, note = _build_argv_template(
+            engine,
+            model=model,
+            effort=effort,
+            timeout=timeout,
+            workdir=dir_path,
+            continue_conversation=continue_conversation,
+            permissions=permissions,
+            allowed_tools=allowed_tools,
+            session=session,
+            max_credits=max_credits,
+            resident=True,
+        )
+        if note:
+            print(f"r4t engine: {note}", file=sys.stderr)
+        if echo:
+            composed = resident_mod.compose_resident_argv(
+                template,
+                dict(env if env is not None else os.environ),
+                engine=engine,
+            )
+            boot_preview = (
+                resident_mod.resident_boot_prompt(
+                    dir_path,
+                    message,
+                    agent=agent,
+                    engine=engine,
+                    resident_seconds=timeout,
+                    lessons_cap=lessons_cap,
+                    lessons_cap_bytes=lessons_cap_bytes,
+                )
+                if scaffold
+                else message
+            )
+            _print_echo(composed, boot_preview, identity)
+        child_env = dict(env if env is not None else os.environ)
+        child_env.update(identity)
+        return resident_mod.enqueue_or_start(
+            engine,
+            message,
+            dir_path=dir_path,
+            template=template,
+            model=model,
+            effort=effort,
+            agent=agent,
+            timeout=timeout,
+            scaffold=scaffold,
+            lessons_cap=lessons_cap,
+            lessons_cap_bytes=lessons_cap_bytes,
+            env=child_env,
+            charge_hook=charge_hook,
+            memory=memory,
+            memory_home=memory_home,
+            memory_writer=memory_writer,
+            memory_people=memory_people,
+            memory_rig_context=memory_rig_context,
+        )
     if scaffold:
         rotate_lessons_if_oversized(dir_path, lessons_cap, lessons_cap_bytes)
         caps = {"lessons_cap": lessons_cap, "lessons_cap_bytes": lessons_cap_bytes}

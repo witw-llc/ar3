@@ -10,6 +10,26 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.107 — 2026-10-16
+
+### Added
+
+- **An engine agent can stay resident.** `r4t engine claude run --resident`
+  (also `ollama-claude` and `agy`) keeps one engine process alive and feeds
+  each new message into the same conversation, so a burst of messages reuses
+  the warm prompt cache instead of starting a new process per message. The
+  session runs for `--timeout` seconds (default 45 minutes), then rewrites
+  `STATUS.md` and `LESSONS.md` and exits; the next message starts a fresh
+  session. Sessions run one after another, never two at once in one folder.
+  `r4t engine <id> stop` ends one now. Four bundled a8s definitions wire it:
+  `engine-claude-resident`, `engine-agy-resident` and their `-unrestricted`
+  variants, with `TIMEOUT` as the session length.
+- **A stopped node stops everything it started.** An a8s definition can name a
+  `stop.invoke`, and a8s runs it once whenever it stops the node: `a8s stop`,
+  `restart`, `kill`, `exit`, `update` and Ctrl+C, also when the handler ended
+  outright on Windows or under `stop --force`. The resident definitions use
+  it, so stopping the node ends its resident session at once.
+
 ## 0.1.106 — 2026-10-15
 
 ### Added

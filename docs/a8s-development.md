@@ -25,6 +25,14 @@ Read [a8s.md](a8s.md) first for concept and usage.
   `$AGE`, `$A8S_DIR`, `$PYTHON`, `$DEFINITION_PATH`, plus per-node a8s vars as `$KEY`)
   expands via `definitions._expand_argv`. Vars are registry-backed (`a8s vars`),
   not OS environment. Used-but-unset raises `UndefinedVarsError` before spawn.
+- **Every stop of a node runs its `stop.invoke` once.** `daemon.run_stop_hook`
+  runs on the handler's final release and on a kill request, outside the wake
+  slot. It names the hook process in the `stop-hook` mark right after it
+  starts the hook, and marks it done after. The CLI clears the mark before it signals.
+  For a handler that ended outright (`os.kill` on Windows, `stop --force`) it
+  waits for a named hook still running, and runs the hook itself only when
+  the handler left no mark. A new path that ends a node does the same. A takeover by another
+  handler is not a stop and runs no hook.
 - **A node's own environment is `a8s vars <name> set env.<NAME> <value>`,** the
   grammar `r4t rig set <rig> env.<NAME>` uses. Only an `env.`-prefixed key
   reaches the child's environment, and `<NAME>` keeps its case; every other var

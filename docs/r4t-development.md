@@ -32,6 +32,16 @@
   `timeout_seconds` exceeds `max_wake_seconds` less `WAKE_MARGIN_SECONDS`
   skips its member alone (`NEVER-FITS`), and `r4t status` reports it as a
   red verdict.
+- **A resident session is serial per `(dir, agent)`.** A message that finds
+  the session `closing` queues for the bridge's next session; never start a
+  second engine beside it. Pid files clear under the same lock the enqueuer
+  takes. `--timeout` is the session's whole life, and `engine stop` sends no
+  wrap-up and drops the queue.
+- **A stop owns the session under the enqueue lock.** It marks the session
+  `stopping`, and a message that finds `stopping` is dropped; it clears only
+  the generation it stopped. The bridge spawns its engine and publishes the
+  engine's pid in one hold of that lock, never spawns once `stopping` is set,
+  and installs its signal handlers before the first engine exists.
 
 ## Testing
 

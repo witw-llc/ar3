@@ -1306,6 +1306,75 @@ class TestBundledEngineDefinitions:
         assert "copy the file" not in description
 
 
+class TestBundledResidentEngineDefinitions:
+    """`engine-<id>-resident.json` and `engine-<id>-resident-unrestricted.json`."""
+
+    @pytest.fixture
+    def agent_root(self, tmp_path):
+        root = tmp_path / "agent"
+        root.mkdir()
+        return root
+
+    @pytest.mark.parametrize(
+        ("stem", "engine_id"),
+        (
+            ("engine-claude-resident", "claude"),
+            ("engine-claude-resident-unrestricted", "claude"),
+            ("engine-agy-resident", "agy"),
+            ("engine-agy-resident-unrestricted", "agy"),
+        ),
+    )
+    def test_bundled_resident_definition_parses_all_three_wakes(
+        self, stem, engine_id, agent_root
+    ):
+        from definitions import (
+            BatchEntry,
+            build_batch_command,
+            build_idle_command,
+            build_stop_command,
+            idle_timeout_seconds,
+        )
+
+        path = default_definition_path(stem)
+        assert path.is_file()
+        defn = json.loads(path.read_text(encoding="utf-8"))
+
+        argv = build_command(
+            defn, {"from": "neil", "to": "ares", "content": "hello"}, agent_root
+        )
+        assert argv[2:6] == ["engine", engine_id, "run", "--resident"]
+        if stem.endswith("-unrestricted"):
+            assert argv[argv.index("--permissions") + 1] == "bypass"
+        else:
+            assert "--permissions" not in argv
+
+        entries = [
+            BatchEntry(
+                {"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json"
+            ),
+        ]
+        batch_argv = build_batch_command(defn, "ares", entries)
+        assert batch_argv[2:6] == ["engine", engine_id, "run", "--resident"]
+
+        assert build_stop_command(defn, "ares")[2:] == [
+            "engine", engine_id, "stop", "--agent", "ares",
+        ]
+
+        idle_argv = build_idle_command(defn, "ares")
+        assert idle_argv[2:6] == ["engine", engine_id, "run", "--resident"]
+        assert "--idle" in idle_argv
+        assert idle_timeout_seconds(defn) == 900.0
+
+        # TIMEOUT, the same var a headless engine node takes, sets the window.
+        argv_custom = build_command(
+            defn,
+            {"from": "neil", "to": "ares", "content": "hello"},
+            agent_root,
+            vars={"TIMEOUT": "1800"},
+        )
+        assert "--timeout=1800" in argv_custom
+
+
 class TestBatchInvoke:
     def test_has_batch_invoke_false_when_missing(self):
         from definitions import has_batch_invoke

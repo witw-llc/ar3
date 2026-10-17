@@ -372,6 +372,8 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `muse.json`     | Meta Muse (`muse exec`) with `--approval-mode never` and `--user-input-auto-resolve`, fresh session every wake. The sandbox stays on; `--user-input-auto-resolve` is what stops an unattended turn blocking when the model reaches for `request_user_input`. |
 | `devin.json`    | Devin CLI (`devin -p`) with `--permission-mode dangerous` — every mode below it still prompts for exec and writes, which a headless turn cannot answer — and `--respect-workspace-trust false` so `-p` does not fail in an untrusted directory. Fresh session every wake. |
 | `engine-<id>.json`     | Eleven bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `muse`, `devin`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. Optional per-node vars tune each one: `MODEL`, `EFFORT`, `TIMEOUT`, `MEMORY`, and `GIT_NAME` / `GIT_EMAIL` for the identity its commits carry (`a8s vars bob set GIT_NAME "Bob (agent)"`). See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
+| `engine-claude-resident.json` | Claude Code as a resident session (`r4t engine claude run --resident`): one engine process with the `a8s_tell` MCP server takes every message for `TIMEOUT` seconds (default 2700, 45 minutes), then rewrites `STATUS.md` and `LESSONS.md` and exits; the next message starts a fresh session. `stop.invoke` ends it at once on `a8s stop`, `restart` or `kill`. Also ships `engine-claude-resident-unrestricted.json` with `--permissions bypass`. See [resident sessions](r4t-engine.md#resident-sessions--claude-ollama-claude-and-agy). |
+| `engine-agy-resident.json` | Antigravity (`agy`) as a resident session (`r4t engine agy run --resident`), the same shape over agy's `stream-json` mode. Also ships `engine-agy-resident-unrestricted.json`. |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](r4t.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
@@ -580,6 +582,31 @@ A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.ti
 - Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty (no incoming message); `$RECIPIENT` is the agent's own name; `$A8S_DIR` resolves as usual.
 
 This subsumes the retired `clear` use-case: define an idle invoke that runs whatever your CLI needs to reset session state (e.g. `claude -p "/clear"`).
+
+### Stop invoke (optional)
+
+A definition whose wakes leave a long-lived process of their own names how to
+end it in a `stop` block. a8s runs `stop.invoke` once whenever it stops the
+node — `a8s stop`, `restart`, `kill`, `exit`, `update` and Ctrl+C on `a8s
+run` — so the operator who stops a node never leaves that process running.
+
+```json
+{
+  "invoke": ["my-agent", "$MESSAGE"],
+  "stop": {"invoke": ["my-agent", "--stop", "$RECIPIENT"]}
+}
+```
+
+- It runs in the node root with the wake environment, outside the wake slot,
+  and gets 30 seconds. Its output and a nonzero exit go to the agent log; the
+  stop itself still succeeds.
+- When a handler ends without running it — `a8s stop --force` kills it, or on
+  Windows, where `a8s stop` and `a8s exit` end the handler outright — the stop
+  command runs the hook in its place, once. A hook the handler had already
+  started is waited for, never run a second time.
+- A handoff to another handler (`a8s start` from a second process) does not
+  run it: the node keeps running.
+- Argv expansion matches `idle.invoke`.
 
 ### Batch invoke (optional)
 

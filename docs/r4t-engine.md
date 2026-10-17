@@ -22,6 +22,7 @@ r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--t
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
                      [--git-name NAME] [--git-email EMAIL]
+                     [--resident]
                      [--memory on|off|small|medium|large] [--memory-home DIR]
                      [--memory-writer RIG] [--memory-people SENDERS]
                      [--] PROMPT
@@ -79,6 +80,10 @@ tool) plus this turn's own measurement flags (see
   translated parameters; see below.
 - `--git-name NAME`, `--git-email EMAIL` — the author and committer of each
   new commit the turn makes; see [git identity](#git-identity).
+- `--resident` — keep one long-running `stream-json` session alive across
+  arrivals (`claude`, `ollama-claude`, and `agy`); `--timeout` then sets the
+  session's length. See
+  [resident sessions](#resident-sessions--claude-ollama-claude-and-agy).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -541,6 +546,52 @@ Over the soft cap, the turn also carries the
 [idle fold](#lessonsmd-upkeep). Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
+### Resident sessions — `claude`, `ollama-claude`, and `agy`
+
+Resuming `claude -p` across a process boundary misses the provider's prompt
+cache 40.6% of the time against a 2.5% same-process baseline (measured, #155).
+`--resident` keeps one `stream-json` engine process alive instead of starting a
+new one per message:
+
+```bash
+r4t engine claude run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+r4t engine agy run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+r4t engine claude stop --agent my-node
+```
+
+The first `run` starts a detached bridge for `(DIR, agent)` and returns 0 at
+once, so the router is never held up. The bridge spawns the engine in
+`stream-json` mode (`claude -p --input-format stream-json --output-format
+stream-json --verbose` with the `a8s_tell` MCP server injected via
+`--mcp-config`, or `agy --input-format stream-json --output-format stream-json
+--print=`). The opening turn carries the cold-boot scaffold, the engine's
+`tell` instructions (`a8s_tell` on Claude; the `tell` CLI on `agy`, which has
+no per-invocation MCP flag) and the first message. Each later `run` queues its
+message and exits 0; the bridge pushes it into the same conversation as a new
+user turn, so the session needs no `tells` monitor of its own.
+
+- `--timeout S` (default `2700`, 45 minutes, with `--resident`) — the
+  session's whole life, not one turn's. When it elapses the bridge lets a
+  running turn finish (up to 2 minutes), sends one wrap-up turn to rewrite
+  `STATUS.md` and `LESSONS.md` (up to 5 minutes), and closes the engine.
+  agy's own `--print-timeout` is dropped in this mode.
+- Sessions run one after another, never side by side. A message that arrives
+  during the wrap-up waits, and the same bridge starts the next session from
+  the `STATUS.md` the wrap-up wrote.
+- `--idle` with `--resident` runs no turn: the session wraps itself up.
+  `--memory` still gets its idle pass.
+- `r4t engine <id> stop [--dir DIR] --agent NAME` ends the session now: no
+  wrap-up turn, and queued messages are dropped, as is a message that arrives
+  during the stop. The bundled resident a8s
+  definitions run it from `stop.invoke`, so `a8s stop`, `restart` and `kill`
+  end the session too.
+- If the engine exits before it reads its first message, the queued messages
+  are dropped and the bridge exits; the next message starts again.
+- State lives in `<DIR>/.engine-resident/<agent>/`, which ignores itself in
+  git. `resident.log` there holds the bridge's log and the engine's replies.
+- Supported on `claude`, `ollama-claude`, and `agy`; other engines fail closed
+  with the supported set. Cannot be combined with `--continue` or `--session`.
+
 ## `check` — does the installed CLI still accept this argv?
 
 ```bash
@@ -663,6 +714,21 @@ not ask. Only for an agent on its own machine and its own account.
 
 The stance lives on the definition's own invoke lines, chosen by name at `add`
 time — the base variants never grow it.
+
+For long-running seats that stay warm across bursts of messages,
+`engine-claude-resident`, `engine-claude-resident-unrestricted`,
+`engine-agy-resident`, and `engine-agy-resident-unrestricted` wire
+`r4t engine <id> run --resident` across `invoke`, `batch.invoke` and
+`idle.invoke`, and `r4t engine <id> stop` as `stop.invoke`:
+
+```bash
+a8s add my-resident ~/somewhere engine-claude-resident
+a8s add my-resident ~/somewhere engine-claude-resident-unrestricted
+a8s add my-resident ~/somewhere engine-agy-resident
+```
+
+They take the same per-node vars as the headless nodes. `TIMEOUT` is the
+session's length (default 2700, 45 minutes).
 
 A custom node beyond these eleven is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for
