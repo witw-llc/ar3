@@ -32,6 +32,16 @@
   `timeout_seconds` exceeds `max_wake_seconds` less `WAKE_MARGIN_SECONDS`
   skips its member alone (`NEVER-FITS`), and `r4t status` reports it as a
   red verdict.
+- **`r4t engine run` and a resident session start from one scaffold, and its
+  tell step says a reply is a message or nothing.** The tell step needs
+  `--agent`, and so does the one-shot MCP splice; a one-shot turn without one
+  answers on stdout. An engine whose MCP idiom is a flag (`RUN_MCP_IDIOMS`) gets `a8s mcp serve` spliced in and is taught
+  `a8s_tell`; never splice a file idiom there, because an a8s node's outbox
+  sits inside the agent's own directory.
+- **r4t never edits `LESSONS.md` or `LESSONS-ARCHIVE.md`.** Past 90% of either
+  cap, or with a spillover line, the agent consolidates to 75% before it
+  answers anything; the rewrite is granted only after a verified copy of each
+  file exists under `archive/`.
 - **A resident session is serial per `(dir, agent)`.** A message that finds
   the session `closing` queues for the bridge's next session; never start a
   second engine beside it. Pid files clear under the same lock the enqueuer

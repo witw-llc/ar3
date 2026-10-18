@@ -329,38 +329,88 @@ class TestEngineFlagsPassThrough:
         assert "r4t engine echo: argv:" in err
         assert "bypassPermissions" in err
 
-    def test_lessons_rotate_at_the_flags_cap(self, r4t_home, tmp_path, preset):
+    def test_lessons_past_the_flags_cap_ask_for_consolidation(
+        self, r4t_home, tmp_path, preset
+    ):
+        original = "".join(f"- lesson {i}\n" for i in range(5)).encode("utf-8")
+        (tmp_path / "LESSONS.md").write_bytes(original)
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--lessons-cap", "3") == 0
+        prompt = only_call(preset)["argv"][-1]
+        assert "Consolidate " in prompt
+        assert "the cap is 3 lines / " in prompt
+        assert "at most 2 lines" in prompt
+        assert (tmp_path / "LESSONS.md").read_bytes() == original
+        [copy] = (tmp_path / "archive").glob("LESSONS-*.md")
+        assert copy.read_bytes() == original
+
+    def test_lessons_under_the_flags_cap_stay_silent(self, r4t_home, tmp_path, preset):
         (tmp_path / "LESSONS.md").write_text(
             "".join(f"- lesson {i}\n" for i in range(5)), encoding="utf-8"
         )
         config = write_rigs(tmp_path, claude_rig())
-        assert run_rig(tmp_path, config, "--lessons-cap", "3") == 0
-        assert (tmp_path / "LESSONS.md").read_text().count("\n") == 3
-        assert (tmp_path / "LESSONS-ARCHIVE.md").is_file()
+        assert run_rig(tmp_path, config, "--lessons-cap", "6") == 0
+        assert "Consolidate " not in only_call(preset)["argv"][-1]
+        assert not (tmp_path / "archive").exists()
 
-    def test_lessons_rotate_at_the_flags_byte_cap(self, r4t_home, tmp_path, preset):
-        (tmp_path / "LESSONS.md").write_text(
-            "".join(f"- lesson {i} {'x' * 90}\n" for i in range(10)), encoding="utf-8"
-        )
-        config = write_rigs(tmp_path, claude_rig())
-        assert run_rig(tmp_path, config, "--lessons-cap-bytes", "500") == 0
-        assert len((tmp_path / "LESSONS.md").read_bytes()) <= 500
-        assert (tmp_path / "LESSONS-ARCHIVE.md").is_file()
-
-    def test_an_idle_rig_turn_over_the_soft_cap_asks_for_a_fold(
+    def test_lessons_past_the_flags_byte_cap_ask_for_consolidation(
         self, r4t_home, tmp_path, preset
     ):
-        # The fold rides the scaffold, so `rig run` carries it exactly as
-        # `engine run` does.
+        original = "".join(f"- lesson {i} {'x' * 90}\n" for i in range(10)).encode("utf-8")
+        (tmp_path / "LESSONS.md").write_bytes(original)
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--lessons-cap-bytes", "1000") == 0
+        assert "Consolidate " in only_call(preset)["argv"][-1]
+        assert (tmp_path / "LESSONS.md").read_bytes() == original
+        assert len(list((tmp_path / "archive").glob("LESSONS-*.md"))) == 1
+
+    def test_a_spillover_alone_asks_for_consolidation(self, r4t_home, tmp_path, preset):
+        (tmp_path / "LESSONS-ARCHIVE.md").write_text("- old\n", encoding="utf-8")
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config) == 0
+        prompt = only_call(preset)["argv"][-1]
+        assert "holds 1 lines that no turn reads" in prompt
+        assert (tmp_path / "LESSONS-ARCHIVE.md").read_text() == "- old\n"
+
+    def test_an_idle_rig_turn_over_the_cap_gets_the_same_note(
+        self, r4t_home, tmp_path, preset
+    ):
         (tmp_path / "LESSONS.md").write_text(
-            "".join(f"- lesson {i}\n" for i in range(9)), encoding="utf-8"
+            "".join(f"- lesson {i}\n" for i in range(10)), encoding="utf-8"
         )
         config = write_rigs(tmp_path, claude_rig())
         assert run_rig(tmp_path, config, "--idle", "--lessons-cap", "10", prompt=None) == 0
         prompt = only_call(preset)["argv"][-1]
-        assert "Idle fold: " in prompt
-        [source] = (tmp_path / "archive").glob("lessons-fold-*-source.md")
-        assert str(source) in prompt
+        assert "Consolidate " in prompt
+        [copy] = (tmp_path / "archive").glob("LESSONS-*.md")
+        assert str(copy) in prompt
+
+    def test_no_scaffold_makes_no_copy(self, r4t_home, tmp_path, preset):
+        (tmp_path / "LESSONS.md").write_text(
+            "".join(f"- lesson {i}\n" for i in range(10)), encoding="utf-8"
+        )
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--no-scaffold", "--lessons-cap", "3") == 0
+        assert only_call(preset)["argv"][-1] == "do the thing"
+        assert not (tmp_path / "archive").exists()
+
+    def test_an_agent_turn_gets_the_a8s_server_and_the_mcp_tell_step(
+        self, r4t_home, tmp_path, preset
+    ):
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config, "--agent", "iris") == 0
+        argv = only_call(preset)["argv"]
+        assert argv[0] == "--mcp-config"
+        assert "mcp__a8s__tell" in argv[argv.index("--allowedTools") + 1]
+        assert engine_run.MCP_TELL_STEP in argv[-1]
+
+    def test_a_turn_with_no_agent_gets_neither(self, r4t_home, tmp_path, preset):
+        config = write_rigs(tmp_path, claude_rig())
+        assert run_rig(tmp_path, config) == 0
+        argv = only_call(preset)["argv"]
+        assert "--mcp-config" not in argv
+        assert "mcp__a8s__tell" not in " ".join(argv)
+        assert "Reply only by message" not in argv[-1]
 
     def test_prompt_required_without_idle(self, r4t_home, tmp_path, capsys):
         config = write_rigs(tmp_path, claude_rig())

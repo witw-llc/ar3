@@ -115,7 +115,7 @@ r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M] [--effort LE
 
 Same turn as [`r4t engine <id> run`](r4t-engine.md) — the same preset table,
 the same smart cold-boot scaffold, the same `--idle` latch, the same
-`LESSONS.md` upkeep (rotation, soft-cap nudge, idle fold), the same exit code (the CLI's own, 124 on a timeout
+`LESSONS.md` upkeep (the consolidation past 90% of a cap), the same exit code (the CLI's own, 124 on a timeout
 kill) and the same stdout, which stays the engine's own reply stream byte for
 byte. `engine` is the bare metal; `rig` is that engine with the rig's tuning
 already on it and the rig's budget in front of it. No roster and no

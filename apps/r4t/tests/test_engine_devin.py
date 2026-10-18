@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 import engines
+from engines import devin as devin_engine
 from engines import run as engine_run
 from rig import (
     HARNESS_PRESETS,
@@ -37,16 +38,9 @@ class TestPreset:
         assert "devin" in HARNESS_PRESETS
         assert "devin" in engine_run.RUN_ENGINES
 
-    def test_capabilities_are_run_and_check_without_quota(self):
-        # devin exposes no headless usage surface, so the module implements no
-        # quota verb and the registry must not advertise one.
-        assert engines.capabilities("devin") == ["run", "check"]
-        assert engines.capability("devin", "quota") is None
-
-    def test_quota_refuses_by_name_instead_of_raising_attributeerror(self):
-        with pytest.raises(engines.QuotaError) as excinfo:
-            engines.quota("devin")
-        assert "no quota verb" in str(excinfo.value)
+    def test_capabilities_include_quota(self):
+        assert engines.capabilities("devin")[:3] == ["quota", "run", "check"]
+        assert engines.capability("devin", "quota") is devin_engine.quota
 
     def test_headless_invocation_is_print_mode_at_dangerous(self):
         assert argv_for() == [

@@ -336,10 +336,10 @@ STATUS.md
 - Foghorn changelogs lead with breaking changes — users typically read only the top section.
 ```
 
-Three files, and you wrote one of them. `LESSONS.md` grows append-only; past
-a cap (200 lines or 35 KB by default) the oldest lines rotate into
-`LESSONS-ARCHIVE.md` before the turn starts, so the file never quietly turns
-into the whole context window.
+Three files, and you wrote one of them. `LESSONS.md` grows append-only, one
+lesson per line. Past 90% of its cap (200 lines or 35 KB by default), the next
+turn first folds it down to 75%, after r4t saves a copy under `archive/`, so
+the file never quietly turns into the whole context window.
 
 ### Seeing exactly what runs
 
@@ -362,7 +362,7 @@ r4t engine echo: --- prompt ---
 Smart cold boot:
 1. Read /home/you/ar3/solo/STATUS.md, then /home/you/ar3/solo/AGENTS.md and /home/you/ar3/solo/LESSONS.md if present. Use these absolute paths even if your workspace root differs. They are the durable source of truth; you have no transcript memory.
 2. Stay idle and exit unless there is clear direction or active work. Never restart completed work. Be token-frugal; no wordy prose.
-3. Before exit, rewrite /home/you/ar3/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ar3/solo/LESSONS.md — append-only, one short bullet each, never rewrite or delete existing lessons. Never edit AGENTS.md.
+3. Before exit, rewrite /home/you/ar3/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ar3/solo/LESSONS.md. Every line of it is one lesson, one short line each, with no sections, headings or tiers. Append; edit an existing line only when told to consolidate. Never edit AGENTS.md.
 
 Routed input:
 Say OK.
@@ -378,6 +378,12 @@ is how the engine mails you, and `a8s convo`, which is how it reads its own
 conversation — that one subcommand, not the router's other verbs. Nothing else
 reaches a shell — a closed list of two is the whole permission budget solo
 needs, and the reply rule below is what spends it.
+
+Add `--agent <name>` and the prelude grows two steps: read the agent's own
+conversation, and reply only by message, because no one reads a networked
+turn's stdout. On claude, codex and copilot that same flag also hands the turn
+the a8s MCP server, so the engine can send with a `tell` tool call instead of
+a shell command.
 
 `check` answers the same question without spending a turn at all: it composes
 the argv `run` would use and asks the installed CLI whether it still parses,
@@ -781,7 +787,7 @@ source, so leave them out:
 ```bash
 cd ~/ar3/solo
 git init -q
-printf 'STATUS.md\nLESSONS.md\nLESSONS-ARCHIVE.md\n' > .gitignore
+printf 'STATUS.md\nLESSONS.md\narchive/\n' > .gitignore
 git add AGENTS.md .gitignore
 git commit -q -m "solo: an engine-backed agent behind a8s"
 ```

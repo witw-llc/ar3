@@ -291,10 +291,7 @@ class TestCheckCli:
 
     def test_check_is_advertised_as_a_verb(self):
         for name in engines.run.RUN_ENGINES:
-            expected = ["run", "check"] if name in {"devin"} else [
-                "quota", "run", "check"
-            ]
-            assert engines.capabilities(name) == expected
+            assert engines.capabilities(name) == ["quota", "run", "check"]
 
 
 def test_check_effort_threads_into_probe_argv(bin_dir, capsys):

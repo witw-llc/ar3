@@ -422,31 +422,50 @@ adds retrieved knowledge and asynchronous learning across turns.
 Prepended to `PROMPT`. The prelude is byte-identical across runs in the same
 `--dir` (no timestamps, no counters), so the prompt cache misses only on what
 follows it: the `LESSONS.md` note when one applies, then the routed input,
-which always comes last:
+which always comes last. A one-shot turn and a
+[resident session](#resident-sessions--claude-ollama-claude-and-agy) start
+from the same prelude; only the closing steps differ.
 
 ```
 Smart cold boot:
 1. Read <DIR>/STATUS.md, then <DIR>/AGENTS.md and <DIR>/LESSONS.md if
    present. Use these absolute paths even if your workspace root differs.
    They are the durable source of truth; you have no transcript memory.
-   Older lessons: <DIR>/LESSONS-ARCHIVE.md (grep it; do not read it whole).
-                                     [only once the archive holds a line]
-2. Run `a8s convo NAME` and reconcile the newest routed messages with
-   STATUS.md before acting.          [only with --agent NAME; steps renumber
-                                       cleanly without it]
-3. Stay idle and exit unless there is clear direction or active work. Never
+2. You are 'NAME'. Run `a8s convo NAME` and reconcile the newest routed
+   messages with STATUS.md before acting.
+3. Reply only by message: call the `a8s_tell` MCP tool ... Printing text
+   sends nothing, and no one reads this session's output. ...
+                                     [steps 2 and 3 only with --agent NAME;
+                                      the tell step is below; steps
+                                      renumber cleanly without them]
+4. Stay idle and exit unless there is clear direction or active work. Never
    restart completed work. Be token-frugal; no wordy prose.
-4. Before exit, rewrite <DIR>/STATUS.md with sections: Current State,
+5. Before exit, rewrite <DIR>/STATUS.md with sections: Current State,
    Important Context, Next Steps, Decisions (with rationale). Append
-   genuinely new durable insights to <DIR>/LESSONS.md — append-only, one
-   short bullet each, never rewrite or delete existing lessons. Never edit
+   genuinely new durable insights to <DIR>/LESSONS.md. Every line of it is
+   one lesson, one short line each, with no sections, headings or tiers.
+   Append; edit an existing line only when told to consolidate. Never edit
    AGENTS.md.
 
-<LESSONS.md note>                    [only over the soft cap; see below]
+<LESSONS.md note>                    [only when a consolidation is due]
 
 Routed input:
 <PROMPT>
 ```
+
+**The tell step.** A node's output reaches nobody, so with `--agent` the
+prelude says that a reply is a message or nothing. Without `--agent` a one-shot
+turn is a person's at a terminal, stdout is the answer, and there is no tell
+step and no splice. (A resident `claude` session carries the a8s server in
+every case; only its tell step needs `--agent`.) An engine that takes the a8s MCP server
+by a flag — `claude`, `codex`, `copilot`, `ollama-claude`, `ollama-codex` —
+gets `a8s mcp serve` spliced into its argv for the turn, the same server a
+roster rig's `mcp` knob injects, and the step teaches the `a8s_tell` tool,
+with the `tell` CLI as the fallback. The `claude` engines also get
+`mcp__a8s__tell` added to `--allowedTools`. Every other engine is taught the
+`tell` CLI with the body on a quoted heredoc: their MCP idioms write a config
+file, and an a8s node's outbox sits inside the agent's own directory.
+`--no-scaffold` splices nothing.
 
 r4t's own dispatcher (`dispatch.run_harness`) never uses this scaffold: it
 already builds the roster's own prompt, and stacking this one on top would
@@ -454,86 +473,44 @@ double it. This is strictly the bare, roster-less path.
 
 ### `LESSONS.md` upkeep
 
-`LESSONS.md` grows by appends, so every scaffolded turn bounds it before the
-turn starts and tells the turn when it is getting full. Nothing r4t does to
-the file loses a line.
+`LESSONS.md` grows by appends. r4t never edits it: the agent keeps it under
+its caps, and r4t tells it when, before the turn answers anything.
 
-**Caps.** A file over 200 lines (`--lessons-cap`) or over 35 KB
-(`--lessons-cap-bytes`, 35840 bytes) rotates: its oldest lines below the
-header move, whole lines and in order, to the end of `LESSONS-ARCHIVE.md`
-(created if absent) until the live file fits both caps. No model touches
-either file. One stderr line names what moved:
-`r4t engine: rotated N lines from <DIR>/LESSONS.md to <DIR>/LESSONS-ARCHIVE.md`.
+**Caps.** 200 lines (`--lessons-cap`) and 35 KB (`--lessons-cap-bytes`,
+35840 bytes). Every size counts the file with LF line endings. A
+`LESSONS.md` that is not UTF-8 never triggers a consolidation.
 
-**The header stays.** The header is every line above the first `## `
-heading. A line that reads `<!-- rotate-below -->` overrides that rule: the
-header is then every line down to and including the marker, above or below
-the first `## `. A file with neither rotates from its first line. A header
-that is over a cap on its own leaves nothing below it that can bring the
-file under; everything below it moves, and a second stderr line says so.
-
-**Headings stay with their lines.** When the cut falls inside a section,
-the headings that still govern the kept lines repeat at the top of the live
-file and stay in place in the archive. Blank lines at the cut move with it.
-
-**Lossless.** The archive is written before `LESSONS.md` is rewritten, and
-each write is atomic. A kill between the two leaves the moved lines in both
-files, and the next rotation archives them again: a line can be duplicated,
-not lost.
-
-**Line endings.** Rotation writes both files with LF line endings, whatever
-they held before, so neither file mixes endings. Every size a cap or a note
-counts is the file with LF endings, so the byte cap holds on disk. A
-`LESSONS.md` that is not UTF-8 is not rotated and gets no note; a stderr line
-says why.
-
-**Soft cap.** Over 80% of either cap (160 lines or 28 KB at the defaults),
-the scaffold carries one line after the prelude:
+**Consolidation.** A consolidation is due when `LESSONS.md` passes 90% of
+either cap (more than 180 lines or 31.5 KB at the defaults), or when the
+spillover file `LESSONS-ARCHIVE.md` holds a non-blank line. The note after
+the prelude then reads:
 
 ```
-<DIR>/LESSONS.md is 172 lines / 30.1 KB of 200 lines / 35 KB. Do not append a
-lesson that repeats one already here; the idle pass consolidates. Do not edit
-existing lines.
+Consolidate <DIR>/LESSONS.md before you answer any message. <DIR>/LESSONS.md
+is 184 lines / 30.1 KB; the cap is 200 lines / 35 KB. Rewrite it to at most
+150 lines and 26.2 KB.
+- Every line is one lesson. Remove sections, headings and tiers.
+- Merge each duplicate into the lesson it repeats.
+- Drop a lesson only when a newer lesson supersedes it. Never drop a live rule.
+- <DIR>/LESSONS-ARCHIVE.md holds 40 lines that no turn reads. Fold the
+  lessons that still hold into <DIR>/LESSONS.md, then delete
+  <DIR>/LESSONS-ARCHIVE.md.                 [only when the spillover holds lines]
+Copies from before this turn: <DIR>/archive/LESSONS-<date>-<hash>.md, ...
+This is the one rewrite of LESSONS.md that the append-only rule allows.
 ```
 
-The nudge keeps the turn append-only. An edit to an existing line is a
-rewrite of the file, and a rewrite killed partway loses every line after the
-point it reached. Only the idle fold edits existing lines, because only the
-idle fold has a copy to recover from. Under the soft cap the scaffold carries
-no note. The figures change from turn
-to turn, so the note sits after the prelude and the cached prefix stays the
-same.
+The target is 75% of each cap. Under the warning line, with no spillover, the
+scaffold carries no note.
 
-**Archive pointer.** Once `LESSONS-ARCHIVE.md` holds a line, step 1 of the
-prelude names it and says to grep it rather than read it whole. The pointer
-sits in the prelude because it does not change from turn to turn: rotation
-creates the archive and `run` never removes it, so the prelude changes once.
-
-**Idle fold.** On an `--idle` turn over the soft cap, the note is a fold in
-place of the nudge. First `run` copies the bytes of `LESSONS.md` to
-`<DIR>/archive/lessons-fold-<date>-source.md` and reads the copy back. Only
-when the copy equals `LESSONS.md` byte for byte is the turn told to rewrite
-`LESSONS.md` whole:
-
-- merge each duplicate into the lesson it repeats;
-- drop a lesson only when a newer lesson supersedes it, and never drop a
-  live rule;
-- keep the header unchanged, named by its line numbers;
-- write `<DIR>/archive/lessons-fold-<date>.md`, a ledger with one row per
-  line of the copy: source line number; kept, merged-into or
-  dropped-superseded; target line.
-
-The copy keeps the fold lossless: a line the model merges or drops, or a
-rewrite that dies partway loses, is still on disk, and the ledger's line
-numbers point into it. `<date>` is UTC, like every date in a filename. A copy
-is never overwritten, so a directory folds at most once a day. An idle turn
-gets the append-only nudge instead when there is no verified copy: the copy
-could not be written, it does not match, or today's fold already ran (that
-copy does not hold lines added since). The fold
-rides the scaffold, not the idle prompt: an `--idle` turn with its own
-`PROMPT` still carries it, and `--no-scaffold` drops it with the rest of the
-scaffold. Rotation at the caps stays the backstop for a fold that falls
-short.
+**Lossless.** Before the note grants a rewrite, `run` copies each of the two
+files that exists to `<DIR>/archive/<name>-<date>-<hash>.md` and reads the
+copy back. A line the model merges or drops, or a rewrite that dies partway
+loses, is still on disk. `<date>` is UTC, like every date in a filename, and
+`<hash>` is the first eight hex digits of the content's SHA-256, so a turn
+that finds the same bytes reuses the copy instead of writing another. When a
+copy cannot be written or does not match, the note says so, tells the turn
+not to edit existing lines, and one stderr line names the cause.
+`--no-scaffold` makes no copy and carries no note.
 
 ### `--idle` — the Cody-pattern debounce
 
@@ -542,8 +519,7 @@ the wasted turn: if `<DIR>/.engine-idle` exists, `run` exits 0 printing
 nothing. Otherwise it creates the marker and runs one turn — the routed
 input is `PROMPT` if given, else the built-in idle consolidation prompt
 ("reconcile STATUS.md with reality, then append any new durable lessons").
-Over the soft cap, the turn also carries the
-[idle fold](#lessonsmd-upkeep). Any run *without* `--idle` removes the marker first — real work re-arms the
+Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
 ### Resident sessions — `claude`, `ollama-claude`, and `agy`
@@ -564,9 +540,12 @@ once, so the router is never held up. The bridge spawns the engine in
 `stream-json` mode (`claude -p --input-format stream-json --output-format
 stream-json --verbose` with the `a8s_tell` MCP server injected via
 `--mcp-config`, or `agy --input-format stream-json --output-format stream-json
---print=`). The opening turn carries the cold-boot scaffold, the engine's
-`tell` instructions (`a8s_tell` on Claude; the `tell` CLI on `agy`, which has
-no per-invocation MCP flag) and the first message. Each later `run` queues its
+--print=`). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
+a one-shot turn gets, with resident closing steps in place of the exit steps:
+the tell step (`a8s_tell` on Claude; the `tell` CLI on `agy`, which has no
+per-invocation MCP flag), the [`LESSONS.md` note](#lessonsmd-upkeep) when a
+consolidation is due, and the first message. The session consolidates first,
+then answers, and keeps running. Each later `run` queues its
 message and exits 0; the bridge pushes it into the same conversation as a new
 user turn, so the session needs no `tells` monitor of its own.
 
@@ -804,13 +783,16 @@ note `token from the agent CLI's Keychain item`. A Linux or Windows machine with
 only the CLI is not covered yet: where the CLI keeps its login there is not
 verified.
 
-**Not every engine answers.** `devin` cannot: its `/usage` and
-`/session-stats` report a session's own consumption, but there is no
-account-quota endpoint the CLI can answer without spending a turn. So
-`apps/r4t/engines/devin.py` implements no `quota` function, `r4t engine list`
-prints `[run, check]` for it, and `r4t engine devin quota` refuses while
-naming the engines that do answer. A verb the registry advertises and can
-never satisfy would be worse than the refusal.
+**Devin's screen.** Devin reports its allowance only in the `/usage` view of
+an interactive session, so `r4t engine devin quota` starts
+`devin --respect-workspace-trust false` in a pseudo-terminal, in an empty
+temporary directory, types `/usage`, and reads the Daily and Weekly bars off
+the screen (about 7 seconds). No prompt reaches a model, so no turn is spent;
+r4t never reads Devin's credentials; no directory is added to Devin's trusted
+list. The plan name comes from the start banner when it is drawn. The screen
+carries no contract: one bar is enough, and a screen with no usable bar is an
+error that quotes what the screen said (`No quota data available`, `Not logged in`). POSIX only: Windows has no
+pseudo-terminal, and the verb refuses there.
 
 `muse` answers, with two caveats — freshness and cost. Its quota rides
 `muse serve`, the MSP session host, whose `usage/read` returns the host's

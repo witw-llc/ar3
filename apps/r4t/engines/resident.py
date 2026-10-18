@@ -38,6 +38,7 @@ from ar3.locking import file_lock
 from ar3.proc import pid_alive, process_start_token, terminate_group
 from ar3.ulid import new as new_ulid
 
+from engines.run import CLI_TELL_STEP, LESSON_LINE_RULE, MCP_TELL_STEP
 from rig import MCP_CLAUDE_TOOL, _mcp_command, _mcp_servers_json
 
 RESIDENT_ENGINES = frozenset({"agy", "claude", "ollama-claude"})
@@ -51,26 +52,6 @@ LOG_ROTATE_BYTES = 1024 * 1024
 # the wrap-up turn is queued behind it, and how long the wrap-up itself gets.
 WRAPUP_WAIT_SECONDS = 120
 WRAPUP_TURN_SECONDS = 300
-
-MCP_TELL_STEP = (
-    "Send messages by calling the `a8s_tell` MCP tool (call the tool — "
-    "printing text sends nothing). Pass `recipient` (the name) and `body` "
-    "(your message), and `attachments` (a list of absolute paths) to send "
-    "files with it. The body is delivered byte-exact; no shell is involved. "
-    "If `a8s_tell` is unavailable, fall back to the `tell` CLI with body on "
-    "stdin (`tell <recipient> - <<'EOF'`). Delivery is asynchronous; do not "
-    "wait for a reply."
-)
-
-CLI_TELL_STEP = (
-    "Send messages with the `tell` shell command (run it via your shell tool "
-    "— printing text sends nothing). Pass the body on stdin with a quoted "
-    "heredoc so `$`, `` ` ``, and `\\` arrive byte-exact (`tell <recipient> - "
-    "<<'EOF'`). If the `a8s` MCP server is configured in this session, you "
-    "may call its `tell` tool instead (`recipient`, `body`, optional "
-    "`attachments`). Delivery is asynchronous; do not wait for a reply."
-)
-
 
 @dataclass(frozen=True)
 class ParsedFrame:
@@ -399,53 +380,22 @@ def resident_boot_prompt(
     resident_seconds: int = DEFAULT_RESIDENT_SECONDS,
     lessons_cap: int,
     lessons_cap_bytes: int,
+    copies: list[Path] | None = None,
 ) -> str:
-    """Compose the initial cold-boot prompt for a resident session."""
-    from engines.run import LESSONS_ARCHIVE_NAME, _lessons_note
+    """The cold-boot prompt for a resident session: the one-shot turn's
+    startup, closed by the resident steps instead of the exit steps."""
+    from engines.run import scaffold_prompt
 
-    status = dir_path / "STATUS.md"
-    agents_file = dir_path / "AGENTS.md"
-    lessons = dir_path / "LESSONS.md"
-    archive = dir_path / LESSONS_ARCHIVE_NAME
-    minutes = max(1, round(resident_seconds / 60))
-    tell_step = RESIDENT_ADAPTERS[engine].tell_step
-
-    read_step = (
-        f"1. Read {status}, then {agents_file} and {lessons} if present. Use "
-        "these absolute paths even if your workspace root differs. They are "
-        "the durable source of truth; you have no prior transcript memory."
+    return scaffold_prompt(
+        dir_path,
+        message,
+        agent=agent,
+        tell_step=RESIDENT_ADAPTERS[engine].tell_step,
+        resident_minutes=max(1, round(resident_seconds / 60)),
+        lessons_cap=lessons_cap,
+        lessons_cap_bytes=lessons_cap_bytes,
+        copies=copies,
     )
-    try:
-        if archive.stat().st_size:
-            read_step += f" Older lessons: {archive} (grep it; do not read it whole)."
-    except OSError:
-        pass
-
-    steps = [read_step]
-    if agent:
-        steps.append(
-            f"{len(steps) + 1}. You are '{agent}'. Run `a8s convo {agent}` and "
-            "reconcile the newest routed messages with STATUS.md before acting."
-        )
-    steps.append(f"{len(steps) + 1}. {tell_step}")
-    steps.append(
-        f"{len(steps) + 1}. Resident session (~{minutes}m window): new inbound "
-        "messages are pushed directly into this conversation as subsequent user "
-        "turns — do NOT start a background `tells` monitor or poll loop. Handle "
-        "each message or burst as it arrives and finish your turn so the next "
-        "message can be delivered. Be token-frugal; no wordy prose."
-    )
-    steps.append(
-        f"{len(steps) + 1}. When the session window expires, you will receive a "
-        f"wrap-up turn to rewrite {status} (sections: Current State, Important "
-        f"Context, Next Steps, Decisions with rationale) and append genuinely "
-        f"new durable insights to {lessons} (append-only, one short bullet "
-        "each, never rewrite or delete existing lessons; never edit AGENTS.md)."
-    )
-    prelude = "Smart cold boot (resident session):\n" + "\n".join(steps)
-    note = _lessons_note(dir_path, lessons_cap, lessons_cap_bytes, None)
-    tail = f"\n\n{note}" if note else ""
-    return f"{prelude}{tail}\n\nRouted input:\n{message}"
 
 
 def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
@@ -458,8 +408,7 @@ def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
         f"2. Rewrite {status} with sections: Current State, Important Context, "
         "Next Steps, Decisions (with rationale).\n"
         f"3. Append any genuinely new durable insights from this session to "
-        f"{lessons} — append-only, one short bullet each, never rewrite or "
-        "delete existing lessons. Never edit AGENTS.md.\n"
+        f"{lessons}. {LESSON_LINE_RULE} Never edit AGENTS.md.\n"
         "4. Reply briefly when done; the session will close immediately after."
     )
 
@@ -624,7 +573,7 @@ def _run_session(
     home: Path, spec: dict, stop_requested: threading.Event, current: dict
 ) -> int:
     """One engine process from first message to wrap-up. Returns its exit code."""
-    from engines.run import resolve_argv0, rotate_lessons_if_oversized
+    from engines.run import prepare_lessons_copies, resolve_argv0
 
     engine = spec["engine"]
     dir_path = Path(spec["dir_path"])
@@ -636,8 +585,13 @@ def _run_session(
     lessons_cap_bytes = int(spec.get("lessons_cap_bytes") or 35 * 1024)
     memory_mode = spec.get("memory") or "off"
 
-    if scaffold:
-        rotate_lessons_if_oversized(dir_path, lessons_cap, lessons_cap_bytes)
+    copies = (
+        prepare_lessons_copies(
+            dir_path, lessons_cap=lessons_cap, lessons_cap_bytes=lessons_cap_bytes
+        )
+        if scaffold
+        else None
+    )
 
     adapter = RESIDENT_ADAPTERS[engine]
     argv = resolve_argv0(
@@ -766,6 +720,7 @@ def _run_session(
                             resident_seconds=resident_seconds,
                             lessons_cap=lessons_cap,
                             lessons_cap_bytes=lessons_cap_bytes,
+                            copies=copies,
                         )
                     else:
                         prompt_text = combined

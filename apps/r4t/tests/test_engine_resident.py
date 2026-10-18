@@ -315,6 +315,81 @@ class TestResidentBootAndWrapupPrompts:
         assert prompt.endswith("alice tells bob (1s ago): hello agy")
 
 
+    def numbered(self, prompt: str) -> list[str]:
+        return [line for line in prompt.split("\n\nRouted input:")[0].split("\n")[1:]]
+
+    def lessons_over_the_cap(self, seat: Path) -> Path:
+        path = seat / "LESSONS.md"
+        path.write_text("".join(f"- lesson {i}\n" for i in range(181)), encoding="utf-8")
+        return path
+
+    def test_boot_prompt_shares_the_first_steps_with_the_one_shot_prelude(self, tmp_path):
+        one_shot = engine_run.scaffold_prompt(
+            tmp_path, "hi", agent="bob", tell_step=engine_run.MCP_TELL_STEP
+        )
+        resident = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", agent="bob",
+            lessons_cap=200, lessons_cap_bytes=35840,
+        )
+        assert resident.startswith("Smart cold boot (resident session):\n")
+        assert one_shot.startswith("Smart cold boot:\n")
+        assert self.numbered(resident)[:3] == self.numbered(one_shot)[:3]
+        assert self.numbered(resident)[2] == f"3. {engine_run.MCP_TELL_STEP}"
+        assert "4. Resident session (~45m window)" in resident
+        assert "Stay idle and exit" in one_shot and "Stay idle and exit" not in resident
+
+    def test_agy_boot_prompt_carries_the_cli_tell_step_in_the_shared_slot(self, tmp_path):
+        prompt = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", agent="bob", engine="agy",
+            lessons_cap=200, lessons_cap_bytes=35840,
+        )
+        assert self.numbered(prompt)[2] == f"3. {engine_run.CLI_TELL_STEP}"
+
+    def test_boot_prompt_without_an_agent_has_no_tell_step(self, tmp_path):
+        prompt = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", agent=None,
+            lessons_cap=200, lessons_cap_bytes=35840,
+        )
+        assert "Reply only by message" not in prompt
+        assert "a8s convo" not in prompt
+        assert "2. Resident session" in prompt
+
+    def test_boot_prompt_carries_the_consolidation_note_when_copies_are_given(
+        self, tmp_path
+    ):
+        lessons = self.lessons_over_the_cap(tmp_path)
+        copies = engine_run.prepare_lessons_copies(tmp_path)
+        prompt = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", agent="bob",
+            lessons_cap=200, lessons_cap_bytes=35840, copies=copies,
+        )
+        head, _, _ = prompt.partition("\n\nRouted input:\n")
+        _, _, note = head.partition("\n\n")
+        assert note.startswith(f"Consolidate {lessons} before you answer any message. ")
+        assert str(copies[0]) in note
+        assert prompt.endswith("Routed input:\nhi")
+
+    def test_boot_prompt_prelude_does_not_move_when_the_note_appears(self, tmp_path):
+        kwargs = dict(agent="bob", lessons_cap=200, lessons_cap_bytes=35840)
+        bare = resident_mod.resident_boot_prompt(tmp_path, "hi", **kwargs)
+        self.lessons_over_the_cap(tmp_path)
+        copies = engine_run.prepare_lessons_copies(tmp_path)
+        loud = resident_mod.resident_boot_prompt(tmp_path, "hi", copies=copies, **kwargs)
+        warn = resident_mod.resident_boot_prompt(tmp_path, "hi", copies=None, **kwargs)
+        prelude = bare.split("\n\nRouted input:")[0]
+        assert "Consolidate" not in bare
+        assert loud.startswith(prelude + "\n\nConsolidate ")
+        assert warn.startswith(prelude + "\n\n")
+        assert "r4t could not save a copy of it" in warn
+        assert "Consolidate" not in warn
+
+    def test_wrapup_prompt_carries_the_lesson_line_rule(self, tmp_path):
+        prompt = resident_mod.wrapup_prompt(tmp_path, 2700)
+        assert engine_run.LESSON_LINE_RULE in prompt
+        assert "wrap up and exit" in prompt
+        assert "Never edit AGENTS.md." in prompt
+
+
 class TestResidentLifecycle:
     def test_burst_of_messages_reuses_single_claude_process_and_wraps_up_at_expiry(
         self, monkeypatch, tmp_path
@@ -454,6 +529,47 @@ class TestResidentLifecycle:
             assert (workdir / "LESSONS.md").is_file()
         finally:
             _stop(workdir, "vela")
+
+    @pytest.mark.parametrize("scaffold", [True, False])
+    def test_a_session_over_the_lessons_cap_saves_a_copy_and_leaves_the_file(
+        self, monkeypatch, tmp_path, scaffold
+    ):
+        fake_bin, record_file = make_fake_stream_claude(tmp_path, sleep_per_turn=0.05)
+        monkeypatch.setitem(
+            engine_run.HARNESS_PRESETS,
+            "claude",
+            {**engine_run.HARNESS_PRESETS["claude"], "invoke": [str(fake_bin), "-p", "{prompt}"]},
+        )
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        original = "".join(f"- lesson {i}\n" for i in range(181)).encode("utf-8")
+        (workdir / "LESSONS.md").write_bytes(original)
+        home = resident_mod.resident_home(workdir, "ares")
+        try:
+            assert r4t_main([
+                "engine", "claude", "run", "--resident", "--timeout", "1",
+                "--dir", str(workdir), "--agent", "ares",
+                *([] if scaffold else ["--no-scaffold"]), "first",
+            ]) == 0
+            _wait_until(lambda: len(_turns(record_file)) >= 1)
+            first = _turns(record_file)[0]
+            _wait_until(
+                lambda: resident_mod.read_live_pid(home) is None
+                and len(_turns(record_file)) >= (2 if scaffold else 1),
+                timeout=20.0,
+            )
+            copies = list((workdir / "archive").glob("LESSONS-*.md"))
+            if scaffold:
+                assert "Consolidate " in first
+                [copy] = copies
+                assert copy.read_bytes() == original
+                assert str(copy) in first
+            else:
+                assert "Consolidate" not in first
+                assert copies == []
+            assert (workdir / "LESSONS.md").read_bytes().startswith(original)
+        finally:
+            _stop(workdir, "ares")
 
     def test_message_during_wrapup_waits_for_the_next_session_never_a_second_engine(
         self, monkeypatch, tmp_path

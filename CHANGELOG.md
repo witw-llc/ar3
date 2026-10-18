@@ -10,6 +10,36 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.108 — 2026-10-17
+
+### Added
+
+- **`r4t engine devin quota` reports Devin's daily and weekly allowance.**
+  It reads the same `/usage` view the Devin CLI shows, with no turn spent and
+  no session left behind. macOS and Linux only.
+
+### Changed
+
+- **An engine agent answers by message.** `r4t engine <id> run --agent NAME`
+  now starts the way a roster turn does: its startup tells the agent that a
+  reply is a message or nothing, because nobody reads the session's own output. `claude`,
+  `codex`, `copilot`, `ollama-claude` and `ollama-codex` get the `a8s_tell`
+  tool for the turn; the other engines are taught the `tell` command. A
+  resident session starts from the same prompt and keeps running.
+- **The agent keeps its own lessons short.** When `LESSONS.md` passes 90% of
+  its cap (200 lines or 35 KB), the startup asks the agent to consolidate it
+  to 75% before it answers any message: one lesson per line, with no sections
+  or tiers. A `LESSONS-ARCHIVE.md` left from earlier releases is named with
+  its line count, and the agent folds it in and deletes it. r4t saves a copy
+  of both files under `archive/` first, so no lesson is lost.
+
+### Removed
+
+- **`LESSONS.md` no longer rotates.** r4t stops moving old lessons to
+  `LESSONS-ARCHIVE.md`, and the once-a-day idle fold is gone; the startup
+  consolidation replaces both. The `<!-- rotate-below -->` marker has no
+  effect.
+
 ## 0.1.107 — 2026-10-16
 
 ### Added
