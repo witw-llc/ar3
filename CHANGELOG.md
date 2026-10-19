@@ -10,6 +10,24 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.111 — 2026-10-19
+
+### Added
+
+- A read-only field sync for k7e's memory evaluation
+  (`apps/k7e/tests/eval/field/sync.py`): it copies each field agent's a8s
+  conversation rows and engine-memory turn captures off its machine into a
+  local corpus, incrementally by cursor, stamps every pull with the agent's
+  MEMORY setting and verifies both ends' counts, so memory-on and memory-off
+  periods compare on real turns. Only read commands run on the far end.
+
+### Fixed
+
+- On Windows, `a8s start` detaches the node from the console that started
+  it. Ctrl+C out of `a8s logs -f` in that console ended the node too, because
+  a console's Ctrl+C reaches every process attached to it; the node now leaves
+  the console at start, and `a8s stop` still ends it (#338).
+
 ## 0.1.110 — 2026-10-19
 
 Carries 0.1.109 to the public mirror: that release run stopped in the suites

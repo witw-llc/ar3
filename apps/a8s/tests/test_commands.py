@@ -811,6 +811,38 @@ class TestSeveralNames:
         assert cmd_start([]) == 2
         assert "usage: a8s start <name> [<name> ...]" in capsys.readouterr().err
 
+    @staticmethod
+    def _spawn_kwargs(monkeypatch) -> list[dict]:
+        seen: list[dict] = []
+
+        class FakeProc:
+            pid = 1000
+
+        def popen(cmd, **kwargs):
+            seen.append(kwargs)
+            return FakeProc()
+
+        monkeypatch.setattr("commands.subprocess.Popen", popen)
+        return seen
+
+    def test_start_puts_the_node_in_its_own_session_on_posix(self, three, monkeypatch):
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
+        seen = self._spawn_kwargs(monkeypatch)
+        assert cmd_start(["a1"]) == 0
+        assert seen[0]["start_new_session"] is True
+        assert "creationflags" not in seen[0]
+
+    def test_start_detaches_the_node_from_the_console_on_windows(self, three, monkeypatch):
+        # Windows ignores start_new_session; a console's Ctrl+C reaches every
+        # process attached to it, so the node must leave the console outright.
+        monkeypatch.setattr("commands.IS_WINDOWS", True)
+        monkeypatch.setattr("commands.subprocess.DETACHED_PROCESS", 0x8, raising=False)
+        monkeypatch.setattr("commands.subprocess.CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+        seen = self._spawn_kwargs(monkeypatch)
+        assert cmd_start(["a1"]) == 0
+        assert seen[0]["creationflags"] == 0x8 | 0x200
+        assert "start_new_session" not in seen[0]
+
     def test_stop_takes_several_names(self, three, monkeypatch, capsys):
         stopped: list[tuple[str, bool]] = []
 

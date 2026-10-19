@@ -50,6 +50,7 @@ from core import (
     wake_pid_path,
 )
 from definitions import (
+    IS_WINDOWS,
     MAILBOX_PATH_FIELDS,
     _autodiscover_definition,
     argv_vars,
@@ -1403,6 +1404,17 @@ def cmd_start(args: list[str]) -> int:
     return _each_name(args, _start_one)
 
 
+def _detached_spawn_flags() -> dict:
+    """A node outlives the console that started it. On POSIX a new session
+    takes it out of the terminal's process group. On Windows, where
+    `start_new_session` is ignored, a console's Ctrl+C reaches every process
+    attached to it, so a node left attached ends with the operator's Ctrl+C
+    out of `a8s logs -f` in that console."""
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def _start_one(name: str) -> int:
     # Validate (resolve_name raises if unknown / cycle).
     try:
@@ -1427,7 +1439,7 @@ def _start_one(name: str) -> int:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **_detached_spawn_flags(),
     )
     if len(members) == 1:
         print(f"started {members[0]} as PID {proc.pid}")
