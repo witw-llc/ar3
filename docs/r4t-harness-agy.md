@@ -128,8 +128,11 @@ permissions wholesale instead.
 
 ## Quota notes
 
-agy shares the owner's real subscription across **two quotas** — a larger
-Gemini quota and a smaller Anthropic (Claude models) quota. The model list is
+agy shares the owner's real subscription across **two shared quotas** — a
+larger Gemini quota and a smaller Anthropic (Claude models) quota — each with
+a weekly and a five-hour limit, and on a paid plan a separate **Gemini 4
+Argon** weekly quota. `r4t engine agy quota` prints every pool under its own
+name. The model list is
 **live**: `agy models` display names drift across releases, so r4t stores the
 friendly `--model` string and re-resolves it against `agy models` before every
 turn (`resolve_agy_model` in `rig.py`). `agy models` prints each model as

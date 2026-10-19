@@ -32,6 +32,7 @@ from pathlib import Path
 from ar3.home import app_home
 from ar3.fsio import atomic_write_text
 from ar3.locking import file_lock
+from ar3.proc import terminate_group
 
 
 def _k7e_home():
@@ -189,7 +190,7 @@ def _days_since(date_str):
         t = time.strptime(str(date_str)[:10], "%Y-%m-%d")
     except (ValueError, TypeError):
         return None
-    return max(0.0, (time.time() - time.mktime(t)) / 86400.0)
+    return max(0.0, (now().timestamp() - time.mktime(t)) / 86400.0)
 
 
 def _recency_factor(last_used_at, last_updated, offset, scale):
@@ -221,7 +222,7 @@ def _bump_usage(node_ids):
     Index-only signal; reset on reindex (re-earns ranking from usage)."""
     if not node_ids:
         return
-    now = time.strftime("%Y-%m-%d")
+    now = today()
     conn = _connect()
     for nid in node_ids:
         conn.execute(
@@ -408,7 +409,7 @@ def store_entry(title, content, tags=None, aliases=None, importance=5,
                 return meta.get("id", path.stem)
 
     node_id = next_id()
-    now = time.strftime("%Y-%m-%d")
+    now = today()
     confidence = round(importance / 10, 1)
 
     body = f"""---
@@ -465,7 +466,7 @@ def append_entry(node_id, section, content, source=None, sources=None, source_re
             f"Node {node_id} is {status}; appending to it would put a retired "
             "claim back in front of what replaced it"
         )
-    now = time.strftime("%Y-%m-%d")
+    now = today()
 
     section_header = f"## {section}"
     if section_header in text:
@@ -548,21 +549,41 @@ def _hit_is_active(hit):
 def is_current(meta):
     """False once an entry's `valid_to` day has passed."""
     valid_to = str(meta.get("valid_to") or "")
-    return not valid_to or valid_to >= time.strftime("%Y-%m-%d")
+    return not valid_to or valid_to >= today()
 
 
 def _current_sql(table):
     """`is_current` in SQL, so an expired row never takes a rank in a search
     track: filtered only after the fused list is cut, expired entries pushed
     current ones out of a small limit."""
-    return f"({table}.valid_to = '' OR {table}.valid_to >= '{time.strftime('%Y-%m-%d')}')"
+    return f"({table}.valid_to = '' OR {table}.valid_to >= '{today()}')"
 
 
 _STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
+def now():
+    """The current UTC time. `K7E_NOW` (a UTC stamp ending in `Z`) replaces the
+    wall clock, so a run can fast-forward through simulated days, across a
+    subprocess boundary too."""
+    pinned = os.environ.get("K7E_NOW", "").strip()
+    if pinned:
+        if not pinned.endswith("Z"):
+            raise ValueError(f"K7E_NOW must be a UTC stamp ending in Z: {pinned!r}")
+        try:
+            return datetime.datetime.strptime(pinned, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            raise ValueError(f"K7E_NOW must look like 2026-10-19T23:59:59Z: {pinned!r}") from None
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 def utc_now():
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today():
+    """The current local day, `YYYY-MM-DD`."""
+    return now().astimezone().strftime("%Y-%m-%d")
 
 
 def utc_stamp(value):
@@ -832,7 +853,7 @@ def _fill_index(conn, embeddings=False):
         title = meta.get("title", "")
         aliases = meta.get("aliases", [])
         tags = meta.get("tags", [])
-        now = meta.get("last_updated", time.strftime("%Y-%m-%d"))
+        now = meta.get("last_updated", today())
         content_hash = meta.get("record_hash", hashlib.sha256(body.encode()).hexdigest()[:16])
 
         conn.execute(
@@ -1220,23 +1241,40 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
 
     try:
         cmd = llm_argv(cmd_str)
-        result = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=timeout,
+        # The command is a harness that forks the model as a grandchild
+        # (`ollama launch opencode ...`), so a timeout has to end the whole
+        # group: `subprocess.run` kills only the child it started and left
+        # the model running for minutes after k7e had given up. POSIX only:
+        # on Windows the foundation ends the harness alone, and the bounded
+        # reap below is what keeps a surviving model from holding this call.
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
             # The model's output is UTF-8; without this, Windows decodes it
             # through the ANSI code page.
             encoding="utf-8", errors="replace",
             cwd=str(config._k7e_home()),
+            start_new_session=(os.name == "posix"),
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return _strip_ansi(result.stdout).strip()
-        if result.returncode != 0:
-            first = (result.stderr.strip().splitlines() or [""])[0]
+        try:
+            stdout, stderr = proc.communicate(prompt, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            terminate_group(proc)
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        if proc.returncode == 0 and stdout.strip():
+            return _strip_ansi(stdout).strip()
+        if proc.returncode != 0:
+            first = (stderr.strip().splitlines() or [""])[0]
             _note_llm_failure(
-                purpose, f"exit {result.returncode}{f' ({first})' if first else ''}"
+                purpose, f"exit {proc.returncode}{f' ({first})' if first else ''}"
             )
-            print(f"  [llm:{purpose}] exit {result.returncode}", file=sys.stderr)
-            if result.stderr.strip():
-                print(f"  [llm:{purpose}] {result.stderr.strip()}", file=sys.stderr)
+            print(f"  [llm:{purpose}] exit {proc.returncode}", file=sys.stderr)
+            if stderr.strip():
+                print(f"  [llm:{purpose}] {stderr.strip()}", file=sys.stderr)
         else:
             # Exit 0 with nothing on stdout. A harness that dies after printing
             # its own error to stdout still exits 0 on some CLIs, so this is a
@@ -1631,7 +1669,7 @@ def compile_tag(tag, dry_run=False):
     entries = entries[:COMPILE_MAX_ENTRIES]
 
     entry_texts = "\n\n---\n\n".join(
-        f"[Entry {e['id']}] {e['title']}\n{e['content']}" for e in entries
+        f"[Entry {e['id']}, {e['valid_from'][:10] or 'undated'}] {e['title']}\n{e['content']}" for e in entries
     )
     prompt = (
         f"Synthesize these {len(entries)} knowledge entries about '{tag}' into a single "
@@ -1639,7 +1677,8 @@ def compile_tag(tag, dry_run=False):
         f"Procedures, Gotchas, Open Questions. Keep every durable detail — commands, "
         f"flags, ports, names, versions, rules. Drop task telemetry that no longer "
         f"matters: test counts for one change, PR or branch status, one-off command "
-        f"output. Where entries disagree, say so rather than choosing. Do not add "
+        f"output. Where entries disagree, state the value from the newest entry as current "
+        f"and name the earlier values as superseded, with their dates. Do not add "
         f"facts the entries do not state. Cite source entry IDs.\n\n{entry_texts}"
     )
 
@@ -1675,7 +1714,7 @@ def compile_tag(tag, dry_run=False):
     valid_from = max((e["valid_from"] for e in entries if e["valid_from"]), default="") or utc_now()
     with write_lock():
         node_id = next_id()
-        now = time.strftime("%Y-%m-%d")
+        now = today()
         body = f"""---
 id: {node_id}
 title: {title}
@@ -1726,14 +1765,15 @@ def compile_due(min_entries=COMPILE_DUE_ENTRIES, every_hours=COMPILE_DUE_HOURS):
     spend every sweep's budget on itself, or hold every other tag back."""
     init()
     mark = NODES_DIR.parent / ".compile-due"
+    last_failed = None
     try:
-        if time.time() - mark.stat().st_mtime < every_hours * 3600:
+        record = json.loads(mark.read_text(encoding="utf-8"))
+        last_failed = record.get("failed")
+        last_pass = datetime.datetime.strptime(record["at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        if (now() - last_pass).total_seconds() < every_hours * 3600:
             return "not-due", None
-        last_failed = json.loads(mark.read_text(encoding="utf-8")).get("failed")
-    except FileNotFoundError:
-        last_failed = None
-    except (OSError, ValueError, AttributeError):
-        last_failed = None
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        pass
     conn = _connect()
     rows = conn.execute(
         "SELECT tags FROM nodes WHERE status = 'active' AND kind = '' AND valid_to = ''"
@@ -1748,7 +1788,7 @@ def compile_due(min_entries=COMPILE_DUE_ENTRIES, every_hours=COMPILE_DUE_HOURS):
             counts[t] = counts.get(t, 0) + 1
     ready = sorted((t for t in counts if counts[t] >= min_entries and t != last_failed),
                    key=lambda t: (-counts[t], t))
-    stamp = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+    stamp = utc_now()
     atomic_write_text(mark, json.dumps({"at": stamp, "tag": ready[0] if ready else None}) + "\n")
     if not ready:
         return "nothing", None
@@ -2094,7 +2134,7 @@ def process_pending_embeddings():
     eligible = {row[0] for row in conn.execute("SELECT id FROM nodes WHERE status = 'active' AND kind = ''")}
     conn.execute("DELETE FROM pending_embeddings WHERE node_id NOT IN "
                  "(SELECT id FROM nodes WHERE status = 'active' AND kind = '')")
-    now = time.strftime("%Y-%m-%d")
+    now = today()
     conn.executemany("INSERT OR IGNORE INTO pending_embeddings (node_id, queued_at) VALUES (?, ?)",
                      ((node_id, now) for node_id in eligible - valid))
     conn.executemany("DELETE FROM pending_embeddings WHERE node_id = ?", ((node_id,) for node_id in valid))
@@ -2139,7 +2179,7 @@ def process_pending_embeddings():
         # Do not hold earlier cache writes open during the provider request.
         conn.commit()
         vec = embed_text(embedding_input) if selected else None
-        now = time.strftime("%Y-%m-%d")
+        now = today()
         saved = _save_embedding(conn, node_id, embedding_input, vec, selected, now)
         if saved:
             conn.execute("DELETE FROM pending_embeddings WHERE node_id = ?", (node_id,))

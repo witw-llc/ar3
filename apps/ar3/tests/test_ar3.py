@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import shutil
 import subprocess
 
 import pytest
@@ -525,10 +527,145 @@ def test_update_refuses_when_git_will_not_report_status(tmp_path, monkeypatch):
 
 
 def test_update_refuses_a_dirty_tree(tmp_path, monkeypatch):
-    root = _checkout(tmp_path, monkeypatch, status=" M VERSION")
+    # `_git_out` strips, so the first line arrives without the column-X space
+    # an unstaged change leaves; the second keeps it.
+    root = _checkout(tmp_path, monkeypatch, status="M VERSION\n M docs/ar3.md")
     refusal = ar3.update_refusal(root)
     assert refusal is not None
     assert "uncommitted changes" in refusal
+    # It names what it found, or the operator is left to guess what git saw.
+    assert "(VERSION, docs/ar3.md)" in refusal
+
+
+def test_update_asks_git_only_about_tracked_files(tmp_path, monkeypatch):
+    # A state file some tool dropped beside the install is not work in
+    # progress, and git itself refuses a pull that would land on an untracked
+    # path. Asking about untracked files refused every update on an install
+    # where a8s had left its conversation archive.
+    root = _checkout(tmp_path, monkeypatch)
+    asked = []
+    modeled = ar3._git_out
+
+    def git(_root, *args):
+        asked.append(args)
+        return modeled(_root, *args)
+
+    monkeypatch.setattr(ar3, "_git_out", git)
+    assert ar3.update_refusal(root) is None
+    status = next(args for args in asked if args[0] == "status")
+    assert "--untracked-files=no" in status
+
+
+_REAL_RUN = subprocess.run
+
+
+def _git(root, *args):
+    return _REAL_RUN(
+        ["git", "-C", str(root), *args], capture_output=True, text=True, check=True
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_update_clears_a_real_checkout_with_an_untracked_file(tmp_path, monkeypatch):
+    # The contract against real git, which the modeled seam cannot carry: an
+    # untracked file clears, a modified tracked file refuses and is named
+    # (git's porcelain line for it starts with a space `_git_out` strips).
+    monkeypatch.setattr(ar3.subprocess, "run", _REAL_RUN)
+    root = tmp_path / "install"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "ar3-tests@example.invalid")
+    _git(root, "config", "user.name", "ar3 tests")
+    (root / "VERSION").write_text("0.1.0\n")
+    _git(root, "add", "VERSION")
+    _git(root, "commit", "-q", "-m", "install")
+    (root / "conversations.sqlite3").write_bytes(b"")
+    assert ar3.update_refusal(root) is None
+    (root / "VERSION").write_text("0.1.1\n")
+    refusal = ar3.update_refusal(root)
+    assert refusal is not None
+    assert "uncommitted changes (VERSION)" in refusal
+    assert "conversations.sqlite3" not in refusal
+
+
+_GET_SH = pathlib.Path(__file__).resolve().parents[3] / "get.sh"
+
+
+def _installer_remote(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _git(remote, "init", "-q", "-b", "main")
+    _git(remote, "config", "user.email", "ar3-tests@example.invalid")
+    _git(remote, "config", "user.name", "ar3 tests")
+    (remote / "VERSION").write_text("0.0.1\n")
+    _git(remote, "add", "VERSION")
+    _git(remote, "commit", "-q", "-m", "first")
+    _git(remote, "tag", "v0.0.1")
+    (remote / "new-command").write_text("UPSTREAM\n")
+    (remote / "VERSION").write_text("0.0.2\n")
+    _git(remote, "add", "new-command", "VERSION")
+    _git(remote, "commit", "-q", "-m", "second")
+    _git(remote, "tag", "v0.0.2")
+    return remote
+
+
+def _run_install_git(tmp_path, remote, install, version):
+    text = _GET_SH.read_text()
+    body = text.split("_install_git() {", 1)[1].split("\n_install_tarball()", 1)[0]
+    script = tmp_path / "install-git.sh"
+    script.write_text("set -eu\nAR3_CHANGED=0\n_install_git() {" + body + "\n_install_git\n")
+    env = {
+        **os.environ,
+        "AR3_DIR": str(install),
+        "AR3_REPO": remote.as_uri(),
+        "AR3_VERSION": version,
+    }
+    return _REAL_RUN(["sh", str(script)], env=env, capture_output=True, text=True)
+
+
+def _installed_at_v1(tmp_path, remote, shallow):
+    install = tmp_path / "install"
+    args = ["--depth", "1"] if shallow else []
+    _REAL_RUN(
+        ["git", "clone", "-q", *args, "--branch", "v0.0.1", remote.as_uri(), str(install)],
+        check=True,
+        capture_output=True,
+    )
+    return install
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("version", ["v0.0.2", ""])
+@pytest.mark.parametrize("shallow", [True, False])
+def test_installer_checkout_refuses_an_untracked_file_the_release_ships(
+    tmp_path, version, shallow
+):
+    remote = _installer_remote(tmp_path)
+    install = _installed_at_v1(tmp_path, remote, shallow)
+    (install / "new-command").write_bytes(b"LOCAL WORK\n")
+    (install / "state.sqlite3").write_bytes(b"STATE\n")
+    run = _run_install_git(tmp_path, remote, install, version)
+    assert run.returncode != 0
+    assert "new-command" in run.stderr
+    assert (install / "new-command").read_bytes() == b"LOCAL WORK\n"
+    assert (install / "state.sqlite3").read_bytes() == b"STATE\n"
+    assert (install / "VERSION").read_text() == "0.0.1\n"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("version", ["v0.0.2", ""])
+@pytest.mark.parametrize("shallow", [True, False])
+def test_installer_checkout_proceeds_past_a_noncolliding_untracked_file(
+    tmp_path, version, shallow
+):
+    remote = _installer_remote(tmp_path)
+    install = _installed_at_v1(tmp_path, remote, shallow)
+    (install / "state.sqlite3").write_bytes(b"STATE\n")
+    run = _run_install_git(tmp_path, remote, install, version)
+    assert run.returncode == 0, run.stderr
+    assert (install / "new-command").read_text() == "UPSTREAM\n"
+    assert (install / "VERSION").read_text() == "0.0.2\n"
+    assert (install / "state.sqlite3").read_bytes() == b"STATE\n"
 
 
 def test_update_refuses_a_working_branch(tmp_path, monkeypatch):

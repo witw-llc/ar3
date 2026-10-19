@@ -94,9 +94,9 @@ a8s ls
 
 # See just the running node processes.
 a8s ps
-#   NAME     PID     UPTIME   ROOT
-#   CLAUDE   12345   2h       /Users/me/projects/code-review
-#   GEMINI   12345   2h       /Users/me/projects/research
+#   NAME     PID     UPTIME   STATUS   DEFINITION   IN 24H   LAST SENT              ROOT
+#   CLAUDE   12345   2h       ok       claude       3        2026-10-19 11:32 PDT   /Users/me/projects/code-review
+#   GEMINI   12345   2h       ok       agy          0        -                      /Users/me/projects/research
 
 # Send messages. Woken agents get `TELL_OUTBOX_DIR` from a8s. Manual / desktop
 # tell uses that env var, or a unique CWD-matched configured outbox
@@ -216,7 +216,7 @@ any prefixes pointing at it.
 | `a8s update [--force]` | Run conversation housekeeping, then restart every running node so handlers re-exec current on-disk a8s (handy after `git pull`). Alias co-handlers that match an alias are restarted as one process. No code fetch yet — that comes with standalone releases. |
 | `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
-| `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, STATUS, MSGS 24H, LAST MSG, ROOT. STATUS is `ok` when the node wakes on its next pass and `busy` while a wake runs, followed by `, 2 dead letter(s) in 24 h` when wakes failed in the last 24 hours. MSGS 24H counts the messages that landed in the node's inbox in the last 24 hours (read from `transactions.sqlite3`), and LAST MSG is the local time of the newest one, however old; `-` means none is recorded. `-q` prints just names. Empty state hints at `a8s ls`. |
+| `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, STATUS, DEFINITION, IN 24H, LAST SENT, ROOT. STATUS is `ok` when the node wakes on its next pass and `busy` while a wake runs, followed by `, 2 dead letter(s) in 24 h` when wakes failed in the last 24 hours. DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts the messages that landed in the node's inbox in the last 24 hours (read from `transactions.sqlite3`). LAST SENT is the local time of the last message the node itself wrote, however old, whether or not it was delivered: the column that says when the agent was last responsive; `-` means it has never sent one. `-q` prints just names. Empty state hints at `a8s ls`. |
 
 A node told to stop by a signal writes the signal and the parent it found into its log and into `RUN_STOP` (`a8s tx --event RUN_STOP`), e.g. `stop-signal SIGTERM (15) from ppid 1 (systemd)` for a host shutdown. A handler that `a8s stop --force` had to kill writes no `RUN_STOP` of its own, so the stop writes one with the detail `killed by a8s stop --force`.
 

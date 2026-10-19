@@ -418,6 +418,29 @@ def inbox_activity(since: str) -> dict[str, tuple[int, str]]:
     return {name: (int(count), newest) for name, count, newest in rows}
 
 
+# The events the router logs while taking a message out of a node's own
+# outbox: picked up, delivered locally, published, published without an
+# answer, or dropped. Any of them proves the node wrote a message then.
+_SENT_EVENTS = ("ENQUEUED", "ROUTED", "PUBLISHED", "PUBLISH_AMBIGUOUS", "DROPPED")
+
+
+def last_sent() -> dict[str, str]:
+    """`{lowercased sender: newest stamp}` of the last message the router took
+    from each node's outbox, over the whole log: when the node last spoke,
+    whether or not anything was delivered."""
+    marks = ",".join("?" * len(_SENT_EVENTS))
+    try:
+        with closing(open_for_read()) as conn:
+            rows = conn.execute(
+                f"SELECT LOWER(sender), MAX(timestamp) FROM transactions "
+                f"WHERE event IN ({marks}) AND sender != '' GROUP BY LOWER(sender)",
+                _SENT_EVENTS,
+            ).fetchall()
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
+    return {name: newest for name, newest in rows}
+
+
 def count_by_remote(event: str, since: str) -> dict[str, int]:
     """`{remote: rows}` of one event at or after `since`, a stamp in the
     log's own form (`2026-10-05T12:00:00.000Z`). Rows with no remote are not

@@ -102,16 +102,15 @@ class TestPsActivity:
         _seed("ROUTED", "beta", "01E", age_hours=1)
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[4] == "3"
-        assert _row(out, "beta")[4] == "1"
+        assert _row(out, "alpha")[5] == "3"
+        assert _row(out, "beta")[5] == "1"
 
     def test_only_a_landing_counts(self, node, capsys):
         for event in ("ENQUEUED", "WAKE_START", "WAKE_RETURN", "PROXY_DELIVERED", "NOT_LOCAL"):
             _seed(event, "alpha", "01A")
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[4] == "0"
-        assert _row(out, "alpha")[5] == "-"
+        assert _row(out, "alpha")[5] == "0"
 
     def test_the_last_message_is_local_time_with_its_zone(self, node, capsys, zone):
         zone("America/Los_Angeles")
@@ -120,17 +119,47 @@ class TestPsActivity:
         _seed("ROUTED", "alpha", "01B", age_hours=1)
         with sqlite3.connect(transactions_path()) as conn:
             conn.execute("UPDATE transactions SET timestamp = ? WHERE msg_id = '01B'", (txlog_stamp,))
+        txlog.log("ROUTED", msg_id="01C", sender="alpha", recipient="beta")
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("UPDATE transactions SET timestamp = ? WHERE msg_id = '01C'", (txlog_stamp,))
         cmd_ps([])
         out = capsys.readouterr().out
-        assert "2026-07-01 05:00 PDT" in out
-        # An old newest message still shows when the node last heard.
-        assert _row(out, "alpha")[4] == "0"
+        assert _row(out, "alpha")[6:8] == ["2026-07-01", "05:00"] or "2026-07-01 05:00 PDT" in out
+        # An old newest message still shows when the node last spoke.
+        assert _row(out, "alpha")[5] == "0"
 
     def test_no_log_reads_as_nothing(self, node, capsys):
         assert not transactions_path().exists()
         assert cmd_ps([]) == 0
         row = _row(capsys.readouterr().out, "alpha")
-        assert row[4] == "0" and row[5] == "-"
+        assert row[5] == "0" and row[6] == "-"
+
+    def test_last_sent_is_the_nodes_own_newest_outbox_event(self, node, capsys, zone):
+        zone("UTC")
+        # Mail landing for alpha never moves LAST SENT; what alpha wrote does,
+        # whether it was delivered, published, or dropped.
+        _seed("ROUTED", "alpha", "01A", age_hours=1)
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[6] == "-"
+        for event, msg_id in (("ENQUEUED", "01B"), ("DROPPED", "01C"), ("PUBLISHED", "01D")):
+            txlog.log(event, msg_id=msg_id, sender="Alpha", recipient="beta")
+        stamp = "2026-07-02T09:30:00.000Z"
+        with sqlite3.connect(transactions_path()) as conn:
+            conn.execute("UPDATE transactions SET timestamp = ? WHERE msg_id = '01D'", (stamp,))
+            conn.execute("UPDATE transactions SET timestamp = '2026-07-01T00:00:00.000Z' WHERE msg_id IN ('01B', '01C')")
+        cmd_ps([])
+        out = capsys.readouterr().out
+        assert "2026-07-02 09:30 UTC" in out
+        assert _row(out, "beta")[6] == "-"
+
+    def test_definition_comes_from_the_registry(self, node, capsys):
+        reg = {"alpha": {"root": str(inbox_dir("alpha").parent), "definition": "claude"},
+               "beta": {"root": str(inbox_dir("beta").parent)}}
+        save_registry(reg)
+        cmd_ps([])
+        out = capsys.readouterr().out
+        assert _row(out, "alpha")[4] == "claude"
+        assert _row(out, "beta")[4] == "default"
 
 
 @pytest.fixture

@@ -153,6 +153,28 @@ class TestModelSelectsTheBuckets:
         assert engines.fuel("claude", "claude-opus-5")["fuel"] == pytest.approx(0.2)
         assert engines.fuel("claude", "fable")["state"] == "unconstrained"
 
+    def test_a_line_metered_apart_constrains_only_its_own_models(self, answers):
+        # agy 1.4.0 on a paid plan: Argon is a separate pool whose label also
+        # names Gemini. A low Argon pool must not drain every Gemini model.
+        answers(
+            "agy",
+            payload={
+                "origin": "live",
+                "plan": "Pro",
+                "buckets": [
+                    {"label": "Gemini Weekly Limit", "remaining_fraction": 0.8, "reset_time": None},
+                    {"label": "Gemini 4 Argon Weekly Limit", "remaining_fraction": 0.2, "reset_time": None},
+                ],
+                "note": None,
+            }
+        )
+        gemini = engines.fuel("agy", "gemini-3.1-pro")
+        assert gemini["fuel"] == pytest.approx(0.8)
+        assert [b["label"] for b in gemini["buckets"]] == ["Gemini Weekly Limit"]
+        argon = engines.fuel("agy", "gemini-4-argon")
+        assert argon["fuel"] == pytest.approx(0.2)
+        assert argon["binding_label"] == "Gemini 4 Argon Weekly Limit"
+
     def test_an_unpinned_rig_counts_only_the_unscoped_buckets(self):
         report = engines.fuel("claude", None)
         assert report["model"] is None

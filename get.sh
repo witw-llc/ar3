@@ -211,7 +211,7 @@ _install_git() {
     before="$(git -C "$AR3_DIR" rev-parse HEAD)"
     if [ -n "$AR3_VERSION" ]; then
       git -C "$AR3_DIR" fetch --depth 1 origin tag "$AR3_VERSION"
-      git -C "$AR3_DIR" checkout -f "$AR3_VERSION"
+      git -C "$AR3_DIR" checkout "$AR3_VERSION"
     elif git -C "$AR3_DIR" symbolic-ref -q HEAD >/dev/null 2>&1; then
       git -C "$AR3_DIR" pull --ff-only
     else
@@ -223,7 +223,7 @@ _install_git() {
       git -C "$AR3_DIR" config remote.origin.fetch \
         "+refs/heads/$branch:refs/remotes/origin/$branch"
       git -C "$AR3_DIR" fetch --depth 1 origin "$branch"
-      git -C "$AR3_DIR" checkout -f -B "$branch" "origin/$branch"
+      git -C "$AR3_DIR" checkout -B "$branch" "origin/$branch"
     fi
     after="$(git -C "$AR3_DIR" rev-parse HEAD)"
     [ "$before" = "$after" ] || AR3_CHANGED=1

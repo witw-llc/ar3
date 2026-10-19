@@ -202,9 +202,11 @@ runs. A claude rig on Opus reads `min(five-hour, weekly, weekly-Opus)`, and the
 same account's Fable rig reads `min(five-hour, weekly, weekly-Fable)` — two rigs
 on one subscription, two different numbers, and neither counts the other's
 weekly. A label may name more than one family, and then it counts for each of
-them. An `agy` rig reads the pool its model belongs to. An `ollama` rig reads
-1.00, because a local model has no cloud tank to empty. The mapping is one
-table, `SCOPED_BUCKETS` in `apps/r4t/engines/__init__.py`, beside the bucket
+them, except a line metered apart from its family: the Gemini 4 Argon pool
+names Gemini too, and it counts for Argon models alone. An `agy` rig reads
+the pool its model belongs to. An `ollama` rig reads 1.00, because a local
+model has no cloud tank to empty. The mapping is one table, `SCOPED_BUCKETS`
+with `SEPARATE_LINES` in `apps/r4t/engines/__init__.py`, beside the bucket
 shape it selects over.
 
 **A rig that pins no model** counts only the unscoped buckets, and its JSON

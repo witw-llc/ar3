@@ -151,12 +151,17 @@ an explicitly named engine that is not installed, fails the run after the
 rest have been tried.
 
 **It refuses on a working checkout.** `get.sh` reaches the tree with
-`git pull --ff-only`, and on a pinned version `git checkout -f`. Run against a
+`git pull --ff-only`, and on a pinned version `git checkout`. Run against a
 clone somebody is developing in, that ranges from a confusing failure to
 discarded work, and nothing printed afterwards undoes it. So an uncommitted
-change, or a branch that is not the remote's default, stops the update before
-it starts and says which it found. A detached HEAD does not: that is what an
-`AR3_VERSION` pin leaves behind, and `get.sh` rejoins the branch itself.
+change to a tracked file, or a branch that is not the remote's default, stops
+the update before it starts and says which it found, naming the paths. A
+detached HEAD does not: that is what an `AR3_VERSION` pin leaves behind, and
+`get.sh` rejoins the branch itself. An untracked file does not either: a state
+file some tool left beside the install is not work in progress, and git stops
+a pull or a checkout by itself, naming the path, when an incoming file would
+land on one. The installer never forces a checkout, so that stop holds on a
+pinned update too.
 
 ## What `ar3` is not
 

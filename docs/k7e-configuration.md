@@ -31,6 +31,11 @@ k7e status                # what's active + recommendations
 
 See [k7e-retrieval.md](k7e-retrieval.md#tuning) for what the ranking knobs do.
 
+`K7E_NOW` is not a key: set to a UTC stamp such as `2026-10-19T23:59:59Z`, it
+replaces the clock for every verb in that process, so a test or a lab run can
+step through days. Task expiry, ranking decay, the compile window and every
+written date follow it.
+
 ## LLM commands (stdin → stdout)
 
 k7e does **not** auto-detect LLMs and does **not** call ollama for generation.

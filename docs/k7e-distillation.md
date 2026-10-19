@@ -124,7 +124,11 @@ model call: each recalled entry goes in with those messages, and every entry
 they contradict or close comes back as the correction to store. The correction
 is stored and `supersede` points the stale entry at it, so the closure ranks
 and the retired claim leaves recall. Its `## History` line records the capture
-stamp and the sentence that decided it.
+stamp and the sentence that decided it. A correction never retires a compiled
+page: the page holds every fact folded into it, and retiring it for one would
+lose the rest. The correction is appended to the page, and the next compile
+folds it in; the compile prompt carries each source's date, so the page states
+which value is current and names the earlier ones as superseded.
 
 A candidate extracted from the same turn that restates a claim the turn
 retired is dropped, including the near-copy the ordinary pipeline would append

@@ -556,7 +556,7 @@ def update_refusal(root: Path) -> Optional[str]:
     """Why this tree must not be pulled forward, or None to proceed.
 
     `get.sh` reaches the installed tree with `git pull --ff-only` and, on a
-    pinned version, `git checkout -f`. Against a checkout somebody is working
+    pinned version, `git checkout`. Against a checkout somebody is working
     in, that ranges from a confusing failure to discarded work, and no message
     printed afterwards undoes it. The two states that mean "someone is working
     here" therefore stop the update before it starts rather than after.
@@ -572,6 +572,14 @@ def update_refusal(root: Path) -> Optional[str]:
     disowned `.git` and an unreadable one are indistinguishable from here, and
     one of them is a working checkout, so a present-but-unreadable `.git`
     stops the update instead of clearing it.
+
+    An untracked file is not a working state. A state file some tool dropped
+    beside the install (an a8s `conversations.sqlite3` on one Windows install)
+    would otherwise refuse every update from then on. Git already refuses,
+    naming the path, when an incoming file would land on an untracked one: a
+    pull does, and so do the installer's checkouts, which carry no force flag
+    for that reason. Only a tracked file's change counts, and the refusal names
+    the paths so the operator sees what git saw.
     """
     if not (root / ".git").exists():
         return None
@@ -583,7 +591,7 @@ def update_refusal(root: Path) -> Optional[str]:
             f"is a checkout somebody is working in, so this stops rather than "
             f"assume the unreadable case is the safe one."
         )
-    status = _git_out(root, "status", "--porcelain")
+    status = _git_out(root, "status", "--porcelain", "--untracked-files=no")
     if status is None:
         return (
             f"{root} is a git checkout whose status git would not report. "
@@ -591,10 +599,14 @@ def update_refusal(root: Path) -> Optional[str]:
             f"without first knowing whether work is in progress here."
         )
     if status:
+        # Porcelain lines are `XY path`; `_git_out` strips, so the first line
+        # may have lost the space that an unstaged change leaves in column X.
+        paths = [line.strip().split(None, 1)[-1] for line in status.splitlines()]
+        shown = ", ".join(paths[:5]) + (f", and {len(paths) - 5} more" if len(paths) > 5 else "")
         return (
-            f"{root} has uncommitted changes. Updating pulls this tree forward, "
-            f"which is not something to do over work in progress — commit or "
-            f"stash first, or point AR3_DIR at the install you meant."
+            f"{root} has uncommitted changes ({shown}). Updating pulls this tree "
+            f"forward, which is not something to do over work in progress — "
+            f"commit or stash first, or point AR3_DIR at the install you meant."
         )
     branch = _git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
     if branch is None:

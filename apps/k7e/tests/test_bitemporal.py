@@ -171,3 +171,21 @@ def test_a_slice_value_that_is_not_a_stamp_never_reaches_the_sql(store):
     import pytest
     with pytest.raises(ValueError):
         engine.search("widget", as_of="2026-01-01T00:00:00Z' OR '1'='1", valid_at="2026-01-01T00:00:00Z")
+
+
+def test_a_pinned_clock_moves_expiry_and_the_stamp(store, monkeypatch):
+    monkeypatch.setenv("K7E_NOW", "2031-03-04T20:06:07Z")
+    assert engine.utc_now() == "2031-03-04T20:06:07Z"
+    expired = engine.store_entry("Widget run", "The widget service run passed.", valid_to="2031-03-03")
+    live = engine.store_entry("Widget gate", "The widget gate rejects stale changelogs.", valid_to="2031-03-05")
+    ids = {h["id"] for h in engine.search("widget", limit=10)}
+    assert live in ids and expired not in ids
+    monkeypatch.setenv("K7E_NOW", "2031-03-07T12:00:00Z")
+    assert live not in {h["id"] for h in engine.search("widget", limit=10)}
+
+
+def test_a_pinned_clock_must_be_a_utc_stamp(monkeypatch):
+    monkeypatch.setenv("K7E_NOW", "2031-03-04")
+    import pytest
+    with pytest.raises(ValueError):
+        engine.now()

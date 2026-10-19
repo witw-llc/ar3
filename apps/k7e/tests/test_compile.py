@@ -1,8 +1,9 @@
 """A compile replaces the entries it folds, and a scheduled compile runs when due."""
-import os
+import json
 import time
 
 import cli
+import distill
 import engine
 
 
@@ -10,6 +11,14 @@ def llm(monkeypatch, calls=None, reply="Synthetic compiled reference about irrig
     calls = [] if calls is None else calls
     monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: calls.append(prompt) or reply)
     return calls
+
+
+def age_mark(store, hours):
+    """Move the last due pass `hours` into the past: the pass time lives in the mark's JSON."""
+    mark = store / ".compile-due"
+    record = json.loads(mark.read_text(encoding="utf-8"))
+    record["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+    mark.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
 
 def status(node_id):
@@ -88,8 +97,7 @@ def test_due_runs_again_after_the_interval(store, monkeypatch):
     llm(monkeypatch)
     entries("garden", 4)
     engine.compile_due()
-    old = time.time() - (engine.COMPILE_DUE_HOURS + 1) * 3600
-    os.utime(store / ".compile-due", (old, old))
+    age_mark(store, engine.COMPILE_DUE_HOURS + 1)
     entries("garden", 1, start=4)
     assert engine.compile_due()[0] == "compiled"
 
@@ -125,7 +133,7 @@ def test_a_task_entry_is_neither_folded_nor_counted(store, monkeypatch):
                               tags=["garden"], valid_to="2099-01-01")
     assert engine.compile_due() == ("nothing", None)
     entries("garden", 1, start=4)
-    os.utime(store / ".compile-due", (0, 0))
+    age_mark(store, engine.COMPILE_DUE_HOURS + 1)
     assert engine.compile_due()[0] == "compiled"
     assert task not in calls[-1] and status(task) == "active"
 
@@ -137,7 +145,7 @@ def test_after_a_failed_tag_the_next_pass_tries_another(store, monkeypatch):
     entries("garden", 6)
     entries("water", 5)
     assert engine.compile_due() == ("failed", None)
-    os.utime(store / ".compile-due", (0, 0))
+    age_mark(store, engine.COMPILE_DUE_HOURS + 1)
     assert engine.compile_due()[0] == "compiled"
     assert "'water'" in calls[-1]
 
@@ -165,3 +173,49 @@ def test_a_source_retired_during_the_model_call_keeps_its_successor(store, monke
     page = engine.compile_tag("garden")
     assert engine._parse_frontmatter(engine.get(sources[0]))["superseded_by"] == correction
     assert engine._parse_frontmatter(engine.get(sources[1]))["superseded_by"] == page
+
+
+def test_the_due_interval_runs_on_the_pinned_clock(store, monkeypatch):
+    llm(monkeypatch)
+    entries("garden", 4)
+    monkeypatch.setenv("K7E_NOW", "2026-01-01T00:00:00Z")
+    engine.compile_due()
+    entries("garden", 1, start=4)
+    monkeypatch.setenv("K7E_NOW", "2026-01-01T19:00:00Z")
+    assert engine.compile_due() == ("not-due", None)
+    monkeypatch.setenv("K7E_NOW", "2026-01-01T21:00:00Z")
+    assert engine.compile_due()[0] == "compiled"
+
+
+def test_the_compile_prompt_carries_each_sources_date(store, monkeypatch):
+    calls = llm(monkeypatch)
+    for day in ("2026-03-04", "2026-05-06", "2026-07-08"):
+        engine.store_entry(f"Synthetic garden rule {day}", f"Synthetic garden irrigation rule {day}.",
+                           tags=["garden"], valid_from=f"{day}T09:00:00Z")
+    engine.compile_tag("garden")
+    for day in ("2026-03-04", "2026-05-06", "2026-07-08"):
+        assert f", {day}] Synthetic garden rule {day}" in calls[0]
+    assert "superseded, with their dates" in calls[0]
+
+
+def test_a_correction_naming_a_compiled_page_does_not_retire_it(store, monkeypatch, tmp_path):
+    llm(monkeypatch)
+    entries("garden", 3)
+    page = engine.compile_tag("garden")
+    asked = []
+    correction = [{"id": page, "title": "Synthetic garden valve change",
+                   "content": "Synthetic garden valve moved to the north bed zebra.", "quote": "north bed"}]
+    monkeypatch.setenv("K7E_DISTILL_COMMAND", "synthetic-distill")
+    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: asked.append(prompt) or (
+        json.dumps(correction) if "## The recalled notes" in prompt else "[]"))
+    capture = tmp_path / "turn.md"
+    capture.write_text(
+        "# turn 20261014T163000000000Z (Synthetic)\n\n- stamp: 20261014T163000000000Z\n- exit: 0\n"
+        f"- knowledge: {page}\n\n## Human messages\n\n### From: owner (thread 01X)\n\n"
+        "The valve moved to the north bed.\n\n## Prompt\n\nPrompt text.\n\n## Output\n\nOk.\n",
+        encoding="utf-8")
+    distill.distill([str(capture)])
+    assert any("## The recalled notes" in p for p in asked)
+    assert status(page) == "active"
+    assert "north bed zebra" in engine.get(page)
+    assert page in [h["id"] for h in engine.search("garden valve zebra", limit=5)]

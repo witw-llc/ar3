@@ -279,7 +279,14 @@ SCOPED_BUCKETS = {
     "opus": ("opus",),
     "sonnet": ("sonnet",),
     "haiku": ("haiku",),
+    "argon": ("argon",),
 }
+
+# A line metered apart from its family. A bucket whose label names the line
+# ("Gemini 4 Argon Weekly Limit") is a dial only that line turns, even though
+# the label names the family too: on a paid plan Argon is a separate pool,
+# and reading it against every Gemini model empties tanks that are full.
+SEPARATE_LINES = ("argon",)
 
 
 def _constrains(bucket: dict, model: str | None) -> bool:
@@ -287,10 +294,14 @@ def _constrains(bucket: dict, model: str | None) -> bool:
     always does. A scoped one does when the model belongs to ANY family its
     label names — the label is server-supplied text, and one bucket may be
     shared ("Sonnet & Opus shared weekly"), so the scopes union rather than
-    the first one winning. A scoped bucket never constrains a rig that pins
+    the first one winning — except a line metered apart (`SEPARATE_LINES`),
+    whose bucket constrains that line alone. A scoped bucket never constrains a rig that pins
     no model, since counting a Fable weekly against a rig that may not be
     running Fable reports an empty tank that is not empty."""
     label = str(bucket.get("label", "")).lower()
+    lines = [line for line in SEPARATE_LINES if line in label]
+    if lines:
+        return bool(model) and any(line in model.lower() for line in lines)
     families = [
         token
         for scope, models in SCOPED_BUCKETS.items()

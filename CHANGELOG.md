@@ -10,6 +10,72 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.110 — 2026-10-19
+
+Carries 0.1.109 to the public mirror: that release run stopped in the suites
+job on a test race, so nothing was published.
+
+### Fixed
+
+- a8s's dual-cluster remote test read the receiving node's conversation
+  archive before the inbound row had landed; it now waits for the row on
+  both legs, as it already did for the first.
+
+## 0.1.109 — 2026-10-19
+
+### Added
+
+- **A 30-day consolidation lab** under `apps/k7e/tests/eval/chassis/`: a
+  scripted model, no network, steps a store through thirty days of turns and
+  reports retention, updates, expiry, poison, growth and whether a compile
+  changed any time slice.
+- **`K7E_NOW` sets k7e's clock.** A UTC stamp in that variable replaces the
+  wall clock for every verb, so a test or a lab run can step a store through
+  days: task expiry, ranking decay, the daily compile window and every written
+  date follow it. `compile --due` records when it last ran inside its mark
+  instead of reading the file's modification time.
+
+### Changed
+
+- **`a8s ps` says when a node last spoke, and what it runs.** The LAST MSG
+  column showed the newest message that *landed* in the node's inbox, which
+  says nothing about whether the agent answered. It is now LAST SENT: the
+  local time of the last message the node itself wrote, delivered or not.
+  MSGS 24H is IN 24H, still the count that landed, and a DEFINITION column
+  shows the node's definition as `a8s ls` does.
+- **The compile prompt dates its sources.** Each entry carries its
+  `valid_from` day, and the page states the newest value as current and names
+  the earlier ones as superseded, instead of only noting a disagreement.
+
+### Fixed
+
+- **A correction never retires a compiled page.** A person's correction that
+  contradicted a compiled page retired the whole page, and every fact folded
+  into it left recall with the one it contradicted: in a 30-day lab, two
+  corrections cost four of fourteen durable rules. The correction is now
+  appended to the page, which the next compile folds in.
+- **`r4t engine agy quota` names the Gemini 4 Argon pool.** The pool arrives
+  in a group of its own on a paid plan, and its row printed as a second
+  "Gemini Weekly Limit". A pool outside the two shared groups now keeps its
+  group's name, and `r4t rig fuel` charges the Argon pool to Argon models
+  alone instead of draining every Gemini model's tank with it.
+- **A k7e model call that times out ends the model too.** The configured
+  command is usually a harness that starts the model as its own child, and the
+  timeout killed only the harness, so a model kept running for minutes after
+  k7e had given up on it. On POSIX the call now runs in its own process group
+  and the timeout ends the group; on Windows the timeout still ends only the
+  harness, and the call gives up waiting on the model's pipes after five
+  seconds.
+- **`ar3 update` no longer refuses an install over an untracked file.** The
+  working-checkout guard asked git about untracked files too, so an install
+  where a tool had left a state file (a8s's `conversations.sqlite3`, on
+  Windows) refused every update as "uncommitted changes". Only a change to a
+  tracked file counts now, and the refusal names the paths it found.
+- **An update never overwrites an untracked local file that the new release
+  also ships.** The installer's pin and unpin checkouts forced past the
+  refusal and replaced such a file. They no longer force, so the update stops
+  and names the path.
+
 ## 0.1.108 — 2026-10-17
 
 ### Added

@@ -2,8 +2,10 @@
 
 Primary: `agy -p "/usage" --output-format json` (≥1.1.13) is a no-agent-turn
 machine answer — zero tokens, no persistent session or IDE required — whose
-`command.data.groups[].buckets[]` carries all FOUR pools with
-`remaining_fraction` and `reset_time`. Verified on 1.2.6.
+`command.data.groups[].buckets[]` carries every pool with
+`remaining_fraction` and `reset_time`: the four shared ones (Gemini and
+Claude/GPT, weekly and five-hour) and, on a paid plan, the Gemini 4 Argon
+weekly pool in a group of its own. Verified on 1.2.6 and 1.4.0.
 
 Fallback: a running Antigravity (IDE or a persistent `agy --continue`
 session) exposes a localhost Connect-RPC API; `GetUserStatus` carries one
@@ -107,7 +109,7 @@ def _usage_command() -> dict:
 
 
 def parse_usage_command(payload: dict) -> dict:
-    """The four pools out of the command envelope. `remaining_fraction` is
+    """Every pool out of the command envelope. `remaining_fraction` is
     already 0–1; `window` names weekly or 5h so the label does not have to
     guess from the bucket's display name."""
     command = payload.get("command")
@@ -122,9 +124,13 @@ def parse_usage_command(payload: dict) -> dict:
         if not isinstance(group, dict):
             continue
         name = str(group.get("name") or "").lower()
+        # The two shared groups are "Gemini Models" and "Claude and GPT
+        # models". A pool with its own group, "Gemini 4 Argon", keeps its own
+        # name: matched on "gemini" alone it became a second "Gemini Weekly
+        # Limit", indistinguishable from the real one.
         family = (
-            "Gemini" if "gemini" in name
-            else "Claude/GPT" if "claude" in name or "gpt" in name
+            "Gemini" if name.endswith("models") and "gemini" in name
+            else "Claude/GPT" if name.endswith("models") and ("claude" in name or "gpt" in name)
             else str(group.get("name") or "?")
         )
         for bucket in group.get("buckets") or []:
@@ -238,10 +244,12 @@ def parse_user_status(payload: dict) -> dict:
     pools: dict[str, dict] = {}
     for label, info in models:
         lower = label.lower()
-        if "gemini" in lower:
-            pool, bucket_label = "gemini", "Weekly Limit"
+        if "argon" in lower:
+            pool, bucket_label = "argon", "Gemini 4 Argon Weekly Limit"
+        elif "gemini" in lower:
+            pool, bucket_label = "gemini", "Gemini Weekly Limit"
         elif "claude" in lower or "gpt" in lower:
-            pool, bucket_label = "claude-gpt", "Five Hour Limit"
+            pool, bucket_label = "claude-gpt", "Claude/GPT Five Hour Limit"
         else:
             continue
         fraction = info.get("remainingFraction")
@@ -250,7 +258,7 @@ def parse_user_status(payload: dict) -> dict:
         current = pools.get(pool)
         if current is None or fraction < current["remaining_fraction"]:
             pools[pool] = {
-                "label": f"{'Gemini' if pool == 'gemini' else 'Claude/GPT'} {bucket_label}",
+                "label": bucket_label,
                 "remaining_fraction": float(fraction),
                 "reset_time": info.get("resetTime"),
             }
@@ -261,11 +269,11 @@ def parse_user_status(payload: dict) -> dict:
         "origin": "live",
         "plan": plan_info.get("planDisplayName") or plan_info.get("planName"),
         "buckets": list(pools.values()),
-        # Names the two pools that are missing rather than pointing at another
+        # Names the pools that are missing rather than pointing at another
         # tool to read them. A note that sends the reader somewhere else is
         # only useful if they can go there.
         "note": (
-            "two of four pools — the Gemini five-hour and Claude/GPT weekly "
+            "weekly pools only — the Gemini five-hour and Claude/GPT weekly "
             "limits are held by the vendor's cloud and are not readable locally"
         ),
     }

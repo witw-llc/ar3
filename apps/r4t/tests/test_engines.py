@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import json
+
 import pytest
 
 import engines
@@ -470,6 +472,25 @@ class TestAgyParse:
         # The pool reports its most-exhausted model.
         assert labels["Claude/GPT Five Hour Limit"]["remaining_fraction"] == pytest.approx(0.5)
 
+    def test_an_argon_model_is_its_own_pool(self):
+        result = agy.parse_user_status(
+            {
+                "userStatus": {
+                    "cascadeModelConfigData": {
+                        "clientModelConfigs": [
+                            {"label": "Gemini 3.1 Pro", "quotaInfo": {"remainingFraction": 0.9}},
+                            {"label": "Gemini 4 Argon", "quotaInfo": {"remainingFraction": 0.2}},
+                        ]
+                    },
+                }
+            }
+        )
+        labels = {b["label"]: b["remaining_fraction"] for b in result["buckets"]}
+        assert labels == {
+            "Gemini Weekly Limit": pytest.approx(0.9),
+            "Gemini 4 Argon Weekly Limit": pytest.approx(0.2),
+        }
+
     def test_no_quota_models_raises(self):
         with pytest.raises(QuotaError):
             agy.parse_user_status({"userStatus": {}})
@@ -537,6 +558,32 @@ class TestAgyUsageCommand:
             "2026-09-24T23:16:59Z"
         )
         assert result["origin"] == "live"
+
+    def test_a_pool_with_its_own_group_keeps_its_name(self):
+        # The shape agy 1.4.0 prints on a paid plan: the two shared groups
+        # and "Gemini 4 Argon" in a group of its own. Matched on "gemini"
+        # alone, Argon's row became a second "Gemini Weekly Limit".
+        payload = json.loads(json.dumps(self.PAYLOAD))
+        payload["command"]["data"]["groups"].append(
+            {
+                "name": "Gemini 4 Argon",
+                "description": "For paid Pro plans, Argon quota is separate.",
+                "buckets": [
+                    {
+                        "id": "gemini-argon-wtu-weekly",
+                        "name": "Gemini 4 Argon Weekly Limit",
+                        "window": "weekly",
+                        "remaining_fraction": 0.9994161128997803,
+                        "reset_time": "2026-10-24T00:15:38Z",
+                    }
+                ],
+            }
+        )
+        result = agy.parse_usage_command(payload)
+        labels = [b["label"] for b in result["buckets"]]
+        assert labels.count("Gemini Weekly Limit") == 1
+        assert labels[-1] == "Gemini 4 Argon Weekly Limit"
+        assert result["buckets"][-1]["reset_time"] == "2026-10-24T00:15:38Z"
 
     def test_no_command_payload_raises(self):
         # An agy too old for machine-readable slash answers prints the table

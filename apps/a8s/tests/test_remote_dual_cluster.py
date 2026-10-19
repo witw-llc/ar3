@@ -11,7 +11,6 @@ import pytest
 pytest.importorskip("paho.mqtt.client")
 
 from commands import cmd_convo
-from convo import load_entries
 from core import inbox_dir
 from mqtt_cluster import (
     ensure_agent_mailboxes,
@@ -102,6 +101,18 @@ class TestDualClusterRemote:
                     for r in rows
                 ),
             )
+            # The "received" log line lands when the envelope reaches the
+            # inbox; the archive row follows it. `a8s convo` reads the
+            # archive, so the read waits for the row, as the first leg does.
+            wait_convo(
+                alice_a8s,
+                predicate=lambda rows: any(
+                    r.get("from") == "BOB"
+                    and r.get("to") == "ALICE"
+                    and "ALICE" in (r.get("recipients") or [])
+                    for r in rows
+                ),
+            )
 
             with using_a8s_home(alice_a8s):
                 assert cmd_convo(["ALICE", "--limit", "10"]) == 0
@@ -166,11 +177,15 @@ class TestDualClusterRemote:
                         pytest.fail("BOB received message despite topic mismatch")
                     time.sleep(0.05)
 
-            with using_a8s_home(alice_a8s):
-                rows = load_entries()
-                assert any(r.get("content") == "wrong topic" for r in rows), (
-                    "sender should still archive outbound remote publish"
-                )
+            # The sender still archives its outbound publish; the row lands
+            # after the publish, so the read waits for it rather than for
+            # the two seconds above, which are the negative-delivery window.
+            wait_convo(
+                alice_a8s,
+                predicate=lambda rows: any(
+                    r.get("content") == "wrong topic" for r in rows
+                ),
+            )
         finally:
             stop_attached_loop(alice_proc)
             stop_attached_loop(bob_proc)

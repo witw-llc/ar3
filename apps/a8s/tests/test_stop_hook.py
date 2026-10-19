@@ -71,6 +71,12 @@ class Rig:
     def start(self) -> int:
         started = self.a8s("start", "n1")
         assert started.returncode == 0, started.stderr
+        return self.attached()
+
+    def attached(self) -> int:
+        """The handler's pid once the node has attached. `start` and the
+        start half of `restart` return as soon as the child is spawned; the
+        pid file lands later, so a verb that reads it waits here first."""
         deadline = time.time() + 20
         while time.time() < deadline:
             if (self.agent / "pid").is_file() and (self.agent / "inbox").is_dir():
@@ -117,6 +123,7 @@ def test_restart_runs_the_hook_for_the_stop_half(rig):
     restarted = rig.a8s("restart", "n1")
     assert restarted.returncode == 0, restarted.stdout + restarted.stderr
     assert rig.runs() == [f"n1 {rig.root.resolve()}"]
+    rig.attached()
     assert rig.a8s("stop", "n1").returncode == 0
     assert len(rig.runs()) == 2
 

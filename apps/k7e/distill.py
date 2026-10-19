@@ -11,6 +11,7 @@ distill_command (or llm_command) is unset.
 """
 
 import calendar
+import datetime
 import json
 import hashlib
 from ar3 import ulid
@@ -178,7 +179,7 @@ def distill(paths, dry_run=False, job_id=None, archive=False):
                     candidates = [c for c in candidates if not _should_reject(c["content"])]
                     new_knowledge = diff_against_store(candidates, None if archive else _valid_from(f))
                     if corrections:
-                        corrected = [c["_supersedes"] for c in corrections]
+                        corrected = [c["_supersedes"] for c in corrections if c.get("_supersedes")]
                         new_knowledge = corrections + _without_restatements(new_knowledge, corrected)
                         # What a person retired is theirs; a fact the model
                         # judged a replacement of it is stored beside it.
@@ -591,13 +592,19 @@ def _parse_corrections(text, recalled, stamp):
         provenance = f"corrects {node_id}, from turn capture {stamp}"
         if quote:
             provenance += f' — a person in that turn said: "{quote}"'
-        out.append({
+        item = {
             "title": title.strip(),
             "content": content.strip(),
             "tags": ["correction"],
-            "_supersedes": node_id,
             "_provenance": provenance,
-        })
+        }
+        if "compiled" in (engine._parse_frontmatter(engine.get(node_id, track_usage=False)).get("tags") or []):
+            # A correction retires a fragment, never a page and every fact
+            # folded into it; it is recorded on the page for the next compile.
+            item["_append_to"] = node_id
+        else:
+            item["_supersedes"] = node_id
+        out.append(item)
     return out
 
 
@@ -748,15 +755,15 @@ def _valid_from(path):
     """A fact became true no later than the turn that stated it. The model
     never proposes this date."""
     when = _turn_time(path)
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when)) if when is not None else None
+    return datetime.datetime.fromtimestamp(when, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if when is not None else None
 
 
 def _task_expiry(path):
     """`YYYY-MM-DD`, TASK_LIFESPAN_DAYS past the day the source turn ran, or
     past today for a file that is not a turn capture."""
     when = _turn_time(path)
-    when = time.time() if when is None else when
-    return time.strftime("%Y-%m-%d", time.localtime(when + TASK_LIFESPAN_DAYS * 86400))
+    when = engine.now().timestamp() if when is None else when
+    return datetime.datetime.fromtimestamp(when + TASK_LIFESPAN_DAYS * 86400).strftime("%Y-%m-%d")
 
 
 def _roster_turn_text(text):

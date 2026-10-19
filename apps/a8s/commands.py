@@ -2096,19 +2096,32 @@ def _inbox_activity_by_node() -> dict[str, tuple[str, str]]:
     return {name: (str(count), clock.stamp(newest)) for name, (count, newest) in found.items()}
 
 
+def _last_sent_by_node() -> dict[str, str]:
+    """`{lowercased name: local time of the last message the node sent}`,
+    empty when the transaction log cannot be read."""
+    try:
+        found = txlog.last_sent()
+    except txlog.TransactionLogError:
+        return {}
+    return {name: clock.stamp(newest) for name, newest in found.items()}
+
+
 def cmd_ps(args: list[str] | None = None) -> int:
     """`a8s ps` — list only running node processes (docker/ollama style).
-    Columns: NAME, PID, UPTIME, STATUS, MSGS 24H, LAST MSG, ROOT. `-q` prints
-    just names, one per line."""
+    Columns: NAME, PID, UPTIME, STATUS, DEFINITION, IN 24H, LAST SENT, ROOT.
+    DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
+    itself last wrote a message, the one column that says it was responsive.
+    `-q` prints just names, one per line."""
     args = args or []
     quiet = "-q" in args
     reg = load_registry()
-    running: list[tuple[str, int, str]] = []
+    running: list[tuple[str, int, str, str]] = []
     for name in sorted(reg, key=str.lower):
         pid = _read_handler_pid(name)
         if pid is None:
             continue
-        running.append((name, pid, reg[name].get("root", "?")))
+        defn = reg[name].get("definition") or str(default_definition_path("default"))
+        running.append((name, pid, Path(defn).stem, reg[name].get("root", "?")))
 
     if not running:
         if not quiet:
@@ -2116,16 +2129,18 @@ def cmd_ps(args: list[str] | None = None) -> int:
         return 0
 
     if quiet:
-        for name, _, _ in running:
+        for name, _, _, _ in running:
             print(name)
         return 0
 
     activity = _inbox_activity_by_node()
+    sent = _last_sent_by_node()
     rows = []
-    for name, pid, root in running:
-        count, last = activity.get(name.lower(), ("0", "-"))
-        rows.append((name, str(pid), _pid_uptime(name), _node_status(name), count, last, root))
-    _print_table(["NAME", "PID", "UPTIME", "STATUS", "MSGS 24H", "LAST MSG", "ROOT"], rows)
+    for name, pid, definition, root in running:
+        count, _ = activity.get(name.lower(), ("0", "-"))
+        rows.append((name, str(pid), _pid_uptime(name), _node_status(name), definition, count,
+                     sent.get(name.lower(), "-"), root))
+    _print_table(["NAME", "PID", "UPTIME", "STATUS", "DEFINITION", "IN 24H", "LAST SENT", "ROOT"], rows)
     return 0
 
 
