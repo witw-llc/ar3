@@ -164,7 +164,9 @@ dates from its last append. An entry never supersedes itself. See [k7e-retrieval
   active reference page and supersedes every entry it folded, so the page
   ranks in their place. `k7e compile --due` is the scheduled form: it compiles
   the tag with the most loose entries once that tag has five, about once a
-  day per store (`COMPILE_DUE_HOURS`). r4t's idle sweep calls it.
+  day per store (`COMPILE_DUE_HOURS`). r4t's idle sweep calls it. The model's
+  reply is the page, checked before it supersedes anything; `k7e compile
+  --revert <page>` restores a page's sources and retires the page.
 - **Rebuild** — `k7e reindex` regenerates `.index.db` from the markdown.
 
 ## Why this shape

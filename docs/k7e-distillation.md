@@ -204,7 +204,10 @@ open ones; any other verdict leaves it open.
   similarity (uses `supersede` under the hood).
 - `k7e compile <tag> [--dry-run]` — fold the active entries for a tag into one
   reference page that supersedes them (LLM). `k7e compile --due` is the
-  scheduled consolidation pass r4t runs from idle.
+  scheduled consolidation pass r4t runs from idle. A reply that is not a page
+  (narration, no sections, shorter than a source) supersedes nothing, and
+  `k7e compile --revert <page>` restores a page's sources when the page turns
+  out bad in use.
 
 See [k7e-cli.md](k7e-cli.md) for full command/flag reference.
 

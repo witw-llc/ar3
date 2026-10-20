@@ -10,7 +10,9 @@ Each run distills every day, runs `compile --due`, and probes recall on days 7,
 
 Arms: `base`, `frozen` (clock stuck on day 1), `nocompile`, `alldurable`,
 `obedient` (a poison-writing model), `oracle` (ground truth written straight
-into the store, which proves the probes).
+into the store, which proves the probes), `narration` (the compile model
+answers every compile with its turn transcript instead of a page; the summary
+reports how many sources a page folded, which must be 0).
 
 Every `compile --due` that compiles is also checked for invariance: for each
 durable key and each simulated day T, the top hit of `--valid-at T` and of

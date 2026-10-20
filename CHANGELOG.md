@@ -10,6 +10,28 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.112 — 2026-10-19
+
+### Fixed
+
+- A k7e compile checks the model's reply before the page supersedes anything.
+  A reply that narrates in the first person, has no section heading, or is
+  shorter than the smallest entry it would replace is rejected and the sources
+  stay active; a field store had kept the compile model's own turn narration
+  as the page for its largest tag and lost the 30 sources behind it. The
+  compile prompt asks for the page and nothing else (#336).
+- The model command runs in a scratch directory that is removed after the
+  call, so a file the model writes is never the page and never lands in the
+  store; the real synthesis had been left in an unindexed file in the store
+  root (#336).
+- A compile that times out is retried on half the entries, down to three,
+  instead of failing the tag on every pass (#336).
+- `k7e compile --revert <page>` restores a compiled page's sources to active
+  and retires the page, for a page found bad once it is in use (#336).
+- The chassis gains a `narration` arm, in which the scripted compile model
+  returns narration on every pass, and reports how many sources a page folded
+  there; the count must be zero (#336).
+
 ## 0.1.111 — 2026-10-19
 
 ### Added

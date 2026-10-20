@@ -44,6 +44,8 @@ from engine import (
     append_entry,
     compile_due,
     compile_tag,
+    RevertRefused,
+    revert_compile,
     process_pending_embeddings,
     supersede,
 )
@@ -61,7 +63,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("store",       "<title> [--tags] [--aliases]",    "Create a new entry (content from stdin or --content)."),
     ("append",        "<id> --section <name>",           "Append to an existing entry's section."),
     ("asset",       "<file>",                          "Store binary (content-addressed, deduped). Prints path."),
-    ("compile",     "<tag> [--dry-run] | --due",       "Fold a tag's entries into one reference page."),
+    ("compile",     "<tag> [--dry-run] | --due | --revert <page>", "Fold a tag's entries into one reference page."),
     ("recall",      "<text> [--limit N] [--include-superseded] [--include-archive]",            "Recall relevant knowledge for a topic or conversation (RAG)."),
     ("distill", "<file|dir> [--dry-run] [--archive]",          "Extract knowledge from raw experience files."),
     ("consolidate", "[--dry-run]",                 "Find and merge duplicate nodes."),
@@ -169,6 +171,8 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--due", action="store_true",
                    help="Compile the tag with the most loose entries, when one is due")
+    p.add_argument("--revert", metavar="PAGE_ID",
+                   help="Restore a compiled page's sources to active and retire the page")
 
     # reindex
     p = sub.add_parser("reindex", help="Rebuild index")
@@ -445,9 +449,20 @@ def main(argv=None):
             print(f"\nConsolidated: {total_superseded} nodes superseded across {len(results)} groups.")
 
     elif args.command == "compile":
-        if bool(args.tag) == args.due or (args.due and args.dry_run):
-            print("Error: compile takes a tag, or --due alone.", file=sys.stderr)
+        if sum(map(bool, (args.tag, args.due, args.revert))) != 1 or (args.dry_run and not args.tag):
+            print("Error: compile takes a tag, or --due alone, or --revert <page> alone.", file=sys.stderr)
             return 2
+        if args.revert:
+            try:
+                restored = revert_compile(args.revert)
+            except RevertRefused as e:
+                print(f"Error: {e}.", file=sys.stderr)
+                return 1
+            if restored is None:
+                print(f"Error: {args.revert} is not a compiled page.", file=sys.stderr)
+                return 1
+            print(f"Reverted {args.revert}: {len(restored)} sources restored to active.")
+            return 0
         # A pass that is not due, or finds nothing ready, needs no model.
         if args.due:
             status, node_id = compile_due()

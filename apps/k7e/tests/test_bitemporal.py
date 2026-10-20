@@ -98,7 +98,9 @@ def test_an_expired_task_fact_is_still_true_inside_its_window(store, monkeypatch
 
 
 def test_a_compiled_page_records_its_sources_and_stands_for_them(store, monkeypatch):
-    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: "Widget service deploy summary.")
+    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: (
+        "## Overview\n\nWidget service deploy summary.\n\n## Procedures\n\n"
+        "* Deploy the widget service from its release branch.\n* Verify the health page after the deploy.\n"))
     sources = [engine.store_entry(f"Widget service deploy {n}", f"Widget service deploy fact {n}.",
                                   tags=["widget"], valid_from=f"2026-0{n}-01T00:00:00Z") for n in (3, 1, 2)]
     page = engine.compile_tag("widget")

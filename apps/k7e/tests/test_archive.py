@@ -5,6 +5,10 @@ import json
 import distill
 import engine
 
+COMPILED_PAGE = ("## Overview\n\nSynthetic compiled reference for the garden.\n\n## Procedures\n\n"
+                 "* Synthetic step one, kept in full.\n* Synthetic step two, kept in full.\n\n"
+                 "## Gotchas\n\nA synthetic gotcha stated plainly.\n")
+
 
 def archive_llm(monkeypatch, items):
     monkeypatch.setattr(engine, "_call_llm", lambda *a, **k: json.dumps(items))
@@ -189,7 +193,7 @@ def test_archive_imperative_is_mechanically_attributed(store, tmp_path, monkeypa
 
 def test_compilation_excludes_typed_claims_and_keeps_operational_entries(store, monkeypatch):
     calls = []
-    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: calls.append(prompt) or "Synthetic compiled reference.")
+    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: calls.append(prompt) or COMPILED_PAGE)
     for i in range(3):
         engine.store_entry(f"Synthetic idea {i}", f"Synthetic exploratory garden idea {i}.", kind="idea", tags=["garden"])
     assert engine.compile_tag("garden") is None
@@ -282,7 +286,7 @@ def test_compile_missing_file_below_usable_threshold_returns_none(store, monkeyp
 
 def test_compile_missing_file_with_three_usable_operational_nodes_succeeds(store, monkeypatch):
     calls = []
-    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: calls.append(prompt) or "Synthetic compiled reference.")
+    monkeypatch.setattr(engine, "_call_llm", lambda prompt, **kwargs: calls.append(prompt) or COMPILED_PAGE)
     nodes = [engine.store_entry(f"Synthetic garden procedure {i}", f"Synthetic irrigation protocol {i}.", tags=["garden"])
              for i in range(4)]
     idea = engine.store_entry("Synthetic garden idea", "Synthetic garden idea is still undecided.", kind="idea", tags=["garden"])

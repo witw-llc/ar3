@@ -20,6 +20,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import subprocess
 import sys
 import time
 import threading
@@ -1230,10 +1231,17 @@ def llm_argv(cmd_str, *, windows=None):
     return argv
 
 
-def _call_llm(prompt, purpose="summarize", timeout=120):
-    """Invoke the configured stdin→stdout CLI for an LLM purpose."""
+def _call_llm(prompt, purpose="summarize", timeout=120, timeout_raises=False):
+    """Invoke the configured stdin→stdout CLI for an LLM purpose. The reply
+    is what the command prints; a file it writes is not a reply. It runs in
+    a scratch directory that is removed afterwards, so a harness that treats
+    its working directory as a project writes nothing into the store and
+    carries no session from the caller's own directory. With
+    `timeout_raises`, a timeout raises `subprocess.TimeoutExpired` after the
+    process group has been ended, so a caller can retry on its own terms."""
     import config
     import subprocess
+    import tempfile
 
     cmd_str = config.resolve_command(purpose)
     if not cmd_str:
@@ -1247,24 +1255,25 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
         # the model running for minutes after k7e had given up. POSIX only:
         # on Windows the foundation ends the harness alone, and the bounded
         # reap below is what keeps a surviving model from holding this call.
-        proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
-            # The model's output is UTF-8; without this, Windows decodes it
-            # through the ANSI code page.
-            encoding="utf-8", errors="replace",
-            cwd=str(config._k7e_home()),
-            start_new_session=(os.name == "posix"),
-        )
-        try:
-            stdout, stderr = proc.communicate(prompt, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            terminate_group(proc)
+        with tempfile.TemporaryDirectory(prefix="k7e-llm-", ignore_cleanup_errors=True) as scratch:
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+                # The model's output is UTF-8; without this, Windows decodes it
+                # through the ANSI code page.
+                encoding="utf-8", errors="replace",
+                cwd=scratch,
+                start_new_session=(os.name == "posix"),
+            )
             try:
-                proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(prompt, timeout=timeout)
             except subprocess.TimeoutExpired:
-                pass
-            raise
+                terminate_group(proc)
+                try:
+                    proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
         if proc.returncode == 0 and stdout.strip():
             return _strip_ansi(stdout).strip()
         if proc.returncode != 0:
@@ -1283,6 +1292,8 @@ def _call_llm(prompt, purpose="summarize", timeout=120):
     except subprocess.TimeoutExpired:
         _note_llm_failure(purpose, f"timed out ({timeout}s)")
         print(f"  [llm:{purpose}] timed out ({timeout}s)", file=sys.stderr)
+        if timeout_raises:
+            raise
     except OSError as e:
         _note_llm_failure(purpose, f"launch failed: {e}")
         print(f"  [llm:{purpose}] launch failed: {e}", file=sys.stderr)
@@ -1625,6 +1636,48 @@ COMPILE_DUE_HOURS = 20
 # then the newest, so a large tag's prompt stays the size of a few captures
 # and the rest wait for the next pass.
 COMPILE_MAX_ENTRIES = 30
+COMPILE_MIN_ENTRIES = 3
+# One model call per attempt; a call that times out is retried on half the
+# entries, down to the minimum, so a tag too large for the model's bound
+# still compiles in parts instead of timing out on every pass.
+COMPILE_TIMEOUT = 120
+# A reply that opens by telling what the model did is a turn transcript,
+# not a page. Only the opening is read: a source may quote a person.
+_NARRATION_RE = re.compile(r"\b(?:I'll|I will|I'm|I am|I've|I have|Let me|I need)\b")
+_NARRATION_WINDOW = 400
+
+
+def _compile_prompt(tag, entries):
+    entry_texts = "\n\n---\n\n".join(
+        f"[Entry {e['id']}, {e['valid_from'][:10] or 'undated'}] {e['title']}\n{e['content']}" for e in entries
+    )
+    return (
+        f"Synthesize these {len(entries)} knowledge entries about '{tag}' into a single "
+        f"authoritative reference that replaces them. Include sections: Overview, "
+        f"Procedures, Gotchas, Open Questions. Keep every durable detail — commands, "
+        f"flags, ports, names, versions, rules. Drop task telemetry that no longer "
+        f"matters: test counts for one change, PR or branch status, one-off command "
+        f"output. Where entries disagree, state the value from the newest entry as current "
+        f"and name the earlier values as superseded, with their dates. Do not add "
+        f"facts the entries do not state. Cite source entry IDs. Reply with the page "
+        f"itself and nothing else: no preamble, no account of what you did, no file "
+        f"written anywhere.\n\n{entry_texts}"
+    )
+
+
+def _compile_rejection(content, entries):
+    """Why `content` is not a page that may replace `entries`, or None when
+    it may: it narrates instead of stating, it has no sections, or it is
+    shorter than the smallest entry it would replace. A page that fails here
+    supersedes nothing; the sources stay active and rank as before."""
+    if _NARRATION_RE.search(content[:_NARRATION_WINDOW]):
+        return "it narrates in the first person"
+    if not re.search(r"(?m)^#{1,6} \S", content):
+        return "it has no sections"
+    smallest = min(len(e["content"]) for e in entries)
+    if len(content) < smallest:
+        return f"it is shorter than its smallest source ({len(content)} < {smallest} characters)"
+    return None
 
 
 def compile_tag(tag, dry_run=False):
@@ -1662,25 +1715,11 @@ def compile_tag(tag, dry_run=False):
         entries.append({"id": n["id"], "title": n["title"], "content": _extract_body(text).strip(),
                         "tags": tags, "valid_from": _clock_columns(meta)[1]})
 
-    if len(entries) < 3:
-        print(f"Need 3+ active entries with tag '{tag}', found {len(entries)}.", file=sys.stderr)
+    if len(entries) < COMPILE_MIN_ENTRIES:
+        print(f"Need {COMPILE_MIN_ENTRIES}+ active entries with tag '{tag}', found {len(entries)}.", file=sys.stderr)
         return None
     entries.sort(key=lambda e: "compiled" not in e["tags"])
     entries = entries[:COMPILE_MAX_ENTRIES]
-
-    entry_texts = "\n\n---\n\n".join(
-        f"[Entry {e['id']}, {e['valid_from'][:10] or 'undated'}] {e['title']}\n{e['content']}" for e in entries
-    )
-    prompt = (
-        f"Synthesize these {len(entries)} knowledge entries about '{tag}' into a single "
-        f"authoritative reference that replaces them. Include sections: Overview, "
-        f"Procedures, Gotchas, Open Questions. Keep every durable detail — commands, "
-        f"flags, ports, names, versions, rules. Drop task telemetry that no longer "
-        f"matters: test counts for one change, PR or branch status, one-off command "
-        f"output. Where entries disagree, state the value from the newest entry as current "
-        f"and name the earlier values as superseded, with their dates. Do not add "
-        f"facts the entries do not state. Cite source entry IDs.\n\n{entry_texts}"
-    )
 
     if dry_run:
         print(f"Would compile {len(entries)} entries for tag '{tag}' and supersede them:")
@@ -1688,9 +1727,29 @@ def compile_tag(tag, dry_run=False):
             print(f"  {e['id']}  {e['title']}")
         return None
 
-    compiled_content = _call_llm(prompt, purpose="compile")
+    while True:
+        try:
+            compiled_content = _call_llm(_compile_prompt(tag, entries), purpose="compile",
+                                         timeout=COMPILE_TIMEOUT, timeout_raises=True)
+        except subprocess.TimeoutExpired:
+            if len(entries) <= COMPILE_MIN_ENTRIES:
+                print(f"compile: '{tag}' timed out at {len(entries)} entries; nothing superseded.",
+                      file=sys.stderr)
+                return None
+            fewer = max(len(entries) // 2, COMPILE_MIN_ENTRIES)
+            print(f"compile: '{tag}' timed out at {len(entries)} entries; retrying with {fewer}.",
+                  file=sys.stderr)
+            entries = entries[:fewer]
+            continue
+        break
     if not compiled_content:
         print("Error: compile_command (or llm_command) not configured or call failed.", file=sys.stderr)
+        return None
+    reason = _compile_rejection(compiled_content, entries)
+    if reason:
+        _note_llm_failure("compile", f"reply rejected: {reason}")
+        print(f"compile: rejected the model's reply for '{tag}': {reason}; nothing superseded.",
+              file=sys.stderr)
         return None
 
     source_ids = [e["id"] for e in entries]
@@ -1751,6 +1810,58 @@ compiled_from: [{', '.join(source_ids)}]
                 continue
 
     return node_id
+
+
+class RevertRefused(Exception):
+    """A compiled page that cannot be reverted as it stands, with the reason."""
+
+
+def revert_compile(page_id):
+    """Put a compiled page's sources back in its place: every source the page
+    superseded is active again, and the page is retired with no successor.
+    Returns the restored ids, or None when `page_id` is not a compiled page.
+    A page a later compile folded is refused (`RevertRefused`): its sources
+    back in ranking would compete with the page that now stands for them,
+    so the current page is reverted first, which makes this one active
+    again. A page already reverted restores nothing and is left as it is.
+    The page stays on disk for audit."""
+    init()
+    restored = []
+    with write_lock():
+        try:
+            text = get(page_id)
+        except FileNotFoundError:
+            return None
+        meta = _parse_frontmatter(text)
+        sources = _ids(meta.get("compiled_from"))
+        if "compiled" not in (meta.get("tags") or []) or not sources:
+            return None
+        successor = _superseded_by_text(meta)
+        if meta.get("status", "active") != "active" and successor:
+            raise RevertRefused(f"{page_id} is superseded by {successor}; revert {successor} first")
+        for sid in sources:
+            try:
+                source_text = get(sid)
+            except FileNotFoundError:
+                continue
+            source_meta = _parse_frontmatter(source_text)
+            if source_meta.get("status") != "superseded" or _superseded_by_text(source_meta) != page_id:
+                continue
+            source_text = _set_frontmatter_key(source_text, "status", "active")
+            source_text = _drop_frontmatter_key(source_text, "superseded_by")
+            source_text = _drop_frontmatter_key(source_text, "superseded_at")
+            _persist_node(_node_path(sid), source_text, result=True)
+            _index_text(sid, source_text)
+            restored.append(sid)
+        if meta.get("status", "active") == "active":
+            now = today()
+            text = _set_frontmatter_key(text, "status", "superseded")
+            text = _set_frontmatter_key(text, "superseded_at", utc_now())
+            text = _drop_frontmatter_key(text, "superseded_by")
+            text = _with_history_line(text, f"* {now}: Reverted; {len(restored)} sources restored to active.")
+            _persist_node(_node_path(page_id), text, result=True)
+            _index_text(page_id, text)
+    return restored
 
 
 # --- Assets ---
@@ -2358,6 +2469,27 @@ def _set_frontmatter_key(text, key, value):
     lines = [item for i, item in enumerate(lines) if i not in positions]
     lines.insert(at, line)
     front = "\n".join(lines)
+    return f"---\n{front}\n---\n{text[match.end():]}"
+
+
+def _with_history_line(text, line):
+    """`text` with `line` at the end of its History section, or appended when
+    it has none: a correction appended after the compile may have left the
+    page ending in another section."""
+    match = re.search(r"(?m)^## History[ \t]*$", text)
+    if not match:
+        return text.rstrip("\n") + f"\n\n## History\n{line}\n"
+    following = re.search(r"(?m)^## ", text[match.end():])
+    end = match.end() + following.start() if following else len(text)
+    return text[:end].rstrip("\n") + f"\n{line}\n" + ("\n" + text[end:] if following else "")
+
+
+def _drop_frontmatter_key(text, key):
+    """`text` without frontmatter `key`; unchanged when the key is absent."""
+    match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    if not match:
+        return text
+    front = "\n".join(item for item in match.group(1).splitlines() if not item.startswith(key + ":"))
     return f"---\n{front}\n---\n{text[match.end():]}"
 
 

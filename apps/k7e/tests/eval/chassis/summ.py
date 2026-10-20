@@ -13,6 +13,10 @@ for n in sys.argv[1:]:
     print("files/day(every5)", [d['total_files'] for d in dl][::5], "pages", dl[-1]['pages'], dl[-1]['active_pages'],
           "folded", dl[-1]['folded'], "active_status", dl[-1]['active_status'])
     print("calls", r['calls'], "graph", r['graph'], "compiles", [c for c in r['compile_log'] if 'Compiled' in c[1]][:6])
+    if r["options"].get("narration"):
+        # The arm's compile model only ever narrates, so no page may fold a source.
+        print("narration arm: sources folded by a page", dl[-1]["folded"], "(must be 0), pages", dl[-1]["pages"],
+              "compile attempts", r["calls"]["compile"])
     inv = r.get("invariance")
     if inv:
         by_key = [c for c in inv["changed"] if c["before_has_key"] != c["after_has_key"]]

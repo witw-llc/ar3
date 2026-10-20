@@ -111,17 +111,33 @@ entries that turn's people contradicted. See
 ### `consolidate [--dry-run]`
 Find and merge duplicate nodes by title similarity.
 
-### `compile <tag> [--dry-run]` · `compile --due`
+### `compile <tag> [--dry-run]` · `compile --due` · `compile --revert <page>`
 Fold the active entries for a tag into one reference page that supersedes them
 (LLM). The page carries the tag first, then `compiled`, then up to ten of its
 sources' own tags. A page folds again only into a compile of its first tag.
+
+The page is what the model prints. The model runs in a scratch directory that
+is removed after the call, so a file it writes is never the page and never
+lands in the store. The reply is checked before anything is written: a reply
+that narrates in the first person, has no section heading, or is shorter than
+the smallest entry it would replace is rejected, the compile exits 1, and the
+sources stay active. A call that times out (`COMPILE_TIMEOUT`, 120 s) is
+retried on half the entries, down to three, so a tag too large for the model's
+bound compiles in parts; a timeout at three entries fails the compile.
+
+`--revert <page>` puts a compiled page's sources back in its place: every
+source the page superseded is active again, and the page is retired with no
+successor and stays on disk for audit. A source a correction retired meanwhile
+keeps the correction. A page a later compile folded is refused until that
+later page is reverted, which makes the earlier one active again; a page
+already reverted restores nothing.
 
 `--due` compiles the tag with the most entries no page has folded, when that
 tag has at least five, and prints `compile: nothing` otherwise. It runs about
 once a day per store (`COMPILE_DUE_HOURS`, marked in
 `$K7E_HOME/.compile-due`); inside that window it prints `compile: not-due`. A failed compile exits 1 and also waits
 out the window, and the next pass passes over the tag that failed, so a
-compile that always times out costs one attempt a day and holds no other tag
+compile that fails every time costs one attempt a day and holds no other tag
 back. A pass that finds nothing ready needs no model command. One compile
 folds at most 30 entries (`COMPILE_MAX_ENTRIES`), the tag's own page first;
 the rest wait. Entries that expire (`valid_to`) are never folded or counted.

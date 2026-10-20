@@ -9,4 +9,5 @@ python3 sim.py nocompile --no-compile >/dev/null 2>&1
 python3 sim.py alldurable --all-durable >/dev/null 2>&1
 python3 sim.py obedient --obedient >/dev/null 2>&1
 python3 sim.py oracle --oracle >/dev/null 2>&1
-python3 summ.py base frozen nocompile alldurable obedient oracle
+python3 sim.py narration --narration >/dev/null 2>&1
+python3 summ.py base frozen nocompile alldurable obedient oracle narration

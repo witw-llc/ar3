@@ -1,6 +1,6 @@
 """30-day chassis run for k7e temporal memory. Scripted model, no network, no ollama.
 
-usage: python sim.py <run-name> [--frozen] [--no-compile] [--all-durable] [--obedient] [--oracle]
+usage: python sim.py <run-name> [--frozen] [--no-compile] [--all-durable] [--obedient] [--oracle] [--narration]
 
 Runs land under K7E_CHASSIS_RUNS, or a temp dir when it is unset.
 """
@@ -198,9 +198,9 @@ def build_plan():
 
 # ---------------------------------------------------------------- scripted model
 class Fake:
-    def __init__(self, plan_turns, keys, all_durable=False, obedient=False):
+    def __init__(self, plan_turns, keys, all_durable=False, obedient=False, narration=False):
         self.turns, self.keys = plan_turns, keys
-        self.all_durable, self.obedient = all_durable, obedient
+        self.all_durable, self.obedient, self.narration = all_durable, obedient, narration
         self.calls = {"extract": 0, "triage": 0, "correct": 0, "compile": 0}
         self.by_tag = {f"D{d:02d}S{s}": t for (d, s), t in plan_turns.items()}
         self.comp_keys = {k["comp"]: k for k in keys if k["cls"] in ("rule",) and "comp" in k}
@@ -216,7 +216,7 @@ class Fake:
                 return c
         return None
 
-    def __call__(self, prompt, purpose="summarize", timeout=120):
+    def __call__(self, prompt, purpose="summarize", timeout=120, timeout_raises=False):
         if prompt.startswith("Extract ONLY genuinely novel"):
             return self.extract(prompt)
         if prompt.startswith("Each pair holds a NEW fact"):
@@ -285,6 +285,12 @@ class Fake:
 
     def compile(self, prompt):
         self.calls["compile"] += 1
+        tag = re.search(r"about '(.*?)'", prompt).group(1)
+        if self.narration:
+            # A harness that answered with its turn transcript and left the
+            # page in a file: what a field store kept as its compiled page.
+            return (f"I'll check the workspace and write the reference for {tag}.\n\n"
+                    f"I wrote the synthesis to writer/{tag}.md and summarized it there.\n")
         blocks = re.findall(r"\[Entry (K7E-[\d-]+)[^\]]*\] (.*?)\n(.*?)(?=\n\n---\n\n\[Entry |\Z)", prompt, re.S)
         seen, lines = set(), []
         for _id, title, body in blocks:
@@ -295,15 +301,16 @@ class Fake:
                         and not ln.startswith("* [[") and ln not in seen:
                     seen.add(ln)
                     lines.append(ln)
-        tag = re.search(r"about '(.*?)'", prompt).group(1)
         return f"## Overview\n\nReference for {tag}.\n\n## Procedures\n\n" + "\n".join(f"* {l}" for l in lines)
 
 
 # ---------------------------------------------------------------- run
 class Run:
-    def __init__(self, name, frozen=False, no_compile=False, all_durable=False, obedient=False, oracle=False):
+    def __init__(self, name, frozen=False, no_compile=False, all_durable=False, obedient=False, oracle=False,
+                 narration=False):
         self.name = name
-        self.opt = dict(frozen=frozen, no_compile=no_compile, all_durable=all_durable, obedient=obedient, oracle=oracle)
+        self.opt = dict(frozen=frozen, no_compile=no_compile, all_durable=all_durable, obedient=obedient, oracle=oracle,
+                        narration=narration)
         self.home = run_dir(name) / "home"
         if self.home.parent.exists():
             import shutil
@@ -318,7 +325,7 @@ class Run:
         engine.reset(self.home)
         engine.init()
         self.keys, self.turns = build_plan()
-        self.fake = Fake(self.turns, self.keys, all_durable, obedient)
+        self.fake = Fake(self.turns, self.keys, all_durable, obedient, narration)
         engine._call_llm = self.fake
         self.daily = []
         self.probes = {}
@@ -622,7 +629,8 @@ if __name__ == "__main__":
     name = sys.argv[1]
     flags = set(sys.argv[2:])
     r = Run(name, frozen="--frozen" in flags, no_compile="--no-compile" in flags,
-            all_durable="--all-durable" in flags, obedient="--obedient" in flags, oracle="--oracle" in flags).run()
+            all_durable="--all-durable" in flags, obedient="--obedient" in flags, oracle="--oracle" in flags,
+            narration="--narration" in flags).run()
     result = dict(options=r.opt, daily=r.daily, metrics=r.metrics(), calls=r.fake.calls, triage_log=r.fake.triage_log,
                   slices=r.slices(), graph=r.graph_counts(), gen2=None if r.opt["oracle"] else gen2(r), graph_after=r.graph_counts(), compile_log=getattr(r, "fake_compile_log", []),
                   invariance=dict(pairs=r.invariance_pairs, changed=r.invariance_changed))
