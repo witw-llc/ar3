@@ -1,0 +1,34 @@
+{
+  "description": "Tool node: a persistent Chrome seat driven by command scripts. Each tell is a script of browser commands (open, go, snap, click, type, shot, close and more) run in this seat's own signed-in Chrome profile; the reply carries the transcript plus any snapshot, screenshot, console log or video as attachments. Register with an ACL: `a8s add garmin ~/browsers/garmin tool-browser --ALLOW=iris`; a sender outside ALLOW gets no reply. Optional vars: ALLOW_EVAL (1 permits `eval` and `run-code`), CHROME (Chrome binary), PORT (a fixed CDP port; unset, Chrome picks a free one and records it in the profile). Chrome runs headed when DISPLAY is set on Linux, headless otherwise; it stays running between wakes and `a8s stop` closes it. A wake needs playwright-cli on its PATH (`npm install -g @playwright/cli`) and, on Linux, DISPLAY and XAUTHORITY for a headed seat: `a8s vars <node> set env.DISPLAY :0`. Seat state lives in `${XDG_DATA_HOME:-~/.local/share}/ar3/browser/<node>`. See docs/a8s-tools.md.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/browser",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--allow-eval=$ALLOW_EVAL?",
+    "--chrome=$CHROME?",
+    "--port=$PORT?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 600,
+  "idle": {
+    "timeout": 0
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../tools/browser",
+      "close",
+      "--seat",
+      "$RECIPIENT",
+      "--chrome=$CHROME?",
+      "--port=$PORT?"
+    ]
+  }
+}

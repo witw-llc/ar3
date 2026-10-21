@@ -10,6 +10,102 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.113
+
+### Added
+
+- **`tool-gemini-web`: Gemini Web as an a8s seat.** It moves into the suite from
+  a8s-gemini-web 0.2.1. Each tell is typed into Gemini in a signed-in browser
+  seat, and Gemini's answer comes back as a tell. Each correspondent has one
+  conversation. Files go in, and generated images come back. The node needs a
+  `tool-browser` seat whose Chrome profile a person has already signed in to
+  Gemini by hand; the node never signs in. Register it with
+  `a8s add gemini ~/agents/gemini tool-gemini-web --ALLOW=iris --BROWSER_SEAT=gemini-profile`.
+  `ALLOW` is required, and a sender outside it gets no reply. The optional
+  `MODEL` var picks a model when a conversation is created. A reply too long
+  for the body is sent as a file. A reply that cannot be sent is held and
+  delivered on the next wake. A turn that cannot run answers that the message
+  was not sent and must be sent again. A send that may have failed is never
+  repeated: the node says it cannot tell and leaves the choice to the sender.
+  State lives in `${XDG_DATA_HOME:-~/.local/share}/ar3/gemini-web/<node>`.
+- **`tool-vault`: encrypted file storage for agents.** It moves into the suite
+  from a8s-vault 0.1.0. An agent connects with a throwaway public key and
+  unlocks its seat with a single-use voucher. It can then list, store,
+  retrieve and delete files. Every message after `/connect` is sealed to the
+  vault's key, and every reply is sealed and signed. Every sender is served
+  under its own container, and one sender never sees another's files. There is
+  no `ALLOW` var. The voucher model is kept: the operator issues the first
+  voucher for each sender, and the vault rotates it after each use. The state
+  root is new: `${XDG_DATA_HOME:-~/.local/share}/ar3/vault/<node>/` (mode
+  0700). No data or key from a8s-vault is carried over, and there is no
+  back-compat. `VAULT_DIR` moves the root, and the optional `OPENSSL` var
+  names the openssl binary. The admin and client commands run as
+  `python3 apps/tools/vault <subcommand>`.
+- **`tool-browser`: a persistent Chrome seat driven by command scripts.** It
+  moves into the suite from a8s-browser 0.3.3. `ALLOW` is required and fails
+  closed, and a refused sender gets no reply. Chrome starts in its own
+  session, and the node's `stop` block closes it when a8s stops the node. On
+  Linux the seat is headed when `DISPLAY` is set and uses `--headless=new`
+  otherwise. On macOS and Windows it is always headed. State moves to
+  `${XDG_DATA_HOME:-~/.local/share}/ar3/browser/<seat>`. The seat needs Node
+  and the real package `@playwright/cli` (`npm install -g @playwright/cli`).
+  The npm package `playwright-cli` is deprecated and ships no binary. Node is
+  a need of the two browser tools only, never a suite requirement.
+  Platforms: Linux and macOS for `tool-browser` and `tool-gemini-web`; on
+  Windows the browser's forced cleanup has no process discovery, and the
+  Gemini seat refuses every message with a reply that names the limit.
+- **`ar3 tool <name>` runs a bundled tool node by hand.** It is a test surface
+  for a tool's wake. It builds the argv with a8s's own expander, so the argv
+  matches a real wake, and it runs the tool once in the current directory.
+  The reply prints as `to <recipient>:` plus the body instead of being sent.
+  Attachments are copied to a temp directory that the verb names on stderr.
+  Options: `--from`, `--as`, `--var KEY=VALUE`, `--attach PATH`, and `-` to
+  read the message from stdin. `ALLOW` defaults to the sender. An unset
+  required var stops the verb and names it. The verb writes no a8s state, and
+  the exit code is the tool's. The tool runtime has a print mode for this: it
+  honours `AR3_TOOL_REPLY_DIR`.
+- **`ar3 doctor` probes the tool nodes' needs.** It checks `openssl` for the
+  vault tool. It also checks `chrome`, `node` and `playwright-cli` for the
+  browser tools. The browser probes are optional: a missing one never fails
+  the core check.
+- Tool nodes: a8s agents that run a program instead of a model. The first is
+  `tool-command-shell`, a command runner over a8s messages — a poor man's SSH.
+  Register it with a sender allowlist and `tell <node> <command>` runs that
+  command on the node's machine and sends the output back:
+  `a8s add mac-terminal ~/work tool-command-shell --ALLOW=operator,assistant`.
+  Each message is one command in its own process, in the node's directory,
+  with no state between commands. The `ALLOW` ACL is required, so a node with
+  no allowlist never runs a command: a8s aborts the wake and dead-letters the
+  message. A refused sender gets no reply. One message is one process tree:
+  nothing a command starts outlives it, whether it ends by exit, by timeout,
+  or by a8s ending the wake. Windows has no process group, so two cases
+  escape there: a child the shell leaves behind after exiting, and a stop
+  from a8s, which is a plain TerminateProcess the tool cannot see. Output past `OUTPUT_MAX` is read and dropped, never held. Per-node vars tune it: `SHELL` (sh / cmd /
+  bash / zsh / powershell / pwsh), `TIMEOUT`, `INLINE_MAX` (output beyond it
+  is attached as `stdout.txt` / `stderr.txt`), and `OUTPUT_MAX`. Tools live under `apps/tools/`, each its own
+  module over a shared runtime, and never import an a8s module — they reply
+  through `a8s tell`. See [docs/a8s-tools.md](docs/a8s-tools.md).
+
+### Changed
+
+- `AGENTS.md` describes how any agent works on this repo. A seat's identity,
+  memory, lessons and procedures live in the seat's own folder outside the
+  checkout; the checkout holds code only, and the ignore rules for a seat's
+  files in it are gone.
+
+### Fixed
+
+- **A resident session ends after `TIMEOUT` seconds of quiet, not `TIMEOUT`
+  seconds of life.** A turn in flight is never cut off, and any turn sent or
+  frame received restarts the window. A long test run no longer meets the
+  wrap-up turn.
+- **An engine without effort support runs anyway.** A cursor or devin node
+  with `EFFORT` set, or a rig that carried an effort and swapped to one of
+  them, never started. The run now drops the value and prints one warning on
+  stderr for each (engine, value) pair in a process. An invalid value on an
+  engine that does support effort still raises. `r4t engine <id> efforts`
+  still reports an unsupported engine as an error.
+
 ## 0.1.112 — 2026-10-19
 
 ### Fixed

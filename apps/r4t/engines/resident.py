@@ -1,8 +1,8 @@
 """Resident engine session — one long-running `stream-json` process per agent
 (supported on `claude`, `ollama-claude`, and `agy`), fed incoming messages over
-stdin and wrapped up when its timeout (default 45m) elapses. The timeout is
-the session's whole life, not one turn's: the window already bounds every turn
-inside it.
+stdin and wrapped up after its timeout (default 45m) of quiet. The timeout is
+a quiet window, not the session's life: a turn in flight never expires the
+session, and any turn sent or frame received restarts the window.
 
 One detached bridge per `(dir, agent)` owns the engine process. Sessions run
 one after another, never side by side: a message that lands while a session
@@ -43,12 +43,14 @@ from rig import MCP_CLAUDE_TOOL, _mcp_command, _mcp_servers_json
 
 RESIDENT_ENGINES = frozenset({"agy", "claude", "ollama-claude"})
 RESIDENT_DIR_NAME = ".engine-resident"
+# Quiet time, not session life: the session ends after this many seconds with
+# no turn in flight and no activity.
 DEFAULT_RESIDENT_SECONDS = 2700
 # The bridge's inbox poll. Latency of a fraction of a second costs nothing
 # against a turn; a tighter loop costs CPU for the whole window.
 POLL_SECONDS = 0.5
 LOG_ROTATE_BYTES = 1024 * 1024
-# At the end of the window: how long a turn still running may finish before
+# At the end of the quiet window: how long a turn still running may finish before
 # the wrap-up turn is queued behind it, and how long the wrap-up itself gets.
 WRAPUP_WAIT_SECONDS = 120
 WRAPUP_TURN_SECONDS = 300
@@ -403,7 +405,7 @@ def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
     lessons = dir_path / "LESSONS.md"
     minutes = max(1, round(resident_seconds / 60))
     return (
-        f"[Resident session window ({minutes}m) reached — wrap up and exit]\n"
+        f"[Resident session quiet for {minutes}m — wrap up and exit]\n"
         "1. Stop any background tasks or monitors you started during this session.\n"
         f"2. Rewrite {status} with sections: Current State, Important Context, "
         "Next Steps, Decisions (with rationale).\n"
@@ -628,7 +630,7 @@ def _run_session(
             return 1
         current["proc"] = proc
         _write_state(home, pid=my_pid, engine_pid=proc.pid, status="running")
-    started_at = time.time()
+    last_activity = time.monotonic()
 
     def set_status(status: str) -> None:
         with file_lock(_lock_file(home)):
@@ -637,7 +639,7 @@ def _run_session(
 
     _log(
         f"resident session started (bridge pid={my_pid}, {engine} pid={proc.pid}, "
-        f"window={resident_seconds}s)"
+        f"quiet window={resident_seconds}s)"
     )
 
     turns_completed = threading.Condition()
@@ -645,7 +647,7 @@ def _run_session(
     collected_outputs: list[str] = []
 
     def _stdout_reader() -> None:
-        nonlocal in_flight_turns
+        nonlocal in_flight_turns, last_activity
         assert proc.stdout is not None
         for raw_line in proc.stdout:
             line = raw_line.strip()
@@ -658,6 +660,11 @@ def _run_session(
                 continue
             if not isinstance(frame, dict):
                 continue
+            # Under the condition: the running→closing decision below reads
+            # this under the same lock, so a frame parsed before the decision
+            # always counts and one parsed after it is after the window.
+            with turns_completed:
+                last_activity = time.monotonic()
             parsed = adapter.parse_frame(frame)
             if parsed.assistant_text:
                 collected_outputs.append(parsed.assistant_text)
@@ -668,6 +675,7 @@ def _run_session(
                 if parsed.result_text and not collected_outputs:
                     collected_outputs.append(parsed.result_text)
                 with turns_completed:
+                    last_activity = time.monotonic()
                     if in_flight_turns > 0:
                         in_flight_turns -= 1
                     turns_completed.notify_all()
@@ -676,12 +684,13 @@ def _run_session(
     reader.start()
 
     def send_user_turn(prompt_text: str) -> bool:
-        nonlocal in_flight_turns
+        nonlocal in_flight_turns, last_activity
         if proc.poll() is not None or proc.stdin is None:
             return False
         try:
             with turns_completed:
                 in_flight_turns += 1
+                last_activity = time.monotonic()
             proc.stdin.write(adapter.encode_user_turn(prompt_text) + "\n")
             proc.stdin.flush()
             return True
@@ -701,10 +710,21 @@ def _run_session(
     booted = False
     memory_turn = None
 
+    def quiet() -> bool:
+        """No turn in flight and a whole window since the last activity.
+        Caller holds `turns_completed`."""
+        return in_flight_turns == 0 and time.monotonic() - last_activity >= resident_seconds
+
     try:
         while not stop_requested.is_set() and proc.poll() is None:
-            if time.time() - started_at >= resident_seconds:
-                break
+            with turns_completed:
+                idle = quiet()
+            if idle and not _inbox_waiting(home):
+                # The inbox check did I/O; decide again under the lock so a
+                # frame that arrived meanwhile keeps the session running.
+                with turns_completed:
+                    if quiet():
+                        break
 
             batch = _drain_inbox(home)
             if batch:
@@ -758,7 +778,7 @@ def _run_session(
             set_status("closing")
             wait_for_quiet(timeout_s=WRAPUP_WAIT_SECONDS)
             if proc.poll() is None and not stop_requested.is_set() and scaffold:
-                _log(f"resident window ({resident_seconds}s) reached — sending wrap-up turn")
+                _log(f"resident quiet for {resident_seconds}s — sending wrap-up turn")
                 if send_user_turn(wrapup_prompt(dir_path, resident_seconds)):
                     wait_for_quiet(timeout_s=WRAPUP_TURN_SECONDS)
 

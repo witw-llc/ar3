@@ -1415,3 +1415,62 @@ def test_update_restart_targets_skip_a_cyclic_alias():
         groups, ["worker-a", "worker-b"], agents, aliases
     )
     assert targets == ["devs"]
+
+
+# ---------- ar3 tool ----------
+
+_REAL_RUN = subprocess.run  # captured at import, before the autouse guard patches it
+
+
+def _real_run(monkeypatch):
+    monkeypatch.setattr(ar3.subprocess, "run", _REAL_RUN)
+
+
+def test_tool_command_shell_prints_the_reply(monkeypatch, capfd):
+    _real_run(monkeypatch)
+    assert ar3.main(["tool", "command-shell", "--", "echo", "ok"]) == 0
+    out = capfd.readouterr().out
+    assert "to operator:" in out
+    assert out.rstrip().endswith("ok")
+
+
+def test_tool_refused_sender_gets_no_reply(monkeypatch, capfd):
+    _real_run(monkeypatch)
+    code = ar3.main(
+        ["tool", "command-shell", "--from", "mallory", "--var", "ALLOW=alice", "--", "echo", "ok"]
+    )
+    captured = capfd.readouterr()
+    assert code == 0
+    assert "to mallory" not in captured.out
+    assert "ok" not in captured.out
+    assert "refused" in captured.out + captured.err
+
+
+def test_tool_missing_required_var_names_it(tmp_path, monkeypatch, capsys):
+    (tmp_path / "apps" / "a8s" / "definitions").mkdir(parents=True)
+    (tmp_path / "apps" / "a8s" / "definitions" / "tool-needy.json").write_text(
+        json.dumps({"invoke": ["$PYTHON", "-c", "pass", "$NEEDED", "$MESSAGE"]})
+    )
+    real_defs = ar3._load_definitions()
+    monkeypatch.setattr(ar3, "_load_definitions", lambda: real_defs)
+    monkeypatch.setattr(ar3, "REPO_ROOT", tmp_path)
+    assert ar3.main(["tool", "needy", "--", "hi"]) == 2
+    assert "NEEDED" in capsys.readouterr().err
+
+
+def test_tool_unknown_name_lists_the_bundled_tools(capfd):
+    assert ar3.main(["tool", "nope"]) == 2
+    assert "command-shell" in capfd.readouterr().err
+
+
+def test_browser_tool_probes_are_optional_doctor_checks():
+    checks = {check.name: check for check in ar3.CHECKS}
+    for name in ("chrome", "node", "playwright-cli"):
+        assert name in checks
+        assert not checks[name].core
+        assert checks[name].group == ar3.TOOLING
+        assert "browser tool" in checks[name].hint
+
+
+def test_openssl_is_a_doctor_check():
+    assert "openssl" in {check.name for check in ar3.CHECKS}

@@ -2187,6 +2187,9 @@ def format_preset_invoke(preset: str) -> str:
     return " ".join(build_preset_invoke(preset))
 
 
+_EFFORT_DROPPED: set[tuple[str | None, object]] = set()
+
+
 def apply_effort(
     argv: list[str], preset: str | None, effort: str | None, *, where: str = ""
 ) -> list[str]:
@@ -2195,10 +2198,23 @@ def apply_effort(
     entry = HARNESS_PRESETS.get(preset or "", {})
     tokens = entry.get("effort_argv")
     if not tokens:
-        hint = (
-            "; use --model with [effort=...] for Cursor" if preset == "cursor" else ""
-        )
-        raise RigError(f"{where}engine {preset!r} does not support --effort{hint}")
+        # An engine with no effort flag runs without one: a node or rig that
+        # carries an effort must never be stopped by an engine that cannot use
+        # it. Warn once per process and drop the value.
+        seen = (preset, effort)
+        if seen not in _EFFORT_DROPPED:
+            _EFFORT_DROPPED.add(seen)
+            hint = (
+                "; use --model with [effort=...] for Cursor"
+                if preset == "cursor"
+                else ""
+            )
+            print(
+                f"r4t: {where}engine {preset!r} does not support --effort; "
+                f"{effort!r} ignored{hint}",
+                file=sys.stderr,
+            )
+        return list(argv)
     values = entry.get("effort_values")
     if (
         not isinstance(effort, str)

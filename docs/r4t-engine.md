@@ -82,7 +82,7 @@ tool) plus this turn's own measurement flags (see
   new commit the turn makes; see [git identity](#git-identity).
 - `--resident` — keep one long-running `stream-json` session alive across
   arrivals (`claude`, `ollama-claude`, and `agy`); `--timeout` then sets the
-  session's length. See
+  quiet window. See
   [resident sessions](#resident-sessions--claude-ollama-claude-and-agy).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
@@ -550,8 +550,10 @@ message and exits 0; the bridge pushes it into the same conversation as a new
 user turn, so the session needs no `tells` monitor of its own.
 
 - `--timeout S` (default `2700`, 45 minutes, with `--resident`) — the
-  session's whole life, not one turn's. When it elapses the bridge lets a
-  running turn finish (up to 2 minutes), sends one wrap-up turn to rewrite
+  quiet window, not the session's life. A turn in flight never ends the
+  session, and any turn sent or frame received restarts the window. After
+  this many seconds with no turn in flight and no activity, the bridge lets
+  a racing turn finish (up to 2 minutes), sends one wrap-up turn to rewrite
   `STATUS.md` and `LESSONS.md` (up to 5 minutes), and closes the engine.
   agy's own `--print-timeout` is dropped in this mode.
 - Sessions run one after another, never side by side. A message that arrives
@@ -707,7 +709,8 @@ a8s add my-resident ~/somewhere engine-agy-resident
 ```
 
 They take the same per-node vars as the headless nodes. `TIMEOUT` is the
-session's length (default 2700, 45 minutes).
+quiet window: the session stays alive while it works and ends after `TIMEOUT`
+seconds of quiet (default 2700, 45 minutes).
 
 A custom node beyond these eleven is a copy: `a8s defs add` installs a template
 into the a8s state root, not the hidden bundled directory — see the wiki for

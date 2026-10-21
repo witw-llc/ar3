@@ -285,7 +285,9 @@ def scaffold_prompt(
     else:
         title = "Smart cold boot (resident session):"
         steps.append(
-            f"Resident session (~{resident_minutes}m window): new inbound "
+            f"Resident session: it stays open while a turn is running and "
+            f"closes after about {resident_minutes}m of quiet (no turn in "
+            "flight, no new message). New inbound "
             "messages are pushed directly into this conversation as subsequent "
             "user turns — do NOT start a background `tells` monitor or poll "
             "loop. Handle each message or burst as it arrives and finish your "

@@ -433,7 +433,7 @@ class TestScaffold:
         )
         assert one_shot.startswith("Smart cold boot:\n")
         assert resident.startswith("Smart cold boot (resident session):\n")
-        assert "4. Resident session (~45m window)" in resident
+        assert "4. Resident session: it stays open while a turn is running" in resident
         assert "5. When the session window expires" in resident
         assert engine_run.LESSON_LINE_RULE in resident
         assert "Stay idle" not in resident and "Before exit" not in resident
@@ -2215,3 +2215,27 @@ class TestNoUserFacingStringNamesAToolOutsideTheSuite:
             "a shipped source names a tool the reader does not have:\n"
             + "\n".join(offenders)
         )
+
+
+class TestEffortUnsupportedEngines:
+    """An engine with no effort flag runs anyway: the value is dropped with
+    one warning (owner ruling 2026-10-20)."""
+
+    @pytest.mark.parametrize("engine", ["cursor", "devin"])
+    def test_effort_is_dropped_and_the_engine_still_runs(
+        self, engine, tmp_path, monkeypatch, capsys
+    ):
+        import rig as rig_module
+
+        rig_module._EFFORT_DROPPED.clear()
+        calls = drive_engine(monkeypatch, tmp_path, engine)
+        code = engine_cli(
+            engine, "run", "--dir", str(tmp_path), "--no-scaffold",
+            "--effort", "high", "hello",
+        )
+        assert code == 0
+        [argv] = recorded_argv(calls)
+        assert "high" not in argv and "--effort" not in argv
+        err = capsys.readouterr().err
+        assert f"engine '{engine}' does not support --effort; 'high' ignored" in err
+        assert err.count("does not support --effort") == 1

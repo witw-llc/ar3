@@ -1,0 +1,20 @@
+{
+  "description": "Tool node: encrypted file storage for agents. Agents /connect with a throwaway public key, unlock their seat with a single-use voucher, then list/store/retrieve/delete files; every message after /connect is sealed to the vault's key and every reply is sealed and signed. Register with `a8s add vault ~/vault-seat tool-vault`; then `python3 <ar3>/apps/tools/vault init --node vault` and `voucher issue <name>` for each sender. Every sender is served under its own section, keyed by its name, and needs an operator-issued voucher to authenticate. The key and store live in `${XDG_DATA_HOME:-~/.local/share}/ar3/vault/<node>/`; optional var VAULT_DIR moves them. Optional var OPENSSL names the openssl binary. See docs/a8s-tools.md.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/vault",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--dir=$VAULT_DIR?",
+    "--openssl=$OPENSSL?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 300,
+  "idle": {
+    "timeout": 0
+  }
+}

@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from rig import HARNESS_PRESETS, RigError, apply_effort
+from rig import HARNESS_PRESETS, RigError
 
 LIST_TIMEOUT_SECONDS = 30
 CLAUDE_ALIASES = ["fable", "opus", "sonnet"]
@@ -48,11 +48,8 @@ def efforts(preset: str) -> tuple[list[str], str | None]:
             f"engine {key!r} takes any non-empty effort value; "
             f"the provider decides (for example low, medium, high)"
         )
-    try:
-        apply_effort([], key, "x")
-    except RigError as exc:
-        raise ValuesError(str(exc)) from exc
-    raise ValuesError(f"engine {key!r} does not support --effort")
+    hint = "; use --model with [effort=...] for Cursor" if key == "cursor" else ""
+    raise ValuesError(f"engine {key!r} does not support --effort{hint}")
 
 
 def _lines(argv: list[str]) -> list[str]:

@@ -10,7 +10,7 @@ The front door to AR3: **a8s** (agent message router), **r4t**
 
 `ar3` never mutates product state; it owns and maintains the suite's own
 substrate instead. It reads a8s/r4t/k7e state and probes prerequisites, and it
-never runs another product's commands for you — when something is missing,
+never runs another product's commands for you (`ar3 tool` is the one local-testing exception, below) — when something is missing,
 `ar3` names the real command to fix it. What `ar3` writes is its own substrate
 and never a product's state: `ar3 deps` fetches on-demand heavy dependencies
 into `~/.local/share/ar3/deps`, and `ar3 update` maintains the suite install
@@ -23,6 +23,7 @@ service is registered; `ar3 deps` is the explicit form, for scripts and for
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
 ar3 update     # pull this install forward to the latest release
+ar3 tool command-shell -- echo ok  # run a bundled tool node once, locally
 ar3 deps       # list on-demand heavy dependency groups and their status
 ar3 deps a8s-s3 # fetch one group by hand (here, boto3 for a8s's S3 storage)
 ar3 --version  # the suite semver (every ar3 CLI answers this)
@@ -62,6 +63,19 @@ still prints the rest.
 State locations follow each product exactly, including the environment
 overrides: `A8S_HOME`, `R4T_HOME` (and `XDG_CONFIG_HOME`), `K7E_HOME`.
 
+## `ar3 tool`
+
+`ar3 tool <name> [--from NAME] [--as NODE] [--var KEY=VALUE]... [--attach PATH]... [--] [message... | -]`
+runs a bundled tool node (`apps/a8s/definitions/tool-<name>.json`) once, in the
+current directory, so you can try it with no router. The argv comes from a8s's
+own expander, so it matches a wake: `$SENDER` is `--from` (default `operator`),
+`$RECIPIENT` is `--as` (default the tool name), `--var` sets per-node vars, and
+`ALLOW` defaults to the sender. A missing required var stops the verb and names
+it. Each `--attach` adds an `ATTACHED FILE:` line to the message; `-` reads the
+message from stdin. The reply prints instead of being sent, and attachments are
+copied to a temp directory named on stderr. The exit code is the tool's. It
+writes no a8s state. An unknown name lists the bundled tools.
+
 ## `ar3 doctor`
 
 Functional probes for the CLIs the suite runs on — every one is read-only and
@@ -76,7 +90,7 @@ configures anything.
   `agy`, `ollama`: on PATH, and does a version probe actually answer?
 - **Services** — the ollama server (reachable? which models are pulled?) and
   docker (binary present *and* daemon reachable — they fail differently).
-- **Tooling** — git present with `user.name` and `user.email` configured, and
+- **Tooling** — git present with `user.name` and `user.email` configured, `openssl` on PATH (the vault tool node needs it), and
   `utf-8 output`: on Windows, whether this child runs in UTF-8 mode or carries
   a `PYTHONIOENCODING`, and what its stdout encoding actually is — a cp1252
   console is what makes the suite's arrows and em dashes crash a command that

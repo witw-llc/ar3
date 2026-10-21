@@ -5,8 +5,9 @@ ar3 never mutates product state; it owns and maintains the suite's own
 substrate instead. It reads a8s/r4t/k7e state passively and probes
 prerequisites — there is no `ar3 tell`, no `ar3 dispatch`, no passthrough:
 every action belongs to the CLI that owns it, and ar3's job is to tell you
-which command that is. The one exception is `ar3 deps`, which fetches
-on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`:
+which command that is. `ar3 tool` is the exception for local testing: it runs
+a bundled a8s tool node by hand, with its reply printed instead of sent, and
+writes no a8s state. Beyond it, `ar3 deps` fetches on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`:
 that directory is substrate ar3 itself owns, not product state, and it is the
 only thing ar3 ever writes.
 
@@ -377,6 +378,38 @@ def _git_probe() -> Probe:
     return Probe(True, version)
 
 
+def _openssl_probe() -> Probe:
+    path = shutil.which("openssl")
+    if path is None:
+        return Probe(False, "not on PATH")
+    return Probe(True, path)
+
+
+def _chrome_probe() -> Probe:
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        path = shutil.which(name)
+        if path:
+            return Probe(True, path)
+    mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    if os.path.exists(mac):
+        return Probe(True, mac)
+    return Probe(False, "not found")
+
+
+def _node_probe() -> Probe:
+    path = shutil.which("node")
+    if path is None:
+        return Probe(False, "not on PATH")
+    return Probe(True, path)
+
+
+def _playwright_cli_probe() -> Probe:
+    path = shutil.which("playwright-cli")
+    if path is None:
+        return Probe(False, "not on PATH")
+    return Probe(True, path)
+
+
 def _utf8_report(os_name: str, utf8_mode: bool, io_encoding: str, stream: str) -> Probe:
     if os_name != "nt":
         return Probe(True, "not applicable — POSIX leaves the locale alone")
@@ -426,6 +459,15 @@ CHECKS: tuple[Check, ...] = (
     Check("ollama serve", SERVICES, _ollama_probe, "ollama serve, then ollama pull <model>"),
     Check("docker", SERVICES, _docker_probe, "start Docker Desktop or the docker daemon"),
     Check("git", TOOLING, _git_probe, "git config --global user.name / user.email", core=True),
+    Check("openssl", TOOLING, _openssl_probe, "install OpenSSL (the vault tool node needs it)"),
+    Check("chrome", TOOLING, _chrome_probe, "install Google Chrome (the browser tool node needs it)"),
+    Check("node", TOOLING, _node_probe, "install Node.js (the browser tool node needs it for playwright-cli)"),
+    Check(
+        "playwright-cli",
+        TOOLING,
+        _playwright_cli_probe,
+        "npm install -g @playwright/cli (the browser tool node needs it)",
+    ),
     Check(
         "utf-8 output",
         TOOLING,
@@ -1195,6 +1237,96 @@ def cmd_update(args: argparse.Namespace) -> int:
     return _update_suite(script)
 
 
+# ---------- tool ----------
+
+def _load_definitions():
+    """a8s's own definitions module, loaded by path, so a tool's argv here is
+    the argv a wake builds. It imports its a8s siblings flat, so the a8s
+    directory rides sys.path for the load only."""
+    import importlib.util
+
+    a8s_dir = REPO_ROOT / "apps" / "a8s"
+    spec = importlib.util.spec_from_file_location("ar3_tool_definitions", a8s_dir / "definitions.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(a8s_dir))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        try:
+            sys.path.remove(str(a8s_dir))
+        except ValueError:
+            pass
+    return module
+
+
+def _tool_names() -> list[str]:
+    root = REPO_ROOT / "apps" / "a8s" / "definitions"
+    return sorted(p.stem[len("tool-"):] for p in root.glob("tool-*.json"))
+
+
+def cmd_tool(args: argparse.Namespace) -> int:
+    """Run a bundled tool node once, by hand: build its argv with a8s's own
+    expander, run it in the cwd, and print the reply it would have sent."""
+    import tempfile
+
+    path = REPO_ROOT / "apps" / "a8s" / "definitions" / f"tool-{args.name}.json"
+    if not path.is_file():
+        names = _tool_names()
+        print(f"ar3 tool: no bundled tool named '{args.name}'", file=sys.stderr)
+        print("tools: " + (", ".join(names) or "(none)"), file=sys.stderr)
+        return 2
+    try:
+        definition = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"ar3 tool: cannot read {path.name}: {exc}", file=sys.stderr)
+        return 2
+    node_vars: dict[str, str] = {}
+    for item in args.var:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            print(f"ar3 tool: --var needs KEY=VALUE, got '{item}'", file=sys.stderr)
+            return 2
+        node_vars[key] = value
+    sender = args.sender
+    if not any(k.upper() == "ALLOW" for k in node_vars):
+        node_vars["ALLOW"] = sender
+    words = list(args.message)
+    if words == ["-"]:
+        message = sys.stdin.read()
+    else:
+        message = " ".join(words)
+    attached = []
+    for raw in args.attach:
+        file = Path(raw).expanduser()
+        if not file.is_file():
+            print(f"ar3 tool: --attach is not a file: {raw}", file=sys.stderr)
+            return 2
+        attached.append(f"ATTACHED FILE: {file.resolve()}")
+    if attached:
+        message = "\n".join([message, "", *attached])
+    defs = _load_definitions()
+    try:
+        argv = defs._expand_argv(
+            list(definition.get("invoke") or []),
+            sender,
+            args.node or args.name,
+            message,
+            definition_path=str(path),
+            vars=node_vars,
+        )
+    except defs.UndefinedVarsError as exc:
+        print(f"ar3 tool: {args.name} needs {', '.join('--var ' + n + '=...' for n in exc.names)}", file=sys.stderr)
+        return 2
+    reply_dir = tempfile.mkdtemp(prefix="ar3-tool-")
+    print(f"ar3 tool: attachments land in {reply_dir}", file=sys.stderr)
+    env = {**os.environ, "AR3_TOOL_REPLY_DIR": reply_dir}
+    try:
+        return subprocess.run(argv, env=env).returncode
+    except OSError as exc:
+        print(f"ar3 tool: cannot run {argv[0]}: {exc}", file=sys.stderr)
+        return 127
+
+
 # ---------- cli ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -1203,7 +1335,8 @@ def main(argv: list[str] | None = None) -> int:
         description=(
             "Front door to the AR3 suite. Bare `ar3` reports where a8s, r4t and "
             "k7e stand; `ar3 doctor` probes the tools they need. AR3 never runs "
-            "another product's commands for you."
+            "another product's commands for you; `ar3 tool` is the exception, "
+            "for testing a tool node locally."
         ),
     )
     parser.add_argument("--version", action="version", version=version_line("ar3"))
@@ -1211,6 +1344,33 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     doctor = sub.add_parser("doctor", help="Probe harness and tool prerequisites")
     doctor.set_defaults(func=cmd_doctor)
+    tool = sub.add_parser(
+        "tool",
+        usage="ar3 tool <name> [--from NAME] [--as NODE] [--var KEY=VALUE]... "
+        "[--attach PATH]... [--] [message... | -]",
+        help="Run a bundled tool node once, locally, with its reply printed",
+        description=(
+            "ar3 tool runs a bundled a8s tool node (apps/a8s/definitions/"
+            "tool-<name>.json) once, in the current directory, for local "
+            "testing. The argv is built by a8s's own expander, so it matches a "
+            "wake. The reply prints instead of being sent; attachments are "
+            "copied to a temp directory named on stderr. ALLOW defaults to "
+            "--from. Nothing is written to a8s state. The exit code is the "
+            "tool's."
+        ),
+    )
+    tool.add_argument("name", help="Tool name, e.g. command-shell")
+    tool.add_argument("--from", dest="sender", default="operator", metavar="NAME",
+                      help="Sender name for $SENDER (default operator)")
+    tool.add_argument("--as", dest="node", default=None, metavar="NODE",
+                      help="Node name for $RECIPIENT (default the tool name)")
+    tool.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
+                      help="A per-node a8s var; repeatable")
+    tool.add_argument("--attach", action="append", default=[], metavar="PATH",
+                      help="Attach a file to the message; repeatable")
+    tool.add_argument("message", nargs="*",
+                      help="The message words, or - to read stdin")
+    tool.set_defaults(func=cmd_tool)
     deps = sub.add_parser(
         "deps",
         help="List, or install, on-demand heavy dependency groups",
@@ -1260,7 +1420,14 @@ def main(argv: list[str] | None = None) -> int:
         "`ar3 doctor` probes — each by its own method.",
     )
     update.set_defaults(func=cmd_update)
-    args = parser.parse_args(argv)
+    raw = sys.argv[1:] if argv is None else list(argv)
+    if raw[:1] == ["tool"]:
+        # Options may sit before or after the name; argparse's subparser path
+        # cannot interleave them with a trailing variable-length message.
+        args = tool.parse_intermixed_args(raw[1:])
+        args.func = cmd_tool
+    else:
+        args = parser.parse_args(raw)
     return args.func(args)
 
 

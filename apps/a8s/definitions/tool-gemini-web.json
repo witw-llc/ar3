@@ -1,0 +1,32 @@
+{
+  "description": "Tool node: Gemini Web as an a8s seat. Each tell is typed into Gemini in a signed-in browser seat and Gemini's answer comes back as a tell, one conversation per correspondent; files go in and generated images come back. It needs a browser seat (see tool-browser) whose Chrome profile a person has already signed in to Gemini by hand; this node never signs in. Register it with the sender ACL and that seat: `a8s add gemini ~/agents/gemini tool-gemini-web --ALLOW=iris --BROWSER_SEAT=gemini-profile`; a sender outside ALLOW gets no reply. Optional var: MODEL picks a model as Gemini's own menu labels it when a conversation is created (unset takes Gemini's default). The wake drives the browser tool by its path in the suite, so it needs the same display setup as tool-browser: on Linux, `a8s vars <node> set env.DISPLAY :0` for a headed seat. A reply that cannot be sent is held and delivered on the next wake; a turn that cannot run answers 'not sent, send it again'. State lives in `${XDG_DATA_HOME:-~/.local/share}/ar3/gemini-web/<node>`. See docs/a8s-tools.md.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/gemini_web",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--browser-seat",
+    "$BROWSER_SEAT",
+    "--model=$MODEL?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 900,
+  "idle": {
+    "timeout": 0
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../tools/browser",
+      "close",
+      "--seat",
+      "$BROWSER_SEAT"
+    ]
+  }
+}

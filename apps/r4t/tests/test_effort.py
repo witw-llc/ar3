@@ -48,9 +48,16 @@ def test_unset_effort_preserves_argv_without_mutation(preset):
 
 
 @pytest.mark.parametrize("preset", ["cursor", "devin", "ollama", None])
-def test_unsupported_effort_names_engine(preset):
-    with pytest.raises(rig.RigError, match=f"{preset!r} does not support --effort"):
-        rig.apply_effort(["cli", "{prompt}"], preset, "low")
+def test_unsupported_effort_is_dropped_with_one_warning(preset, capsys):
+    rig._EFFORT_DROPPED.clear()
+    argv = ["cli", "{prompt}"]
+    assert rig.apply_effort(argv, preset, "low") == argv
+    assert rig.apply_effort(argv, preset, "low") == argv
+    err = capsys.readouterr().err
+    assert f"engine {preset!r} does not support --effort; 'low' ignored" in err
+    assert err.count("does not support --effort") == 1
+    if preset == "cursor":
+        assert "[effort=...]" in err
 
 
 @pytest.mark.parametrize(
@@ -237,8 +244,10 @@ def test_rig_effort_persistence_set_unset_and_swap_validation(tmp_path):
     assert config.read_bytes() == before
     rig.swap_preset_rig(config, "worker", "claude", effort="low")
     assert rig.rig_setting(config, "worker", "effort").value == "low"
-    with pytest.raises(rig.RigError, match="does not support"):
-        rig.swap_preset_rig(config, "worker", "cursor")
+    rig._EFFORT_DROPPED.clear()
+    rig.swap_preset_rig(config, "worker", "cursor")
+    assert "--effort" not in rig.load_rig_config(config).rigs["worker"].argv("hi")
+    rig.swap_preset_rig(config, "worker", "claude", effort="low")
     rig.set_rig_value(config, "worker", "effort", "high")
     loaded = rig.load_rig_config(config).rigs["worker"]
     assert loaded.effort == "high"
@@ -374,16 +383,18 @@ def test_dispatch_and_distill_apply_effort(monkeypatch, tmp_path):
     assert worker.distill_command(tmp_path) is None
 
 
-def test_cursor_model_options_remain_verbatim(tmp_path):
+def test_cursor_model_options_remain_verbatim(tmp_path, capsys):
+    rig._EFFORT_DROPPED.clear()
     model = "claude-opus-4-8[context=1m,effort=high,fast=false]"
     argv = engine_run.build_argv(
         "cursor", "hi", model=model, timeout=900, workdir=tmp_path
     )
     assert argv[argv.index("--model") + 1] == model
-    with pytest.raises(engine_run.RunError, match="use --model"):
-        engine_run.build_argv(
-            "cursor", "hi", model=model, effort="low", timeout=900, workdir=tmp_path
-        )
+    dropped = engine_run.build_argv(
+        "cursor", "hi", model=model, effort="low", timeout=900, workdir=tmp_path
+    )
+    assert dropped == argv
+    assert "use --model" in capsys.readouterr().err
 
 
 def test_codex_resume_keeps_effort_after_subcommand(tmp_path):
@@ -448,3 +459,15 @@ def test_codex_compact_config_override_is_replaced():
         "-c=other=true",
         "{prompt}",
     ]
+
+
+def test_rig_with_effort_on_cursor_builds_an_argv(tmp_path, capsys):
+    rig._EFFORT_DROPPED.clear()
+    config = tmp_path / "rigs.json"
+    rig.add_preset_rig(config, "worker", "claude", effort="low")
+    rig.swap_preset_rig(config, "worker", "cursor")
+    loaded = rig.load_rig_config(config).rigs["worker"]
+    assert loaded.effort == "low"
+    argv = loaded.argv("hi")
+    assert argv and argv[0] == rig.HARNESS_PRESETS["cursor"]["invoke"][0]
+    assert "low" not in argv

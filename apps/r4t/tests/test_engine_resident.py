@@ -19,7 +19,9 @@ from ar3.proc import terminate_group
 from r4t import main as r4t_main
 
 
-def make_fake_stream_claude(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> tuple[Path, Path]:
+def make_fake_stream_claude(
+    tmp_path: Path, *, sleep_per_turn: float = 0.05, late_frame_after: float = 0.0
+) -> tuple[Path, Path]:
     """Create an executable fake `claude` that speaks `--input-format stream-json`
     and `--output-format stream-json`, recording its argv, env, and every received
     stdin frame to `record.json`."""
@@ -28,7 +30,7 @@ def make_fake_stream_claude(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> 
     code = textwrap.dedent(
         f"""\
         #!{sys.executable}
-        import json, os, sys, time
+        import json, os, sys, threading, time
         from pathlib import Path
 
         record_file = Path({str(record_path)!r})
@@ -80,6 +82,15 @@ def make_fake_stream_claude(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> 
                 "result": reply_text,
             }}) + "\\n")
             sys.stdout.flush()
+            if {late_frame_after} and len(rec["turns"]) == 1:
+                # The harness wakes itself (a background task ends) with no turn in flight.
+                def _late():
+                    sys.stdout.write(json.dumps({{
+                        "type": "result", "subtype": "success",
+                        "is_error": False, "result": "late",
+                    }}) + "\\n")
+                    sys.stdout.flush()
+                threading.Timer({late_frame_after}, _late).start()
         """
     )
     script_path.write_text(code, encoding="utf-8")
@@ -294,7 +305,7 @@ class TestResidentBootAndWrapupPrompts:
         )
         assert "You are 'bob'" in prompt
         assert "a8s_tell" in prompt
-        assert "45m window" in prompt
+        assert "45m of quiet" in prompt
         assert str(tmp_path / "STATUS.md") in prompt
         assert str(tmp_path / "LESSONS.md") in prompt
         assert prompt.endswith("alice tells bob (1s ago): hello there")
@@ -311,7 +322,7 @@ class TestResidentBootAndWrapupPrompts:
         )
         assert "You are 'bob'" in prompt
         assert "tell <recipient> - <<'EOF'" in prompt
-        assert "45m window" in prompt
+        assert "45m of quiet" in prompt
         assert prompt.endswith("alice tells bob (1s ago): hello agy")
 
 
@@ -335,7 +346,7 @@ class TestResidentBootAndWrapupPrompts:
         assert one_shot.startswith("Smart cold boot:\n")
         assert self.numbered(resident)[:3] == self.numbered(one_shot)[:3]
         assert self.numbered(resident)[2] == f"3. {engine_run.MCP_TELL_STEP}"
-        assert "4. Resident session (~45m window)" in resident
+        assert "4. Resident session: it stays open while a turn is running" in resident
         assert "Stay idle and exit" in one_shot and "Stay idle and exit" not in resident
 
     def test_agy_boot_prompt_carries_the_cli_tell_step_in_the_shared_slot(self, tmp_path):
@@ -387,6 +398,7 @@ class TestResidentBootAndWrapupPrompts:
         prompt = resident_mod.wrapup_prompt(tmp_path, 2700)
         assert engine_run.LESSON_LINE_RULE in prompt
         assert "wrap up and exit" in prompt
+        assert "quiet for 45m" in prompt
         assert "Never edit AGENTS.md." in prompt
 
 
@@ -568,6 +580,75 @@ class TestResidentLifecycle:
                 assert "Consolidate" not in first
                 assert copies == []
             assert (workdir / "LESSONS.md").read_bytes().startswith(original)
+        finally:
+            _stop(workdir, "ares")
+
+    def _patch_claude(self, monkeypatch, fake_bin):
+        monkeypatch.setitem(
+            engine_run.HARNESS_PRESETS,
+            "claude",
+            {**engine_run.HARNESS_PRESETS["claude"], "invoke": [str(fake_bin), "-p", "{prompt}"]},
+        )
+
+    def test_a_turn_in_flight_past_the_window_is_not_cut_off(self, monkeypatch, tmp_path):
+        # Negative control for the old wall-clock cut: the turn runs 2.5s, the
+        # window is 1s. The session must not enter `closing` while the turn runs.
+        fake_bin, record_file = make_fake_stream_claude(tmp_path, sleep_per_turn=2.5)
+        self._patch_claude(monkeypatch, fake_bin)
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        home = resident_mod.resident_home(workdir, "ares")
+        try:
+            assert r4t_main(["engine", "claude", "run", "--resident", "--timeout", "1",
+                             "--dir", str(workdir), "--agent", "ares", "slow work"]) == 0
+            _wait_until(lambda: len(_turns(record_file)) >= 1)
+            started = time.monotonic()
+            while time.monotonic() - started < 1.8:
+                assert (resident_mod.read_state(home) or {}).get("status") != "closing"
+                assert len(_turns(record_file)) == 1
+                time.sleep(0.1)
+            # Positive control: once the result arrives and the window passes quiet, wrap-up is sent.
+            _wait_until(lambda: len(_turns(record_file)) >= 2, timeout=15.0)
+            assert "wrap up and exit" in _turns(record_file)[1]
+        finally:
+            _stop(workdir, "ares")
+
+    def test_a_late_frame_restarts_the_quiet_window(self, monkeypatch, tmp_path):
+        # Window 2s. The engine speaks again 1.5s after its turn, with no turn
+        # in flight. The wrap-up must come a full window after that frame.
+        fake_bin, record_file = make_fake_stream_claude(
+            tmp_path, sleep_per_turn=0.05, late_frame_after=1.5
+        )
+        self._patch_claude(monkeypatch, fake_bin)
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        try:
+            assert r4t_main(["engine", "claude", "run", "--resident", "--timeout", "2",
+                             "--dir", str(workdir), "--agent", "ares", "go"]) == 0
+            _wait_until(lambda: len(_turns(record_file)) >= 1)
+            t0 = time.monotonic()
+            _wait_until(lambda: len(_turns(record_file)) >= 2, timeout=15.0)
+            elapsed = time.monotonic() - t0
+            assert "wrap up and exit" in _turns(record_file)[1]
+            # Without the reset the wrap-up lands near 2.0s; with it, near 3.5s.
+            assert elapsed >= 2.8, elapsed
+        finally:
+            _stop(workdir, "ares")
+
+    def test_quiet_for_the_window_with_no_turn_in_flight_sends_the_wrapup(
+        self, monkeypatch, tmp_path
+    ):
+        fake_bin, record_file = make_fake_stream_claude(tmp_path, sleep_per_turn=0.05)
+        self._patch_claude(monkeypatch, fake_bin)
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        try:
+            assert r4t_main(["engine", "claude", "run", "--resident", "--timeout", "1",
+                             "--dir", str(workdir), "--agent", "ares", "hello"]) == 0
+            _wait_until(lambda: len(_turns(record_file)) >= 2, timeout=15.0)
+            turns = _turns(record_file)
+            assert "hello" in turns[0]
+            assert "quiet for" in turns[1] and "wrap up and exit" in turns[1]
         finally:
             _stop(workdir, "ares")
 

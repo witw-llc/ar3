@@ -45,7 +45,7 @@
 - **A resident session is serial per `(dir, agent)`.** A message that finds
   the session `closing` queues for the bridge's next session; never start a
   second engine beside it. Pid files clear under the same lock the enqueuer
-  takes. `--timeout` is the session's whole life, and `engine stop` sends no
+  takes. `--timeout` is the quiet window, not the session's life, and `engine stop` sends no
   wrap-up and drops the queue.
 - **A stop owns the session under the enqueue lock.** It marks the session
   `stopping`, and a message that finds `stopping` is dropped; it clears only
