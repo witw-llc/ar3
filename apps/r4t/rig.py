@@ -1720,7 +1720,13 @@ def _mcp_codex_override(
     env: dict, cwd: Path, command: list[str], *, isolated: bool = False
 ) -> str:
     """codex takes config as `-c key=<TOML value>`, and its server table is the
-    one idiom that also accepts an explicit cwd."""
+    one idiom that also accepts an explicit cwd.
+
+    `default_tools_approval_mode = "approve"` is load-bearing: a turn whose
+    approval policy is `never` (every sandboxed `codex exec`, and the resident
+    app-server) fails each MCP tool call with "MCP tool call requires
+    approval, but approval policy is never" — and the model still reports the
+    message as sent (verified against codex-cli 0.163.0)."""
     args = ", ".join(_toml_string(a) for a in command[1:])
     server_env = _mcp_server_env(env, isolated=isolated)
     pinned = ", ".join(f"{k} = {_toml_string(v)}" for k, v in server_env.items())
@@ -1729,7 +1735,8 @@ def _mcp_codex_override(
         f"command = {_toml_string(command[0])}, "
         f"args = [{args}], "
         f"env = {{{pinned}}}, "
-        f"cwd = {_toml_string(str(cwd))}"
+        f"cwd = {_toml_string(str(cwd))}, "
+        'default_tools_approval_mode = "approve"'
         "}"
     )
 

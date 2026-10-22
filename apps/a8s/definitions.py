@@ -713,6 +713,28 @@ def build_stop_command(
     )
 
 
+def build_status_command(
+    definition: dict,
+    agent_name: str,
+    definition_path: str = "",
+    vars: dict[str, str] | None = None,
+) -> list[str] | None:
+    """Pick the `status.invoke` argv from `definition`, expanded like
+    `stop.invoke`. A node whose wake leaves a long-lived process of its own
+    names here how to ask it whether it is working; `a8s ps` prints the first
+    word of the probe's stdout (`busy` or `resident`) as STATUS. Returns None
+    when the definition declares none."""
+    status = definition.get("status")
+    if not isinstance(status, dict):
+        return None
+    argv = status.get("invoke")
+    if not argv:
+        return None
+    return _expand_argv(
+        list(argv), "", agent_name, "", "", "", definition_path, vars=vars
+    )
+
+
 DEFAULT_BATCH_PAUSE_SECONDS = 3.0
 
 

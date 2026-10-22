@@ -275,7 +275,7 @@ class TestComposeResidentArgv:
         assert "{prompt}" not in composed
 
     def test_rejects_non_resident_engines(self, tmp_path):
-        for engine in ("codex", "cursor", "copilot", "opencode", "muse", "devin"):
+        for engine in ("cursor", "copilot", "opencode", "muse", "devin"):
             with pytest.raises(engine_run.RunError, match="does not support --resident"):
                 engine_run._build_argv_template(
                     engine, model=None, timeout=900, workdir=tmp_path, resident=True
@@ -762,7 +762,7 @@ class TestResidentLifecycle:
             _stop(workdir, "ares")
 
     def test_stop_refuses_an_engine_with_no_resident_mode(self, tmp_path, capsys):
-        assert r4t_main(["engine", "codex", "stop", "--dir", str(tmp_path)]) == 2
+        assert r4t_main(["engine", "cursor", "stop", "--dir", str(tmp_path)]) == 2
         assert "no resident session" in capsys.readouterr().err
 
     def test_idle_wake_never_boots_or_feeds_a_resident_session(self, monkeypatch, tmp_path):
@@ -929,3 +929,81 @@ class TestResidentStopOwnership:
             _wait_until(lambda: not resident_mod.pid_alive(tool))
         finally:
             _kill(bridge, tool)
+
+
+class TestResidentStatus:
+    """`r4t engine <id> status`: what `a8s ps` reads through `status.invoke`."""
+
+    def _live_home(self, tmp_path, **state):
+        home = resident_mod.resident_home(tmp_path, "ares")
+        home.mkdir(parents=True)
+        resident_mod._write_pid_files(home, os.getpid())
+        resident_mod._write_state(home, pid=os.getpid(), engine_pid=None, **state)
+        return home
+
+    def _run(self, tmp_path, capsys):
+        code = r4t_main(["engine", "claude", "status", "--dir", str(tmp_path), "--agent", "ares"])
+        return code, capsys.readouterr().out.strip()
+
+    def test_a_turn_in_flight_is_busy(self, tmp_path, capsys):
+        self._live_home(tmp_path, status="running", turns=1)
+        assert self._run(tmp_path, capsys) == (0, "busy")
+
+    def test_no_turn_in_flight_is_resident(self, tmp_path, capsys):
+        self._live_home(tmp_path, status="running", turns=0)
+        assert self._run(tmp_path, capsys) == (0, "resident")
+
+    def test_a_state_without_turns_is_resident(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="running")
+        state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+        state.pop("turns")
+        (home / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "resident")
+
+    def test_closing_with_no_turn_is_resident(self, tmp_path, capsys):
+        self._live_home(tmp_path, status="closing")
+        assert self._run(tmp_path, capsys) == (0, "resident")
+
+    def test_starting_with_a_queued_message_is_busy(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="starting")
+        assert self._run(tmp_path, capsys) == (0, "resident")
+        (home / "inbox").mkdir(exist_ok=True)
+        (home / "inbox" / "1.json").write_text("{}", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "busy")
+
+    def test_stopping_prints_nothing_and_exits_1(self, tmp_path, capsys):
+        self._live_home(tmp_path, status="stopping", turns=2)
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_a_dead_bridge_prints_nothing_and_exits_1(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="running", turns=1)
+        resident_mod._pid_file(home).write_text("4194300\n", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_no_session_at_all_exits_1(self, tmp_path, capsys):
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_an_engine_without_a_resident_session_is_refused(self, tmp_path, capsys):
+        assert r4t_main(["engine", "gemini", "status", "--dir", str(tmp_path),
+                         "--agent", "ares"]) == 2
+
+    def test_the_bridge_publishes_turns_while_a_turn_runs(self, monkeypatch, tmp_path):
+        fake_bin, record_file = make_fake_stream_claude(tmp_path, sleep_per_turn=2.0)
+        monkeypatch.setitem(
+            engine_run.HARNESS_PRESETS,
+            "claude",
+            {**engine_run.HARNESS_PRESETS["claude"], "invoke": [str(fake_bin), "-p", "{prompt}"]},
+        )
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        home = resident_mod.resident_home(workdir, "ares")
+        try:
+            assert r4t_main(["engine", "claude", "run", "--resident", "--timeout", "30",
+                             "--dir", str(workdir), "--agent", "ares", "hello"]) == 0
+            _wait_until(lambda: (resident_mod.read_state(home) or {}).get("turns") == 1)
+            assert resident_mod.status_resident(workdir, "ares") == "busy"
+            _wait_until(lambda: (resident_mod.read_state(home) or {}).get("turns") == 0,
+                        timeout=15.0)
+            assert resident_mod.status_resident(workdir, "ares") == "resident"
+        finally:
+            _stop(workdir, "ares")

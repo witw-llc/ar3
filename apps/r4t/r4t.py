@@ -1557,6 +1557,8 @@ def cmd_engine(args: argparse.Namespace) -> int:
         return _cmd_engine_check(args, args.target.strip().lower())
     if args.action == "stop":
         return _cmd_engine_stop(args)
+    if args.action == "status":
+        return _cmd_engine_status(args)
     try:
         # The explicit quota command is the opt-in: engines whose live read
         # spends (muse) mint it here and nowhere else.
@@ -1641,7 +1643,10 @@ def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
     else:
         print(engine_check.format_text(reports))
         print()
-        print("No turn is spent: a check drives each CLI's own --help/--version.")
+        how = "a check drives each CLI's own --help/--version"
+        if any(r.method == "app-server handshake" for r in reports):
+            how += ", and app-server's initialize and an ephemeral thread/start"
+        print(f"No turn is spent: {how}.")
     return 1 if any(r.verdict == engine_check.REJECTED for r in reports) else 0
 
 
@@ -1707,6 +1712,24 @@ def _cmd_engine_stop(args: argparse.Namespace) -> int:
         return 2
     stopped = resident_mod.stop_resident(_turn_dir(args), args.agent)
     print(f"r4t engine: resident session {'stopped' if stopped else 'not running'}")
+    return 0
+
+
+def _cmd_engine_status(args: argparse.Namespace) -> int:
+    from engines import resident as resident_mod
+
+    engine = args.target.strip().lower()
+    if engine not in resident_mod.RESIDENT_ENGINES:
+        print(
+            f"r4t engine: {engine} has no resident session to ask (engines "
+            f"that do: {', '.join(sorted(resident_mod.RESIDENT_ENGINES))})",
+            file=sys.stderr,
+        )
+        return 2
+    word = resident_mod.status_resident(_turn_dir(args), args.agent)
+    if word is None:
+        return 1
+    print(word)
     return 0
 
 
@@ -3300,7 +3323,7 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "action",
         nargs="?",
-        choices=["quota", "run", "check", "stop", "models", "efforts"],
+        choices=["quota", "run", "check", "stop", "status", "models", "efforts"],
         help="What to ask the engine.",
     )
     engine_p.add_argument(
@@ -3705,7 +3728,7 @@ def _adopt_stray_positionals(args: argparse.Namespace, extras: list[str]) -> lis
     for tok in extras:
         if tok != "-" and tok.startswith("-"):
             remaining.append(tok)
-        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check", "stop", "models", "efforts"):
+        elif getattr(args, "action", "") is None and tok in ("quota", "run", "check", "stop", "status", "models", "efforts"):
             args.action = tok
         elif (
             getattr(args, "prompt", "") is None

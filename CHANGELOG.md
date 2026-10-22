@@ -10,6 +10,57 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.115
+
+### Added
+
+- A definition may declare `status.invoke`, a probe `a8s ps` runs for each
+  running node (3 second limit, all nodes in parallel) to learn whether a
+  detached process is working. `r4t engine <id> status --agent NAME` is the
+  matching verb for resident sessions: it prints `busy` or `resident`, and
+  nothing (exit 1) when no session is up. The resident bridge now records its
+  in-flight turn count as `turns` in `state.json`. The four bundled resident
+  definitions declare the probe. Closes #343.
+- Resident sessions on Codex: `r4t engine codex run --resident` keeps one
+  `codex app-server` thread alive across messages, with the `a8s_tell` MCP
+  server, the workspace-write sandbox (`danger-full-access` with
+  `--permissions bypass`) and approvals never. The session refuses to start
+  when app-server reports any other policy in force, and sends one turn at a
+  time. New bundled definitions `engine-codex-resident.json` and
+  `engine-codex-resident-unrestricted.json`. `r4t engine codex check
+  --resident` runs the app-server handshake without a turn, names its
+  version, and notes any version other than the proven 0.163.0.
+
+### Fixed
+
+- A restricted codex turn (`codex exec --sandbox workspace-write`, approvals
+  never) could not send a reply by the `a8s_tell` MCP tool: every call failed
+  with "MCP tool call requires approval, but approval policy is never", and
+  the model still reported the message as sent. The a8s server entry now
+  carries `default_tools_approval_mode = "approve"`. Turns with
+  `--permissions bypass` were not affected.
+- A codex turn's tell step named the tool `a8s_tell`, which Codex lists as
+  `mcp__a8s__tell`; the model searched for the wrong name, found nothing, and
+  fell back to the `tell` CLI, which a sandbox that cannot start leaves
+  without a shell. The codex step now names `mcp__a8s__tell`, on engine
+  turns and on roster members whose rig runs codex or ollama-codex with the
+  `mcp` knob on.
+
+### Changed
+
+- `a8s ps` STATUS gains `resident` (session up, no turn in flight) and shows
+  `busy` for a resident node that is mid-turn, which read `idle` before. A live
+  wake still wins as `busy`; a probe that fails or says anything else leaves
+  the wake-based `busy`, `fail` or `idle`.
+- The resident wrap-up turn's last step now reads "When done, say so in your
+  reply text only; send no message." It said "Reply briefly", and a session
+  taught to reply only by message sent its sender a "Done." message at every
+  close.
+- `r4t engine codex quota` starts `codex app-server` with
+  `-c sandbox_mode="read-only"` and `-c approval_policy="never"`. The
+  top-level `-s read-only -a never` it passed before are ignored by
+  app-server, which ran the probe with approvals on-request.
+
 ## 0.1.114
 
 ### Changed

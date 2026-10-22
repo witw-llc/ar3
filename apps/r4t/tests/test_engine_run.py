@@ -995,9 +995,16 @@ class TestRunTellStepAndMcp:
         argv, _ = self.run_engine(monkeypatch, tmp_path, engine)
         self.spliced(engine, argv)
         prompt = argv[-1]
-        assert engine_run.MCP_TELL_STEP in prompt
         assert engine_run.CLI_TELL_STEP not in prompt
-        assert "`a8s_tell`" in prompt
+        if engine in ("codex", "ollama-codex"):
+            # Codex shows the tool as `mcp__a8s__tell`; told `a8s_tell`, the
+            # model searched for that name, found nothing, and fell back.
+            assert engine_run.CODEX_MCP_TELL_STEP in prompt
+            assert "`mcp__a8s__tell`" in prompt
+            assert "`a8s_tell`" not in prompt
+        else:
+            assert engine_run.MCP_TELL_STEP in prompt
+            assert "`a8s_tell`" in prompt
 
     def test_claude_gets_the_server_config_and_the_tool_in_its_allowlist(
         self, monkeypatch, tmp_path

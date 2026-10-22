@@ -132,7 +132,9 @@ __all__ = [
     "LESSONS_TARGET",
     "LESSONS_ARCHIVE_NAME",
     "MCP_TELL_STEP",
+    "CODEX_MCP_TELL_STEP",
     "CLI_TELL_STEP",
+    "mcp_tell_step",
     "DEFAULT_IDLE_PROMPT",
     "RunError",
     "build_argv",
@@ -177,6 +179,26 @@ MCP_TELL_STEP = (
     "named in the routed input. Delivery is asynchronous; do not wait for a "
     "reply."
 )
+
+# Codex lists MCP tools as `mcp__<server>__<tool>` inside its code-mode tool
+# catalog, so a model told `a8s_tell` searches for that name, finds nothing,
+# and falls back to the shell — which a sandbox that cannot start leaves
+# without a way to reply (codex-cli 0.163.0, live, 2026-10-22).
+CODEX_MCP_TELL_TOOL = "mcp__a8s__tell"
+CODEX_MCP_TELL_STEP = MCP_TELL_STEP.replace(
+    "call the `a8s_tell` MCP tool",
+    f"call the a8s MCP server's `tell` tool (`{CODEX_MCP_TELL_TOOL}` in "
+    "your tool list)",
+).replace("If `a8s_tell` is unavailable", "If that tool is unavailable")
+assert CODEX_MCP_TELL_STEP != MCP_TELL_STEP
+
+
+def mcp_tell_step(engine: str) -> str:
+    """The MCP tell step in the tool name the engine shows its model."""
+    if HARNESS_PRESETS.get(engine, {}).get("mcp") == "codex-config":
+        return CODEX_MCP_TELL_STEP
+    return MCP_TELL_STEP
+
 
 CLI_TELL_STEP = (
     "Reply only by message: run the `tell` shell command via your shell tool. "
@@ -802,13 +824,18 @@ def execute(
             resident=True,
         )
         if note:
+            # The one-shot note names exec's flag; a resident session rewrites
+            # it, so the note says what the session really runs with.
+            note = resident_mod.RESIDENT_PERMISSION_NOTES.get((engine, permissions), note)
             print(f"r4t engine: {note}", file=sys.stderr)
+        # Composed here as well as in the bridge, so a template the resident
+        # adapter refuses fails this call rather than the detached session.
+        composed = resident_mod.compose_resident_argv(
+            template,
+            dict(env if env is not None else os.environ),
+            engine=engine,
+        )
         if echo:
-            composed = resident_mod.compose_resident_argv(
-                template,
-                dict(env if env is not None else os.environ),
-                engine=engine,
-            )
             boot_preview = (
                 resident_mod.resident_boot_prompt(
                     dir_path,
@@ -854,7 +881,7 @@ def execute(
             dir_path,
             message,
             agent=agent,
-            tell_step=MCP_TELL_STEP if use_mcp else CLI_TELL_STEP,
+            tell_step=mcp_tell_step(engine) if use_mcp else CLI_TELL_STEP,
             copies=prepare_lessons_copies(dir_path, **caps),
             **caps,
         )

@@ -128,6 +128,7 @@ import transcript
 from engines import copilot as copilot_engine
 from rig import (
     AGY_HOME_IDIOM,
+    HARNESS_PRESETS,
     ENV_MCP_HOME_PEERS,
     McpPlan,
     RigConfig,
@@ -214,6 +215,17 @@ PROMPT_DEFAULTS: dict[str, str] = {
     # while the named one was called 20/20.
     "work_tell_mcp": (
         "- Send messages by calling the `a8s_tell` tool (call the tool — "
+        "printing text sends nothing). Pass `recipient` (the name) and `body` "
+        "(your message), and `attachments` (a list of absolute paths) to send "
+        "files with it. The body is delivered byte-exact; there is no shell. "
+        "`recipient` is whoever asked, or a member. Members:"
+    ),
+    # Codex lists the tool as `mcp__a8s__tell`; told `a8s_tell`, its model
+    # searches the tool list for that name, finds nothing, and falls back
+    # (codex-cli 0.163.0, live).
+    "work_tell_mcp_codex": (
+        "- Send messages by calling the a8s MCP server's `tell` tool "
+        "(`mcp__a8s__tell` in your tool list; call the tool — "
         "printing text sends nothing). Pass `recipient` (the name) and `body` "
         "(your message), and `attachments` (a list of absolute paths) to send "
         "files with it. The body is delivered byte-exact; there is no shell. "
@@ -585,6 +597,16 @@ def resolve_workdir(ctx: DispatchContext, member: Member) -> Path:
     return ctx.workplace / p
 
 
+def _tell_prompt_key(rig: Rig) -> str:
+    """The tell bullet for this rig: the shell heredoc, or the MCP tool under
+    the name the harness shows its model."""
+    if not rig.mcp_on:
+        return "work_tell"
+    if HARNESS_PRESETS.get(rig.preset or "", {}).get("mcp") == "codex-config":
+        return "work_tell_mcp_codex"
+    return "work_tell_mcp"
+
+
 def prompt_sections(
     ctx: DispatchContext,
     roster: Roster,
@@ -713,7 +735,7 @@ def prompt_sections(
             "## How to work",
             ctx.prompt("work_batch"),
             ctx.prompt("work_never_wait"),
-            ctx.prompt("work_tell_mcp" if rig.mcp_on else "work_tell"),
+            ctx.prompt(_tell_prompt_key(rig)),
             *(members or ["    - (none)"]),
             ctx.prompt("work_direct"),
             ctx.prompt("work_no_ack"),

@@ -10,8 +10,9 @@ auto-approval OFF). No test asserts that a composed argv is accepted by the
 installed binary, which is the gap this verb closes.
 
 **No tokens are spent.** A check never runs a turn: it drives the CLI's own
-`--help` and `--version`, and nothing else. The prompt is removed from the
-argv before any probe.
+`--help` and `--version` (for a resident codex session, also the
+app-server's initialize and an ephemeral thread/start), and nothing else. The
+prompt is removed from the argv before any probe.
 
 Two detection shapes, chosen per engine and recorded in PROBES with the reason:
 
@@ -269,6 +270,8 @@ def check_engine(
                 f"exit {code}",
             )
             return report
+        if resident and engine in APP_SERVER_ENGINES:
+            return _check_app_server(report, template, workdir or Path.cwd())
         report.verdict = ACCEPTED
         return report
 
@@ -292,6 +295,47 @@ def check_engine(
         )
         return report
     report.verdict = ACCEPTED
+    return report
+
+
+# A resident session on these talks to a long-lived server whose policy no
+# --help can show, so the check drives the server itself.
+APP_SERVER_ENGINES = frozenset({"codex"})
+
+
+def _check_app_server(report: EngineReport, argv: list[str], workdir: Path) -> EngineReport:
+    """`codex app-server` parses -s/-a/-m and then ignores them, so a parse
+    probe passes an argv that runs with the wrong policy. This runs the
+    handshake instead: initialize for the version, then an ephemeral
+    thread/start (no rollout file, no model call) whose answer is the policy
+    in force, compared with the one composed. The pinned version is the one
+    the adapter was proven on; another one is a note, not a rejection — the
+    session itself refuses a wrong policy at every start."""
+    from engines import resident as resident_mod
+
+    report.method = "app-server handshake"
+    probe = resident_mod.codex_app_server_probe(resolve_argv0(argv), workdir)
+    version = probe.get("version")
+    if version:
+        report.version = f"app-server {version}"
+    if probe.get("error"):
+        report.verdict = REJECTED
+        report.detail = probe["error"]
+        return report
+    problem = resident_mod.codex_policy_problem(
+        probe["result"], resident_mod.codex_sandbox_intent(argv)
+    )
+    if problem:
+        report.verdict = REJECTED
+        report.detail = f"thread/start reports {problem}"
+        return report
+    report.verdict = ACCEPTED
+    proven = resident_mod.CODEX_APP_SERVER_PROVEN
+    if version != proven:
+        report.detail = (
+            f"app-server {version or '(version unknown)'} is not the proven "
+            f"{proven}; re-prove the resident adapter before relying on it"
+        )
     return report
 
 

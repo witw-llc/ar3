@@ -31,7 +31,7 @@ Exit 0 means clean, 1 means defects. Nine classes:
 | `orphan` | unreachable from `_Sidebar.md` within two link hops |
 | `sidebar-leaf` | a `_Sidebar.md` entry that is not an index page |
 | `dead-link` | a `[[wiki]]` or relative link to a page that does not exist |
-| `ledger-oversize` | the decision ledger's live table is over its row ceiling |
+| `ledger-oversize` | the decision ledger's live table is over its row ceiling (120); at the ceiling the summary asks for a consolidation pass down to 90 |
 | `unarchived-row` | a superseded ledger row still sitting in the live table |
 | `unconsolidated-pair` | two live ledger rows on one surface in one domain |
 

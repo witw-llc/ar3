@@ -80,6 +80,10 @@ MAX_HOPS = 2
 LEDGER = "Decisions"
 LEDGER_ARCHIVE = "Decisions-Archive"
 LEDGER_CEILING = 120
+# At the ceiling the pass consolidates down to this, not merely under the
+# line, so the ledger grows without gardening on every new row (owner rule,
+# 2026-10-22).
+LEDGER_TARGET = 90
 SURFACE_WORDS = 3
 SURFACE_END = re.compile(r" — | - | – |:")
 ROW_SPLIT = re.compile(r"(?<!\\)\|")
@@ -458,6 +462,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"{LEDGER}: {ledger['rows']} live rows against a ceiling of "
                 f"{ledger['ceiling']}; surface names read as {ledger['surface']}"
             )
+            if ledger["rows"] >= ledger["ceiling"]:
+                print(
+                    f"{LEDGER}: at the ceiling; consolidate to {LEDGER_TARGET} "
+                    "live rows (the owner's rule, 2026-10-22)"
+                )
         if defects:
             flagged = len({d.page for d in defects})
             print(f"\n{len(defects)} defects on {flagged} of {page_count} pages")

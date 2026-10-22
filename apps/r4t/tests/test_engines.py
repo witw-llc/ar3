@@ -371,6 +371,16 @@ class TestCodexProbeArgv:
     def test_approval_policy_is_one_every_codex_accepts(self):
         assert codex.APPROVAL_POLICY in ("on-request", "never")
 
+    def test_policy_rides_config_keys_app_server_applies(self):
+        # app-server parses the top-level -s/-a and then ignores them, so the
+        # probe states its read-only intent as -c keys after the subcommand.
+        argv = codex.QUOTA_ARGV
+        assert argv[:2] == ["codex", "app-server"]
+        assert 'sandbox_mode="read-only"' in argv
+        assert f'approval_policy="{codex.APPROVAL_POLICY}"' in argv
+        for ignored in ("-s", "-a", "--sandbox", "--ask-for-approval"):
+            assert ignored not in argv
+
     def test_last_line_is_the_complaint_not_the_warnings(self):
         assert codex._last_line("WARN: no bubblewrap\nerror: invalid value") == (
             "error: invalid value"

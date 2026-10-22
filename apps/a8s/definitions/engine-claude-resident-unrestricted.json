@@ -81,5 +81,16 @@
       "--agent",
       "$RECIPIENT"
     ]
+  },
+  "status": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "claude",
+      "status",
+      "--agent",
+      "$RECIPIENT"
+    ]
   }
 }

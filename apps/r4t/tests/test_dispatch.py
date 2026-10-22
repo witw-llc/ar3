@@ -4262,6 +4262,20 @@ class TestMcpKnob:
         assert HEREDOC_TEACHING not in prompt
         assert "Members:" in prompt
 
+    @pytest.mark.parametrize("preset", ("codex", "ollama-codex"))
+    def test_codex_names_the_tool_as_its_tool_list_shows_it(self, ctx, preset):
+        prompt = self._prompt(ctx, Rig(name="t", preset=preset, mcp=True))
+        assert "`mcp__a8s__tell` in your tool list" in prompt
+        assert "`a8s_tell`" not in prompt
+        assert HEREDOC_TEACHING not in prompt
+        for argument in ("`recipient`", "`body`", "`attachments`"):
+            assert argument in prompt
+
+    def test_other_mcp_presets_keep_the_tool_text_byte_identical(self, ctx):
+        prompt = self._prompt(ctx, Rig(name="t", preset="claude", mcp=True))
+        assert dispatch.PROMPT_DEFAULTS["work_tell_mcp"] in prompt
+        assert "mcp__a8s__tell` in your tool list" not in prompt
+
     def test_agy_opted_in_gets_the_tool_doctrine_too(self, ctx):
         prompt = self._prompt(ctx, Rig(name="t", preset="agy", mcp=True))
         assert "`a8s_tell` tool" in prompt

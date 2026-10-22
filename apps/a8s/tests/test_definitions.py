@@ -1322,6 +1322,8 @@ class TestBundledResidentEngineDefinitions:
             ("engine-claude-resident-unrestricted", "claude"),
             ("engine-agy-resident", "agy"),
             ("engine-agy-resident-unrestricted", "agy"),
+            ("engine-codex-resident", "codex"),
+            ("engine-codex-resident-unrestricted", "codex"),
         ),
     )
     def test_bundled_resident_definition_parses_all_three_wakes(
@@ -1358,6 +1360,11 @@ class TestBundledResidentEngineDefinitions:
 
         assert build_stop_command(defn, "ares")[2:] == [
             "engine", engine_id, "stop", "--agent", "ares",
+        ]
+        from definitions import build_status_command
+
+        assert build_status_command(defn, "ares")[2:] == [
+            "engine", engine_id, "status", "--agent", "ares",
         ]
 
         idle_argv = build_idle_command(defn, "ares")

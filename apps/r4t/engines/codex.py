@@ -2,10 +2,15 @@
 
 `codex app-server` speaks newline-delimited JSON-RPC on stdio and ships a
 schema-documented `account/rateLimits/read` method: a read-only account call
-that costs no model quota. The sandbox flags keep the child harmless even if
-the handshake goes sideways. Window identity comes from `windowDurationMins`,
-never from the primary/secondary slot — sessions have been observed with
-either or both populated.
+that costs no model quota. The sandbox settings keep the child harmless even
+if the handshake goes sideways. Window identity comes from
+`windowDurationMins`, never from the primary/secondary slot — sessions have
+been observed with either or both populated.
+
+The app-server takes its policy from `-c` keys only. The top-level `-s`, `-a`,
+`-m` and `--dangerously-bypass-approvals-and-sandbox` parse and are then
+ignored without a word (verified against codex-cli 0.163.0), so every argv
+here states its intent as `-c`.
 """
 from __future__ import annotations
 
@@ -23,6 +28,12 @@ TIMEOUT_S = 15
 # than falling back — an argv the probe cannot afford to guess at, since it
 # never runs a command anyway and only reads the account's rate limits.
 APPROVAL_POLICY = "never"
+# As `-c` keys, the only spelling app-server applies (see the module doc).
+QUOTA_ARGV = [
+    "codex", "app-server",
+    "-c", 'sandbox_mode="read-only"',
+    "-c", f'approval_policy="{APPROVAL_POLICY}"',
+]
 
 
 def quota() -> dict:
@@ -44,7 +55,7 @@ def _rpc_rate_limits() -> dict:
     try:
         errors = tempfile.TemporaryFile(mode="w+")
         proc = subprocess.Popen(
-            ["codex", "-s", "read-only", "-a", APPROVAL_POLICY, "app-server"],
+            QUOTA_ARGV,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=errors,

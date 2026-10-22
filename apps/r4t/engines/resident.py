@@ -1,6 +1,7 @@
-"""Resident engine session — one long-running `stream-json` process per agent
-(supported on `claude`, `ollama-claude`, and `agy`), fed incoming messages over
-stdin and wrapped up after its timeout (default 45m) of quiet. The timeout is
+"""Resident engine session — one long-running engine process per agent
+(`stream-json` on `claude`, `ollama-claude` and `agy`; `codex app-server`
+JSON-RPC on `codex`), fed incoming messages over stdin and wrapped up after its
+timeout (default 45m) of quiet. The timeout is
 a quiet window, not the session's life: a turn in flight never expires the
 session, and any turn sent or frame received restarts the window.
 
@@ -19,9 +20,11 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 _AR3_LIB = str(Path(__file__).resolve().parents[3] / "lib")
 if _AR3_LIB not in sys.path:
@@ -38,10 +41,15 @@ from ar3.locking import file_lock
 from ar3.proc import pid_alive, process_start_token, terminate_group
 from ar3.ulid import new as new_ulid
 
-from engines.run import CLI_TELL_STEP, LESSON_LINE_RULE, MCP_TELL_STEP
-from rig import MCP_CLAUDE_TOOL, _mcp_command, _mcp_servers_json
+from engines.run import (
+    CLI_TELL_STEP, CODEX_MCP_TELL_STEP, LESSON_LINE_RULE, MCP_TELL_STEP, RunError,
+)
+from rig import (
+    MCP_CLAUDE_TOOL, _mcp_codex_override, _mcp_command, _mcp_servers_json,
+    _toml_string,
+)
 
-RESIDENT_ENGINES = frozenset({"agy", "claude", "ollama-claude"})
+RESIDENT_ENGINES = frozenset({"agy", "claude", "codex", "ollama-claude"})
 RESIDENT_DIR_NAME = ".engine-resident"
 # Quiet time, not session life: the session ends after this many seconds with
 # no turn in flight and no activity.
@@ -57,10 +65,26 @@ WRAPUP_TURN_SECONDS = 300
 
 @dataclass(frozen=True)
 class ParsedFrame:
+    """What one engine frame means to the bridge. `replies` are lines the
+    bridge writes to the engine's stdin at once (a JSON-RPC answer, a held
+    turn); `fatal` ends the engine because the session cannot run."""
+
     assistant_text: str = ""
     result_text: str = ""
     error_text: str = ""
     turn_completed: bool = False
+    replies: tuple[str, ...] = ()
+    fatal: bool = False
+
+
+class EngineSession(Protocol):
+    """Per-process state for an engine whose protocol is not one line per
+    turn. Built once per engine process; `turn_lines` runs on the bridge's
+    loop thread and `on_frame` on its reader thread."""
+
+    def opening_lines(self) -> list[str]: ...
+    def turn_lines(self, text: str) -> list[str]: ...
+    def on_frame(self, frame: dict) -> ParsedFrame: ...
 
 
 @dataclass(frozen=True)
@@ -69,6 +93,13 @@ class ResidentAdapter:
     encode_user_turn: Callable[[str], str]
     parse_frame: Callable[[dict], ParsedFrame]
     tell_step: str
+    # None: the stateless path above. Set: called with the composed argv and
+    # the session's directory once per engine process, and used in place of
+    # `encode_user_turn` and `parse_frame`.
+    session: Callable[[list[str], Path], EngineSession] | None = None
+    # False: the engine's stderr goes straight to resident.log instead of
+    # sharing its stdout pipe, where a stderr line can split a long frame.
+    merge_stderr: bool = True
 
 
 def _safe_agent_key(agent: str | None) -> str:
@@ -155,11 +186,15 @@ def read_state(home: Path) -> dict | None:
         return None
 
 
-def _write_state(home: Path, *, pid: int, engine_pid: int | None, status: str) -> None:
+def _write_state(
+    home: Path, *, pid: int, engine_pid: int | None, status: str, turns: int = 0
+) -> None:
     """`status` is `starting`, `running`, `closing` or `stopping`. A message
     that finds `closing` still queues for the next session; one that finds
-    `stopping` is dropped, as the stop drops the queue. Written only under the
-    lock, so the engine pid is published in the same hold that spawned it."""
+    `stopping` is dropped, as the stop drops the queue. `turns` is the count
+    of turns in flight in the session, for `status_resident`. Written only
+    under the lock, so the engine pid is published in the same hold that
+    spawned it."""
     atomic_write_text(
         _state_file(home),
         json.dumps({
@@ -167,6 +202,7 @@ def _write_state(home: Path, *, pid: int, engine_pid: int | None, status: str) -
             "engine_pid": engine_pid,
             "engine_start": process_start_token(engine_pid) if engine_pid else None,
             "status": status,
+            "turns": turns,
         }),
     )
 
@@ -354,10 +390,371 @@ AGY_ADAPTER = ResidentAdapter(
     tell_step=CLI_TELL_STEP,
 )
 
+# --- codex: `codex app-server`, newline-delimited JSON-RPC ------------------
+#
+# Proven against codex-cli 0.163.0 (wiki Engine-Codex). The app-server applies
+# only `-c` keys and thread/start params: the top-level `-s`, `-a`, `-m` and
+# `--dangerously-bypass-approvals-and-sandbox` parse and are then ignored, so
+# the exec template is rewritten, never passed through. The thread/start answer
+# carries the EFFECTIVE policy, and the session refuses to run on any other.
+
+CODEX_APP_SERVER_PROVEN = "0.163.0"
+CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+CODEX_APPROVAL_POLICY = "never"
+# `(engine, permissions)` → the note a resident run prints in place of the
+# one-shot one, whose flag the resident argv no longer carries.
+RESIDENT_PERMISSION_NOTES = {
+    ("codex", "bypass"): (
+        'codex resident \'bypass\' is -c sandbox_mode="danger-full-access" with '
+        '-c approval_policy="never": the session is no longer confined to its '
+        "workspace"
+    ),
+}
+_CODEX_DROPPED = frozenset({"{prompt}", "--skip-git-repo-check"})
+_CODEX_SANDBOX_TYPES = {
+    "read-only": "readOnly",
+    "workspace-write": "workspaceWrite",
+    "danger-full-access": "dangerFullAccess",
+}
+_CODEX_INIT_ID = 1
+_CODEX_THREAD_ID = 2
+# Under `never` no approval is ever asked; one that comes anyway is answered
+# with the narrowest grant, never more than the configured sandbox.
+_CODEX_REFUSALS = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "item/fileChange/requestApproval": {"decision": "decline"},
+    "execCommandApproval": {"decision": "denied"},
+    "applyPatchApproval": {"decision": "denied"},
+    "mcpServer/elicitation/request": {"action": "decline", "content": None},
+    "item/tool/requestUserInput": {"answers": {}},
+}
+_CODEX_VERSION_RE = re.compile(r"^[^/\s]+/(\d+(?:\.\d+)+)")
+
+
+def _compose_codex_argv(
+    template: list[str],
+    env: dict[str, str],
+    mcp_log_path: Path | None = None,
+) -> list[str]:
+    """Turn a `codex exec ... {prompt}` template into `codex app-server` with
+    the same intent as `-c` keys: model, sandbox (the bypass flag is
+    `danger-full-access`), approvals `never`, and the a8s MCP server. The
+    server's cwd is this process's: the bridge runs in the session's
+    directory."""
+    rest = list(template[1:])
+    if "exec" not in rest:
+        raise RunError(f"codex resident needs a `codex exec` template, got {template!r}")
+    rest.remove("exec")
+    config: list[str] = []
+    model: str | None = None
+    sandbox = "workspace-write"
+    i = 0
+    while i < len(rest):
+        token = rest[i]
+        if token in _CODEX_DROPPED:
+            i += 1
+        elif token == CODEX_BYPASS_FLAG:
+            sandbox = "danger-full-access"
+            i += 1
+        elif token in ("-c", "--config", "-m", "--model", "-s", "--sandbox") and i + 1 < len(rest):
+            value = rest[i + 1]
+            if token in ("-c", "--config"):
+                config += ["-c", value]
+            elif token in ("-m", "--model"):
+                model = value
+            else:
+                sandbox = value
+            i += 2
+        else:
+            raise RunError(
+                f"codex resident cannot carry {token!r} to app-server, which "
+                "takes its policy from -c keys only"
+            )
+    if sandbox not in _CODEX_SANDBOX_TYPES:
+        raise RunError(f"codex resident: unknown sandbox {sandbox!r}")
+    server_env = dict(env)
+    if mcp_log_path is not None:
+        server_env["A8S_MCP_LOG"] = str(mcp_log_path)
+    argv = [template[0], "app-server", *config]
+    if model:
+        argv += ["-c", f"model={_toml_string(model)}"]
+    argv += [
+        "-c", f"sandbox_mode={_toml_string(sandbox)}",
+        "-c", f"approval_policy={_toml_string(CODEX_APPROVAL_POLICY)}",
+        "-c", _mcp_codex_override(server_env, Path.cwd(), _mcp_command()),
+    ]
+    return argv
+
+
+def codex_sandbox_intent(argv: list[str]) -> str:
+    """The `sandbox_mode` a composed app-server argv asks for."""
+    for token in argv:
+        if token.startswith("sandbox_mode="):
+            return token.split("=", 1)[1].strip().strip('"')
+    return "workspace-write"
+
+
+def codex_version(user_agent: str) -> str | None:
+    """The CLI version from the initialize answer's `userAgent`
+    (`<client>/<version> (<os>) ...`)."""
+    m = _CODEX_VERSION_RE.match(user_agent or "")
+    return m.group(1) if m else None
+
+
+def codex_policy_problem(result: dict, sandbox: str) -> str | None:
+    """Why a thread/start answer is not the policy asked for, or None."""
+    approval = result.get("approvalPolicy")
+    got = (result.get("sandbox") or {}).get("type")
+    want = _CODEX_SANDBOX_TYPES.get(sandbox)
+    problems = []
+    if approval != CODEX_APPROVAL_POLICY:
+        problems.append(f"approvalPolicy {approval!r}, not {CODEX_APPROVAL_POLICY!r}")
+    if got != want:
+        problems.append(f"sandbox {got!r}, not {want!r}")
+    return "; ".join(problems) or None
+
+
+def _rpc(msg: dict) -> str:
+    return json.dumps({"jsonrpc": "2.0", **msg}, ensure_ascii=False)
+
+
+def codex_opening(cwd: str, *, ephemeral: bool = False) -> list[str]:
+    params: dict = {"cwd": cwd}
+    if ephemeral:
+        params["ephemeral"] = True
+    return [
+        _rpc({"id": _CODEX_INIT_ID, "method": "initialize",
+              "params": {"clientInfo": {"name": "r4t", "version": "0"}}}),
+        _rpc({"method": "initialized", "params": {}}),
+        _rpc({"id": _CODEX_THREAD_ID, "method": "thread/start", "params": params}),
+    ]
+
+
+class CodexSession:
+    """One thread on one app-server process. One turn is on the wire at a
+    time: app-server merges a turn/start sent mid-turn into the running turn
+    and answers it with ONE turn/completed, which would leave the bridge
+    counting a turn that never ends. Turns that arrive early (before the
+    thread exists) or mid-turn wait in `held`, oldest first."""
+
+    def __init__(self, argv: list[str], dir_path: Path):
+        self.cwd = str(dir_path)
+        self.sandbox = codex_sandbox_intent(argv)
+        self.thread_id: str | None = None
+        self.busy = False
+        self.held: deque[str] = deque()
+        self.turn_requests: set[int] = set()
+        self.next_id = _CODEX_THREAD_ID + 1
+        self.version: str | None = None
+        self.lock = threading.Lock()
+
+    def opening_lines(self) -> list[str]:
+        return codex_opening(self.cwd)
+
+    def _turn_start(self, text: str) -> str:
+        rid = self.next_id
+        self.next_id += 1
+        self.turn_requests.add(rid)
+        self.busy = True
+        return _rpc({"id": rid, "method": "turn/start", "params": {
+            "threadId": self.thread_id,
+            "input": [{"type": "text", "text": text}],
+        }})
+
+    def _release(self) -> tuple[str, ...]:
+        if self.thread_id is not None and not self.busy and self.held:
+            return (self._turn_start(self.held.popleft()),)
+        return ()
+
+    def turn_lines(self, text: str) -> list[str]:
+        with self.lock:
+            if self.thread_id is None or self.busy:
+                self.held.append(text)
+                return []
+            return [self._turn_start(text)]
+
+    def on_frame(self, frame: dict) -> ParsedFrame:
+        with self.lock:
+            return self._on_frame(frame)
+
+    def _on_frame(self, frame: dict) -> ParsedFrame:
+        method = frame.get("method")
+        if method is not None and "id" in frame:
+            answer = _CODEX_REFUSALS.get(method)
+            reply = (
+                {"id": frame["id"], "result": answer}
+                if answer is not None
+                else {"id": frame["id"], "error": {"code": -32601, "message": f"r4t does not serve {method}"}}
+            )
+            return ParsedFrame(
+                error_text=f"codex asked {method}; refused under approval policy never",
+                replies=(_rpc(reply),),
+            )
+        if method is None:
+            return self._on_response(frame)
+        params = frame.get("params") or {}
+        if method == "item/completed":
+            item = params.get("item") or {}
+            if params.get("threadId") == self.thread_id and item.get("type") == "agentMessage":
+                text = item.get("text")
+                return ParsedFrame(assistant_text=text.strip() if isinstance(text, str) else "")
+            return ParsedFrame()
+        if method == "turn/completed":
+            if params.get("threadId") != self.thread_id:
+                return ParsedFrame()
+            turn = params.get("turn") or {}
+            self.busy = False
+            finals = [
+                it.get("text") for it in turn.get("items") or []
+                if isinstance(it, dict) and it.get("type") == "agentMessage"
+                and isinstance(it.get("text"), str)
+            ]
+            error = ""
+            if turn.get("status") in ("failed", "interrupted"):
+                error = ((turn.get("error") or {}).get("message") or f"turn {turn.get('status')}")
+            return ParsedFrame(
+                result_text=finals[-1].strip() if finals else "",
+                error_text=error,
+                turn_completed=True,
+                replies=self._release(),
+            )
+        if method == "error" and not params.get("willRetry", False):
+            return ParsedFrame(error_text=str((params.get("error") or {}).get("message") or "codex error"))
+        if method == "configWarning":
+            _log(f"codex warning: {params.get('summary')}")
+        return ParsedFrame()
+
+    def _on_response(self, frame: dict) -> ParsedFrame:
+        rid = frame.get("id")
+        error = frame.get("error")
+        message = str((error or {}).get("message") or error) if error is not None else ""
+        if rid == _CODEX_INIT_ID:
+            if error is not None:
+                return ParsedFrame(error_text=f"codex initialize failed: {message}", fatal=True)
+            self.version = codex_version((frame.get("result") or {}).get("userAgent", ""))
+            note = "" if self.version == CODEX_APP_SERVER_PROVEN else (
+                f" (not the proven {CODEX_APP_SERVER_PROVEN})"
+            )
+            _log(f"codex app-server {self.version or 'version unknown'}{note}")
+            return ParsedFrame()
+        if rid == _CODEX_THREAD_ID:
+            if error is not None:
+                return ParsedFrame(error_text=f"codex thread/start failed: {message}", fatal=True)
+            result = frame.get("result") or {}
+            problem = codex_policy_problem(result, self.sandbox)
+            if problem:
+                return ParsedFrame(
+                    error_text=f"codex thread/start reports {problem}; ending the session",
+                    fatal=True,
+                )
+            self.thread_id = (result.get("thread") or {}).get("id")
+            if not self.thread_id:
+                return ParsedFrame(error_text="codex thread/start returned no thread id", fatal=True)
+            return ParsedFrame(replies=self._release())
+        if rid in self.turn_requests:
+            self.turn_requests.discard(rid)
+            if error is not None:
+                self.busy = False
+                return ParsedFrame(
+                    error_text=f"codex turn/start failed: {message}",
+                    turn_completed=True,
+                    replies=self._release(),
+                )
+        return ParsedFrame()
+
+
+def _codex_unused_encode(_text: str) -> str:
+    raise RuntimeError("codex turns go through CodexSession.turn_lines")
+
+
+def _codex_unused_parse(_frame: dict) -> ParsedFrame:
+    raise RuntimeError("codex frames go through CodexSession.on_frame")
+
+
+def codex_app_server_probe(argv: list[str], cwd: Path, *, timeout: float = 15.0) -> dict:
+    """The handshake a check runs: initialize, then an ephemeral thread/start
+    (no rollout file, no model call). `argv` gets `--strict-config`, so an
+    unknown `-c` key fails at once. Returns `version`, the thread/start
+    `result`, and `error` (with the server's last stderr line) on failure."""
+    import tempfile
+
+    errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    try:
+        proc = subprocess.Popen(
+            argv + ["--strict-config"], cwd=str(cwd), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8",
+            errors="replace",
+        )
+    except OSError as exc:
+        errors.close()
+        return {"error": f"cannot run {argv[0]} app-server: {exc}"}
+    answers: dict = {}
+
+    def read() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and "method" not in msg and msg.get("id") in (1, 2):
+                answers[msg["id"]] = msg
+                if msg["id"] == 2 or "error" in msg:
+                    return
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    out: dict = {}
+    try:
+        assert proc.stdin is not None
+        for line in codex_opening(str(cwd), ephemeral=True):
+            proc.stdin.write(line + "\n")
+        proc.stdin.flush()
+        reader.join(timeout=timeout)
+    except OSError as exc:
+        out["error"] = f"app-server pipe broke: {exc}"
+    finally:
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        errors.seek(0)
+        lines = [ln.strip() for ln in re.sub(r"\x1b\[[0-9;]*m", "", errors.read()).splitlines() if ln.strip()]
+        errors.close()
+    init, thread = answers.get(1), answers.get(2)
+    if init and "result" in init:
+        out["version"] = codex_version(init["result"].get("userAgent", ""))
+    for name, answer in (("initialize", init), ("thread/start", thread)):
+        if answer is not None and "error" in answer:
+            out.setdefault("error", f"{name}: {answer['error'].get('message')}")
+    if thread and "result" in thread:
+        out["result"] = thread["result"]
+    elif "error" not in out:
+        tail = f": {lines[-1]}" if lines else ""
+        out["error"] = f"app-server did not answer thread/start in {timeout:.0f}s{tail}"
+    return out
+
+
+CODEX_ADAPTER = ResidentAdapter(
+    compose_argv=_compose_codex_argv,
+    encode_user_turn=_codex_unused_encode,
+    parse_frame=_codex_unused_parse,
+    tell_step=CODEX_MCP_TELL_STEP,
+    session=CodexSession,
+    merge_stderr=False,
+)
+
 RESIDENT_ADAPTERS: dict[str, ResidentAdapter] = {
     "claude": CLAUDE_ADAPTER,
     "ollama-claude": CLAUDE_ADAPTER,
     "agy": AGY_ADAPTER,
+    "codex": CODEX_ADAPTER,
 }
 
 
@@ -411,7 +808,8 @@ def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
         "Next Steps, Decisions (with rationale).\n"
         f"3. Append any genuinely new durable insights from this session to "
         f"{lessons}. {LESSON_LINE_RULE} Never edit AGENTS.md.\n"
-        "4. Reply briefly when done; the session will close immediately after."
+        "4. When done, say so in your reply text only; send no message. "
+        "The session closes right after."
     )
 
 
@@ -596,12 +994,17 @@ def _run_session(
     )
 
     adapter = RESIDENT_ADAPTERS[engine]
-    argv = resolve_argv0(
-        compose_resident_argv(
-            template, dict(os.environ), engine=engine,
-            mcp_log_path=home / "mcp-calls.jsonl",
+    try:
+        argv = resolve_argv0(
+            compose_resident_argv(
+                template, dict(os.environ), engine=engine,
+                mcp_log_path=home / "mcp-calls.jsonl",
+            )
         )
-    )
+    except RunError as exc:
+        dropped = _drain_inbox(home)
+        _log(f"resident cannot compose {engine}: {exc}; dropped {len(dropped)} message(s)")
+        return 1
     child_env = {k: v for k, v in os.environ.items() if not k.startswith("A8S_TURN_")}
 
     my_pid = os.getpid()
@@ -618,7 +1021,8 @@ def _run_session(
                 env=child_env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                # Unmerged, stderr is the bridge's own: resident.log.
+                stderr=subprocess.STDOUT if adapter.merge_stderr else None,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -631,11 +1035,51 @@ def _run_session(
         current["proc"] = proc
         _write_state(home, pid=my_pid, engine_pid=proc.pid, status="running")
     last_activity = time.monotonic()
+    session = adapter.session(argv, dir_path) if adapter.session is not None else None
+    # The loop thread writes turns and the reader writes replies; one lock
+    # keeps each line whole on the pipe.
+    stdin_lock = threading.Lock()
+
+    def write_lines(lines) -> bool:
+        if not lines:
+            return True
+        if proc.poll() is not None or proc.stdin is None:
+            return False
+        try:
+            with stdin_lock:
+                for line in lines:
+                    proc.stdin.write(line + "\n")
+                proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
 
     def set_status(status: str) -> None:
         with file_lock(_lock_file(home)):
-            if (read_state(home) or {}).get("status") != "stopping":
-                _write_state(home, pid=my_pid, engine_pid=proc.pid, status=status)
+            current_state = read_state(home) or {}
+            if current_state.get("status") != "stopping":
+                _write_state(
+                    home, pid=my_pid, engine_pid=proc.pid, status=status,
+                    turns=current_state.get("turns", 0),
+                )
+
+    def publish_turns() -> None:
+        # Same lock as every other state write, taken before the count is
+        # read: two threads publishing cannot leave the older count last, and
+        # the status read back under the lock is the one rewritten, so a
+        # concurrent `closing` or `stopping` is never clobbered. Called
+        # outside `turns_completed` so a stop holding the file lock cannot
+        # stall the frame counters. Lock order is file lock, then condition.
+        with file_lock(_lock_file(home)):
+            current_state = read_state(home) or {}
+            if current_state.get("status") in (None, "stopping"):
+                return
+            with turns_completed:
+                count = in_flight_turns
+            _write_state(
+                home, pid=my_pid, engine_pid=proc.pid,
+                status=current_state["status"], turns=count,
+            )
 
     _log(
         f"resident session started (bridge pid={my_pid}, {engine} pid={proc.pid}, "
@@ -665,7 +1109,10 @@ def _run_session(
             # always counts and one parsed after it is after the window.
             with turns_completed:
                 last_activity = time.monotonic()
-            parsed = adapter.parse_frame(frame)
+            parsed = (
+                session.on_frame(frame) if session is not None
+                else adapter.parse_frame(frame)
+            )
             if parsed.assistant_text:
                 collected_outputs.append(parsed.assistant_text)
                 _log(parsed.assistant_text)
@@ -679,23 +1126,31 @@ def _run_session(
                     if in_flight_turns > 0:
                         in_flight_turns -= 1
                     turns_completed.notify_all()
+                publish_turns()
+            if parsed.replies:
+                write_lines(parsed.replies)
+            if parsed.fatal:
+                _log("resident engine cannot run this session; ending it")
+                proc.terminate()
 
     reader = threading.Thread(target=_stdout_reader, daemon=True)
     reader.start()
+    if session is not None and not write_lines(session.opening_lines()):
+        _log("resident engine closed stdin before its handshake")
 
     def send_user_turn(prompt_text: str) -> bool:
         nonlocal in_flight_turns, last_activity
         if proc.poll() is not None or proc.stdin is None:
             return False
-        try:
-            with turns_completed:
-                in_flight_turns += 1
-                last_activity = time.monotonic()
-            proc.stdin.write(adapter.encode_user_turn(prompt_text) + "\n")
-            proc.stdin.flush()
-            return True
-        except (BrokenPipeError, OSError):
-            return False
+        with turns_completed:
+            in_flight_turns += 1
+            last_activity = time.monotonic()
+        publish_turns()
+        lines = (
+            session.turn_lines(prompt_text) if session is not None
+            else [adapter.encode_user_turn(prompt_text)]
+        )
+        return write_lines(lines)
 
     def wait_for_quiet(timeout_s: float) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -860,6 +1315,27 @@ def serve_resident(home: Path) -> int:
                 _clear_pid_files(home, expected_pid=my_pid)
                 return exit_code
             _write_state(home, pid=my_pid, engine_pid=None, status="starting")
+
+
+def status_resident(dir_path: Path, agent: str | None) -> str | None:
+    """`busy`, `resident`, or None when no session is up. None: no live
+    bridge, or a bridge whose state says `stopping`. `busy`: a turn is in
+    flight (`turns` > 0; a state written before the field existed reads as
+    0), or the bridge is `starting` with a message queued. Everything else is
+    `resident`, including `closing`. Reads only; takes no lock."""
+    home = resident_home(dir_path, agent)
+    if read_live_pid(home) is None:
+        return None
+    state = read_state(home) or {}
+    status = state.get("status")
+    if status == "stopping":
+        return None
+    turns = state.get("turns", 0)
+    if isinstance(turns, int) and turns > 0:
+        return "busy"
+    if status == "starting" and _inbox_waiting(home):
+        return "busy"
+    return "resident"
 
 
 def stop_resident(

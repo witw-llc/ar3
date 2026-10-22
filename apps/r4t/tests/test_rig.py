@@ -1947,6 +1947,22 @@ class TestMcpInjection:
         assert f'cwd = "{cwd}"' in override
         assert f'TELL_OUTBOX_DIR = "{env["TELL_OUTBOX_DIR"]}"' in override
 
+    def test_codex_override_approves_the_tell_tool(self, tmp_path):
+        # Without the key, a turn whose approval policy is `never` fails every
+        # a8s tool call ("MCP tool call requires approval, but approval policy
+        # is never") and the model still reports the message sent.
+        import tomllib
+
+        rig = _mcp_rig(tmp_path, "codex")
+        env, cwd = self._turn(tmp_path)
+        override = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv[2]
+        key, _, value = override.partition("=")
+        table = tomllib.loads(f"t = {value}")["t"]
+        assert key == "mcp_servers.a8s"
+        assert table["default_tools_approval_mode"] == "approve"
+        assert table["cwd"] == str(cwd)
+        assert table["args"][-2:] == ["mcp", "serve"]
+
     def test_codex_ollama_splices_after_the_launcher_separator(self, tmp_path):
         rig = _mcp_rig(tmp_path, "ollama-codex", model="qwen3.6")
         env, cwd = self._turn(tmp_path)

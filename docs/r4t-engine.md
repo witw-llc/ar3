@@ -83,7 +83,7 @@ tool) plus this turn's own measurement flags (see
 - `--resident` — keep one long-running `stream-json` session alive across
   arrivals (`claude`, `ollama-claude`, and `agy`); `--timeout` then sets the
   quiet window. See
-  [resident sessions](#resident-sessions--claude-ollama-claude-and-agy).
+  [resident sessions](#resident-sessions--claude-ollama-claude-agy-and-codex).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -423,7 +423,7 @@ Prepended to `PROMPT`. The prelude is byte-identical across runs in the same
 `--dir` (no timestamps, no counters), so the prompt cache misses only on what
 follows it: the `LESSONS.md` note when one applies, then the routed input,
 which always comes last. A one-shot turn and a
-[resident session](#resident-sessions--claude-ollama-claude-and-agy) start
+[resident session](#resident-sessions--claude-ollama-claude-agy-and-codex) start
 from the same prelude; only the closing steps differ.
 
 ```
@@ -461,7 +461,9 @@ every case; only its tell step needs `--agent`.) An engine that takes the a8s MC
 by a flag — `claude`, `codex`, `copilot`, `ollama-claude`, `ollama-codex` —
 gets `a8s mcp serve` spliced into its argv for the turn, the same server a
 roster rig's `mcp` knob injects, and the step teaches the `a8s_tell` tool,
-with the `tell` CLI as the fallback. The `claude` engines also get
+with the `tell` CLI as the fallback. The `codex` engines name the tool as
+Codex lists it, `mcp__a8s__tell`: told `a8s_tell`, a Codex model searches its
+tool list for that name and finds nothing. The `claude` engines also get
 `mcp__a8s__tell` added to `--allowedTools`. Every other engine is taught the
 `tell` CLI with the body on a quoted heredoc: their MCP idioms write a config
 file, and an a8s node's outbox sits inside the agent's own directory.
@@ -522,28 +524,29 @@ input is `PROMPT` if given, else the built-in idle consolidation prompt
 Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
-### Resident sessions — `claude`, `ollama-claude`, and `agy`
+### Resident sessions — `claude`, `ollama-claude`, `agy`, and `codex`
 
 Resuming `claude -p` across a process boundary misses the provider's prompt
 cache 40.6% of the time against a 2.5% same-process baseline (measured, #155).
-`--resident` keeps one `stream-json` engine process alive instead of starting a
-new one per message:
+`--resident` keeps one engine process alive instead of starting a new one per
+message:
 
 ```bash
 r4t engine claude run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 r4t engine agy run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+r4t engine codex run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 r4t engine claude stop --agent my-node
 ```
 
 The first `run` starts a detached bridge for `(DIR, agent)` and returns 0 at
-once, so the router is never held up. The bridge spawns the engine in
-`stream-json` mode (`claude -p --input-format stream-json --output-format
+once, so the router is never held up. The bridge spawns the engine in its
+long-running mode: `claude -p --input-format stream-json --output-format
 stream-json --verbose` with the `a8s_tell` MCP server injected via
-`--mcp-config`, or `agy --input-format stream-json --output-format stream-json
---print=`). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
+`--mcp-config`; `agy --input-format stream-json --output-format stream-json
+--print=`; or `codex app-server` (see [Codex](#codex-app-server) below). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
 a one-shot turn gets, with resident closing steps in place of the exit steps:
-the tell step (`a8s_tell` on Claude; the `tell` CLI on `agy`, which has no
-per-invocation MCP flag), the [`LESSONS.md` note](#lessonsmd-upkeep) when a
+the tell step (`a8s_tell` on Claude and Codex; the `tell` CLI on `agy`, which
+has no per-invocation MCP flag), the [`LESSONS.md` note](#lessonsmd-upkeep) when a
 consolidation is due, and the first message. The session consolidates first,
 then answers, and keeps running. Each later `run` queues its
 message and exits 0; the bridge pushes it into the same conversation as a new
@@ -566,12 +569,59 @@ user turn, so the session needs no `tells` monitor of its own.
   during the stop. The bundled resident a8s
   definitions run it from `stop.invoke`, so `a8s stop`, `restart` and `kill`
   end the session too.
+- `r4t engine <id> status [--dir DIR] --agent NAME` prints one word and
+  exits 0: `busy` when a turn is in flight (or the bridge is starting with a
+  message queued), `resident` when the session is up with no turn in flight
+  (a closing session counts). With no live bridge, or a stopping one, it
+  prints nothing and exits 1. The bridge keeps the in-flight count in
+  `state.json` (`turns`). The bundled resident a8s definitions run it from
+  `status.invoke`, which is how `a8s ps` shows `busy` and `resident`.
 - If the engine exits before it reads its first message, the queued messages
   are dropped and the bridge exits; the next message starts again.
 - State lives in `<DIR>/.engine-resident/<agent>/`, which ignores itself in
   git. `resident.log` there holds the bridge's log and the engine's replies.
-- Supported on `claude`, `ollama-claude`, and `agy`; other engines fail closed
-  with the supported set. Cannot be combined with `--continue` or `--session`.
+- Supported on `claude`, `ollama-claude`, `agy`, and `codex`; other engines
+  fail closed with the supported set. Cannot be combined with `--continue` or
+  `--session`.
+
+#### Codex: `app-server`
+
+A resident `codex` session is one `codex app-server` process (JSON-RPC on
+stdio) holding one thread. Proven on codex-cli 0.163.0.
+
+- app-server applies only `-c` keys. It parses the top-level `-s`, `-a`, `-m`
+  and `--dangerously-bypass-approvals-and-sandbox` and then ignores them, so
+  the bridge rewrites the `codex exec` argv: `-c model="..."`,
+  `-c sandbox_mode="workspace-write"` (`danger-full-access` with
+  `--permissions bypass`), `-c approval_policy="never"`, and the a8s MCP
+  server as `-c mcp_servers.a8s={...}`.
+- The a8s server table carries `default_tools_approval_mode = "approve"`.
+  Without it, under approvals `never`, every `a8s_tell` call fails with "MCP
+  tool call requires approval, but approval policy is never". One-shot
+  `codex exec` turns get the same key.
+- The tell step names the tool `mcp__a8s__tell`, the name in Codex's own
+  tool list.
+- The thread/start answer names the policy in force. The session ends before
+  its first turn when that is not approvals `never` and the composed sandbox;
+  `resident.log` names both values.
+- One turn is on the wire at a time. app-server merges a turn sent mid-turn
+  into the running turn, so a message that arrives mid-turn waits for the next
+  turn, as on Claude.
+- An approval request that comes anyway is declined. The bridge never grants
+  more than the configured sandbox.
+- The engine's stderr goes to `resident.log` directly; its stdout carries only
+  JSON-RPC.
+- On Linux the codex sandbox runs commands under bubblewrap, which needs
+  unprivileged user namespaces. With
+  `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu 24.04's default)
+  and no AppArmor profile for `bwrap`, every shell command in a restricted
+  codex turn fails, one-shot or resident; the `a8s_tell` MCP call still works.
+  `resident.log` shows codex's warning ("Codex's Linux sandbox uses bubblewrap
+  and needs access to create user namespaces"). Use `--permissions bypass` on
+  such a host only for an agent on its own machine and its own account.
+- `r4t engine codex check --resident` runs the handshake without a turn:
+  `initialize` for the version and an ephemeral `thread/start` for the policy
+  in force. A version other than the proven 0.163.0 is accepted with a note.
 
 ## `check` — does the installed CLI still accept this argv?
 
@@ -583,10 +633,13 @@ r4t engine check --json
 ```
 
 `check` composes the exact argv `run` would spend a turn on — same `--model`,
-`--effort`, `--permissions`, `--allowed-tools`, `--continue` — and asks the installed
+`--effort`, `--permissions`, `--allowed-tools`, `--continue`, `--resident` — and asks the installed
 binary whether it parses. **No turn is spent and no tokens are billed:** the
 prompt is removed from the argv, and the only things run are the CLI's own
-`--help` and `--version`.
+`--help` and `--version`. `r4t engine codex check --resident` also runs the
+app-server handshake (`initialize`, an ephemeral `thread/start`) and rejects
+an argv whose policy in force is not the one composed; see
+[Codex](#codex-app-server).
 
 Two probe shapes, one per parser class, each recorded with its engine in
 `apps/r4t/engines/check.py`:
@@ -698,14 +751,17 @@ time — the base variants never grow it.
 
 For long-running seats that stay warm across bursts of messages,
 `engine-claude-resident`, `engine-claude-resident-unrestricted`,
-`engine-agy-resident`, and `engine-agy-resident-unrestricted` wire
+`engine-agy-resident`, `engine-agy-resident-unrestricted`,
+`engine-codex-resident`, and `engine-codex-resident-unrestricted` wire
 `r4t engine <id> run --resident` across `invoke`, `batch.invoke` and
-`idle.invoke`, and `r4t engine <id> stop` as `stop.invoke`:
+`idle.invoke`, `r4t engine <id> stop` as `stop.invoke`, and `r4t engine <id> status` as
+`status.invoke`:
 
 ```bash
 a8s add my-resident ~/somewhere engine-claude-resident
 a8s add my-resident ~/somewhere engine-claude-resident-unrestricted
 a8s add my-resident ~/somewhere engine-agy-resident
+a8s add my-resident ~/somewhere engine-codex-resident
 ```
 
 They take the same per-node vars as the headless nodes. `TIMEOUT` is the

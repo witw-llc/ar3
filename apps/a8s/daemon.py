@@ -91,6 +91,7 @@ from definitions import (
     build_command,
     build_idle_command,
     build_stop_command,
+    build_status_command,
     files_ttl_seconds,
     has_batch_invoke,
     idle_timeout_seconds,
@@ -1223,6 +1224,104 @@ def run_stop_hook(name: str) -> None:
         _mark_stop_hook_ran(name)
 
 
+def _hook_launch(name: str, p: Participant, build) -> tuple[list[str], dict[str, str]] | None:
+    """The argv and environment of a definition hook (`stop`, `status`) for
+    node `name`: `build` picks and expands the argv, the wake wrapper and the
+    node's composed wake env apply. None when the definition declares none."""
+    definition = load_definition(name)
+    cmd = build(definition, name, resolve_definition_path(name), vars=load_agent_vars(name))
+    if cmd is None:
+        return None
+    return wrap_wake_argv(definition, cmd), {**os.environ, **_wake_env(p, definition)}
+
+
+STATUS_PROBE_SECONDS = 3.0
+
+
+def probe_node_status(name: str) -> str | None:
+    """Run the node's `status.invoke`, if it declares one, in the node's root
+    with the env the stop hook gets. Returns the first word of stdout, or None
+    when there is no probe, it failed, exited nonzero or ran past
+    `STATUS_PROBE_SECONDS`."""
+    try:
+        p = next((q for q in participants_from_registry() if q.name == name), None)
+        if p is None:
+            return None
+        launch = _hook_launch(name, p, build_status_command)
+        if launch is None:
+            return None
+        cmd, env = launch
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(p.root),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            # Its own group: a timeout ends the probe and every child it
+            # left, not only the leader. A child keeping stdout open would
+            # otherwise hold the pipe, and `ps`, for as long as it lives.
+            **_wake_spawn_flags(new_session=True),
+        )
+    except (OSError, RegistryUnreadable, FileNotFoundError, RuntimeError, ValueError):
+        return None
+    stdout = _read_until(proc, STATUS_PROBE_SECONDS)
+    if stdout is None:
+        _end_probe(proc)
+        return None
+    words = stdout.split()
+    return words[0] if words else None
+
+
+def _read_until(proc: subprocess.Popen, seconds: float) -> str | None:
+    """stdout of `proc` once the pipe hits EOF and the process has exited,
+    or None after `seconds`. A daemon thread does the read, so a deadline
+    that passes leaves nothing for the caller to wait on: `communicate`'s
+    own reader (a thread on Windows) holds the stream's lock while blocked,
+    and a `close` from this side would wait on that lock until whatever
+    holds the pipe lets go. `ps` is a short-lived command; a reader left
+    behind by a hung probe ends with it."""
+    chunks: list[bytes] = []
+
+    def read() -> None:
+        assert proc.stdout is not None
+        try:
+            chunks.append(proc.stdout.read())
+        except (OSError, ValueError):
+            pass
+
+    # One budget from here: the join and the wait share it, so a late EOF
+    # cannot buy the exit a second deadline.
+    deadline = _time.monotonic() + seconds
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(timeout=seconds)
+    if reader.is_alive():
+        return None
+    try:
+        proc.wait(timeout=max(0.0, deadline - _time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode != 0:
+        return None
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def _end_probe(proc: subprocess.Popen) -> None:
+    """End a probe that ran past its deadline: the whole group, then reap the
+    leader with a bounded wait. The stdout pipe is not touched: the reader
+    left on it ends when the pipe does."""
+    terminate_group(proc)
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _run_stop_hook(name: str) -> None:
     try:
         p = next((q for q in participants_from_registry() if q.name == name), None)
@@ -1232,14 +1331,10 @@ def _run_stop_hook(name: str) -> None:
     if p is None:
         return
     try:
-        definition = load_definition(name)
-        cmd = build_stop_command(
-            definition, name, resolve_definition_path(name), vars=load_agent_vars(name)
-        )
-        if cmd is None:
+        launch = _hook_launch(name, p, build_stop_command)
+        if launch is None:
             return
-        cmd = wrap_wake_argv(definition, cmd)
-        env = {**os.environ, **_wake_env(p, definition)}
+        cmd, env = launch
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         out_agent(name, f"[{name}] stop hook skipped: {e}")
         return

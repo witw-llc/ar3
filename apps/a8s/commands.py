@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.parse
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -79,6 +80,7 @@ from definitions import (
 )
 from daemon import (
     STOP_HOOK_SECONDS,
+    probe_node_status,
     clear_stop_hook_mark,
     read_stop_hook_mark,
     run_stop_hook_if_owed,
@@ -2091,10 +2093,16 @@ def cmd_exit() -> int:
 
 
 def _node_status(name: str) -> str:
-    """`busy` while a wake is in flight; otherwise the last settled wake's
-    outcome: `fail` when it failed (an idle wake counts), else `idle`."""
+    """`busy` while a wake is in flight. Otherwise the node's `status.invoke`
+    probe may answer `busy` (a turn runs in its detached session) or
+    `resident` (session up, no turn). Any other answer falls back to the last
+    settled wake's outcome: `fail` when it failed (an idle wake counts), else
+    `idle`."""
     if read_wake_pid(name) is not None:
         return "busy"
+    probed = probe_node_status(name)
+    if probed in ("busy", "resident"):
+        return probed
     return "fail" if read_last_wake(name) is False else "idle"
 
 
@@ -2131,7 +2139,7 @@ def _last_sent_by_node() -> dict[str, str]:
 
 def cmd_ps(args: list[str] | None = None) -> int:
     """`a8s ps` — list only running node processes (docker/ollama style).
-    Columns: NAME, PID, UPTIME, STATUS (`ok` or `busy`), FAILED (failed wakes of
+    Columns: NAME, PID, UPTIME, STATUS (`busy`, `resident`, `fail` or `idle`), FAILED (failed wakes of
     the last 24 hours, `-` when none), DEFINITION, IN 24H, LAST SENT, ROOT.
     DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
     itself last wrote a message, the one column that says it was responsive.
@@ -2160,10 +2168,12 @@ def cmd_ps(args: list[str] | None = None) -> int:
     activity = _inbox_activity_by_node()
     sent = _last_sent_by_node()
     failed = _wake_failures_by_node()
+    with ThreadPoolExecutor(max_workers=len(running)) as pool:
+        statuses = list(pool.map(lambda r: _node_status(r[0]), running))
     rows = []
-    for name, pid, definition, root in running:
+    for (name, pid, definition, root), status in zip(running, statuses):
         count, _ = activity.get(name.lower(), ("0", "-"))
-        rows.append((name, str(pid), _pid_uptime(name), _node_status(name),
+        rows.append((name, str(pid), _pid_uptime(name), status,
                      str(failed.get(name.lower()) or "-"), definition, count,
                      sent.get(name.lower(), "-"), root))
     _print_table(["NAME", "PID", "UPTIME", "STATUS", "FAILED", "DEFINITION", "IN 24H", "LAST SENT", "ROOT"], rows)

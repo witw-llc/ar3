@@ -1,0 +1,90 @@
+{
+  "description": "OpenAI Codex CLI as a long-running resident engine node \u2014 `r4t engine codex run --resident`, keeping one `codex app-server` thread with the `a8s_tell` MCP server alive while it works and for `TIMEOUT` seconds of quiet after the last turn (default 2700, 45 minutes), sending new messages into the same conversation one turn at a time and wrapping up STATUS.md/LESSONS.md at expiry; the next message after that starts a fresh session from STATUS.md. The session runs in the workspace-write sandbox with approvals never and refuses to start when app-server reports any other policy; on Linux that sandbox needs unprivileged user namespaces for bubblewrap, or every shell command in a turn fails. `r4t engine codex check --resident` proves the policy and names the app-server version. `a8s stop`, `restart` and `kill` end the session at once through `stop.invoke`; `status.invoke` lets `a8s ps` show busy or resident. Enable private K7E memory with `a8s vars <name> set MEMORY on`. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means the engine's own default. Set the quiet window per node with `a8s vars <name> set TIMEOUT <secs>`. Set EFFORT to an engine-supported reasoning level; unset uses the engine default. Commit as the agent with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`; unset uses git's own config.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "codex",
+    "run",
+    "--resident",
+    "--memory=$MEMORY?",
+    "--memory-home=$MEMORY_HOME?",
+    "--memory-writer=$MEMORY_WRITER?",
+    "--memory-people=$MEMORY_PEOPLE?",
+    "--timeout=$TIMEOUT?",
+    "--effort=$EFFORT?",
+    "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "codex",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "codex",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "codex",
+      "stop",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "status": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "codex",
+      "status",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

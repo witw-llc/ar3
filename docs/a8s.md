@@ -216,7 +216,7 @@ any prefixes pointing at it.
 | `a8s update [--force]` | Run conversation housekeeping, then restart every running node so handlers re-exec current on-disk a8s (handy after `git pull`). Alias co-handlers that match an alias are restarted as one process. No code fetch yet — that comes with standalone releases. |
 | `a8s kill <name>`  | Per-agent force-detach: writes a kill-request, SIGUSR1s the holder. Holder kills the in-flight wake subprocess iff it's for that agent and releases the attachment; siblings keep running. Falls back to whole-process SIGTERM only if the holder doesn't honor the request in 10s. |
 | `a8s exit`         | SIGTERM every running handler.                                                                                                                                                                                                                                                      |
-| `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, STATUS, FAILED, DEFINITION, IN 24H, LAST SENT, ROOT. STATUS is `busy` while a wake runs, `fail` when the last wake (an idle wake included) failed, and `idle` otherwise. FAILED counts the failed wakes of the last 24 hours, one per wake whatever the number of messages it carried, idle wakes included (`-` when none). DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts the messages that landed in the node's inbox in the last 24 hours (read from `transactions.sqlite3`). LAST SENT is the local time of the last message the node itself wrote, however old, whether or not it was delivered: the column that says when the agent was last responsive; `-` means it has never sent one. `-q` prints just names. Empty state hints at `a8s ls`. |
+| `a8s ps [-q]`      | List only running node processes: NAME, PID, UPTIME, STATUS, FAILED, DEFINITION, IN 24H, LAST SENT, ROOT. STATUS is `busy` while a wake runs or the node's [status probe](#status-probe-optional) answers `busy` (a turn in flight in its detached session), `resident` when the probe answers that its session is up with no turn in flight, `fail` when the last wake (an idle wake included) failed, and `idle` otherwise. FAILED counts the failed wakes of the last 24 hours, one per wake whatever the number of messages it carried, idle wakes included (`-` when none). DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts the messages that landed in the node's inbox in the last 24 hours (read from `transactions.sqlite3`). LAST SENT is the local time of the last message the node itself wrote, however old, whether or not it was delivered: the column that says when the agent was last responsive; `-` means it has never sent one. `-q` prints just names. Empty state hints at `a8s ls`. |
 
 A node told to stop by a signal writes the signal and the parent it found into its log and into `RUN_STOP` (`a8s tx --event RUN_STOP`), e.g. `stop-signal SIGTERM (15) from ppid 1 (systemd)` for a host shutdown. A handler that `a8s stop --force` had to kill writes no `RUN_STOP` of its own, so the stop writes one with the detail `killed by a8s stop --force`.
 
@@ -372,8 +372,9 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `muse.json`     | Meta Muse (`muse exec`) with `--approval-mode never` and `--user-input-auto-resolve`, fresh session every wake. The sandbox stays on; `--user-input-auto-resolve` is what stops an unattended turn blocking when the model reaches for `request_user_input`. |
 | `devin.json`    | Devin CLI (`devin -p`) with `--permission-mode dangerous` — every mode below it still prompts for exec and writes, which a headless turn cannot answer — and `--respect-workspace-trust false` so `-p` does not fail in an untrusted directory. Fresh session every wake. |
 | `engine-<id>.json`     | Eleven bundled bare engine-backed nodes — `claude`, `codex`, `agy`, `copilot`, `cursor`, `opencode`, `muse`, `devin`, `ollama-claude`, `ollama-codex`, `ollama-opencode` — each wiring `r4t engine <id> run` for a message, a batch and an idle wake, and each shipping twice: the base `engine-<id>.json` and an `engine-<id>-unrestricted.json` that adds `--permissions bypass`. Usable as shipped: `a8s add bob ./ engine-cursor`. Optional per-node vars tune each one: `MODEL`, `EFFORT`, `TIMEOUT`, `MEMORY`, and `GIT_NAME` / `GIT_EMAIL` for the identity its commits carry (`a8s vars bob set GIT_NAME "Bob (agent)"`). See [docs/r4t-engine.md](r4t-engine.md#a8s-integration). |
-| `engine-claude-resident.json` | Claude Code as a resident session (`r4t engine claude run --resident`): one engine process with the `a8s_tell` MCP server takes every message while it works and for `TIMEOUT` seconds of quiet after the last turn (default 2700, 45 minutes), then rewrites `STATUS.md` and `LESSONS.md` and exits; the next message starts a fresh session. `stop.invoke` ends it at once on `a8s stop`, `restart` or `kill`. Also ships `engine-claude-resident-unrestricted.json` with `--permissions bypass`. See [resident sessions](r4t-engine.md#resident-sessions--claude-ollama-claude-and-agy). |
+| `engine-claude-resident.json` | Claude Code as a resident session (`r4t engine claude run --resident`): one engine process with the `a8s_tell` MCP server takes every message while it works and for `TIMEOUT` seconds of quiet after the last turn (default 2700, 45 minutes), then rewrites `STATUS.md` and `LESSONS.md` and exits; the next message starts a fresh session. `stop.invoke` ends it at once on `a8s stop`, `restart` or `kill`. Also ships `engine-claude-resident-unrestricted.json` with `--permissions bypass`. See [resident sessions](r4t-engine.md#resident-sessions--claude-ollama-claude-agy-and-codex). |
 | `engine-agy-resident.json` | Antigravity (`agy`) as a resident session (`r4t engine agy run --resident`), the same shape over agy's `stream-json` mode. Also ships `engine-agy-resident-unrestricted.json`. |
+| `engine-codex-resident.json` | OpenAI Codex CLI as a resident session (`r4t engine codex run --resident`), the same shape over one `codex app-server` thread with the `a8s_tell` MCP server, in the workspace-write sandbox with approvals never. On Linux that sandbox needs unprivileged user namespaces, or every shell command fails ([details](r4t-engine.md#codex-app-server)). Also ships `engine-codex-resident-unrestricted.json` with `--permissions bypass`. |
 | `filedrop.json` | Filedrop seat — file-proxy delivery into `<root>/.inbox/`; no CLI wake. Watch with `tells -f`. See [docs/a8s-filedrop.md](a8s-filedrop.md). Bare name: `a8s add <name> <dir> filedrop`.                                                              |
 | `claude-proxy.json` | Claude Code filedrop variant (same file-proxy shape).                                                                                                                                                                                           |
 | `r4t.json`      | [r4t](r4t.md) roster node — dispatch + idle wakes into `r4t.py`. Bare name: `a8s add <name> <dir> r4t`.                                                                                                                                   |
@@ -586,6 +587,27 @@ A definition's `idle` block fires `idle.invoke` when the agent has gone `idle.ti
 - Argv expansion: `$SENDER`/`$MESSAGE`/`$TIMESTAMP`/`$AGE` are empty (no incoming message); `$RECIPIENT` is the agent's own name; `$A8S_DIR` resolves as usual.
 
 This subsumes the retired `clear` use-case: define an idle invoke that runs whatever your CLI needs to reset session state (e.g. `claude -p "/clear"`).
+
+### Status probe (optional)
+
+A node whose wake hands the message to a detached process names how to ask that
+process whether it is working in a `status` block. `a8s ps` runs `status.invoke`
+for each running node that declares one and shows the answer as STATUS.
+
+```json
+{
+  "invoke": ["my-agent", "$MESSAGE"],
+  "status": {"invoke": ["my-agent", "--status", "$RECIPIENT"]}
+}
+```
+
+- It takes the same argv grammar and variables as `stop.invoke`, and runs in the
+  node root with the wake environment. The probes of all running nodes run in
+  parallel, each with a 3 second limit.
+- a8s uses the first word of stdout when it is `busy` or `resident`. Any other
+  output, empty output, a nonzero exit, a timeout or a failure to start the
+  probe leaves STATUS to the wake record (`busy`, `fail` or `idle`).
+- A wake in flight shows `busy` before the probe runs. `a8s ls` does not run it.
 
 ### Stop invoke (optional)
 

@@ -327,3 +327,152 @@ class TestForceEscalation:
         monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
         monkeypatch.setattr("commands.STOP_WAIT_S", 0.1)
         assert cmd_stop(["alpha"]) == 1
+
+
+class TestStatusProbe:
+    """`status.invoke`: a node's own answer to `busy` / `resident`."""
+
+    def _probed(self, node, tmp_path, script: str) -> None:
+        import sys
+        defn = tmp_path / "probed.json"
+        defn.write_text(json.dumps({
+            "invoke": [sys.executable, "-c", "pass"],
+            "status": {"invoke": [sys.executable, "-c", script, "$RECIPIENT"]},
+        }))
+        save_registry({
+            "alpha": {"root": str(tmp_path / "root"), "definition": str(defn)},
+            "beta": {"root": str(tmp_path / "root")},
+        })
+
+    def _status(self, capsys) -> str:
+        cmd_ps([])
+        return _row(capsys.readouterr().out, "alpha")[3]
+
+    def test_build_status_command(self):
+        from definitions import build_status_command
+        assert build_status_command({"invoke": ["x"]}, "n1") is None
+        assert build_status_command({"status": {}}, "n1") is None
+        defn = {"status": {"invoke": ["r4t", "status", "--agent", "$RECIPIENT", "--x=$X?"]}}
+        assert build_status_command(defn, "n1") == ["r4t", "status", "--agent", "n1"]
+        assert build_status_command(defn, "n1", vars={"X": "1"})[-1] == "--x=1"
+
+    @pytest.mark.parametrize("word", ["busy", "resident"])
+    def test_probe_word_is_the_status(self, node, tmp_path, capsys, word):
+        self._probed(node, tmp_path, f"print('{word} extra words')")
+        assert self._status(capsys) == word
+
+    @pytest.mark.parametrize("script", [
+        "print('garbage')",
+        "pass",
+        "import sys; print('busy'); sys.exit(1)",
+    ])
+    def test_anything_else_falls_back(self, node, tmp_path, capsys, script):
+        self._probed(node, tmp_path, script)
+        assert self._status(capsys) == "idle"
+
+    def test_fallback_keeps_fail(self, node, tmp_path, capsys):
+        self._probed(node, tmp_path, "print('garbage')")
+        write_last_wake(node, False)
+        assert self._status(capsys) == "fail"
+
+    def test_a_probe_past_the_timeout_falls_back(self, node, tmp_path, capsys, monkeypatch):
+        import daemon
+        monkeypatch.setattr(daemon, "STATUS_PROBE_SECONDS", 0.5)
+        self._probed(node, tmp_path, "import time; time.sleep(30)")
+        assert self._status(capsys) == "idle"
+
+    def _probe_with_pipe_holder(self, node, tmp_path, leader: str) -> "pathlib.Path":
+        """A probe whose child keeps the stdout pipe for 30 s; the leader
+        exits at once or stays. Returns the file the child's pid lands in."""
+        marker = tmp_path / "child.pid"
+        tail = "import time; time.sleep(30)" if leader == "stays" else "pass"
+        self._probed(node, tmp_path, (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+            f"open({str(marker)!r}, 'w').write(str(p.pid)); "
+            f"print('busy', flush=True); {tail}"
+        ))
+        return marker
+
+    @pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+    @pytest.mark.parametrize("leader", ["exits", "stays"])
+    def test_a_child_holding_stdout_does_not_stall_ps(self, node, tmp_path, capsys, monkeypatch, leader):
+        """A child the probe spawned keeps the stdout pipe for 30 s, whether
+        the leader exits at once or stays. Killing the leader alone would
+        leave `ps` waiting on the pipe; the group ends and the child goes
+        with it."""
+        import daemon
+        import time
+        monkeypatch.setattr(daemon, "STATUS_PROBE_SECONDS", 0.5)
+        marker = self._probe_with_pipe_holder(node, tmp_path, leader)
+        started = time.monotonic()
+        assert self._status(capsys) == "idle"
+        assert time.monotonic() - started < 5.0
+        child = int(marker.read_text())
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        with pytest.raises(ProcessLookupError):
+            os.kill(child, 0)
+
+    def test_a_late_eof_does_not_extend_the_deadline(self, node, tmp_path, capsys, monkeypatch):
+        """The leader prints and closes stdout at 0.4 s and exits at 0.8 s,
+        past the 0.5 s deadline. A wait that got its own budget after the
+        read would accept that answer at 0.8 s; one budget refuses it at the
+        deadline and falls back."""
+        import daemon
+        import time
+        monkeypatch.setattr(daemon, "STATUS_PROBE_SECONDS", 0.5)
+        self._probed(node, tmp_path, (
+            "import os, sys, time; time.sleep(0.4); print('busy', flush=True); "
+            "os.close(1); time.sleep(0.4)"
+        ))
+        started = time.monotonic()
+        assert self._status(capsys) == "idle"
+        assert time.monotonic() - started < 1.5
+
+    @pytest.mark.parametrize("leader", ["exits", "stays"])
+    def test_the_deadline_holds_when_only_the_leader_can_be_ended(
+        self, node, tmp_path, capsys, monkeypatch, leader
+    ):
+        """Windows has no group to end: the child keeps the pipe after the
+        leader is killed. The deadline must still return `ps`, so nothing on
+        the ps side may wait on the pipe or its stream (a reader blocked in
+        the buffered stream holds its lock, and a `close` would wait on it).
+        Leader-only termination is forced here; the child is ended by the
+        test afterwards."""
+        import daemon
+        import signal
+        import time
+        monkeypatch.setattr(daemon, "STATUS_PROBE_SECONDS", 0.5)
+        monkeypatch.setattr(daemon, "terminate_group", lambda proc, **_: proc.kill())
+        marker = self._probe_with_pipe_holder(node, tmp_path, leader)
+        started = time.monotonic()
+        try:
+            assert self._status(capsys) == "idle"
+            assert time.monotonic() - started < 5.0
+        finally:
+            try:
+                os.kill(int(marker.read_text()), getattr(signal, "SIGKILL", signal.SIGTERM))
+            except (OSError, ValueError):
+                pass
+
+    def test_a_missing_program_falls_back(self, node, tmp_path, capsys):
+        defn = tmp_path / "probed.json"
+        defn.write_text(json.dumps({"status": {"invoke": ["/nonexistent/prog"]}}))
+        save_registry({"alpha": {"root": str(tmp_path / "root"), "definition": str(defn)}})
+        assert self._status(capsys) == "idle"
+
+    def test_a_live_wake_wins_before_the_probe(self, node, tmp_path, capsys):
+        self._probed(node, tmp_path, "print('resident')")
+        write_wake_pid(node, os.getpid(), ["a.json"])
+        assert self._status(capsys) == "busy"
+
+    def test_the_probe_runs_in_the_node_root(self, node, tmp_path, capsys):
+        self._probed(node, tmp_path,
+                     "import os; print('busy' if os.getcwd().endswith('root') else 'x')")
+        assert self._status(capsys) == "busy"
