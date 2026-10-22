@@ -3,7 +3,9 @@
 Repo-local checkers. Each one runs on demand, from a checkout, with no
 GitHub Actions minutes attached — that is the whole point. Actions minutes are
 metered on this repo and a release must never wait on a budget, so a checker
-runs "for real" in `release.yml` and never in the per-PR workflow.
+runs "for real" in `release.yml`. The one exception is the wiki gardener,
+which also runs on every non-draft PR on the owner's self-hosted runner, where
+minutes are not metered: release 0.1.113 failed on it after the merge.
 
 Every tool here is stdlib-only Python and reads nothing but the paths it is
 given.
@@ -70,8 +72,8 @@ reason, whether a category is the right one, and whether two rows on one surface
 should actually merge, stay with the gardener.
 Renames are not checked at all — the tool's docstring says why.
 
-`release.yml` runs the tool over the wiki on every release, non-blocking until
-the wiki reports clean. `tests/test_wiki_gardener.py` drives every check over
+`test.yml` runs the tool over the wiki on every non-draft PR and `release.yml`
+on every release, both blocking. `tests/test_wiki_gardener.py` drives every check over
 miniature wikis built in `tmp_path`, and the tool and that test are routed into
 the per-PR `a8s` job so a change to either runs it.
 

@@ -79,6 +79,7 @@ from core import (
     read_last_active,
     touch_inbox_waiting_since,
     touch_last_active,
+    write_last_wake,
     trash_dir,
     unique_path,
     write_wake_pid,
@@ -401,6 +402,21 @@ def _sweep_stuck_wake_readers() -> None:
     _STUCK_WAKE_READERS = alive
 
 
+IS_WINDOWS = os.name == "nt"
+
+
+def _wake_spawn_flags(*, new_session: bool) -> dict:
+    """Popen flags for a process the node spawns. The node has no console
+    on Windows (#338), and a console child of a console-less parent gets a
+    new visible console. `CREATE_NO_WINDOW` gives it a hidden one that its
+    own children (the engine CLI) inherit. It cannot be combined with
+    `DETACHED_PROCESS`. `start_new_session` is ignored on Windows, so POSIX
+    alone gets it, and only when `new_session` asks."""
+    if IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {"start_new_session": True} if new_session else {}
+
+
 def _start_wake_subprocess(
     name: str,
     cmd: list[str],
@@ -440,11 +456,17 @@ def _start_wake_subprocess(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            start_new_session=True,
+            **_wake_spawn_flags(new_session=True),
         )
     except FileNotFoundError:
         ts = clock.time_stamp()
         out_agent(name, f"{name}> [{ts}] command not found: {cmd[0]}")
+        return False
+    except OSError as e:
+        # A program that exists but cannot run (mode 0600, a wrong binary
+        # format) fails the spawn the same way: the caller settles it once.
+        ts = clock.time_stamp()
+        out_agent(name, f"{name}> [{ts}] cannot start {cmd[0]}: {e}")
         return False
     stdout_queue: "queue.Queue[str | object]" = queue.Queue()
     stdout_thread = threading.Thread(
@@ -640,6 +662,7 @@ def _settle_wake(
     return_detail = f"exit {rc}" if rc is not None else (reason or "spawn failed")
     for f in envelopes:
         txlog.log("WAKE_RETURN", msg_id=f.stem, recipient=p.name, detail=return_detail)
+    write_last_wake(p.name, rc == 0)
     if rc == 0:
         return
     if reason is None:
@@ -649,10 +672,30 @@ def _settle_wake(
     _dead_letter(p.name, [f.name for f in envelopes], f"wake failed ({reason})")
 
 
+def _settle_idle(name: str, rc: int | None, *, reason: str | None = None) -> None:
+    """An idle wake carries no envelope, so a failure leaves no dead letter;
+    it is still a failed wake, counted the same way (`WAKE_FAILED`), or the
+    operator never sees a node whose idle turns all fail, out of quota.
+    `rc` None is a wake that never ran (spawn failed, or `reason` says why)."""
+    touch_last_active(name)
+    write_last_wake(name, rc == 0)
+    if rc == 0:
+        return
+    if reason is None:
+        reason = "spawn failed" if rc is None else f"exit {rc}"
+    txlog.log("WAKE_FAILED", recipient=name, detail=f"idle wake failed ({reason})")
+    out_agent(name, f"[{name}] idle wake failed ({reason})")
+
+
 def _dead_letter(name: str, filenames: list[str], reason: str) -> None:
     """Mark each envelope a dead letter where it lies in trash: one agent-log
-    line, one `DROPPED` row each."""
+    line, one `WAKE_FAILED` row for the wake, one `DROPPED` row per envelope.
+    A wake with no envelope (an idle wake killed outright) is still one
+    failed wake, with its row and its line and nothing to drop."""
+    txlog.log("WAKE_FAILED", recipient=name, detail=reason)
+    write_last_wake(name, False)
     if not filenames:
+        out_agent(name, f"[{name}] {reason}")
         return
     for fname in filenames:
         mark_dead_letter(name, fname)
@@ -919,7 +962,7 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
         cmd = wrap_wake_argv(definition, cmd)
         spawn_env = _wake_env(p, definition)
     except ValueError as e:
-        out_agent(p.name, f"[{p.name}] idle aborted: {e}")
+        _settle_idle(p.name, None, reason=f"aborted: {e}")
         return False
     out_agent(
         p.name,
@@ -929,20 +972,24 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
     max_sec = max_wake_seconds(definition)
     try:
         if async_wake:
-            return _start_wake_subprocess(
+            if _start_wake_subprocess(
                 p.name,
                 cmd,
                 p.root,
                 env=spawn_env,
                 max_seconds=max_sec,
-                on_complete=lambda _rc: touch_last_active(p.name),
-            )
+                on_complete=lambda rc: _settle_idle(p.name, rc),
+            ):
+                return True
+            _settle_idle(p.name, None)
+            return False
         run_with_prefix(
-            p.name, cmd, p.root, env=spawn_env, max_seconds=max_sec
+            p.name, cmd, p.root, env=spawn_env, max_seconds=max_sec,
+            on_complete=lambda rc: _settle_idle(p.name, rc),
         )
-    finally:
-        if not async_wake:
-            touch_last_active(p.name)
+    except BaseException:
+        touch_last_active(p.name)
+        raise
     return True
 
 
@@ -1208,6 +1255,7 @@ def _run_stop_hook(name: str) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            **_wake_spawn_flags(new_session=False),
         )
     except OSError as e:
         out_agent(name, f"[{name}] stop hook failed: {e}")

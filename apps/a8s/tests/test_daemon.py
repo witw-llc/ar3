@@ -22,6 +22,8 @@ import pytest
 
 from core import (
     Participant,
+    read_last_wake,
+    transactions_path,
     TELL_OUTBOX_DIR_ENV,
     agent_log_path,
     clear_inbox_waiting_since,
@@ -952,6 +954,18 @@ def _write_idle_def(path: Path, fixtures_dir: Path, timeout: int) -> None:
     }))
 
 
+def _write_failing_idle_def(path: Path, timeout: int) -> None:
+    """An idle invoke that exits 3 and prints nothing: the shape of an engine
+    out of quota."""
+    path.write_text(json.dumps({
+        "invoke": [sys.executable, "-c", "pass"],
+        "idle": {
+            "timeout": timeout,
+            "invoke": [sys.executable, "-c", "import sys; sys.exit(3)"],
+        },
+    }))
+
+
 class TestMaybeRunIdle:
     """`maybe_run_idle` is the per-iteration check `attached_loop` calls
     for each handled agent after draining the inbox. It reads
@@ -1020,6 +1034,108 @@ class TestMaybeRunIdle:
         # Even with no last-active, timeout<=0 means idle is off.
         assert maybe_run_idle(Participant("X", d)) is False
 
+
+    def test_a_failed_idle_wake_is_a_failed_wake(self, fake_home, tmp_path):
+        # No envelope, so no dead letter; still one WAKE_FAILED row, or a node
+        # whose idle turns all fail (out of quota) never shows in `a8s ps`.
+        import txlog
+        from core import touch_last_active, read_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_failing_idle_def(defp, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        before = datetime.now(timezone.utc)
+        touch_last_active("X", before - timedelta(seconds=60))
+        assert maybe_run_idle(Participant("X", d)) is True
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1
+        assert rows[0]["to"] == "X"
+        assert "idle wake failed (exit 3)" in rows[0]["detail"]
+        assert not list(txlog.read_recent(limit=50, events=["DROPPED"]))
+        assert "idle wake failed (exit 3)" in _read_log("X")
+        assert read_last_active("X") >= before
+        assert read_last_wake("X") is False
+
+    def test_a_failed_async_idle_wake_is_counted_at_completion(self, fake_home, tmp_path):
+        import daemon
+        import txlog
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_failing_idle_def(defp, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+        assert maybe_run_idle(Participant("X", d), async_wake=True) is True
+        # Nothing is counted until the handler reaps the exit.
+        assert not transactions_path().exists()
+        deadline = time.monotonic() + 10
+        while daemon._CURRENT_WAKE_PROC is not None and time.monotonic() < deadline:
+            daemon._finish_wake_if_done()
+            time.sleep(0.05)
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1 and "idle wake failed (exit 3)" in rows[0]["detail"]
+
+    def test_an_idle_wake_that_cannot_start_is_a_failed_wake(self, fake_home, tmp_path):
+        import txlog
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        defp.write_text(json.dumps({
+            "invoke": [sys.executable, "-c", "pass"],
+            "idle": {"timeout": 1, "invoke": [str(tmp_path / "no-such-program")]},
+        }))
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+        maybe_run_idle(Participant("X", d))
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1 and rows[0]["to"] == "X"
+        assert "idle wake failed" in rows[0]["detail"]
+
+    @pytest.mark.parametrize("async_wake", [False, True])
+    def test_an_idle_program_that_cannot_run_is_a_failed_wake(self, fake_home, tmp_path, async_wake):
+        # A script without the execute bit raises PermissionError at Popen,
+        # not FileNotFoundError; it is a spawn failure all the same.
+        import daemon
+        import txlog
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        script = tmp_path / "no-exec.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o600)
+        defp = tmp_path / "idle.json"
+        defp.write_text(json.dumps({
+            "invoke": [sys.executable, "-c", "pass"],
+            "idle": {"timeout": 1, "invoke": [str(script)]},
+        }))
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+        maybe_run_idle(Participant("X", d), async_wake=async_wake)
+        assert daemon._CURRENT_WAKE_PROC is None
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1 and rows[0]["to"] == "X"
+        assert "idle wake failed (spawn failed)" in rows[0]["detail"]
+        assert "cannot start" in _read_log("X")
+
+    def test_a_successful_idle_wake_counts_nothing(self, fake_home, tmp_path, fixtures_dir):
+        from core import touch_last_active
+        from datetime import datetime, timezone, timedelta
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout=1)
+        save_registry({"X": {"root": str(d), "definition": str(defp)}})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+        assert maybe_run_idle(Participant("X", d)) is True
+        assert not transactions_path().exists()
+        assert read_last_wake("X") is True
 
 class TestAttachedLoopIdleIntegration:
     """End-to-end: attached_loop's iteration must call maybe_run_idle for

@@ -10,6 +10,31 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.114
+
+### Changed
+
+- `a8s ps` STATUS is now one word, `busy`, `fail` (the last wake, an idle wake
+  included, failed) or `idle`, and a new FAILED column counts
+  the failed wakes of the last 24 hours (`-` when none). The long
+  `5 dead letter(s) in 24 h` text warped the table. Each failed wake now
+  writes one `WAKE_FAILED` transaction row, an idle wake that fails, cannot
+  start or is killed included. The dead-letter count stays in
+  `a8s health` and in the agent log.
+- The wiki-gardener check now runs on every non-draft pull request, before the
+  merge. Before, it ran only at release, and release 0.1.113 failed on it after
+  the merge. The release keeps its own run as the final gate. `AGENTS.md` now
+  tells every agent to run `tools/wiki-gardener.py` on the wiki after each wiki
+  write and before a PR leaves draft.
+
+### Fixed
+
+- On Windows, a command window opened on every wake of a node, including the
+  idle wake. Since 0.1.111 the node has no console (#338), and a console
+  program that a console-less parent starts gets a new visible one. The node
+  now starts each wake, and each stop hook, in a hidden console, which the
+  engine CLI inherits (#342).
+
 ## 0.1.113
 
 ### Added

@@ -58,6 +58,7 @@ Event = Literal[
     "RUN_STOP",
     "WAKE_START",
     "WAKE_RETURN",
+    "WAKE_FAILED",
     "HEARTBEAT",
     "WEDGE",
 ]
@@ -83,6 +84,7 @@ EVENTS: tuple[str, ...] = (
     "RUN_STOP",
     "WAKE_START",
     "WAKE_RETURN",
+    "WAKE_FAILED",
     "HEARTBEAT",
     "WEDGE",
 )
@@ -455,6 +457,23 @@ def count_by_remote(event: str, since: str) -> dict[str, int]:
     except (OSError, sqlite3.Error) as e:
         raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
     return {str(remote): int(count) for remote, count in rows}
+
+
+def count_events(event: str, since: str) -> dict[str, int]:
+    """`{lowercased recipient: rows}` of one event at or after `since`, a
+    stamp in the log's own form (`2026-10-05T12:00:00.000Z`). Rows with no
+    recipient are not counted."""
+    try:
+        with closing(open_for_read()) as conn:
+            rows = conn.execute(
+                "SELECT LOWER(recipient), COUNT(*) FROM transactions "
+                "WHERE event = ? AND timestamp >= ? AND recipient != '' "
+                "GROUP BY LOWER(recipient)",
+                (event, since),
+            ).fetchall()
+    except (OSError, sqlite3.Error) as e:
+        raise TransactionLogError(f"cannot read {transactions_path()}: {e}") from e
+    return {str(name): int(count) for name, count in rows}
 
 
 def last_heard() -> dict[str, str]:

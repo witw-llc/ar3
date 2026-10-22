@@ -453,3 +453,67 @@ class TestWatchdog:
         watchdog.start()
         watchdog.join(timeout=2.0)
         assert not watchdog.is_alive(), "a zero knob must return immediately, not poll forever"
+
+
+class TestWakeSpawnFlags:
+    """On Windows the node has no console, so a wake must start in a hidden
+    one or it opens a visible window (#342)."""
+
+    @staticmethod
+    def _capture(monkeypatch, is_windows: bool) -> list[dict]:
+        monkeypatch.setattr(daemon_mod, "IS_WINDOWS", is_windows)
+        monkeypatch.setattr(
+            daemon_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+        )
+        seen: list[dict] = []
+
+        def popen(cmd, **kwargs):
+            seen.append(kwargs)
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr(daemon_mod.subprocess, "Popen", popen)
+        return seen
+
+    def test_wake_gets_its_own_session_on_posix(self, fake_home, tmp_path, monkeypatch):
+        seen = self._capture(monkeypatch, False)
+        assert not daemon_mod._start_wake_subprocess("A", ["x"], tmp_path)
+        assert seen[0]["start_new_session"] is True
+        assert "creationflags" not in seen[0]
+
+    def test_wake_gets_a_hidden_console_on_windows(self, fake_home, tmp_path, monkeypatch):
+        seen = self._capture(monkeypatch, True)
+        assert not daemon_mod._start_wake_subprocess("A", ["x"], tmp_path)
+        assert seen[0]["creationflags"] == 0x08000000
+        assert "start_new_session" not in seen[0]
+
+    @staticmethod
+    def _stop_hook_kwargs(monkeypatch, tmp_path, is_windows: bool) -> dict:
+        seen = TestWakeSpawnFlags._capture(monkeypatch, is_windows)
+
+        def popen(cmd, **kwargs):
+            seen.append(kwargs)
+            raise OSError("no spawn in a test")
+
+        monkeypatch.setattr(daemon_mod.subprocess, "Popen", popen)
+        monkeypatch.setattr(
+            daemon_mod, "participants_from_registry", lambda: [Participant("A", tmp_path)]
+        )
+        monkeypatch.setattr(daemon_mod, "load_definition", lambda n: {})
+        monkeypatch.setattr(daemon_mod, "resolve_definition_path", lambda n: tmp_path / "d.json")
+        monkeypatch.setattr(daemon_mod, "load_agent_vars", lambda n: {})
+        monkeypatch.setattr(daemon_mod, "build_stop_command", lambda *a, **k: ["stop"])
+        monkeypatch.setattr(daemon_mod, "wrap_wake_argv", lambda d, c: c)
+        monkeypatch.setattr(daemon_mod, "_wake_env", lambda p, d: {})
+        daemon_mod._run_stop_hook("A")
+        assert len(seen) == 1
+        return seen[0]
+
+    def test_stop_hook_keeps_posix_flags_unchanged(self, fake_home, tmp_path, monkeypatch):
+        kw = self._stop_hook_kwargs(monkeypatch, tmp_path, False)
+        assert "start_new_session" not in kw
+        assert "creationflags" not in kw
+
+    def test_stop_hook_gets_a_hidden_console_on_windows(self, fake_home, tmp_path, monkeypatch):
+        kw = self._stop_hook_kwargs(monkeypatch, tmp_path, True)
+        assert kw["creationflags"] == 0x08000000
+        assert "start_new_session" not in kw

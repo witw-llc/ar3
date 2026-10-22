@@ -267,14 +267,17 @@ Read [a8s.md](a8s.md) first for concept and usage.
   once.** Any other wake outcome — nonzero exit, a kill by the timeout, the
   watchdog or `stop --force`, a failed spawn, unexpanded vars — leaves the
   envelopes in trash, marks each one in the agent's `dead-letters/` directory
-  (one empty file named as its trash file), writes one `DROPPED` row each and
+  (one empty file named as its trash file), writes one `WAKE_FAILED` row for the wake, one `DROPPED` row each and
   one agent-log line naming the ids. Never requeue a wake's envelopes, never
   arm a wake backoff, and never add a verb that returns a dead letter: the
   sender is in control and sends again. Never write a message to an agent
-  about a failure, and send nothing about it across the network. `a8s ps` and
-  `a8s health` count the markers whose mtime falls in the last 24 hours, and
-  the count deletes markers older than 7 days. An inbox file that will not
-  parse and a definition that will not load are dead letters too.
+  about a failure, and send nothing about it across the network. `a8s health`
+  counts the markers whose mtime falls in the last 24 hours, `a8s ps` counts
+  the `WAKE_FAILED` rows of the last 24 hours, and the count deletes markers older than 7 days. An inbox file that will not
+  parse and a definition that will not load are dead letters too. An idle
+  wake has no envelope and leaves no dead letter, but when it exits nonzero,
+  cannot start, aborts on an unexpanded var or is killed, it is one failed
+  wake with its `WAKE_FAILED` row the same way.
 - **A routing pass claims a pending message before it sends it.** Rename it
   from `pending/` into `sending/` first, and settle it from there. A file
   that will not move is not sent; a settle step that fails leaves the file in

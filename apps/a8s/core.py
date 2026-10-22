@@ -292,6 +292,34 @@ def clear_inbox_waiting_since(name: str) -> None:
         pass
 
 
+def last_wake_path(name: str) -> Path:
+    """Per-agent outcome of the last wake that settled: the one word `ok` or
+    `failed`. Written at every settle (a message wake, an idle wake, a wake
+    killed by `a8s stop --force`); `a8s ps` reads it for STATUS."""
+    return agent_dir(name) / "last-wake"
+
+
+def write_last_wake(name: str, ok: bool) -> None:
+    """Best-effort, like `touch_last_active`: a missed write shows the
+    previous outcome one wake longer."""
+    p = last_wake_path(name)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("ok" if ok else "failed", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_last_wake(name: str) -> bool | None:
+    """True when the last settled wake succeeded, False when it failed, None
+    when no wake has settled yet (or the record is unreadable)."""
+    try:
+        word = last_wake_path(name).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return {"ok": True, "failed": False}.get(word)
+
+
 def wake_pid_path(name: str) -> Path:
     """Per-agent record of the wake subprocess in flight: JSON `{"pid": N,
     "start": "<process start token>", "unit": [<trash filenames>]}`. Written when a wake spawns and removed

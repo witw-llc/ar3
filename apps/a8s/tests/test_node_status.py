@@ -26,6 +26,7 @@ from core import (
     trash_dir,
     transactions_path,
     wake_pid_path,
+    write_last_wake,
     write_wake_pid,
 )
 from registry import save_registry
@@ -46,40 +47,6 @@ def _row(out: str, name: str) -> list[str]:
     return next(line for line in out.splitlines() if line.startswith(name)).split()
 
 
-class TestPsStatus:
-    def test_ok_when_nothing_failed(self, node, capsys):
-        assert cmd_ps([]) == 0
-        out = capsys.readouterr().out
-        assert "STATUS" in out
-        assert _row(out, "alpha")[3] == "ok"
-
-    def test_dead_letters_of_the_last_day_are_counted(self, node, capsys):
-        mark_dead_letter(node, "a.json")
-        mark_dead_letter(node, "b.json")
-        mark_dead_letter(node, "old.json")
-        old = datetime.now(timezone.utc).timestamp() - 25 * 3600
-        os.utime(dead_letters_dir(node) / "old.json", (old, old))
-        cmd_ps([])
-        out = capsys.readouterr().out
-        assert "ok, 2 dead letter(s) in 24 h" in out
-        assert _row(out, "beta")[3] == "ok"
-
-    def test_a_wake_in_flight_is_busy(self, node, capsys):
-        write_wake_pid(node, os.getpid(), ["a.json"])
-        cmd_ps([])
-        assert _row(capsys.readouterr().out, "alpha")[3] == "busy"
-
-    def test_a_dead_wake_record_is_not_busy(self, node, capsys):
-        wake_pid_path(node).write_text(json.dumps({"pid": 2**22 + 12345, "start": "", "unit": []}))
-        cmd_ps([])
-        assert _row(capsys.readouterr().out, "alpha")[3] == "ok"
-
-    def test_quiet_is_still_names_only(self, node, capsys):
-        mark_dead_letter(node, "a.json")
-        cmd_ps(["-q"])
-        assert capsys.readouterr().out.splitlines() == ["alpha", "beta"]
-
-
 def _seed(event: str, recipient: str, msg_id: str, *, age_hours: float = 0.0) -> None:
     txlog.log(event, msg_id=msg_id, sender="x", recipient=recipient)
     stamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).strftime(
@@ -92,6 +59,66 @@ def _seed(event: str, recipient: str, msg_id: str, *, age_hours: float = 0.0) ->
         )
 
 
+class TestPsStatus:
+    def test_ok_when_nothing_failed(self, node, capsys):
+        assert cmd_ps([]) == 0
+        out = capsys.readouterr().out
+        assert "STATUS" in out
+        assert _row(out, "alpha")[3] == "idle"
+
+    def test_dead_letter_markers_do_not_change_status(self, node, capsys):
+        mark_dead_letter(node, "a.json")
+        mark_dead_letter(node, "b.json")
+        cmd_ps([])
+        out = capsys.readouterr().out
+        assert "dead letter" not in out
+        assert _row(out, "alpha")[3] == "idle"
+
+    def test_failed_column_counts_wake_failures_of_the_last_day(self, node, capsys):
+        _seed("WAKE_FAILED", "alpha", "", age_hours=1)
+        _seed("WAKE_FAILED", "ALPHA", "", age_hours=5)
+        _seed("WAKE_FAILED", "alpha", "", age_hours=25)
+        cmd_ps([])
+        out = capsys.readouterr().out
+        assert "FAILED" in out
+        row = _row(out, "alpha")
+        assert row[3:5] == ["idle", "2"]
+        assert _row(out, "beta")[4] == "-"
+
+    def test_failed_column_is_a_dash_when_none(self, node, capsys):
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[4] == "-"
+
+    def test_a_failed_last_wake_is_fail_until_the_next_one_succeeds(self, node, capsys):
+        write_last_wake(node, False)
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[3] == "fail"
+        write_last_wake(node, True)
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[3] == "idle"
+
+    def test_a_wake_in_flight_is_busy_whatever_the_last_outcome(self, node, capsys):
+        write_last_wake(node, False)
+        write_wake_pid(node, os.getpid(), ["a.json"])
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[3] == "busy"
+
+    def test_a_wake_in_flight_is_busy(self, node, capsys):
+        write_wake_pid(node, os.getpid(), ["a.json"])
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[3] == "busy"
+
+    def test_a_dead_wake_record_is_not_busy(self, node, capsys):
+        wake_pid_path(node).write_text(json.dumps({"pid": 2**22 + 12345, "start": "", "unit": []}))
+        cmd_ps([])
+        assert _row(capsys.readouterr().out, "alpha")[3] == "idle"
+
+    def test_quiet_is_still_names_only(self, node, capsys):
+        mark_dead_letter(node, "a.json")
+        cmd_ps(["-q"])
+        assert capsys.readouterr().out.splitlines() == ["alpha", "beta"]
+
+
 class TestPsActivity:
     def test_counts_distinct_messages_landed_in_the_last_day(self, node, capsys):
         _seed("ROUTED", "alpha", "01A", age_hours=1)
@@ -102,15 +129,15 @@ class TestPsActivity:
         _seed("ROUTED", "beta", "01E", age_hours=1)
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[5] == "3"
-        assert _row(out, "beta")[5] == "1"
+        assert _row(out, "alpha")[6] == "3"
+        assert _row(out, "beta")[6] == "1"
 
     def test_only_a_landing_counts(self, node, capsys):
         for event in ("ENQUEUED", "WAKE_START", "WAKE_RETURN", "PROXY_DELIVERED", "NOT_LOCAL"):
             _seed(event, "alpha", "01A")
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[5] == "0"
+        assert _row(out, "alpha")[6] == "0"
 
     def test_the_last_message_is_local_time_with_its_zone(self, node, capsys, zone):
         zone("America/Los_Angeles")
@@ -124,15 +151,15 @@ class TestPsActivity:
             conn.execute("UPDATE transactions SET timestamp = ? WHERE msg_id = '01C'", (txlog_stamp,))
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[6:8] == ["2026-07-01", "05:00"] or "2026-07-01 05:00 PDT" in out
+        assert _row(out, "alpha")[7:9] == ["2026-07-01", "05:00"] or "2026-07-01 05:00 PDT" in out
         # An old newest message still shows when the node last spoke.
-        assert _row(out, "alpha")[5] == "0"
+        assert _row(out, "alpha")[6] == "0"
 
     def test_no_log_reads_as_nothing(self, node, capsys):
         assert not transactions_path().exists()
         assert cmd_ps([]) == 0
         row = _row(capsys.readouterr().out, "alpha")
-        assert row[5] == "0" and row[6] == "-"
+        assert row[6] == "0" and row[7] == "-"
 
     def test_last_sent_is_the_nodes_own_newest_outbox_event(self, node, capsys, zone):
         zone("UTC")
@@ -140,7 +167,7 @@ class TestPsActivity:
         # whether it was delivered, published, or dropped.
         _seed("ROUTED", "alpha", "01A", age_hours=1)
         cmd_ps([])
-        assert _row(capsys.readouterr().out, "alpha")[6] == "-"
+        assert _row(capsys.readouterr().out, "alpha")[7] == "-"
         for event, msg_id in (("ENQUEUED", "01B"), ("DROPPED", "01C"), ("PUBLISHED", "01D")):
             txlog.log(event, msg_id=msg_id, sender="Alpha", recipient="beta")
         stamp = "2026-07-02T09:30:00.000Z"
@@ -150,7 +177,7 @@ class TestPsActivity:
         cmd_ps([])
         out = capsys.readouterr().out
         assert "2026-07-02 09:30 UTC" in out
-        assert _row(out, "beta")[6] == "-"
+        assert _row(out, "beta")[7] == "-"
 
     def test_definition_comes_from_the_registry(self, node, capsys):
         reg = {"alpha": {"root": str(inbox_dir("alpha").parent), "definition": "claude"},
@@ -158,8 +185,8 @@ class TestPsActivity:
         save_registry(reg)
         cmd_ps([])
         out = capsys.readouterr().out
-        assert _row(out, "alpha")[4] == "claude"
-        assert _row(out, "beta")[4] == "default"
+        assert _row(out, "alpha")[5] == "claude"
+        assert _row(out, "beta")[5] == "default"
 
 
 @pytest.fixture

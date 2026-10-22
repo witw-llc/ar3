@@ -26,6 +26,7 @@ from core import (
     dead_letters_dir,
     inbox_dir,
     mark_dead_letter,
+    read_last_wake,
     trash_dir,
 )
 from daemon import _settle_wake, attached_loop, wake_once
@@ -120,6 +121,31 @@ class TestSettleWake:
         assert [e["event"] for e in events] == ["WAKE_RETURN", "DROPPED"]
         assert events[0]["detail"] == "exit 3"
         assert events[1]["detail"] == "wake failed (exit 3); dead letter in trash"
+
+    def test_one_wake_failed_row_for_a_multi_message_wake(self, agent):
+        envs = [_in_trash("A", "one"), _in_trash("A", "two"), _in_trash("A", "three")]
+
+        _settle_wake(agent, envs, 3)
+
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1
+        assert rows[0]["to"] == "A"
+        assert read_last_wake("A") is False
+        _settle_wake(agent, [_in_trash("A", "four")], 0)
+        assert read_last_wake("A") is True
+        assert rows[0]["detail"] == "wake failed (exit 3)"
+        dropped = txlog.read_recent(limit=50, events=["DROPPED"])
+        assert len(dropped) == 3
+
+    def test_a_killed_wake_with_no_envelope_is_one_failed_wake(self, agent):
+        # `a8s stop --force` on an idle wake: nothing to drop, one failure.
+        from daemon import _dead_letter
+
+        _dead_letter("A", [], "wake killed by `a8s stop --force`")
+
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1 and rows[0]["to"] == "A"
+        assert not txlog.read_recent(limit=50, events=["DROPPED"])
 
     def test_no_retry_record_is_written(self, agent):
         _settle_wake(agent, [_in_trash("A", "x")], 3)
@@ -279,6 +305,25 @@ class TestFailureModesDeadLetter:
         log = _read_log("A")
         assert "command not found" in log
         assert "wake failed (spawn failed)" in log
+
+    def test_binary_without_the_execute_bit(self, fake_home, tmp_path):
+        # PermissionError at Popen, not FileNotFoundError: the same dead
+        # letter, with the cause in the log.
+        script = tmp_path / "no-exec.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o600)
+        _register(tmp_path, {"invoke": [str(script), "$MESSAGE"]})
+        msg = _queue_inbox("A", "bad definition")
+
+        attached_loop(["A"], 0.05, single_pass=True)
+
+        assert not list(inbox_dir("A").glob("*.json"))
+        assert _dead("A") == [msg.name]
+        log = _read_log("A")
+        assert "cannot start" in log and "Permission denied" in log
+        assert "wake failed (spawn failed)" in log
+        rows = [e for _, e in txlog.read_recent(limit=50, events=["WAKE_FAILED"])]
+        assert len(rows) == 1
 
     def test_undefined_var(self, fake_home, tmp_path, fixtures_dir):
         _register(

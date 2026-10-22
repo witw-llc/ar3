@@ -42,6 +42,7 @@ from core import (
     inbox_dir,
     out,
     pid_path,
+    read_last_wake,
     read_wake_pid,
     s3_ledger_path,
     trash_dir,
@@ -2090,11 +2091,21 @@ def cmd_exit() -> int:
 
 
 def _node_status(name: str) -> str:
-    """`busy` while a wake is in flight, else `ok` — the node wakes on its
-    next pass — followed by the dead letters of the last 24 hours."""
-    state = "busy" if read_wake_pid(name) is not None else "ok"
-    dead = count_dead_letters(name, datetime.now(timezone.utc) - timedelta(hours=24))
-    return f"{state}, {dead} dead letter(s) in 24 h" if dead else state
+    """`busy` while a wake is in flight; otherwise the last settled wake's
+    outcome: `fail` when it failed (an idle wake counts), else `idle`."""
+    if read_wake_pid(name) is not None:
+        return "busy"
+    return "fail" if read_last_wake(name) is False else "idle"
+
+
+def _wake_failures_by_node() -> dict[str, int]:
+    """`{lowercased name: failed wakes in the last 24 hours}`, empty when the
+    transaction log cannot be read."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    try:
+        return txlog.count_events("WAKE_FAILED", since)
+    except txlog.TransactionLogError:
+        return {}
 
 
 def _inbox_activity_by_node() -> dict[str, tuple[str, str]]:
@@ -2120,7 +2131,8 @@ def _last_sent_by_node() -> dict[str, str]:
 
 def cmd_ps(args: list[str] | None = None) -> int:
     """`a8s ps` — list only running node processes (docker/ollama style).
-    Columns: NAME, PID, UPTIME, STATUS, DEFINITION, IN 24H, LAST SENT, ROOT.
+    Columns: NAME, PID, UPTIME, STATUS (`ok` or `busy`), FAILED (failed wakes of
+    the last 24 hours, `-` when none), DEFINITION, IN 24H, LAST SENT, ROOT.
     DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
     itself last wrote a message, the one column that says it was responsive.
     `-q` prints just names, one per line."""
@@ -2147,12 +2159,14 @@ def cmd_ps(args: list[str] | None = None) -> int:
 
     activity = _inbox_activity_by_node()
     sent = _last_sent_by_node()
+    failed = _wake_failures_by_node()
     rows = []
     for name, pid, definition, root in running:
         count, _ = activity.get(name.lower(), ("0", "-"))
-        rows.append((name, str(pid), _pid_uptime(name), _node_status(name), definition, count,
+        rows.append((name, str(pid), _pid_uptime(name), _node_status(name),
+                     str(failed.get(name.lower()) or "-"), definition, count,
                      sent.get(name.lower(), "-"), root))
-    _print_table(["NAME", "PID", "UPTIME", "STATUS", "DEFINITION", "IN 24H", "LAST SENT", "ROOT"], rows)
+    _print_table(["NAME", "PID", "UPTIME", "STATUS", "FAILED", "DEFINITION", "IN 24H", "LAST SENT", "ROOT"], rows)
     return 0
 
 
