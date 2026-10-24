@@ -178,7 +178,16 @@ class MqttTransport(Transport):
         if username is not None:
             self._client.username_pw_set(username, password)
         if self._tls:
-            self._client.tls_set()
+            import ssl
+
+            # The context paho's `tls_set()` builds with no arguments: the
+            # certificate and the host name both checked against the system
+            # CA store. `tls_set()` itself reads `ssl.PROTOCOL_TLSv1_2` before
+            # it picks this protocol, and a Python built on OpenSSL 4 has no
+            # such name.
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.load_default_certs()
+            self._client.tls_set_context(context)
         self._connected = threading.Event()
         self._on_message: Optional[OnMessage] = None
         self._msg_queue: queue.SimpleQueue[Any] = queue.SimpleQueue()

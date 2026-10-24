@@ -10,6 +10,20 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.117
+
+### Fixed
+
+- An `mqtts` remote starts on a Python built on OpenSSL 4. paho's
+  `tls_set()` reads `ssl.PROTOCOL_TLSv1_2`, which such a Python does not
+  have, so the remote was skipped with `module 'ssl' has no attribute
+  'PROTOCOL_TLSv1_2'` and the node ran with no broker. The transport now
+  builds the same context itself (`PROTOCOL_TLS_CLIENT`, the system CA
+  store, the certificate and the host name checked) and passes it with
+  `tls_set_context()`. Closes #352.
+- `a8s health` reports a configured remote that could not be built as
+  `FAIL` and exits 1. It printed `remotes: (none configured)` and exited 0.
+
 ## 0.1.116
 
 ### Added

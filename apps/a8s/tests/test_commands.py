@@ -2581,6 +2581,19 @@ class TestCmdRemoteFolder:
         cmd_health()
         assert "remote box: FAIL" in capsys.readouterr().out
 
+    def test_health_fails_a_remote_that_cannot_be_built(self, fake_home, capsys):
+        from commands import cmd_health
+        from network import save_network_config
+
+        cfg = load_network_config()
+        cfg["remotes"]["hub"] = {"transport": "pigeon"}
+        save_network_config(cfg)
+        capsys.readouterr()
+        assert cmd_health() == 1
+        out = capsys.readouterr().out
+        assert "remote hub: FAIL" in out
+        assert "remotes: (none configured)" not in out
+
     def test_broker_form_is_untouched(self, fake_home):
         rc = cmd_remote(["hub", "mqtt://broker:1883", "a8s/test", "--user", "alice"])
         assert rc == 0

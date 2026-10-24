@@ -3852,8 +3852,15 @@ def cmd_health() -> int:
             "probe": True,
         }
     )
-    if not remotes:
+    # A remote that cannot be built is skipped with a WARN line, so a node
+    # still starts. For health it is a FAIL, never "none configured".
+    built = {t.id for t in remotes}
+    skipped = [name for name in configured_remote_ids() if name not in built]
+    if not remotes and not skipped:
         print("remotes: (none configured)")
+    for name in skipped:
+        print(f"remote {name}: FAIL (not started; see the WARN line above)")
+        errors += 1
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     try:
         ambiguous = txlog.count_by_remote("PUBLISH_AMBIGUOUS", since)

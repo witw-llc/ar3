@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -679,3 +680,37 @@ class TestDefaultClientId:
     def test_clean_session_opt_in(self):
         t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t", clean_session=True)
         assert t._client._clean_session is True
+
+
+class TestTls:
+    def test_mqtts_needs_no_tls_1_2_protocol_name(self, monkeypatch):
+        # A Python built on OpenSSL 4 has no ssl.PROTOCOL_TLSv1_2, and
+        # paho's tls_set() reads it first. The remote was skipped.
+        monkeypatch.delattr(ssl, "PROTOCOL_TLSv1_2", raising=False)
+        t = MqttTransport(remote_id="hub", broker="mqtts://broker.invalid", topic="t")
+        ctx = t._client._ssl_context
+        assert t._client._ssl is True
+        assert ctx.protocol == ssl.PROTOCOL_TLS_CLIENT
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+        assert ctx.check_hostname is True
+        assert t._client._tls_insecure is False
+
+    def test_mqtts_context_is_the_one_tls_set_builds(self):
+        if not hasattr(ssl, "PROTOCOL_TLSv1_2"):
+            pytest.skip("no ssl.PROTOCOL_TLSv1_2 here, so paho's tls_set() cannot run")
+        ref = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+        ref.tls_set()
+        t = MqttTransport(remote_id="hub", broker="mqtts://broker.invalid", topic="t")
+        ours, theirs = t._client._ssl_context, ref._ssl_context
+        for attr in (
+            "protocol", "verify_mode", "check_hostname", "options",
+            "verify_flags", "minimum_version", "maximum_version",
+        ):
+            assert getattr(ours, attr) == getattr(theirs, attr), attr
+        assert ours.cert_store_stats() == theirs.cert_store_stats()
+        assert t._client._tls_insecure is ref._tls_insecure is False
+
+    def test_mqtt_without_s_has_no_tls(self):
+        t = MqttTransport(remote_id="hub", broker="mqtt://x", topic="t")
+        assert t._client._ssl is False
+        assert t._client._ssl_context is None
