@@ -19,12 +19,26 @@ Settings come from the environment:
   FAKE_CODEX_VERSION        version in userAgent (default 0.163.0)
   FAKE_CODEX_TURN_SECONDS   how long a turn runs (default 0.05)
   FAKE_CODEX_APPROVAL       1: ask one approval request in the first turn
+  FAKE_CODEX_HANG_WRAPUP    1: a wrap-up turn sleeps 30 s before it replies
+  FAKE_CODEX_BARE_JSON      1: a turn writes a bare JSON value before it replies
+  FAKE_CODEX_FATAL_WRAPUP   1: a wrap-up turn sends a bare JSON value and stops
+  FAKE_CODEX_EXIT_WRAPUP    1: a wrap-up turn exits 3 before it replies
+  FAKE_CODEX_HOLD_AFTER_EOF seconds to stay up after stdin closes
+  FAKE_CODEX_FATAL_AFTER_EOF 1: 0.2 s after stdin closes, record fatal_at, write a bare JSON value, then hold
+  FAKE_CODEX_RECORD_SIGTERM 1: record sigterm_at and exit on SIGTERM
+
+Waits are 0.05 s steps, and stdin is read on another thread so the main
+thread returns that often too. A SIGTERM that lands in the gap before one
+long sleep or one blocking read is handled only when that call returns, so
+the handler would otherwise run the whole wait late.
 """
 from __future__ import annotations
 
 import copy
 import json
 import os
+import queue
+import signal
 import sys
 import threading
 import time
@@ -64,22 +78,40 @@ APPROVAL = first("approval", lambda r: r["line"].get("method")
                  == "item/commandExecution/requestApproval")
 
 out_lock = threading.Lock()
-rec_lock = threading.Lock()
+# The SIGTERM handler runs on the main thread, which may already hold this.
+rec_lock = threading.RLock()
 record_path = os.environ.get("FAKE_CODEX_RECORD")
 record = {"argv": sys.argv[1:], "pid": os.getpid(), "in": [], "steered": 0,
           "replies": [], "turns": []}
 
 
 def save() -> None:
-    if record_path:
-        with rec_lock:
-            Path(record_path).write_text(json.dumps(record), encoding="utf-8")
+    """Replace a finished temp file so a reader never sees a truncated record."""
+    if not record_path:
+        return
+    path = Path(record_path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with rec_lock:
+        tmp.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(tmp, path)
 
 
 def send(msg: dict) -> None:
     with out_lock:
         sys.stdout.write(json.dumps(msg) + "\n")
         sys.stdout.flush()
+
+
+def _sleep_in_steps(seconds: float) -> None:
+    """Sleep so a pending SIGTERM handler runs within 50 ms."""
+    if seconds <= 0:
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
 
 
 def sandbox_from_argv() -> str:
@@ -101,6 +133,17 @@ turn_seconds = float(os.environ.get("FAKE_CODEX_TURN_SECONDS", "0.05"))
 save()
 
 
+def _on_sigterm(_signum, _frame) -> None:
+    with rec_lock:
+        record["sigterm_at"] = time.time()
+    save()
+    os._exit(0)
+
+
+if os.environ.get("FAKE_CODEX_RECORD_SIGTERM") == "1":
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
 def run_turn(turn_id: str) -> None:
     started = copy.deepcopy(TURN_STARTED)
     started["params"]["threadId"] = thread_id
@@ -113,12 +156,26 @@ def run_turn(turn_id: str) -> None:
         ask["params"]["turnId"] = turn_id
         send(ask)
         answered.wait(timeout=10)
-    time.sleep(turn_seconds)
+    _sleep_in_steps(turn_seconds)
+    if os.environ.get("FAKE_CODEX_BARE_JSON") == "1":
+        with out_lock:
+            sys.stdout.write("42\n")
+            sys.stdout.flush()
     with state_lock:
         texts = list(state["texts"])
         state["active"] = None
         state["texts"] = []
-    if any("wrap up and exit" in t for t in texts):
+    wrap_up = any("wrap up and exit" in t for t in texts)
+    if os.environ.get("FAKE_CODEX_HANG_WRAPUP") == "1" and wrap_up:
+        _sleep_in_steps(30)
+    if wrap_up and os.environ.get("FAKE_CODEX_FATAL_WRAPUP") == "1":
+        with out_lock:
+            sys.stdout.write("42\n")
+            sys.stdout.flush()
+        return
+    if wrap_up and os.environ.get("FAKE_CODEX_EXIT_WRAPUP") == "1":
+        os._exit(3)
+    if wrap_up:
         Path("STATUS.md").write_text("# Current State\nWrapped up cleanly.\n", encoding="utf-8")
     reply = f"ack {len(record['turns'])}"
     item = copy.deepcopy(AGENT_ITEM)
@@ -133,7 +190,23 @@ def run_turn(turn_id: str) -> None:
     send(done)
 
 
-for raw in sys.stdin:
+def _stdin_lines() -> None:
+    """Read stdin off the main thread. A blocking read there holds a pending
+    SIGTERM handler until the next line, which is long enough for SIGKILL."""
+    for raw in sys.stdin:
+        incoming_lines.put(raw)
+    incoming_lines.put(None)
+
+
+incoming_lines: queue.Queue = queue.Queue()
+threading.Thread(target=_stdin_lines, daemon=True).start()
+while True:
+    try:
+        raw = incoming_lines.get(timeout=0.05)
+    except queue.Empty:
+        continue
+    if raw is None:
+        break
     line = raw.strip()
     if not line:
         continue
@@ -186,4 +259,23 @@ for raw in sys.stdin:
                                                     "items": [], "error": None}}})
         if not joined:
             threading.Thread(target=run_turn, args=(turn_id,), daemon=True).start()
+exit_code = os.environ.get("FAKE_CODEX_EXIT_CODE")
+if exit_code is not None:
+    sys.exit(int(exit_code))
+hold = float(os.environ.get("FAKE_CODEX_HOLD_AFTER_EOF", "0"))
+fatal_after = os.environ.get("FAKE_CODEX_FATAL_AFTER_EOF") == "1"
+if hold or fatal_after:
+    with rec_lock:
+        record["eof_at"] = time.time()
+    save()
+    if fatal_after:
+        _sleep_in_steps(0.2)
+        with rec_lock:
+            record["fatal_at"] = time.time()
+            save()
+        with out_lock:
+            sys.stdout.write("42\n")
+            sys.stdout.flush()
+    if hold:
+        _sleep_in_steps(hold)
 sys.exit(0)

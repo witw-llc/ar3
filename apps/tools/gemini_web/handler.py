@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import _runtime as rt
 
@@ -29,6 +30,7 @@ from . import store as store_module
 from .outbox import Outbox
 from .store import SessionStore, StoreError
 
+README = Path(__file__).resolve().parent / "README.md"
 MAX_BODY = 4000
 
 # A reply too long for the body is sent as a file instead of being cut. The cap
@@ -243,6 +245,11 @@ def handle(
     spec = allow or ""
     if not rt.allowed(sender, spec):
         print(f"a8s-gemini-web: {sender!r} is not in ALLOW — refused", file=sys.stderr)
+        return 0
+
+    if rt.is_help(message):
+        body = rt.help_reply("tool-gemini-web", seat, README, "apps/tools/gemini_web/README.md")
+        _status(send, sender, body)
         return 0
 
     if store_module.fcntl is None:

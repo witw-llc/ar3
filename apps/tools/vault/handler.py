@@ -10,6 +10,7 @@ import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
+from pathlib import Path
 
 import _runtime as rt
 
@@ -20,31 +21,8 @@ from .vault import VaultError
 ATTACHED = "ATTACHED FILE: "
 UNAVAILABLE = "ATTACHMENT UNAVAILABLE: "
 
-HELP = """{seat}: encrypted storage for agents. Vault key fingerprint (pin it):
-  {fpr}
-
-Everything except /help, /public-key and /connect must be SEALED.
-
-1. tell {seat} /public-key                      -> vault.pem; check the fingerprint above
-2. tell {seat} --attach me.pem /connect         -> a throwaway RSA public key (>=2048 bits).
-   Replies are sealed to it from now on. A new /connect wipes the old session.
-3. tell {seat} "A8SV1:<base64 of a blob sealed to vault.pem>"
-   The blob's plaintext is {{"req":"<request JSON>", "sig":"<base64 SHA-256 signature of
-   that exact string by me.pem's private key>"}}, where the request JSON is:
-     {{"v":1, "cmd":"/authenticate <voucher>", "conn":"<sha256 of me.pem DER>",
-      "ts":"<UTC ISO-8601>", "nonce":"<random hex>", "files":{{"<attachment>":"<sha256>"}}}}
-   Replies echo the nonce and, for /retrieve, the sha256 of each sealed attachment.
-   /authenticate burns the voucher and returns the next one. Save it before anything else.
-
-Sealed commands, once authenticated:
-  /list   /store <name> (attach one file sealed to vault.pem)   /retrieve <name>
-  /delete <name>   /voucher new | list | revoke-all   /logout
-
-Vouchers are single-use, at most {cap} unused per seat. The first one comes from the vault's
-operator (`python3 <ar3>/apps/tools/vault voucher issue <seat>` on the vault host).
-
-Easiest client: `python3 <ar3>/apps/tools/vault client ...` does
-all of this. Raw openssl recipe for sealing: tell {seat} "/help recipe"."""
+README = Path(__file__).resolve().parent / "README.md"
+README_PATH = "apps/tools/vault/README.md"
 
 RECIPE = """Seal (sh + openssl or LibreSSL; <pub.pem> <in> <out>):
   ek=$(openssl rand -hex 32); mk=$(openssl rand -hex 32); iv=$(openssl rand -hex 16)
@@ -60,6 +38,16 @@ ciphertext BEFORE decrypting. Replies are JSON {{"body":"<json>","sig":"<base64>
 verify sig (dgst -sha256 -verify vault.pem) over body, check body.nonce is one you sent and
 have not yet consumed, and check each attachment's sha256 against body.files before opening.
 Sign requests the same way: openssl dgst -sha256 -sign me.key over the request JSON."""
+
+
+
+def help_text(seat, fpr):
+    """The vault's help: the README's `## Usage` section, then the node's own
+    key fingerprint and the recipe pointer. Plaintext and sealed `/help` both
+    answer it."""
+    extra = (f"Vault key fingerprint of {seat} (pin it):\n  {fpr}\n"
+             f'Raw openssl recipe for sealing: tell {seat} "/help recipe"')
+    return rt.help_reply("tool-vault", seat, README, README_PATH, extra)
 
 
 def split_message(message):
@@ -138,7 +126,9 @@ class Wake:
             return self.connect()
         if cmd == "/help" and words[1:2] == ["recipe"]:
             return self.send(RECIPE)
-        body = HELP.format(seat=self.seat, fpr=self.vault.fpr, cap=vaultlib.VOUCHER_CAP)
+        if rt.is_help(self.text):
+            cmd = "/help"
+        body = help_text(self.seat, self.vault.fpr)
         if cmd and cmd != "/help":
             body = (f"{self.seat}: refusing plaintext {cmd!r}. Only /help, /public-key and "
                     "/connect travel in the clear.\n\n" + body)
@@ -226,7 +216,7 @@ class Wake:
             return {"voucher": v.authenticate(who, args[0]),
                     "note": "the voucher you sent is burned; save this one before anything else"}
         if op in ("/help", ""):
-            return {"help": HELP.format(seat=self.seat, fpr=v.fpr, cap=vaultlib.VOUCHER_CAP)}
+            return {"help": help_text(self.seat, v.fpr)}
         v.require_auth(who)
         if op == "/logout":
             v.logout(who)

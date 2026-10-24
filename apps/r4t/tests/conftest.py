@@ -30,6 +30,11 @@ def pytest_configure(config):
         "isolation_integration: real OS-boundary test; run via "
         "tests/docker/run-as.sh, excluded from the default suite",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_memory_kick: this test may call engine_memory.kick and the "
+        "worker exec",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -45,12 +50,36 @@ def _no_var_cache_leak():
 
 
 @pytest.fixture(autouse=True)
-def _no_real_keychain(monkeypatch):
-    """The cursor probe asks the macOS Keychain after its database; a test
-    that reaches it must never read the developer's real login."""
+def _no_real_memory_kick(monkeypatch, request):
+    """A memory outcome of 0 queues a capture and kick() starts the one-shot
+    CLI from PATH. A test reaches that only when it opts in."""
+    if request.node.get_closest_marker("real_memory_kick"):
+        return
+    import engine_memory
+
+    def refuse_kick(home):
+        # Turn() always calls kick. With an empty queue the real function
+        # returns before it starts a worker. A queued capture is the spawn.
+        queued = list((home / "queue").glob("*.json"))
+        if queued:
+            pytest.fail(f"real memory kick reached for {home}")
+
+    def refuse_writer(capture_path):
+        pytest.fail(f"real memory worker exec reached: {capture_path}")
+
+    monkeypatch.setattr(engine_memory, "kick", refuse_kick)
+    monkeypatch.setattr(engine_memory, "writer", refuse_writer)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cursor_login(monkeypatch):
+    """The cursor probe reads the CLI auth file and, on macOS, the Keychain
+    after its database. A test that reaches either must never read the
+    developer's real login."""
     from engines import cursor
 
     monkeypatch.setattr(cursor, "_keychain_token", lambda: None)
+    monkeypatch.setattr(cursor, "_cli_auth_token", lambda: None)
 
 
 @pytest.fixture

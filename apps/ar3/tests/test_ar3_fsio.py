@@ -5,7 +5,9 @@ import os
 
 import pytest
 
-from ar3.fsio import atomic_write_bytes, atomic_write_text
+from pathlib import Path
+
+from ar3.fsio import atomic_write_bytes, atomic_write_text, exists, is_dir, is_file, stat_or_none
 
 
 class TestBasics:
@@ -118,3 +120,42 @@ class TestBytes:
         atomic_write_bytes(target, b"\x00\r\n", mode=0o600)
         assert (target.stat().st_mode & 0o777) == 0o600
         assert target.read_bytes() == b"\x00\r\n"
+
+
+class TestUnreadablePath:
+    """Python 3.12 re-raises PermissionError from Path.is_dir on a Windows
+    profile WSL cannot stat. These helpers return False/None instead."""
+
+    def test_a_readable_file_and_directory(self, tmp_path):
+        directory = tmp_path / "profile"
+        directory.mkdir()
+        target = directory / "auth.json"
+        target.write_text("{}", encoding="utf-8")
+        assert is_dir(directory) is True
+        assert is_file(directory) is False
+        assert is_file(target) is True
+        assert is_dir(target) is False
+        assert exists(target) is True
+        assert stat_or_none(target) is not None
+        assert exists(tmp_path / "missing") is False
+        assert is_dir(tmp_path / "missing") is False
+        assert stat_or_none(tmp_path / "missing") is None
+
+    def test_permission_error_on_one_directory_does_not_raise(self, tmp_path, monkeypatch):
+        blocked = tmp_path / "CodexSandboxOffline"
+        sibling = tmp_path / "nobre"
+        blocked.mkdir()
+        sibling.mkdir()
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if Path(path) == blocked:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        assert is_dir(blocked) is False
+        assert is_file(blocked) is False
+        assert exists(blocked) is False
+        assert stat_or_none(blocked) is None
+        assert is_dir(sibling) is True

@@ -476,3 +476,56 @@ def test_state_root_default_and_override(tmp_path, monkeypatch):
     assert vaultlib.vault_root("other") == str(tmp_path / "home" / "ar3" / "vault" / "other")
     monkeypatch.setenv("VAULT_DIR", str(tmp_path / "elsewhere"))
     assert vaultlib.vault_root("vault") == str(tmp_path / "elsewhere")
+
+
+@pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?", "HELP", "  /Help \n"])
+def test_the_four_spellings_all_reach_the_same_help(env, spelling):
+    tmp_path, v = env
+    _, reference = wake(tmp_path, "neil", "/help")
+    to, body = wake(tmp_path, "neil", spelling)
+    assert to == "neil"
+    assert body == reference
+    assert v.fpr in body
+    assert "refusing plaintext" not in body
+    assert "README: apps/tools/vault/README.md" in body
+
+
+def test_help_with_more_words_is_still_refused_plaintext(env):
+    tmp_path, _ = env
+    _, body = wake(tmp_path, "neil", "help me open a page")
+    assert "refusing plaintext 'help'" in body
+
+
+def test_help_recipe_still_answers_the_recipe(env):
+    tmp_path, _ = env
+    _, body = wake(tmp_path, "neil", "/help recipe")
+    assert body.startswith("Seal (sh + openssl")
+
+
+def test_help_carries_the_readme_usage_the_fingerprint_and_the_recipe_pointer(env):
+    tmp_path, v = env
+    usage = handler.rt.usage_from_readme(handler.README)
+    assert usage
+    _, body = wake(tmp_path, "neil", "help")
+    assert body.startswith("vault: tool-vault \u2014 usage")
+    assert usage in body
+    assert v.fpr in body
+    assert '"/help recipe"' in body
+    assert body.rstrip().endswith("README: apps/tools/vault/README.md")
+
+
+def test_the_refusal_carries_the_same_help(env):
+    tmp_path, v = env
+    usage = handler.rt.usage_from_readme(handler.README)
+    _, body = wake(tmp_path, "neil", "help me open a page")
+    assert "refusing plaintext 'help'" in body
+    assert usage in body
+
+
+def test_help_without_a_usage_section_says_so(env, monkeypatch):
+    tmp_path, _ = env
+    bare = tmp_path / "README.md"
+    bare.write_text("# tool-vault\n\n## State\n\nnone\n")
+    monkeypatch.setattr(handler, "README", bare)
+    _, body = wake(tmp_path, "neil", "help")
+    assert 'no "## Usage" section in apps/tools/vault/README.md' in body

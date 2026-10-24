@@ -80,10 +80,10 @@ tool) plus this turn's own measurement flags (see
   translated parameters; see below.
 - `--git-name NAME`, `--git-email EMAIL` — the author and committer of each
   new commit the turn makes; see [git identity](#git-identity).
-- `--resident` — keep one long-running `stream-json` session alive across
-  arrivals (`claude`, `ollama-claude`, and `agy`); `--timeout` then sets the
-  quiet window. See
-  [resident sessions](#resident-sessions--claude-ollama-claude-agy-and-codex).
+- `--resident` — keep one long-running session alive across arrivals
+  (`claude`, `ollama-claude`, `agy`, `codex`, and `cursor`); `--timeout`
+  then sets the quiet window. See
+  [resident sessions](#resident-sessions--claude-ollama-claude-agy-codex-and-cursor).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -423,7 +423,7 @@ Prepended to `PROMPT`. The prelude is byte-identical across runs in the same
 `--dir` (no timestamps, no counters), so the prompt cache misses only on what
 follows it: the `LESSONS.md` note when one applies, then the routed input,
 which always comes last. A one-shot turn and a
-[resident session](#resident-sessions--claude-ollama-claude-agy-and-codex) start
+[resident session](#resident-sessions--claude-ollama-claude-agy-codex-and-cursor) start
 from the same prelude; only the closing steps differ.
 
 ```
@@ -524,7 +524,7 @@ input is `PROMPT` if given, else the built-in idle consolidation prompt
 Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
-### Resident sessions — `claude`, `ollama-claude`, `agy`, and `codex`
+### Resident sessions — `claude`, `ollama-claude`, `agy`, `codex`, and `cursor`
 
 Resuming `claude -p` across a process boundary misses the provider's prompt
 cache 40.6% of the time against a 2.5% same-process baseline (measured, #155).
@@ -535,6 +535,7 @@ message:
 r4t engine claude run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 r4t engine agy run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 r4t engine codex run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+r4t engine cursor run --resident --agent my-node "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
 r4t engine claude stop --agent my-node
 ```
 
@@ -543,9 +544,10 @@ once, so the router is never held up. The bridge spawns the engine in its
 long-running mode: `claude -p --input-format stream-json --output-format
 stream-json --verbose` with the `a8s_tell` MCP server injected via
 `--mcp-config`; `agy --input-format stream-json --output-format stream-json
---print=`; or `codex app-server` (see [Codex](#codex-app-server) below). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
+--print=`; `codex app-server` (see [Codex](#codex-app-server) below); or
+`agent acp` (see [Cursor](#cursor-agent-acp) below). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
 a one-shot turn gets, with resident closing steps in place of the exit steps:
-the tell step (`a8s_tell` on Claude and Codex; the `tell` CLI on `agy`, which
+the tell step (`a8s_tell` on Claude, Codex, and Cursor; the `tell` CLI on `agy`, which
 has no per-invocation MCP flag), the [`LESSONS.md` note](#lessonsmd-upkeep) when a
 consolidation is due, and the first message. The session consolidates first,
 then answers, and keeps running. Each later `run` queues its
@@ -580,9 +582,9 @@ user turn, so the session needs no `tells` monitor of its own.
   are dropped and the bridge exits; the next message starts again.
 - State lives in `<DIR>/.engine-resident/<agent>/`, which ignores itself in
   git. `resident.log` there holds the bridge's log and the engine's replies.
-- Supported on `claude`, `ollama-claude`, `agy`, and `codex`; other engines
-  fail closed with the supported set. Cannot be combined with `--continue` or
-  `--session`.
+- Supported on `claude`, `ollama-claude`, `agy`, `codex`, and `cursor`; other
+  engines fail closed with the supported set. Cannot be combined with
+  `--continue` or `--session`.
 
 #### Codex: `app-server`
 
@@ -623,6 +625,113 @@ stdio) holding one thread. Proven on codex-cli 0.163.0.
   `initialize` for the version and an ephemeral `thread/start` for the policy
   in force. A version other than the proven 0.163.0 is accepted with a note.
 
+#### Cursor: `agent acp`
+
+A resident `cursor` session is one `agent acp` process (JSON-RPC on stdio)
+holding one session. Proven on agent 2026.10.22-27dcf5f, on WSL only.
+Windows and macOS are untested. This machine has no Mac, and no `agent` on
+the Windows `PATH`. On Windows, `terminate()` hits `agent.cmd` and leaves
+the node child, the same gap the codex resident already has.
+
+`AcpSession` in `engines/acp.py` is the generic session. It checks that
+initialize and authenticate both answered and that the protocol version is
+1, holds every prompt but one, assembles `agent_message_chunk` text into a
+single assistant message per turn, and answers `session/request_permission`
+by the offered option's kind or with `cancelled` when that kind is absent.
+Every line it writes is JSON-RPC 2.0. A malformed frame that belongs to the
+session ends it, and once that error is set the session stays failed.
+Authenticate runs only when the subclass's method is in `authMethods`; an
+unoffered method fails closed in the resident session as well as in
+`check --resident`. The deadline ends a process that never becomes ready.
+Another engine whose CLI speaks ACP subclasses this and does not reimplement
+it.
+
+`CursorSession` is that subclass for Cursor. It supplies `cursor_login`,
+the catalog pin via `session/set_config_option`, the proven-version note,
+and the replies to `cursor/ask_question` and `cursor/create_plan`. The
+resident bridge registers the engine, ends a handshake that misses its
+deadline, and stops an ACP process with the sequence below. Other engines
+still exit on stdin EOF.
+
+- The preset `agent -p --trust --force --approve-mcps` becomes `agent acp`.
+  `-p`, `{prompt}`, `--trust`, `--approve-mcps`, `--model`, and `--force`
+  are not spawned. `--permissions bypass` becomes `agent --force acp`.
+  The model slug is carried beside the argv and pinned after `session/new`.
+  The restricted resident definition does not pass `--force`, so a tool
+  call is asked and rejected once. Measured on agent
+  2026.10.22-27dcf5f: with `--force` a shell call is not asked; without it
+  the server asks. The two handshakes match once the session id is set
+  aside. Stdin EOF does not end this agent. The engine is its own
+  process group. Every exit (quiet expiry, a fatal frame, a missed
+  handshake, `check --resident`, and `stop`) is one sequence:
+  `session/cancel` when a turn is in flight and the session is not already
+  fatal, at most 1.5 s, then stdin EOF. The EOF grace applies only to a
+  quiet expiry and a wrap-up that finished: cursor waits 1.5 s and codex,
+  claude and agy wait 10 s. A stop, a fatal, a missed deadline, a failed
+  write, and an engine exit signal at once. A fatal that arrives during
+  that grace ends the wait, and the signal goes out at once. Then the termination. On POSIX,
+  SIGTERM to the group recorded at spawn. The
+  stop polls that group, reaping the leader, until it is empty or 2 s
+  pass, then SIGKILL. The group id is the engine pid from
+  `start_new_session`, stored at spawn; the stop does not call getpgid. A
+  leader that has already exited is not passed to `os.kill`; only the
+  recorded group is signaled. On Windows there is no SIGKILL and no
+  killpg: wait out the grace, then terminate(), then up to 2 s, then
+  kill() on the leader. `terminate()` hits `agent.cmd` and leaves the
+  node child. Windows and macOS were not run. The bridge's own group is not
+  signaled. A failed write, a fatal frame, or a missed handshake settles
+  and logs the held message and does not run the wrap-up. A turn still in
+  flight when the session ends comes off the count, and one dropped line
+  names the cause: stop, deadline, failed write, fatal, or engine exit.
+  Deadline is only a handshake or a wrap-up whose clock ran out. `turns`
+  is 0 after every end. A session error
+  does not disarm the handshake deadline; the deadline stays armed until
+  the handshake completes. `stop` also signals the engine group published
+  at spawn, so a bridge that died outright does not leave that group
+  behind. A dead leader's group is signaled only when its start token is
+  from this boot. That boot check is Linux only; macOS has no boot id to
+  read, so the check does not apply there. Where no start-token reader
+  exists (Windows), a new bridge does not end the engine a dead bridge
+  published; only `stop` signals a recorded pid. Memory is decided after
+  the engine has exited and the
+  reader has stopped. It is 0 only when there was no fatal frame, no turn
+  left in flight, the engine did not exit by itself with a non-zero code,
+  and no deadline was missed. A quiet expiry and an idle stop are 0. A
+  stop that interrupts a turn, a fatal frame, a missed deadline, or an
+  engine exit with a turn in flight is not. A signal the bridge sent,
+  including the 143 from `agent acp` on SIGTERM, does not count as the
+  engine's own exit. Claude and agy merge stderr onto the frame pipe, and
+  a bare JSON value there is logged and skipped. ACP and codex do not; a
+  frame that is not an object ends the session.
+  Measure the next ACP engine before assuming it exits on EOF.
+- After `session/new`, the bridge pins the catalog value with
+  `session/set_config_option`. The slug `composer-2.5` is the option's name;
+  its catalog value is `composer-2.5[fast=true]`. A bracketed slug such as
+  `grok-4.6[effort=high]` matches the catalog value that contains those
+  pairs. Two such values say the model name is ambiguous. A `currentValue`
+  that already matches is left alone.
+  Unset `MODEL` means `composer-2.5`. A separate `EFFORT` variable is
+  ignored, with one warning; effort belongs in the model slug's brackets.
+- The a8s MCP server goes on `session/new` as `mcpServers` (`env` is a list
+  of `{name, value}`). The tell step names `a8s_tell`. One-shot cursor turns
+  stay on the `tell` CLI.
+- One prompt is on the wire at a time. Text arrives as `session/update`
+  chunks (`agent_message_chunk`) and is delivered as one assistant text
+  per turn.
+- When a permission request does arrive, the client selects the offered
+  option whose kind is `allow_once` if `--force` is set, and `reject_once`
+  if it is not. Measured option ids are `allow-once`, `allow-always`, and
+  `reject-once`. When the wanted kind was not offered, the reply is
+  `cancelled`. Ids are opaque and are never invented.
+  `cursor/ask_question` and `cursor/create_plan` are declined so a headless
+  turn cannot block.
+- Stderr goes to `resident.log`; stdout carries only JSON-RPC.
+- `r4t engine cursor check --resident` sends `initialize` first.
+  `authenticate` (`cursor_login`) follows only when that method is in the
+  initialize `authMethods`; otherwise the check fails closed. `session/new`
+  follows the authenticate answer. No prompt is sent. A version other than
+  2026.10.22-27dcf5f is accepted with a note.
+
 ## `check` — does the installed CLI still accept this argv?
 
 ```bash
@@ -639,7 +748,9 @@ prompt is removed from the argv, and the only things run are the CLI's own
 `--help` and `--version`. `r4t engine codex check --resident` also runs the
 app-server handshake (`initialize`, an ephemeral `thread/start`) and rejects
 an argv whose policy in force is not the one composed; see
-[Codex](#codex-app-server).
+[Codex](#codex-app-server). `r4t engine cursor check --resident` also runs the
+ACP handshake (`initialize`, `authenticate`, `session/new`) and sends no
+prompt; see [Cursor](#cursor-agent-acp).
 
 Two probe shapes, one per parser class, each recorded with its engine in
 `apps/r4t/engines/check.py`:
@@ -710,7 +821,7 @@ of 900s.
 All definitions also carry `--effort=$EFFORT?` on invoke, batch, and idle:
 `a8s vars my-bare-node set EFFORT low` selects reasoning effort for that node.
 Unset drops the token. Cursor keeps effort inside `MODEL` bracket syntax;
-setting a separate `EFFORT` on Cursor or Devin produces an unsupported error.
+setting a separate `EFFORT` on Cursor or Devin is ignored, with one warning.
 See [reasoning effort](#reasoning-effort) for each engine's values.
 `r4t engine <id> efforts` and `r4t engine <id> models` list what `MODEL` and `EFFORT` accept (see [`models` and `efforts`](#models-and-efforts--what---model-and---effort-accept)).
 
@@ -752,7 +863,8 @@ time — the base variants never grow it.
 For long-running seats that stay warm across bursts of messages,
 `engine-claude-resident`, `engine-claude-resident-unrestricted`,
 `engine-agy-resident`, `engine-agy-resident-unrestricted`,
-`engine-codex-resident`, and `engine-codex-resident-unrestricted` wire
+`engine-codex-resident`, `engine-codex-resident-unrestricted`,
+`engine-cursor-resident`, and `engine-cursor-resident-unrestricted` wire
 `r4t engine <id> run --resident` across `invoke`, `batch.invoke` and
 `idle.invoke`, `r4t engine <id> stop` as `stop.invoke`, and `r4t engine <id> status` as
 `status.invoke`:
@@ -762,6 +874,7 @@ a8s add my-resident ~/somewhere engine-claude-resident
 a8s add my-resident ~/somewhere engine-claude-resident-unrestricted
 a8s add my-resident ~/somewhere engine-agy-resident
 a8s add my-resident ~/somewhere engine-codex-resident
+a8s add my-resident ~/somewhere engine-cursor-resident
 ```
 
 They take the same per-node vars as the headless nodes. `TIMEOUT` is the
@@ -836,11 +949,19 @@ rejected too, or `claude doctor` fails, the error says to run
 `CLAUDE_CODE_OAUTH_TOKEN` is used as given and never refreshed.
 
 **Cursor's token.** `r4t engine cursor quota` takes its token from the IDE's
-state database, or on macOS from the `agent` CLI's own Keychain item
-(`cursor-access-token`) when the IDE is not installed; that answer carries the
-note `token from the agent CLI's Keychain item`. A Linux or Windows machine with
-only the CLI is not covered yet: where the CLI keeps its login there is not
-verified.
+state database first, then the `agent` CLI's `auth.json`, then on macOS the
+CLI's Keychain item (`cursor-access-token`). The answer notes which store
+answered: `token from the IDE state database`, `token from the agent CLI's
+auth.json`, or `token from the agent CLI's Keychain item`. The auth file is
+`$XDG_CONFIG_HOME/cursor/auth.json` or `~/.config/cursor/auth.json` on Linux,
+`%APPDATA%/Cursor/auth.json` on Windows, and `~/.cursor/auth.json` on macOS
+(used there when `AGENT_CLI_CREDENTIAL_STORE=file`; the Keychain is the usual
+store). A Windows profile this process cannot stat is skipped. When `mode=ro`
+on `state.vscdb` raises SQLite `disk I/O error` — a WSL read of the Windows
+database while the IDE has it open — the read retries `mode=ro&immutable=1`.
+The retry is that error text only, not a path prefix.
+Immutable ignores an uncheckpointed WAL; the auth file covers a token that
+lives only there. The CLI login does not require the IDE.
 
 **Devin's screen.** Devin reports its allowance only in the `/usage` view of
 an interactive session, so `r4t engine devin quota` starts

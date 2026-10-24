@@ -203,3 +203,48 @@ def test_geminis_own_trouble_wording_is_passed_on_as_a_note(seat, outbox, clock,
     answer("gemini", "example-sender", "hello", outbox, seat)
     assert "couldn't generate" in outbox.last
     assert "trouble wording" in outbox.last
+
+
+def test_help_answers_the_usage_and_asks_gemini_nothing(outbox, state_home):
+    usage = handler.rt.usage_from_readme(handler.README)
+    assert usage
+
+    for spelling in ["help", "/help", "--help", "/?", "Help"]:
+        code = handler.handle(
+            "gemini", "example-sender", spelling, browser_seat="profile",
+            allow="example-sender", runner=RefusedSeat(), send=outbox,
+        )
+        assert code == 0
+    assert len(outbox.sent) == 5
+    assert outbox.last.startswith("gemini: tool-gemini-web — usage")
+    assert usage in outbox.last
+    assert outbox.last.endswith("README: apps/tools/gemini_web/README.md")
+
+
+def test_help_works_on_a_node_with_no_browser_seat(outbox, state_home):
+    handler.handle("gemini", "example-sender", "help", allow="example-sender",
+                   runner=RefusedSeat(), send=outbox)
+    assert "usage" in outbox.last
+
+
+def test_help_me_open_a_page_is_a_prompt_not_help(seat, outbox, clock, state_home):
+    answer("gemini", "example-sender", "help me open a page", outbox, seat)
+    assert seat.history
+
+
+def test_a_stranger_sending_help_gets_no_reply(outbox, state_home):
+    code = handler.handle(
+        "gemini", "stranger", "help", browser_seat="profile",
+        allow="example-sender", runner=RefusedSeat(), send=outbox,
+    )
+    assert code == 0
+    assert outbox.sent == []
+
+
+def test_help_without_a_usage_section_says_so(outbox, state_home, monkeypatch, tmp_path):
+    bare = tmp_path / "README.md"
+    bare.write_text("# tool-gemini-web\n\n## State\n\nnone\n")
+    monkeypatch.setattr(handler, "README", bare)
+    handler.handle("gemini", "example-sender", "help", allow="example-sender",
+                   runner=RefusedSeat(), send=outbox)
+    assert 'no "## Usage" section in apps/tools/gemini_web/README.md' in outbox.last

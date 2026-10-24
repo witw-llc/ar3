@@ -943,7 +943,7 @@ def _require_signed_in(browser, url):
     if SIGN_IN_HOST in url:
         raise GeminiError(
             f"browser seat {browser.seat!r} is not signed in to Gemini — the page is on "
-            f"{SIGN_IN_HOST}. Sign it in by hand once (`ar3 tool browser --as {browser.seat} -- open`, "
+            f"{SIGN_IN_HOST}. Sign it in by hand once (`python3 apps/tools/browser --seat {browser.seat} open`, "
             "then log in in the window that opens); this driver never signs in to anything."
         )
 
@@ -986,7 +986,7 @@ def prompt_label(snapshot, seat=""):
         raise GeminiError(
             "no textbox in the page snapshot — Gemini's prompt box was not found "
             f"(it is normally named {PROMPT_FALLBACK_LABEL!r}). "
-            f"`ar3 tool browser --as {seat or '<seat>'} -- snap` shows what the page looks like now."
+            f"`python3 apps/tools/browser --seat {seat or '<seat>'} snap` shows what the page looks like now."
         )
     return label
 
@@ -1011,12 +1011,12 @@ def _no_prompt(browser, snapshot):
             "did not survive to the next command. Either a8s-browser restarted Chrome "
             "and could not return to the page (its own error names the URL it lost), "
             f"or seat {seat!r}'s Chrome window was closed by hand. "
-            f"`ar3 tool browser --as {seat} -- open` brings the seat back."
+            f"`python3 apps/tools/browser --seat {seat} open` brings the seat back."
         )
     return (
         f"no textbox in the page snapshot after {PROMPT_WAIT_SECONDS:.0f}s — Gemini's "
         f"prompt box never appeared (it is normally named {PROMPT_FALLBACK_LABEL!r}). "
-        f"`ar3 tool browser --as {seat} -- snap` shows the page now."
+        f"`python3 apps/tools/browser --seat {seat} snap` shows the page now."
     )
 
 
@@ -1229,7 +1229,7 @@ def _consent_error(browser, names):
         f"Gemini is asking this profile to accept its disclaimer about uploaded files "
         f"before it will take one, so {', '.join(names)} was not sent and neither was "
         f"your message. Someone has to accept it by hand, once: open the seat "
-        f"(`ar3 tool browser --as {browser.seat} -- open`), attach any file to a chat, and press "
+        f"(`python3 apps/tools/browser --seat {browser.seat} open`), attach any file to a chat, and press "
         f"Agree in the dialog that appears. This driver does not accept terms on an "
         f"account it drives."
     )

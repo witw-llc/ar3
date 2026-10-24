@@ -5,8 +5,8 @@ ar3 never mutates product state; it owns and maintains the suite's own
 substrate instead. It reads a8s/r4t/k7e state passively and probes
 prerequisites — there is no `ar3 tell`, no `ar3 dispatch`, no passthrough:
 every action belongs to the CLI that owns it, and ar3's job is to tell you
-which command that is. `ar3 tool` is the exception for local testing: it runs
-a bundled a8s tool node by hand, with its reply printed instead of sent, and
+which command that is. `ar3 tool` is the one exception: it drives a bundled
+a8s tool node on this machine, with its reply printed instead of sent, and
 writes no a8s state. Beyond it, `ar3 deps` fetches on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`:
 that directory is substrate ar3 itself owns, not product state, and it is the
 only thing ar3 ever writes.
@@ -1264,9 +1264,145 @@ def _tool_names() -> list[str]:
     return sorted(p.stem[len("tool-"):] for p in root.glob("tool-*.json"))
 
 
+NO_SESSION = {"vault"}
+
+# Mirrors HEREDOC in apps/tools/browser/commands.py. ar3 only frames the
+# lines; the tool still parses the script.
+_BLOCK_OPENER = re.compile(r"^(?P<command>.*?)\s*<<\s*(?P<marker>\S+)$")
+
+
+def _tool_target(defs, args, definition):
+    """The node a tool run acts as: `(node, argv vars, env vars, cwd)`, or the
+    exit code 2 after a message. With --node the registry supplies all four.
+    Without it the run is the tool's name in the current directory."""
+    if not args.node:
+        return args.name, {}, {}, Path.cwd()
+    try:
+        found = defs.resolve_recipient(args.node)
+    except OSError as exc:
+        print(f"ar3 tool: cannot read the a8s registry: {exc}", file=sys.stderr)
+        return 2
+    if found is None:
+        print(
+            f"ar3 tool: no node named '{args.node}' in the a8s registry. "
+            "Run a8s ls to see the nodes.",
+            file=sys.stderr,
+        )
+        return 2
+    node, info = found
+    stem = defs.definition_stem(info.get("definition") or "default")
+    if stem != f"tool-{args.name}":
+        print(f"ar3 tool: node '{node}' runs {stem}, not tool-{args.name}.", file=sys.stderr)
+        return 2
+    try:
+        node_env = defs.env_vars(info.get("vars"))
+    except ValueError as exc:
+        print(f"ar3 tool: {exc}", file=sys.stderr)
+        return 2
+    return node, defs.argv_vars(info.get("vars")), node_env, Path(info["root"])
+
+
+def _tool_argv(defs, definition, path, sender, node, node_vars, message):
+    """The argv a wake would run for this message."""
+    argv = defs._expand_argv(
+        list(definition.get("invoke") or []),
+        sender,
+        node,
+        message,
+        definition_path=str(path),
+        vars=node_vars,
+    )
+    return defs.wrap_wake_argv(definition, argv)
+
+
+def _tool_run(argv, env, cwd, reply_dir) -> int:
+    """Run one wake argv and wait for it. Ctrl-C reaches the child too, since
+    it shares the terminal's process group; ar3 notes it and keeps waiting."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env={**env, "AR3_TOOL_REPLY_DIR": str(reply_dir)},
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        print(f"ar3 tool: cannot run {argv[0]}: {exc}", file=sys.stderr)
+        return 127
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            print("ar3 tool: interrupted.", file=sys.stderr)
+
+
+def _read_submission(readline, prompt, more="... "):
+    """One submission: a line, or a `<<MARKER` block read to its marker line.
+    `readline(prompt)` returns the next line without its newline, or None at
+    end of input. Returns the text, or None at end of input."""
+    first = readline(prompt)
+    if first is None:
+        return None
+    opener = _BLOCK_OPENER.match(first.strip())
+    if not opener:
+        return first
+    marker = opener.group("marker")
+    lines = [first]
+    while True:
+        line = readline(more)
+        if line is None:
+            print(f"ar3 tool: no line reads {marker}. The block did not run.", file=sys.stderr)
+            return None
+        lines.append(line)
+        if line.strip() == marker:
+            return "\n".join(lines)
+
+
+def _tool_session(run_one, node, interactive, readline) -> int:
+    """Run one script per submission until end of input. A failed script
+    prints its reply and the session goes on."""
+    prompt = f"{node}> "
+    while True:
+        try:
+            submission = _read_submission(readline, prompt)
+        except KeyboardInterrupt:
+            print()
+            continue
+        if submission is None:
+            if interactive:
+                print()
+            return 0
+        if submission.strip():
+            run_one(submission)
+
+
+def _stdin_reader(interactive):
+    if interactive:
+        try:
+            import readline  # noqa: F401  (line editing for input())
+        except ImportError:
+            pass
+
+        def read(prompt):
+            try:
+                return input(prompt)
+            except EOFError:
+                return None
+
+        return read
+
+    def read(_prompt):
+        line = sys.stdin.readline()
+        return line.rstrip("\r\n") if line else None
+
+    return read
+
+
 def cmd_tool(args: argparse.Namespace) -> int:
-    """Run a bundled tool node once, by hand: build its argv with a8s's own
-    expander, run it in the cwd, and print the reply it would have sent."""
+    """Drive a bundled tool node from this terminal: one script, one script
+    from stdin, or a session of one script per submission. The argv is built
+    by a8s's own expander, so it matches a wake. Replies print."""
     import tempfile
 
     path = REPO_ROOT / "apps" / "a8s" / "definitions" / f"tool-{args.name}.json"
@@ -1280,21 +1416,83 @@ def cmd_tool(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"ar3 tool: cannot read {path.name}: {exc}", file=sys.stderr)
         return 2
-    node_vars: dict[str, str] = {}
+    words = list(args.message)
+    session = not words
+    if args.name in NO_SESSION and (args.node or session):
+        print(
+            f"ar3 tool: {args.name} takes no --node and no session. "
+            "Its messages are sealed. Use the vault client.",
+            file=sys.stderr,
+        )
+        return 2
+    if session and args.attach:
+        print("ar3 tool: --attach needs a command or -.", file=sys.stderr)
+        return 2
+    overrides = []
     for item in args.var:
         key, sep, value = item.partition("=")
         if not sep or not key:
             print(f"ar3 tool: --var needs KEY=VALUE, got '{item}'", file=sys.stderr)
             return 2
-        node_vars[key] = value
+        overrides.append((key, value))
+    defs = _load_definitions()
+    target = _tool_target(defs, args, definition)
+    if isinstance(target, int):
+        return target
+    node, node_vars, node_env, cwd = target
     sender = args.sender
-    if not any(k.upper() == "ALLOW" for k in node_vars):
-        node_vars["ALLOW"] = sender
-    words = list(args.message)
-    if words == ["-"]:
-        message = sys.stdin.read()
-    else:
-        message = " ".join(words)
+    # The person at the keyboard is the operator; ALLOW is for senders on the network.
+    node_vars["ALLOW"] = sender
+    for key, value in overrides:
+        env_name = defs.split_env_var_key(key)
+        if env_name is not None:
+            node_env[env_name] = value
+        else:
+            node_vars[key.upper()] = value
+    try:
+        env = {**os.environ, **defs.wake_env(definition, node_env)}
+        _tool_argv(defs, definition, path, sender, node, node_vars, "")
+    except defs.UndefinedVarsError as exc:
+        for name in exc.names:
+            if args.node:
+                print(
+                    f"ar3 tool: node '{node}' has no {name} var. "
+                    f"Set it with a8s vars {node} set {name} <value>, "
+                    f"or give --var {name}=...",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ar3 tool: {args.name} needs --var {name}=...", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"ar3 tool: {exc}", file=sys.stderr)
+        return 2
+
+    def run_message(message, reply_dir):
+        argv = _tool_argv(defs, definition, path, sender, node, node_vars, message)
+        return _tool_run(argv, env, cwd, reply_dir)
+
+    reply_root = Path(tempfile.mkdtemp(prefix="ar3-tool-"))
+    if session:
+        interactive = sys.stdin.isatty()
+        if interactive:
+            print(
+                f"ar3 tool: {args.name} session on {node} as {sender}.\n"
+                "Type one command per line. Type help to see the commands. "
+                "Press Ctrl-D to stop.\n"
+                f"Attachments go to {reply_root}.",
+                file=sys.stderr,
+            )
+        count = 0
+
+        def run_one(message):
+            nonlocal count
+            count += 1
+            return run_message(message, reply_root / f"{count:03d}")
+
+        return _tool_session(run_one, node, interactive, _stdin_reader(interactive))
+
+    message = sys.stdin.read() if words == ["-"] else " ".join(words)
     attached = []
     for raw in args.attach:
         file = Path(raw).expanduser()
@@ -1304,27 +1502,8 @@ def cmd_tool(args: argparse.Namespace) -> int:
         attached.append(f"ATTACHED FILE: {file.resolve()}")
     if attached:
         message = "\n".join([message, "", *attached])
-    defs = _load_definitions()
-    try:
-        argv = defs._expand_argv(
-            list(definition.get("invoke") or []),
-            sender,
-            args.node or args.name,
-            message,
-            definition_path=str(path),
-            vars=node_vars,
-        )
-    except defs.UndefinedVarsError as exc:
-        print(f"ar3 tool: {args.name} needs {', '.join('--var ' + n + '=...' for n in exc.names)}", file=sys.stderr)
-        return 2
-    reply_dir = tempfile.mkdtemp(prefix="ar3-tool-")
-    print(f"ar3 tool: attachments land in {reply_dir}", file=sys.stderr)
-    env = {**os.environ, "AR3_TOOL_REPLY_DIR": reply_dir}
-    try:
-        return subprocess.run(argv, env=env).returncode
-    except OSError as exc:
-        print(f"ar3 tool: cannot run {argv[0]}: {exc}", file=sys.stderr)
-        return 127
+    print(f"ar3 tool: attachments land in {reply_root}", file=sys.stderr)
+    return run_message(message, reply_root)
 
 
 # ---------- cli ----------
@@ -1336,7 +1515,7 @@ def main(argv: list[str] | None = None) -> int:
             "Front door to the AR3 suite. Bare `ar3` reports where a8s, r4t and "
             "k7e stand; `ar3 doctor` probes the tools they need. AR3 never runs "
             "another product's commands for you; `ar3 tool` is the exception, "
-            "for testing a tool node locally."
+            "to drive a tool node on this machine."
         ),
     )
     parser.add_argument("--version", action="version", version=version_line("ar3"))
@@ -1346,30 +1525,30 @@ def main(argv: list[str] | None = None) -> int:
     doctor.set_defaults(func=cmd_doctor)
     tool = sub.add_parser(
         "tool",
-        usage="ar3 tool <name> [--from NAME] [--as NODE] [--var KEY=VALUE]... "
-        "[--attach PATH]... [--] [message... | -]",
-        help="Run a bundled tool node once, locally, with its reply printed",
+        usage="ar3 tool <name> [--node NAME] [--from NAME] [--var KEY=VALUE]... "
+        "[--attach PATH]... [--] [command... | -]",
+        help="Drive a bundled tool node from this terminal, replies printed",
         description=(
-            "ar3 tool runs a bundled a8s tool node (apps/a8s/definitions/"
-            "tool-<name>.json) once, in the current directory, for local "
-            "testing. The argv is built by a8s's own expander, so it matches a "
-            "wake. The reply prints instead of being sent; attachments are "
-            "copied to a temp directory named on stderr. ALLOW defaults to "
-            "--from. Nothing is written to a8s state. The exit code is the "
-            "tool's."
+            "ar3 tool drives a bundled tool node on this machine. With --node "
+            "it reads the node's vars from the a8s registry and runs in the "
+            "node's directory. The person at the keyboard is the operator and "
+            "passes the ALLOW list. With a command it runs one script and "
+            "prints the reply. With - it reads one script from stdin. With no "
+            "command it starts a session: one command per line, each reply "
+            "printed when it is done. Ctrl-D ends the session."
         ),
     )
     tool.add_argument("name", help="Tool name, e.g. command-shell")
     tool.add_argument("--from", dest="sender", default="operator", metavar="NAME",
                       help="Sender name for $SENDER (default operator)")
-    tool.add_argument("--as", dest="node", default=None, metavar="NODE",
-                      help="Node name for $RECIPIENT (default the tool name)")
+    tool.add_argument("--node", dest="node", default=None, metavar="NAME",
+                      help="A registered node to act as: its vars, its directory (default the tool name, in the current directory)")
     tool.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
                       help="A per-node a8s var; repeatable")
     tool.add_argument("--attach", action="append", default=[], metavar="PATH",
                       help="Attach a file to the message; repeatable")
     tool.add_argument("message", nargs="*",
-                      help="The message words, or - to read stdin")
+                      help="The command words, or - to read one script from stdin; none starts a session")
     tool.set_defaults(func=cmd_tool)
     deps = sub.add_parser(
         "deps",

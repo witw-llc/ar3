@@ -20,7 +20,8 @@ from r4t import main as r4t_main
 
 
 def make_fake_stream_claude(
-    tmp_path: Path, *, sleep_per_turn: float = 0.05, late_frame_after: float = 0.0
+    tmp_path: Path, *, sleep_per_turn: float = 0.05, late_frame_after: float = 0.0,
+    bare_values: bool = False,
 ) -> tuple[Path, Path]:
     """Create an executable fake `claude` that speaks `--input-format stream-json`
     and `--output-format stream-json`, recording its argv, env, and every received
@@ -32,6 +33,14 @@ def make_fake_stream_claude(
         #!{sys.executable}
         import json, os, sys, threading, time
         from pathlib import Path
+
+        def save(payload):
+            tmp = record_file.with_name(
+                record_file.name + "." + str(os.getpid()) + "."
+                + str(threading.get_ident()) + ".tmp"
+            )
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, record_file)
 
         record_file = Path({str(record_path)!r})
         workdir = Path.cwd()
@@ -49,7 +58,7 @@ def make_fake_stream_claude(
         rec["argv"] = sys.argv[1:]
         rec["pid"] = os.getpid()
         rec["env"] = {{k: v for k, v in os.environ.items() if k.startswith(("GIT_", "TELL_"))}}
-        record_file.write_text(json.dumps(rec), encoding="utf-8")
+        save(rec)
 
         sys.stdout.write(json.dumps({{"type": "system", "subtype": "init", "session_id": "fake-sess"}}) + "\\n")
         sys.stdout.flush()
@@ -62,9 +71,13 @@ def make_fake_stream_claude(
             content = (frame.get("message") or {{}}).get("content", "")
             rec = load_rec()
             rec["turns"].append(content)
-            record_file.write_text(json.dumps(rec), encoding="utf-8")
+            save(rec)
 
             time.sleep({sleep_per_turn})
+            if {bare_values!r}:
+                for value in ("42", "null", "true", '"plain"', "[1]"):
+                    sys.stdout.write(value + "\\n")
+                sys.stdout.flush()
             if "wrap up and exit" in content:
                 (workdir / "STATUS.md").write_text("# Current State\\nWrapped up cleanly.\\n", encoding="utf-8")
                 with (workdir / "LESSONS.md").open("a", encoding="utf-8") as lf:
@@ -98,7 +111,7 @@ def make_fake_stream_claude(
     return script_path, record_path
 
 
-def make_fake_stream_agy(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> tuple[Path, Path]:
+def make_fake_stream_agy(tmp_path: Path, *, sleep_per_turn: float = 0.05, bare_values: bool = False) -> tuple[Path, Path]:
     """Create an executable fake `agy` that speaks `agy`'s `--input-format
     stream-json --output-format stream-json --print=` protocol (`event: "user"`
     in, `event: "init"` / `step_update` / `result` out)."""
@@ -107,8 +120,16 @@ def make_fake_stream_agy(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> tup
     code = textwrap.dedent(
         f"""\
         #!{sys.executable}
-        import json, os, sys, time
+        import json, os, sys, threading, time
         from pathlib import Path
+
+        def save(payload):
+            tmp = record_file.with_name(
+                record_file.name + "." + str(os.getpid()) + "."
+                + str(threading.get_ident()) + ".tmp"
+            )
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, record_file)
 
         record_file = Path({str(record_path)!r})
         workdir = Path.cwd()
@@ -126,7 +147,7 @@ def make_fake_stream_agy(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> tup
         rec["argv"] = sys.argv[1:]
         rec["pid"] = os.getpid()
         rec["env"] = {{k: v for k, v in os.environ.items() if k.startswith(("GIT_", "TELL_"))}}
-        record_file.write_text(json.dumps(rec), encoding="utf-8")
+        save(rec)
 
         sys.stdout.write(json.dumps({{
             "event": "init",
@@ -144,9 +165,13 @@ def make_fake_stream_agy(tmp_path: Path, *, sleep_per_turn: float = 0.05) -> tup
             content = (frame.get("message") or {{}}).get("content", "")
             rec = load_rec()
             rec["turns"].append(content)
-            record_file.write_text(json.dumps(rec), encoding="utf-8")
+            save(rec)
 
             time.sleep({sleep_per_turn})
+            if {bare_values!r}:
+                for value in ("42", "null", "true", '"plain"', "[1]"):
+                    sys.stdout.write(value + "\\n")
+                sys.stdout.flush()
             if "wrap up and exit" in content:
                 (workdir / "STATUS.md").write_text("# Current State\\nAgy wrapped up cleanly.\\n", encoding="utf-8")
                 with (workdir / "LESSONS.md").open("a", encoding="utf-8") as lf:
@@ -275,7 +300,7 @@ class TestComposeResidentArgv:
         assert "{prompt}" not in composed
 
     def test_rejects_non_resident_engines(self, tmp_path):
-        for engine in ("cursor", "copilot", "opencode", "muse", "devin"):
+        for engine in ("copilot", "opencode", "muse", "devin"):
             with pytest.raises(engine_run.RunError, match="does not support --resident"):
                 engine_run._build_argv_template(
                     engine, model=None, timeout=900, workdir=tmp_path, resident=True
@@ -590,6 +615,72 @@ class TestResidentLifecycle:
             {**engine_run.HARNESS_PRESETS["claude"], "invoke": [str(fake_bin), "-p", "{prompt}"]},
         )
 
+    def test_a_bare_json_value_on_claude_stderr_is_skipped(self, monkeypatch, tmp_path):
+        fake_bin, record_file = make_fake_stream_claude(
+            tmp_path, sleep_per_turn=0.05, bare_values=True,
+        )
+        self._patch_claude(monkeypatch, fake_bin)
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        home = resident_mod.resident_home(workdir, "ares")
+        try:
+            assert r4t_main([
+                "engine", "claude", "run", "--resident", "--timeout", "1",
+                "--dir", str(workdir), "--agent", "ares", "--no-scaffold", "hello",
+            ]) == 0
+            _wait_until(
+                lambda: resident_mod.read_live_pid(home) is None
+                and len(_turns(record_file)) >= 1,
+                timeout=15,
+            )
+        finally:
+            _stop(workdir, "ares")
+        log = (home / "resident.log").read_text(encoding="utf-8")
+        assert "ack turn 1" in log
+        assert "not an object" not in log
+        assert "dropped " not in log
+        assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+
+    def test_a_bare_json_value_on_agy_stderr_is_skipped(self, monkeypatch, tmp_path):
+        fake_bin, record_file = make_fake_stream_agy(
+            tmp_path, sleep_per_turn=0.05, bare_values=True,
+        )
+        monkeypatch.setitem(
+            engine_run.HARNESS_PRESETS,
+            "agy",
+            {
+                **engine_run.HARNESS_PRESETS["agy"],
+                "invoke": [
+                    str(fake_bin),
+                    "--dangerously-skip-permissions",
+                    "--mode",
+                    "accept-edits",
+                    "--print",
+                    "{prompt}",
+                ],
+            },
+        )
+        workdir = tmp_path / "seat"
+        workdir.mkdir()
+        home = resident_mod.resident_home(workdir, "ares")
+        try:
+            assert r4t_main([
+                "engine", "agy", "run", "--resident", "--timeout", "1",
+                "--dir", str(workdir), "--agent", "ares", "--no-scaffold", "hello",
+            ]) == 0
+            _wait_until(
+                lambda: resident_mod.read_live_pid(home) is None
+                and len(_turns(record_file)) >= 1,
+                timeout=15,
+            )
+        finally:
+            _stop(workdir, "ares")
+        log = (home / "resident.log").read_text(encoding="utf-8")
+        assert "agy ack turn 1" in log
+        assert "not an object" not in log
+        assert "dropped " not in log
+        assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+
     def test_a_turn_in_flight_past_the_window_is_not_cut_off(self, monkeypatch, tmp_path):
         # Negative control for the old wall-clock cut: the turn runs 2.5s, the
         # window is 1s. The session must not enter `closing` while the turn runs.
@@ -762,7 +853,7 @@ class TestResidentLifecycle:
             _stop(workdir, "ares")
 
     def test_stop_refuses_an_engine_with_no_resident_mode(self, tmp_path, capsys):
-        assert r4t_main(["engine", "cursor", "stop", "--dir", str(tmp_path)]) == 2
+        assert r4t_main(["engine", "copilot", "stop", "--dir", str(tmp_path)]) == 2
         assert "no resident session" in capsys.readouterr().err
 
     def test_idle_wake_never_boots_or_feeds_a_resident_session(self, monkeypatch, tmp_path):
@@ -866,8 +957,12 @@ class TestResidentStopOwnership:
             real = r._write_state
             def pause(home, **kw):
                 if kw["status"] == "running":
-                    gate.write_text(str(kw["engine_pid"]))
-                    time.sleep(120)
+                    tmp = gate.with_name(gate.name + "." + str(os.getpid()) + ".tmp")
+                    tmp.write_text(str(kw["engine_pid"]))
+                    os.replace(tmp, gate)
+                    deadline = time.monotonic() + 120
+                    while time.monotonic() < deadline:
+                        time.sleep(0.05)
                 return real(home, **kw)
             r._write_state = pause
             r.serve_resident(home)
@@ -911,10 +1006,13 @@ class TestResidentStopOwnership:
         engine = tmp_path / "engine-with-tool"
         engine.write_text(textwrap.dedent(f"""\
             #!{sys.executable}
-            import subprocess, sys, time
+            import os, subprocess, sys, time
             from pathlib import Path
             tool = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
-            Path({str(marker)!r}).write_text(str(tool.pid))
+            p = Path({str(marker)!r})
+            tmp = p.with_name(p.name + "." + str(os.getpid()) + ".tmp")
+            tmp.write_text(str(tool.pid))
+            os.replace(tmp, p)
             time.sleep(120)
         """))
         engine.chmod(0o700)
@@ -1007,3 +1105,90 @@ class TestResidentStatus:
             assert resident_mod.status_resident(workdir, "ares") == "resident"
         finally:
             _stop(workdir, "ares")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process signals are POSIX")
+def test_a_stop_request_signals_a_busy_claude_at_once(tmp_path):
+    record_file = tmp_path / "claude-record.json"
+    script = tmp_path / "fake-claude"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, queue, signal, sys, threading, time\n"
+        "from pathlib import Path\n"
+        f"record_file = Path({str(record_file)!r})\n"
+        "rec = {'pid': os.getpid(), 'turns': []}\n"
+        "def save():\n"
+        "    tmp = record_file.with_name(record_file.name + '.' + str(os.getpid()) + '.' + str(threading.get_ident()) + '.tmp')\n"
+        "    tmp.write_text(json.dumps(rec), encoding='utf-8')\n"
+        "    os.replace(tmp, record_file)\n"
+        "def on_term(*_a):\n"
+        "    rec['sigterm_at'] = time.time()\n"
+        "    save()\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGTERM, on_term)\n"
+        "save()\n"
+        "sys.stdout.write(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'fake'}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "lines = queue.Queue()\n"
+        "def _read():\n"
+        "    for raw in sys.stdin:\n"
+        "        lines.put(raw)\n"
+        "    lines.put(None)\n"
+        "threading.Thread(target=_read, daemon=True).start()\n"
+        "while True:\n"
+        "    try:\n"
+        "        raw = lines.get(timeout=0.05)\n"
+        "    except queue.Empty:\n"
+        "        continue\n"
+        "    if raw is None:\n"
+        "        break\n"
+        "    line = raw.strip()\n"
+        "    if not line:\n"
+        "        continue\n"
+        "    frame = json.loads(line)\n"
+        "    rec['turns'].append((frame.get('message') or {}).get('content', ''))\n"
+        "    save()\n"
+        "    deadline = time.monotonic() + 60\n"
+        "    while time.monotonic() < deadline:\n"
+        "        time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    try:
+        assert resident_mod.enqueue_or_start(
+            "claude", "hello", dir_path=workdir,
+            template=[str(script), "-p", "{prompt}"],
+            model=None, effort=None, agent="ares", timeout=60, scaffold=False,
+        ) == 0
+        def turn_started() -> bool:
+            if not record_file.is_file():
+                return False
+            try:
+                return bool(json.loads(record_file.read_text(encoding="utf-8")).get("turns"))
+            except ValueError:
+                return False
+
+        _wait_until(turn_started)
+        started = time.time()
+        assert resident_mod.stop_resident(workdir, "ares") is True
+
+        def signaled() -> bool:
+            if not record_file.is_file():
+                return False
+            try:
+                return "sigterm_at" in json.loads(
+                    record_file.read_text(encoding="utf-8")
+                )
+            except ValueError:
+                return False
+
+        _wait_until(signaled, timeout=3)
+        rec = json.loads(record_file.read_text(encoding="utf-8"))
+        assert rec["sigterm_at"] - started < 1.0
+    finally:
+        pid = resident_mod.read_live_pid(home)
+        if pid is not None:
+            terminate_group(pid)

@@ -171,6 +171,9 @@ tested there.
 - **[docs/ar3.md](docs/ar3.md)** carries the install variants, and
   **[docs/a8s.md](docs/a8s.md)**, **[docs/r4t.md](docs/r4t.md)** and
   **[docs/k7e.md](docs/k7e.md)** cover the apps, flat under [`docs/`](docs/).
+- **[docs/a8s-tools.md](docs/a8s-tools.md)** lists the tool nodes: a shell, a
+  signed-in browser, Gemini on the web and an encrypted vault, each with its own
+  README and a `help` message that tells you how to drive it.
 
 ## Where it is going
 

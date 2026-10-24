@@ -386,9 +386,9 @@ def _run_code(seat, args, allow_eval):
     return plc.result_or(plc.run_code(seat, args[0], timeout=60))
 
 
-def _step(seat, verb, args, run, allow_eval):
+def _step(seat, verb, args, run, allow_eval, script_epoch=None):
     if verb == "open":
-        session.ensure_running(seat)
+        session.ensure_running(seat, script_epoch=script_epoch)
         return session.current_url(seat)
     if verb == "close":
         session.close_browser(seat)
@@ -543,7 +543,9 @@ def script_commands(body):
     return parsed
 
 
-def run_script(seat, body, allow_eval=False):
+def run_script(seat, body, allow_eval=False, epoch=None):
+    """`epoch` is the stop epoch the caller read at its entry, before any wait
+    for the seat. None reads it now."""
     run = Run(seat)
     session.prune_scratch(seat)
     try:
@@ -553,7 +555,14 @@ def run_script(seat, body, allow_eval=False):
     except ScriptError as exc:
         steps = []
         run.fail(exc.line, str(exc))
+    epoch0 = session.stop_epoch(seat) if epoch is None else epoch
+    stopped = False
     for line, block in steps:
+        if session.stop_epoch(seat) != epoch0:
+            # `a8s stop` closed the seat under this script: end it here.
+            run.fail(line, session.STOP_MESSAGE)
+            stopped = True
+            break
         verb = line.split(None, 1)[0]
         if verb in RAW_ARGS:
             args = line.split(None, 1)[1:]
@@ -572,14 +581,15 @@ def run_script(seat, body, allow_eval=False):
             args = [block]
         try:
             if verb not in NO_ENSURE:
-                session.ensure_running(seat)
-            output = _step(seat, verb, args, run, allow_eval)
+                session.ensure_running(seat, script_epoch=epoch0)
+            output = _step(seat, verb, args, run, allow_eval, script_epoch=epoch0)
             run.note(line, str(output or ""))
         except plc.BrowserError as exc:
             run.fail(line, str(exc))
+            stopped = stopped or str(exc) == session.STOP_MESSAGE
             break
 
-    if not run.ok:
+    if not run.ok and not stopped:
         try:
             _write_snapshot(seat, run, "failure")
         except plc.BrowserError:

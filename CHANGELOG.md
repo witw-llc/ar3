@@ -10,6 +10,122 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.116
+
+### Added
+
+- Resident sessions on Cursor: `r4t engine cursor run --resident` keeps one
+  `agent acp` session alive across messages, with the `a8s_tell` MCP server
+  on `session/new` and one prompt at a time. The generic protocol is
+  `AcpSession`; `CursorSession` adds the Cursor login, the catalog pin, and
+  the two cursor requests. `--model` is not spawned. The session pins the
+  catalog model after `session/new` (`composer-2.5` is
+  `composer-2.5[fast=true]`; a bracketed slug matches the catalog value that
+  contains those pairs). New bundled definitions
+  `engine-cursor-resident.json` and
+  `engine-cursor-resident-unrestricted.json`. `r4t engine cursor check
+  --resident` runs the ACP handshake without a prompt, fails closed when
+  initialize or authenticate does not answer or the protocol version is not
+  1, and notes any version other than the proven 2026.10.22-27dcf5f.
+  On that agent, `--force` skips `session/request_permission` for a shell
+  call; without it the server offers `allow-once`, `allow-always`, and
+  `reject-once`. The restricted resident definition does not pass
+  `--force`; `--permissions bypass` keeps it. Stdin EOF does not end the
+  process. The bridge closes stdin, waits a short grace, then SIGTERM.
+- A README for each tool node, linked from the root `README.md` and from
+  `docs/a8s-tools.md`: `apps/tools/browser/README.md` (every command and its
+  syntax), `apps/tools/command_shell/README.md`, `apps/tools/gemini_web/README.md`
+  and `apps/tools/vault/README.md`. `docs/a8s-tools.md` stays as the overview.
+  Closes #346.
+- A help reflection on every tool node. A message that is one line reading
+  `help`, `/help`, `--help` or `/?` (any case) is answered with the tool's usage
+  and runs nothing: no shell command, no browser step, no Gemini turn. The
+  reply names the node and the tool, gives the commands and the vars, and ends
+  with the README path. The help text is the `## Usage` section of the tool's
+  README, read when help is called: one convention for every tool, and no
+  separate usage text to keep in step. A sender outside the node's `ALLOW` list
+  still gets no reply. `tool-vault` answers all four spellings in plaintext and
+  adds its key fingerprint.
+- `ar3 tool <name> --node <node>` drives a tool node from one terminal on its
+  machine. It has three modes: one script as words, one script from stdin with
+  `-`, and a session with one command per line. A `<<MARKER` line opens a block
+  that runs to its marker. `--node` reads the node's vars from the a8s registry
+  and runs in the node's directory. The person at the keyboard is the operator
+  and passes `ALLOW`. `--var` overrides last, so `--var ALLOW=alice` still
+  makes a refusal. `tool-vault` takes no `--node` and no session.
+- A seat lock for `tool-browser`. The wake, the `ar3 tool` session and the
+  browser CLI (`do`, `open`, `go`, `snap`, `console`) take one lock per script.
+  A script that finds the seat busy waits up to 60 seconds. Then the reply is
+  `<node>: busy: seat held by <who> since <when>. Nothing ran.` `a8s stop` does not
+  wait for the seat: it closes Chrome even when a session holds it, and it ends
+  that session's script (its next command fails with `seat closed by a8s stop`;
+  every path that opens Chrome checks the stop; a new command opens Chrome again). A short launch lock keeps a launch and a
+  stop from racing. The
+  `lock` file in the seat directory names the holder.
+
+### Changed
+
+- `command_shell` is a package, `apps/tools/command_shell/`, run the way the
+  other tools are run. `tool-command-shell.json` passes the node name as
+  `--seat $RECIPIENT` so the help reply can name it. The old entry
+  `apps/tools/command_shell.py` stays as a shim that runs the package, so a
+  definition copied before this version keeps working.
+- `ar3 tool --as` is removed. `--node` replaces it and means "load this
+  registered node". For a seat that is not a node, use
+  `python3 apps/tools/browser --seat <seat>`.
+- In print mode, a reply prints its body with no `to <sender>:` header, and
+  each attachment prints as `artifact: <path>` (it was `attached:`). A session
+  reply is not cut at 4000 characters.
+
+### Fixed
+
+- `r4t engine cursor quota` reads the `agent` CLI login from `auth.json`
+  (Linux `~/.config/cursor/auth.json` or `$XDG_CONFIG_HOME/cursor/auth.json`,
+  Windows `%APPDATA%/Cursor/auth.json`, macOS `~/.cursor/auth.json`) after
+  the IDE database and before the macOS Keychain. A Windows profile this
+  process cannot stat is skipped; the stat helpers are `ar3.fsio`. When
+  `mode=ro` on `state.vscdb` raises SQLite `disk I/O error` (a WSL read of
+  the Windows database while the IDE has it open), the read retries
+  `mode=ro&immutable=1`. Any other SQLite error falls through. HTTP 401/403
+  tries the next store and names it. The error text does not echo a Bearer
+  value. An `auth.json` that is not UTF-8 is skipped. The answer notes
+  which store supplied the token. A login that is not ASCII printable
+  with no whitespace is malformed and the next store is tried. A request
+  that still fails names no header value. A fatal ACP frame runs the
+  bounded stop, including during the wrap-up, and skips `session/cancel`.
+  A session error does not disarm the handshake deadline, and a session
+  that has failed stays failed. The ACP handshake sends initialize first,
+  then authenticate only when that method was offered, then session/new.
+  Every ACP line is JSON-RPC 2.0. An in-flight turn is cancelled before
+  the process stop. The engine's process group is recorded at spawn and
+  published with its start token. After SIGTERM the group has 2 s to exit
+  before SIGKILL. A reaped leader is not signaled by pid. The EOF grace
+  applies only to a quiet expiry and a wrap-up that finished: 1.5 s for the
+  cursor ACP session and 10 s for codex, claude and agy. A stop, a fatal, a
+  missed deadline, a failed write, and an engine exit signal at once. A fatal
+  that arrives during that grace ends the wait, and the signal goes out at
+  once. On
+  Windows that same grace is waited out, then terminate(), then up to 2 s,
+  then kill(), with no SIGKILL and no killpg. A bare JSON value on claude's
+  or agy's merged stderr is skipped. On ACP and codex, whose stdout is only
+  frames, a frame that is not an object is fatal. A turn still in flight at
+  the end comes off the count and one dropped line names the cause: stop,
+  deadline, failed write, fatal, or engine exit. Deadline is only a
+  handshake or a wrap-up whose clock ran out. Memory is decided after the
+  engine has exited. It is 0 only with no fatal frame, no turn left in
+  flight, no non-zero exit of the engine's own, and no missed deadline. A
+  quiet expiry and an idle stop are 0, including when the bridge's own
+  SIGTERM makes the engine exit 143. A stop that interrupts a turn, a fatal
+  frame, a missed deadline, or an engine exit with a turn in flight is not.
+  A signal the bridge sent does not count as the engine's own exit. `stop`
+  signals the published engine group after a bridge crash. A dead leader's
+  group is signaled only when its start token is from this boot, and that
+  boot check is Linux only; macOS has no boot id to read. Where no
+  start-token reader exists (Windows), a new bridge does not end the engine
+  a dead bridge published; only `stop` signals a recorded pid. A bracketed
+  slug that matches two catalog values says the model name is ambiguous.
+  Windows and macOS were not run.
+
 ## 0.1.115
 
 ### Added

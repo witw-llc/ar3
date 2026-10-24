@@ -440,6 +440,410 @@ class TestCodexResidentCheck:
         assert report.method == "parse probe"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process signals are POSIX")
+def test_a_stop_request_signals_a_busy_codex_at_once(monkeypatch, tmp_path):
+    import time
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "30")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    try:
+        assert _run(workdir, "hello", "--timeout", "60") == 0
+        _wait_until(lambda: _rec(record).get("turns"))
+        started = time.time()
+        assert resident_mod.stop_resident(workdir, "ares") is True
+        _wait_until(lambda: _rec(record).get("sigterm_at"), timeout=3)
+        rec = _rec(record)
+        assert rec["sigterm_at"] - started < 1.0
+    finally:
+        _stop(workdir, "ares")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_an_exit_after_eof_records_a_nonzero_memory_exit(monkeypatch, tmp_path):
+    import threading
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_EXIT_CODE", "3")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    mem = tmp_path / "mem"
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "on",
+        "memory_home": str(mem),
+    }
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    turns = list(mem.rglob("turns/*.json"))
+    assert turns
+    assert json.loads(turns[0].read_text(encoding="utf-8")).get("exit") not in (None, 0)
+    assert _rec(record).get("turns")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_an_outside_sigkill_after_eof_records_a_nonzero_memory_exit(
+    monkeypatch, tmp_path,
+):
+    """A negative code counts when the bridge sent no signal. An outside
+    SIGKILL after EOF is the engine's own failure, the way exit 3 is."""
+    import signal
+    import threading
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    mem = tmp_path / "mem"
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "on",
+        "memory_home": str(mem),
+    }
+    done = threading.Thread(
+        target=resident_mod._run_session,
+        args=(home, spec, threading.Event(), {}),
+        daemon=True,
+    )
+    done.start()
+    try:
+        _wait_until(lambda: _rec(record).get("eof_at"), timeout=15)
+        engine_pid = (resident_mod.read_state(home) or {}).get("engine_pid")
+        assert isinstance(engine_pid, int)
+        os.kill(engine_pid, signal.SIGKILL)
+        done.join(10)
+    finally:
+        if done.is_alive():
+            state = resident_mod.read_state(home) or {}
+            pid = state.get("engine_pid")
+            if isinstance(pid, int):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            done.join(3)
+    assert not done.is_alive()
+    turns = list(mem.rglob("turns/*.json"))
+    assert turns
+    assert json.loads(turns[0].read_text(encoding="utf-8")).get("exit") not in (None, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_quiet_expiry_waits_out_the_eof_grace(monkeypatch, tmp_path, capsys):
+    """codex keeps the 10 s EOF grace when the bridge ends the session.
+    An engine that exits 5 s after EOF is not signaled."""
+    import threading
+    import time
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "5")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "off",
+    }
+    started = time.monotonic()
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    elapsed = time.monotonic() - started
+    rec = _rec(record)
+    out = capsys.readouterr().out
+    assert rec.get("eof_at")
+    assert "sigterm_at" not in rec
+    assert "resident session exited (code 0)" in out
+    assert 5.5 < elapsed < 12
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process signals are POSIX")
+def test_a_stop_during_the_eof_grace_signals_at_once(monkeypatch, tmp_path):
+    """A stop that arrives while codex is in its quiet EOF grace ends the
+    grace. SIGTERM follows at once, the way a stop that was already set does."""
+    import time
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    try:
+        assert resident_mod.enqueue_or_start(
+            "codex", "hello", dir_path=workdir, template=_template(),
+            model=None, effort=None, agent="ares", timeout=1,
+            scaffold=False,
+        ) == 0
+        _wait_until(lambda: _rec(record).get("eof_at"), timeout=15)
+        started = time.time()
+        assert resident_mod.stop_resident(workdir, "ares") is True
+        _wait_until(lambda: _rec(record).get("sigterm_at"), timeout=3)
+        rec = _rec(record)
+        assert rec["sigterm_at"] - started < 1.0
+    finally:
+        _stop(workdir, "ares")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_an_unfinished_wrap_up_drops_the_turn(monkeypatch, tmp_path, capsys):
+    import threading
+
+    _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_HANG_WRAPUP", "1")
+    monkeypatch.setattr(resident_mod, "WRAPUP_TURN_SECONDS", 0.4)
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    mem = tmp_path / "mem"
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": True,
+        "memory": "on",
+        "memory_home": str(mem),
+    }
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    out = capsys.readouterr().out
+    turns = list(mem.rglob("turns/*.json"))
+    assert turns
+    assert json.loads(turns[0].read_text(encoding="utf-8")).get("exit") not in (None, 0)
+    assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+    assert out.count("dropped ") == 1
+    assert "dropped 1 held message(s): deadline" in out
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_missed_wrap_up_deadline_signals_at_once(monkeypatch, tmp_path, capsys):
+    """A wrap-up whose clock runs out is SIGTERM at once. The 10 s EOF grace
+    does not apply. EOF_GRACE_SECONDS is left at 10 so a grace would fail.
+    The fake stays up after EOF, so the signal hits the handler rather than
+    interpreter shutdown."""
+    import threading
+    import time
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_HANG_WRAPUP", "1")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    monkeypatch.setattr(resident_mod, "WRAPUP_TURN_SECONDS", 0.3)
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": True,
+        "memory": "off",
+    }
+    started = time.monotonic()
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    elapsed = time.monotonic() - started
+    rec = _rec(record)
+    assert rec.get("sigterm_at")
+    assert "dropped 1 held message(s): deadline" in capsys.readouterr().out
+    # Quiet window 1 s, wrap-up deadline 0.3 s. A 10 s grace lands near 11 s.
+    assert elapsed < 4
+
+
+def _wrap_up_session(monkeypatch, tmp_path, flag: str):
+    import threading
+
+    _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv(flag, "1")
+    monkeypatch.setattr(resident_mod, "EOF_GRACE_SECONDS", 0.2)
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    mem = tmp_path / "mem"
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": True,
+        "memory": "on",
+        "memory_home": str(mem),
+    }
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    return home, mem
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_fatal_during_the_wrap_up_names_fatal(monkeypatch, tmp_path, capsys):
+    home, mem = _wrap_up_session(monkeypatch, tmp_path, "FAKE_CODEX_FATAL_WRAPUP")
+    out = capsys.readouterr().out
+    assert "dropped 1 held message(s): fatal" in out
+    assert "deadline" not in out
+    assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+    turns = list(mem.rglob("turns/*.json"))
+    assert turns
+    assert json.loads(turns[0].read_text(encoding="utf-8")).get("exit") not in (None, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_an_engine_exit_during_the_wrap_up_names_engine_exit(
+    monkeypatch, tmp_path, capsys,
+):
+    home, mem = _wrap_up_session(monkeypatch, tmp_path, "FAKE_CODEX_EXIT_WRAPUP")
+    out = capsys.readouterr().out
+    assert "dropped 1 held message(s): engine exit" in out
+    assert "deadline" not in out
+    assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+    turns = list(mem.rglob("turns/*.json"))
+    assert turns
+    assert json.loads(turns[0].read_text(encoding="utf-8")).get("exit") not in (None, 0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_bare_json_value_on_codex_stdout_is_fatal(monkeypatch, tmp_path, capsys):
+    import threading
+
+    _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_BARE_JSON", "1")
+    monkeypatch.setattr(resident_mod, "EOF_GRACE_SECONDS", 0.2)
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "off",
+    }
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    out = capsys.readouterr().out
+    assert "resident engine sent a frame that was not an object; ending it" in out
+    assert "dropped 1 held message(s): fatal" in out
+    assert (resident_mod.read_state(home) or {}).get("turns", 0) == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_codex_fatal_signals_without_the_eof_grace(monkeypatch, tmp_path):
+    """The fake stays up after EOF. A fatal must SIGTERM at once, not after
+    the 10 s grace."""
+    import threading
+    import time
+
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_BARE_JSON", "1")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "off",
+    }
+    started = time.monotonic()
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    assert time.monotonic() - started < 3
+    assert _rec(record).get("sigterm_at")
+
+
+def _fatal_during_the_grace(monkeypatch, tmp_path, *, windows: bool) -> dict:
+    import threading
+
+    if windows:
+        monkeypatch.setattr(resident_mod, "_use_windows_stop", lambda: True)
+    record = _patch_codex(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_TURN_SECONDS", "0.05")
+    monkeypatch.setenv("FAKE_CODEX_FATAL_AFTER_EOF", "1")
+    monkeypatch.setenv("FAKE_CODEX_HOLD_AFTER_EOF", "30")
+    monkeypatch.setenv("FAKE_CODEX_RECORD_SIGTERM", "1")
+    workdir = tmp_path / "seat"
+    workdir.mkdir()
+    home = resident_mod.resident_home(workdir, "ares")
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "hello")
+    spec = {
+        "engine": "codex",
+        "dir_path": str(workdir),
+        "template": _template(),
+        "agent": "ares",
+        "timeout": 1,
+        "scaffold": False,
+        "memory": "off",
+    }
+    resident_mod._run_session(home, spec, threading.Event(), {})
+    return _rec(record)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_fatal_during_the_eof_grace_signals_at_once(monkeypatch, tmp_path):
+    """Quiet expiry starts the grace. A fatal during it must not wait the
+    rest of the 10 s out."""
+    rec = _fatal_during_the_grace(monkeypatch, tmp_path, windows=False)
+    assert rec.get("fatal_at") and rec.get("sigterm_at")
+    assert rec["sigterm_at"] - rec["fatal_at"] < 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_a_windows_fatal_during_the_eof_grace_signals_at_once(monkeypatch, tmp_path):
+    rec = _fatal_during_the_grace(monkeypatch, tmp_path, windows=True)
+    assert rec.get("fatal_at") and rec.get("sigterm_at")
+    assert rec["sigterm_at"] - rec["fatal_at"] < 1
+
+
 def test_the_wrap_up_turn_asks_for_reply_text_and_no_message(tmp_path):
     """A wrap-up that says "reply" to a session taught to reply only by
     message sent its sender a "Done." tell at every close (live, 2026-10-22)."""

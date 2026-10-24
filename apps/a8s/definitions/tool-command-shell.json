@@ -2,7 +2,9 @@
   "description": "Tool node: run a shell command sent as a message and reply with its output. A poor man's SSH. Register with an ACL and the node runs only commands from allowlisted senders: `a8s add mac-terminal ./ tool-command-shell --ALLOW=operator,assistant`; then `tell mac-terminal ls -la`. Each message is one command in its own process, in the node's directory, with no state between them. Optional vars: SHELL (sh/cmd/bash/zsh/powershell/pwsh), TIMEOUT (s), INLINE_MAX (bytes inline before output is attached), OUTPUT_MAX (bytes kept per stream). See docs/a8s-tools.md.",
   "invoke": [
     "$PYTHON",
-    "$A8S_DIR/../tools/command_shell.py",
+    "$A8S_DIR/../tools/command_shell",
+    "--seat",
+    "$RECIPIENT",
     "--from",
     "$SENDER",
     "--allow",

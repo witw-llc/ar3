@@ -12,6 +12,7 @@ removed on any failure so a crash never leaves stray `.tmp` litter behind.
 from __future__ import annotations
 
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -24,6 +25,38 @@ from ar3.ulid import new as new_ulid
 REPLACE_ATTEMPTS = 10
 REPLACE_BACKOFF_SECONDS = 0.01
 REPLACE_BACKOFF_CAP_SECONDS = 0.25
+
+
+def stat_or_none(path: Path) -> os.stat_result | None:
+    """Stat `path`, or None on any OSError.
+
+    Python 3.12 re-raises PermissionError from Path.is_dir() and Path.is_file()
+    when the target cannot be statted. A WSL process scanning /mnt/c/Users hits
+    that on an unreadable Windows profile, and the profile sorts ahead of the
+    one that holds the login. A caller that is only asking whether a path is
+    there must not abort the rest of the scan.
+    """
+    try:
+        return os.stat(path)
+    except OSError:
+        return None
+
+
+def is_dir(path: Path) -> bool:
+    """True when `path` is a directory. False on any OSError, including a missing path."""
+    info = stat_or_none(path)
+    return info is not None and stat.S_ISDIR(info.st_mode)
+
+
+def is_file(path: Path) -> bool:
+    """True when `path` is a regular file. False on any OSError, including a missing path."""
+    info = stat_or_none(path)
+    return info is not None and stat.S_ISREG(info.st_mode)
+
+
+def exists(path: Path) -> bool:
+    """True when `path` can be statted. False on any OSError, including PermissionError."""
+    return stat_or_none(path) is not None
 
 
 def replace_with_retry(src: Path | str, dst: Path | str) -> None:

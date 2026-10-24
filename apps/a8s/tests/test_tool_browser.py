@@ -116,6 +116,31 @@ class TestWake:
         assert _read_envelopes(outbox_dir(b_root)) == []
 
 
+class TestSeatLock:
+    def test_a_wake_meets_a_held_seat_and_replies_busy(self, fake_home, tmp_path, monkeypatch):
+        import fcntl
+
+        from ar3.proc import process_start_token
+
+        a_root, b_root = _setup(tmp_path, monkeypatch, "a")
+        monkeypatch.setenv("AR3_BROWSER_SEAT_WAIT", "0.5")
+        lock = tmp_path / "xdg" / "ar3" / "browser" / "stub" / "lock"
+        lock.parent.mkdir(parents=True)
+        pid = os.getpid()
+        lock.write_text(json.dumps({
+            "pid": pid, "start": process_start_token(pid), "kind": "ar3 tool",
+            "sender": "operator", "since": "2026-10-23 09:00:00 PDT",
+        }))
+        _write_outbox("a", a_root, "stub", "url", [])
+        with open(lock, "r+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(b_root))
+        assert len(replies) == 1
+        assert replies[0]["content"].startswith("stub: busy: seat held by ar3 tool from operator (pid ")
+        assert replies[0]["content"].endswith("Nothing ran.")
+
+
 @pytest.mark.skipif(
     os.environ.get("AR3_TOOL_BROWSER_LIVE") != "1",
     reason="drives a real Chrome and playwright-cli; set AR3_TOOL_BROWSER_LIVE=1 "
@@ -139,4 +164,65 @@ def test_live_open_go_snap_close(tmp_path):
     assert snapshots and "Example Domain" in snapshots[0].read_text()
     assert shutil.which("pgrep") is None or subprocess.run(
         ["pgrep", "-f", "ar3/browser/ar3livetest"], capture_output=True
+    ).returncode == 1
+
+
+class TestHelpWake:
+    @pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?"])
+    def test_help_answers_the_usage(self, fake_home, tmp_path, monkeypatch, spelling):
+        a_root, b_root = _setup(tmp_path, monkeypatch, "a")
+        _write_outbox("a", a_root, "stub", spelling, [])
+
+        assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(b_root))
+        assert len(replies) == 1
+        assert replies[0]["to"] == "a"
+        assert replies[0]["content"].startswith("stub: tool-browser \u2014 usage")
+        assert "README: apps/tools/browser/README.md" in replies[0]["content"]
+
+    def test_a_refused_sender_gets_no_help(self, fake_home, tmp_path, monkeypatch):
+        a_root, b_root = _setup(tmp_path, monkeypatch, "someone-else")
+        _write_outbox("a", a_root, "stub", "help", [])
+
+        assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        assert _read_envelopes(outbox_dir(b_root)) == []
+
+
+@pytest.mark.skipif(
+    os.environ.get("AR3_TOOL_BROWSER_LIVE") != "1",
+    reason="drives a real Chrome and playwright-cli; set AR3_TOOL_BROWSER_LIVE=1",
+)
+def test_live_ar3_tool_session_on_a_registered_node(tmp_path):
+    """`ar3 tool browser --node` drives a headless seat through a piped
+    session: four replies, artifacts, and no Chrome left on the profile."""
+    name = f"ar3scratch{os.getpid()}"
+    home = tmp_path / "a8s"
+    home.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (home / "a8s.json").write_text(json.dumps({"agents": {name: {
+        "root": str(root),
+        "definition": str(Path(TOOL).parent.parent / "a8s" / "definitions" / "tool-browser.json"),
+        "vars": {"ALLOW": "nobody"},
+    }}, "aliases": {}, "namespaces": {}}))
+    env = {k: v for k, v in os.environ.items() if k != "DISPLAY"}
+    env.update(A8S_HOME=str(home), XDG_DATA_HOME=str(tmp_path / "xdg"))
+    ar3_cli = Path(TOOL).parent.parent / "ar3" / "cli.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ar3_cli), "tool", "browser", "--node", name],
+            input="open\ngo https://example.com\nsnap\nclose\n",
+            env=env, capture_output=True, text=True, timeout=240,
+        )
+    finally:
+        subprocess.run([sys.executable, str(TOOL), "close", "--seat", name],
+                       env=env, capture_output=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count(f"{name}: ok") == 4
+    assert "artifact: " in result.stdout
+    artifacts = [Path(line[len("artifact: "):]) for line in result.stdout.splitlines()
+                 if line.startswith("artifact: ")]
+    assert any("Example Domain" in p.read_text() for p in artifacts if p.name.endswith("snapshot.txt"))
+    assert shutil.which("pgrep") is None or subprocess.run(
+        ["pgrep", "-f", f"ar3/browser/{name}"], capture_output=True
     ).returncode == 1

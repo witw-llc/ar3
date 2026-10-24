@@ -178,3 +178,23 @@ class TestExitCodes:
         assert "Chrome would not start" in replies[0]["content"]
         assert "wake failed" not in agent_log_path("gem").read_text()
         assert not list(inbox_dir("gem").glob("*.json"))
+
+
+class TestHelpWake:
+    @pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?"])
+    def test_help_answers_the_usage_without_a_turn(self, fake_home, tmp_path, monkeypatch, spelling):
+        a_root, b_root = _setup(tmp_path, monkeypatch)
+        _write_outbox("a", a_root, "gem", spelling, [])
+
+        assert attached_loop(["a", "gem"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(b_root))
+        assert len(replies) == 1
+        assert replies[0]["content"].startswith("gem: tool-gemini-web \u2014 usage")
+        assert "README: apps/tools/gemini_web/README.md" in replies[0]["content"]
+
+    def test_a_refused_sender_gets_no_help(self, fake_home, tmp_path, monkeypatch):
+        a_root, b_root = _setup(tmp_path, monkeypatch, allow="someone-else")
+        _write_outbox("a", a_root, "gem", "help", [])
+
+        assert attached_loop(["a", "gem"], 0.1, single_pass=True) == 0
+        assert _read_envelopes(outbox_dir(b_root)) == []

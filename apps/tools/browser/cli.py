@@ -1,13 +1,16 @@
 """CLI for the browser tool: drive a seat's browser by hand, or serve a8s wakes."""
 import argparse
+import contextlib
 import json
 import os
 import sys
+import time
 
 from . import commands
 from . import doctor
 from . import handler
 from . import plc
+from . import seatlock
 from . import session
 
 
@@ -19,14 +22,38 @@ def _allow_eval():
     return os.environ.get("AR3_BROWSER_ALLOW_EVAL", "").lower() in ("1", "true", "yes")
 
 
-def _do(seat, args):
+def _waiting(seat):
+    def say(who):
+        print(f"{seat}: waiting: seat held by {who}.", file=sys.stderr)
+
+    return say
+
+
+def _hold(seat, kind, verb):
+    return seatlock.hold(seat, kind, verb=verb, on_wait=_waiting(seat))
+
+
+def _busy(seat, busy, as_json):
+    if as_json:
+        step = {"command": "", "ok": False, "error": f"busy: {busy}"}
+        print(json.dumps({"ok": False, "steps": [step], "files": []}))
+    else:
+        print(f"{seat}: busy: {busy}", file=sys.stderr)
+    return 1
+
+
+def _do(seat, args, epoch):
     if args.script == "-":
         body = sys.stdin.read()
     else:
         with open(args.script) as handle:
             body = handle.read()
 
-    run = commands.run_script(seat, body, allow_eval=_allow_eval())
+    try:
+        with _hold(seat, "browser do", "do"):
+            run = commands.run_script(seat, body, allow_eval=_allow_eval(), epoch=epoch)
+    except seatlock.SeatBusy as busy:
+        return _busy(seat, busy, args.json)
     if args.json:
         print(json.dumps({"ok": run.ok, "steps": run.steps, "files": run.files}))
     else:
@@ -99,31 +126,86 @@ def main():
     if args.command == "do" and args.script != "-":
         args.script = os.path.abspath(args.script)
     os.chdir(session.scratch_dir(seat))
+    # Read the stop epoch now, before any wait for the seat: an operation that
+    # began before a stop must not open Chrome after it.
+    epoch = session.stop_epoch(seat)
     if args.command == "handle":
         return handler.handle(
             seat, args.sender, args.message,
             allow=args.allow, allow_eval=args.allow_eval,
         )
     if args.command == "do":
-        return _do(seat, args)
+        return _do(seat, args, epoch)
 
+    if args.command == "close":
+        return _close(seat)
+    if args.command == "status":
+        print(session.status(seat))
+        return 0
+    try:
+        with _hold(seat, "browser cli", args.command):
+            return _drive(seat, args, epoch)
+    except seatlock.SeatBusy as busy:
+        return _busy(seat, busy, False)
+
+
+LAUNCH_LOCK_WAIT_SECONDS = 3.0
+LAUNCH_POLL_SECONDS = 0.1
+
+
+def _close(seat):
+    """The stop hook. It never waits for the seat: the epoch it writes ends the
+    holder's script. It takes the launch lock for the epoch and the kill, but
+    only for a short poll, because a8s kills the hook after 30 s."""
+    try:
+        with seatlock.hold(seat, "a8s stop", verb="close", wait=0):
+            return _closed_under_launch_lock(seat)
+    except seatlock.SeatBusy as busy:
+        print(f"{seat}: closing Chrome. The seat is held by {busy.who}.", file=sys.stderr)
+        return _closed_under_launch_lock(seat)
+
+
+def _closed_under_launch_lock(seat):
+    deadline = time.monotonic() + LAUNCH_LOCK_WAIT_SECONDS
+    with contextlib.ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(session.launch_lock(seat, blocking=False))
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(f"{seat}: launch lock held past 3 s; closing anyway.", file=sys.stderr)
+                    break
+                time.sleep(LAUNCH_POLL_SECONDS)
+        return _closed(seat)
+
+
+def _closed(seat):
+    # The epoch goes first: a script that holds the seat must see the stop
+    # before it can see the closed Chrome.
+    session.bump_stop_epoch(seat)
+    try:
+        session.close_browser(seat)
+    except plc.BrowserError as exc:
+        print(f"{seat}: {exc}", file=sys.stderr)
+        return 1
+    print(f"{seat}: closed")
+    return 0
+
+
+def _drive(seat, args, epoch):
     try:
         if args.command == "open":
-            session.open_browser(seat)
-            print(session.status(seat))
-        elif args.command == "close":
-            session.close_browser(seat)
-            print(f"{seat}: closed")
-        elif args.command == "status":
+            session.open_if_down(seat, epoch)
             print(session.status(seat))
         elif args.command == "snap":
-            session.ensure_running(seat)
+            session.ensure_running(seat, script_epoch=epoch)
             print(session.snapshot(seat))
         elif args.command == "console":
-            session.ensure_running(seat)
+            session.ensure_running(seat, script_epoch=epoch)
             print(plc.result_or(plc.run(seat, "console")))
         elif args.command == "go":
-            session.ensure_running(seat)
+            session.ensure_running(seat, script_epoch=epoch)
             plc.run(seat, "goto", args.url, timeout=60)
             print(session.current_url(seat))
     except plc.BrowserError as exc:

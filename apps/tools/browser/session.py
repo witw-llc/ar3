@@ -20,7 +20,9 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
+from ar3.locking import file_lock
 from ar3.proc import spawn
 
 from . import plc
@@ -44,6 +46,41 @@ def state_root():
 
 def seat_home(seat):
     return os.path.join(state_root(), seat)
+
+
+STOP_MESSAGE = "seat closed by a8s stop"
+
+
+def _stop_epoch_path(seat):
+    return os.path.join(seat_home(seat), "stop-epoch")
+
+
+def stop_epoch(seat):
+    """The opaque token of the last `a8s stop` on this seat; "" when none."""
+    try:
+        with open(_stop_epoch_path(seat), encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def bump_stop_epoch(seat):
+    """Write a new stop token atomically. Call it BEFORE anything is killed."""
+    home = seat_home(seat)
+    os.makedirs(home, exist_ok=True)
+    token = str(time.time_ns())
+    tmp = os.path.join(home, f".stop-epoch.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(token)
+    os.replace(tmp, _stop_epoch_path(seat))
+    return token
+
+
+def launch_lock(seat, blocking=True):
+    """The launch lock: held by a launch decision (milliseconds, plus Chrome's
+    start, 12 s at most with the teardown of a failed start) and by the stop's
+    epoch-and-kill. It is separate from the seat lock; a stop never forces past it."""
+    return file_lock(Path(seat_home(seat)) / "launch-lock", blocking=blocking)
 
 
 def profile_dir(seat):
@@ -423,9 +460,11 @@ def _route_downloads_js(seat, directory=None):
     )
 
 
-def open_browser(seat):
+def _start_chrome(seat):
+    """Launch Chrome if none runs and wait for its CDP port. Returns the CDP
+    base to attach to, or None when the seat is already attached."""
     if plc.is_open(seat):
-        return
+        return None
 
     base = cdp_base(seat)
     if not base:
@@ -443,7 +482,10 @@ def open_browser(seat):
         # nobody can drive — and an icon nobody can quit — running forever.
         _terminate_profile(seat)
         raise plc.BrowserError(f"Chrome for seat {seat!r} did not come up (no live CDP port in its profile)")
+    return base
 
+
+def _attach(seat, base):
     try:
         plc.run(seat, "attach", f"--cdp={base}", timeout=15)
     except plc.BrowserError:
@@ -553,10 +595,10 @@ def _bring_to_front(seat):
     )
 
 
-def _restart_browser(seat, url):
+def _restart_browser(seat, url, epoch=None):
     """Cycle Chrome and land back on `url`, so a restart never moves the caller."""
     close_browser(seat)
-    open_browser(seat)
+    open_if_down(seat, epoch)
     if url not in BLANK_URLS:
         try:
             plc.run(seat, "goto", url, timeout=60)
@@ -566,7 +608,40 @@ def _restart_browser(seat, url):
             ) from exc
 
 
-def ensure_running(seat):
+def open_if_down(seat, epoch):
+    """The one way to start Chrome. Every opener calls it with the epoch it read
+    at its own entry: ensure_running, the CLI verbs and the restart repair.
+
+    Chrome is down, so this call would launch it. An operation that began
+    before an `a8s stop` must not relaunch what the stop closed. The stop
+    writes its epoch and kills under the launch lock; the launch reads the
+    epoch under the same lock, so it sees the new epoch. The lock is released
+    before any page work. An epoch of None skips the check (tests only).
+    """
+    if plc.is_open(seat):
+        return
+    with launch_lock(seat):
+        if plc.is_open(seat):
+            return
+        if epoch is not None and stop_epoch(seat) != epoch:
+            raise plc.BrowserError(STOP_MESSAGE)
+        if _before_spawn is not None:
+            _before_spawn()
+        base = _start_chrome(seat)
+        # Post-spawn barrier: a stop that gave up on the launch lock may have
+        # bumped the epoch and scanned before this Chrome existed. Re-read it;
+        # if it moved, end the Chrome we made.
+        if epoch is not None and stop_epoch(seat) != epoch:
+            _terminate_profile(seat)
+            raise plc.BrowserError(STOP_MESSAGE)
+    if base:
+        _attach(seat, base)
+
+
+_before_spawn = None  # test hook: called between the epoch check and the spawn
+
+
+def ensure_running(seat, script_epoch=None):
     """Open the browser, and make sure the driven page is one a click can reach.
 
     A page no window holds takes no input in its out-of-process iframes —
@@ -582,13 +657,13 @@ def ensure_running(seat):
     either handles the modal state or reports the real error.
     """
     if not plc.is_open(seat):
-        open_browser(seat)
+        open_if_down(seat, script_epoch)
     try:
         page = _window_of_page(seat)
     except plc.BrowserError:
         return
     if page.get("window") is None:
-        _restart_browser(seat, page.get("url") or "")
+        _restart_browser(seat, page.get("url") or "", script_epoch)
     elif page.get("state") == "minimized":
         _unminimise(seat, page["window"])
     elif page.get("visible") == "hidden":

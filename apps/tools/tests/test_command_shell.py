@@ -116,8 +116,8 @@ class TestRunCommand:
             f"cs.run_command({command!r}, timeout=60)\n"
         )
         tool = spawn(
-            [sys.executable, "-c", script], cwd=Path(cs.__file__).parent,
-            env={**os.environ, "PYTHONPATH": Path(cs.__file__).parent.parent.parent / "lib"},
+            [sys.executable, "-c", script], cwd=Path(cs.__file__).parent.parent,
+            env={**os.environ, "PYTHONPATH": Path(cs.__file__).parents[3] / "lib"},
         )
         try:
             deadline = time.monotonic() + 10
@@ -211,3 +211,62 @@ class TestMainWake:
         rc = cs.main(["--from", "alice", "--allow", "alice", "--timeout=0.5", "--", "sleep 10"])
         assert rc == 0
         assert "timed out" in _reply(outbox)["content"]
+
+
+class TestHelp:
+    @pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?", "HELP"])
+    def test_help_answers_the_usage_and_runs_nothing(self, tmp_path, monkeypatch, spelling):
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        usage = cs.shell.rt.usage_from_readme(cs.shell.README)
+        assert usage
+        marker = tmp_path / "ran"
+        monkeypatch.setattr(
+            cs.shell, "run_command", lambda *a, **k: marker.write_text("ran")
+        )
+        rc = cs.main(["--seat", "box", "--from", "alice", "--allow", "alice", "--", spelling])
+        assert rc == 0
+        assert not marker.exists()
+        content = _reply(outbox)["content"]
+        assert content.startswith("box: tool-command-shell — usage")
+        assert usage in content
+        assert content.endswith("README: apps/tools/command_shell/README.md")
+
+    @pytest.mark.parametrize("message", ["help me open a page", "echo a\nhelp"])
+    def test_other_messages_still_run(self, tmp_path, monkeypatch, message):
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        seen = []
+
+        def fake(command, **kwargs):
+            seen.append(command)
+            return {"code": 0, "elapsed": 0.0, "timed_out": False, "stdout": "",
+                    "stderr": "", "stdout_trunc": False, "stderr_trunc": False}
+
+        monkeypatch.setattr(cs.shell, "run_command", fake)
+        assert cs.main(["--from", "alice", "--allow", "alice", "--", message]) == 0
+        assert seen == [message]
+
+    def test_a_refused_sender_gets_no_help(self, tmp_path, monkeypatch):
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        assert cs.main(["--from", "mallory", "--allow", "alice", "--", "help"]) == 0
+        assert list(outbox.glob("*.json")) == []
+
+    def test_help_in_print_mode_prints_the_usage(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("AR3_TOOL_REPLY_DIR", str(tmp_path / "out"))
+        assert cs.main(["--seat", "box", "--from", "operator", "--allow", "operator", "--", "/?"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("box: tool-command-shell")
+        assert cs.shell.rt.usage_from_readme(cs.shell.README) in out
+
+    def test_help_without_a_usage_section_says_so(self, tmp_path, monkeypatch, capsys):
+        bare = tmp_path / "README.md"
+        bare.write_text("# tool-command-shell\n\n## State\n\nnone\n")
+        monkeypatch.setattr(cs.shell, "README", bare)
+        monkeypatch.setenv("AR3_TOOL_REPLY_DIR", str(tmp_path / "out"))
+        assert cs.main(["--seat", "box", "--from", "operator", "--allow", "operator", "--", "help"]) == 0
+        assert 'no "## Usage" section in apps/tools/command_shell/README.md' in capsys.readouterr().out

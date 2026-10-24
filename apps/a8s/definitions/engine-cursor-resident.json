@@ -1,0 +1,90 @@
+{
+  "description": "Cursor Agent CLI as a long-running resident engine node — `r4t engine cursor run --resident`, keeping one `agent acp` session with the `a8s_tell` MCP server alive while it works. This definition does not pass `--force`: a tool call is asked and rejected once. `engine-cursor-resident-unrestricted` passes `--force`, which agent 2026.10.22-27dcf5f honors by not asking. Stdin EOF does not end `agent acp`. The bridge cancels an in-flight turn, closes stdin, then SIGTERM and SIGKILL the engine's process group. The session stays up while it works and for `TIMEOUT` seconds of quiet after the last turn (default 2700, 45 minutes), pushing new messages into the active conversation and wrapping up STATUS.md/LESSONS.md at expiry; the next message after that starts a fresh session from STATUS.md. `a8s stop`, `restart` and `kill` end the session at once through `stop.invoke`; `status.invoke` lets `a8s ps` show busy or resident. Enable private K7E memory with `a8s vars <name> set MEMORY on`. Pick a model with `a8s vars <name> set MODEL <id>` (or `a8s add ... --model=<id>`); unset means composer-2.5, not the CLI's own `auto`, which reuses the last model run on the machine and spends on the newest one. Set the quiet window per node with `a8s vars <name> set TIMEOUT <secs>`. Set MODEL with bracket options such as [effort=high] to select reasoning effort. A separate EFFORT variable is ignored, with one warning. Commit as the agent with `a8s vars <name> set GIT_NAME ...` and `GIT_EMAIL ...`; unset uses git's own config.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "cursor",
+    "run",
+    "--resident",
+    "--memory=$MEMORY?",
+    "--memory-home=$MEMORY_HOME?",
+    "--memory-writer=$MEMORY_WRITER?",
+    "--memory-people=$MEMORY_PEOPLE?",
+    "--timeout=$TIMEOUT?",
+    "--effort=$EFFORT?",
+    "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "cursor",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "cursor",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "cursor",
+      "stop",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "status": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "cursor",
+      "status",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

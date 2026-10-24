@@ -53,7 +53,7 @@ def foreign_listener():
 
 
 def _drive_open(monkeypatch, seat, main_pids):
-    """Run open_browser with every process call faked; return the recorded calls."""
+    """Run open_if_down with every process call faked; return the recorded calls."""
     calls = []
     monkeypatch.setattr(session.plc, "is_open", lambda s: False)
     monkeypatch.setattr(session, "_main_pids", lambda s: main_pids)
@@ -143,7 +143,7 @@ def test_attach_goes_only_to_the_endpoint_our_own_chrome_holds(monkeypatch, tmp_
         return object()
 
     monkeypatch.setattr(session.urllib.request, "urlopen", fake_urlopen)
-    session.open_browser("seat")
+    session.open_if_down("seat", None)
     assert asked == ["http://[::1]:52729/json/version"]
     assert calls == ["attach:--cdp=http://[::1]:52729"]
 
@@ -158,7 +158,7 @@ def test_a_port_held_only_by_a_foreign_pid_is_not_ours_even_when_it_answers(
     asked = []
     monkeypatch.setattr(session.urllib.request, "urlopen", lambda url, timeout=None: asked.append(url))
     with pytest.raises(session.plc.BrowserError, match="did not come up"):
-        session.open_browser("seat")
+        session.open_if_down("seat", None)
     assert asked == []
     assert not any(c.startswith("attach") for c in calls)
 
@@ -200,7 +200,7 @@ def test_a_listener_with_no_chrome_of_ours_is_never_attached(
     _record_port("seat", foreign_listener)
     calls = _drive_open(monkeypatch, "seat", main_pids=[])
     with pytest.raises(session.plc.BrowserError):
-        session.open_browser("seat")
+        session.open_if_down("seat", None)
     assert calls[0] == "launch"
     assert not any(c.startswith("attach") for c in calls)
 
@@ -212,7 +212,7 @@ def test_a_seat_with_a_live_chrome_of_its_own_attaches_to_its_recorded_port(
     monkeypatch.delenv("AR3_BROWSER_PORT", raising=False)
     _record_port("seat", foreign_listener)
     calls = _drive_open(monkeypatch, "seat", main_pids=["7"])
-    session.open_browser("seat")
+    session.open_if_down("seat", None)
     assert calls == [f"attach:--cdp=http://127.0.0.1:{foreign_listener}"]
 
 
@@ -221,7 +221,7 @@ def test_the_override_fails_closed_on_a_port_in_use(monkeypatch, tmp_path, forei
     monkeypatch.setenv("AR3_BROWSER_PORT", str(foreign_listener))
     calls = _drive_open(monkeypatch, "seat", main_pids=[])
     with pytest.raises(session.plc.BrowserError, match="in use"):
-        session.open_browser("seat")
+        session.open_if_down("seat", None)
     assert calls == []
 
 
@@ -229,13 +229,13 @@ def test_a_live_seat_is_never_attached_through_a_foreign_override(
     monkeypatch, tmp_path, foreign_listener
 ):
     """Artemis's round-6 probe: seat A runs on its own port, the override names
-    another live listener (seat B). open_browser must not attach to B."""
+    another live listener (seat B). open_if_down must not attach to B."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     _record_port("seat", foreign_listener)
     monkeypatch.setenv("AR3_BROWSER_PORT", str(foreign_listener + 1))
     calls = _drive_open(monkeypatch, "seat", main_pids=["7"])
     with pytest.raises(session.plc.BrowserError, match="not the requested"):
-        session.open_browser("seat")
+        session.open_if_down("seat", None)
     assert calls == []
 
 
@@ -393,7 +393,7 @@ def test_open_cleans_up_chrome_when_attach_fails(monkeypatch, tmp_path):
     reaped = []
     monkeypatch.setattr(session, "_terminate_profile", lambda seat: reaped.append(seat))
     try:
-        session.open_browser("seat")
+        session.open_if_down("seat", None)
     except session.plc.BrowserError:
         pass
     assert reaped == ["seat"]
@@ -412,7 +412,7 @@ class FakeSeat:
         monkeypatch.setattr(session.plc, "run_code", self.run_code)
         monkeypatch.setattr(session.plc, "run", self.run)
         monkeypatch.setattr(session, "close_browser", lambda seat: self.restart("close"))
-        monkeypatch.setattr(session, "open_browser", lambda seat: self.restart("open"))
+        monkeypatch.setattr(session, "open_if_down", lambda seat, epoch=None: self.restart("open"))
 
     def restart(self, step):
         self.calls.append(step)
@@ -544,7 +544,7 @@ def test_open_routes_downloads_right_after_attaching(monkeypatch, tmp_path):
             "route" if "setDownloadBehavior" in body else "code"
         ),
     )
-    session.open_browser("seat")
+    session.open_if_down("seat", None)
     assert steps == ["attach", "route"]
 
 
@@ -583,3 +583,133 @@ def test_chrome_starts_in_its_own_session_with_quiet_output(monkeypatch, tmp_pat
     )
     proc.wait()
     assert int(out.read_text()) == proc.pid
+
+
+def test_ensure_running_with_a_running_chrome_ignores_the_epoch(monkeypatch):
+    seat = FakeSeat(monkeypatch, "https://example.com/")
+    monkeypatch.setattr(session, "stop_epoch", lambda s: pytest.fail("epoch read"))
+    session.ensure_running("seat", script_epoch="old")
+
+
+def _closed_chrome(monkeypatch):
+    launched = []
+    monkeypatch.setattr(session.plc, "is_open", lambda s: False)
+    monkeypatch.setattr(session, "_start_chrome", lambda s: launched.append(s))
+    monkeypatch.setattr(session, "_attach", lambda s, b: None)
+    monkeypatch.setattr(session, "_window_of_page", lambda s: {"window": 1, "visible": "visible"})
+    return launched
+
+
+def test_ensure_running_will_not_relaunch_after_a_stop(monkeypatch):
+    launched = _closed_chrome(monkeypatch)
+    old = session.stop_epoch("seat")
+    session.bump_stop_epoch("seat")
+    with pytest.raises(session.plc.BrowserError, match="seat closed by a8s stop"):
+        session.ensure_running("seat", script_epoch=old)
+    assert launched == []
+
+
+def test_ensure_running_launches_when_the_epoch_is_unchanged_or_absent(monkeypatch):
+    launched = _closed_chrome(monkeypatch)
+    session.bump_stop_epoch("seat")
+    session.ensure_running("seat", script_epoch=session.stop_epoch("seat"))
+    session.ensure_running("seat")
+    assert launched == ["seat", "seat"]
+
+
+def test_the_stop_epoch_is_empty_until_bumped_and_changes_each_bump():
+    assert session.stop_epoch("fresh") == ""
+    first = session.bump_stop_epoch("fresh")
+    second = session.bump_stop_epoch("fresh")
+    assert first and second != first
+    assert session.stop_epoch("fresh") == second
+
+
+def test_a_launch_waits_on_the_launch_lock_then_refuses_after_the_stop(monkeypatch):
+    import textwrap
+    launched = _closed_chrome(monkeypatch)
+    old = session.stop_epoch("seat")
+    code = textwrap.dedent("""
+        import time
+        from browser import session
+        with session.launch_lock("seat"):
+            print("held", flush=True)
+            time.sleep(1.5)
+            session.bump_stop_epoch("seat")
+    """)
+    proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
+                            env={**os.environ, "PYTHONPATH": ":".join(sys.path)})
+    try:
+        assert proc.stdout.readline().strip() == "held"
+        started = time.monotonic()
+        with pytest.raises(session.plc.BrowserError, match="seat closed by a8s stop"):
+            session.ensure_running("seat", script_epoch=old)
+        assert time.monotonic() - started > 1.0
+    finally:
+        proc.wait()
+    assert launched == []
+
+
+def test_a_stop_that_gave_up_on_the_launch_lock_still_ends_the_launch(monkeypatch, capsys):
+    """The exact barrier: the launch passes its check, the stop times out and finds
+    no Chrome, then the launch spawns, re-reads the epoch and ends its own Chrome."""
+    import threading
+    from browser import cli
+    events = []
+    monkeypatch.setattr(session.plc, "is_open", lambda s: False)
+    monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
+    monkeypatch.setattr(session, "_attach", lambda s, b: events.append("attach"))
+    monkeypatch.setattr(session, "_terminate_profile", lambda s: events.append("terminate"))
+    monkeypatch.setattr(session, "close_browser", lambda s: events.append("close"))
+    monkeypatch.setattr(cli, "LAUNCH_LOCK_WAIT_SECONDS", 0.5)
+    at_hook, release = threading.Event(), threading.Event()
+
+    def hook():
+        at_hook.set()
+        assert release.wait(20)
+
+    monkeypatch.setattr(session, "_before_spawn", hook)
+    old = session.stop_epoch("seat")
+    result = {}
+
+    def launch():
+        try:
+            session.ensure_running("seat", script_epoch=old)
+        except session.plc.BrowserError as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=launch)
+    thread.start()
+    assert at_hook.wait(10)
+    assert cli._close("seat") == 0
+    assert events == ["close"]
+    assert "launch lock held past 3 s; closing anyway." in capsys.readouterr().err
+    release.set()
+    thread.join(20)
+    assert events == ["close", "spawn", "terminate"]
+    assert result["error"] == "seat closed by a8s stop"
+
+
+def test_the_restart_repair_does_not_reopen_chrome_after_a_stop(monkeypatch):
+    events = []
+    monkeypatch.setattr(session.plc, "is_open", lambda s: False)
+    monkeypatch.setattr(session, "close_browser", lambda s: events.append("close"))
+    monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
+    monkeypatch.setattr(session, "_before_spawn", None)
+    old = session.stop_epoch("seat")
+    session.bump_stop_epoch("seat")
+    with pytest.raises(session.plc.BrowserError, match="seat closed by a8s stop"):
+        session._restart_browser("seat", "https://example.com/", old)
+    assert events == ["close"]
+
+
+def test_the_restart_repair_cannot_leave_chrome_when_the_stop_lands_before_the_spawn(monkeypatch):
+    events = []
+    monkeypatch.setattr(session.plc, "is_open", lambda s: False)
+    monkeypatch.setattr(session, "close_browser", lambda s: events.append("close"))
+    monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
+    monkeypatch.setattr(session, "_terminate_profile", lambda s: events.append("terminate"))
+    monkeypatch.setattr(session, "_before_spawn", lambda: session.bump_stop_epoch("seat"))
+    with pytest.raises(session.plc.BrowserError, match="seat closed by a8s stop"):
+        session._restart_browser("seat", "", session.stop_epoch("seat"))
+    assert events == ["close", "spawn", "terminate"]

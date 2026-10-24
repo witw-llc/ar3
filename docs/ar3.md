@@ -10,7 +10,7 @@ The front door to AR3: **a8s** (agent message router), **r4t**
 
 `ar3` never mutates product state; it owns and maintains the suite's own
 substrate instead. It reads a8s/r4t/k7e state and probes prerequisites, and it
-never runs another product's commands for you (`ar3 tool` is the one local-testing exception, below) — when something is missing,
+never runs another product's commands for you (`ar3 tool` is the one exception: it drives a tool node on this machine, below) — when something is missing,
 `ar3` names the real command to fix it. What `ar3` writes is its own substrate
 and never a product's state: `ar3 deps` fetches on-demand heavy dependencies
 into `~/.local/share/ar3/deps`, and `ar3 update` maintains the suite install
@@ -23,7 +23,7 @@ service is registered; `ar3 deps` is the explicit form, for scripts and for
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
 ar3 update     # pull this install forward to the latest release
-ar3 tool command-shell -- echo ok  # run a bundled tool node once, locally
+ar3 tool command-shell --node mac-terminal  # drive a tool node from this terminal
 ar3 deps       # list on-demand heavy dependency groups and their status
 ar3 deps a8s-s3 # fetch one group by hand (here, boto3 for a8s's S3 storage)
 ar3 --version  # the suite semver (every ar3 CLI answers this)
@@ -65,16 +65,33 @@ overrides: `A8S_HOME`, `R4T_HOME` (and `XDG_CONFIG_HOME`), `K7E_HOME`.
 
 ## `ar3 tool`
 
-`ar3 tool <name> [--from NAME] [--as NODE] [--var KEY=VALUE]... [--attach PATH]... [--] [message... | -]`
-runs a bundled tool node (`apps/a8s/definitions/tool-<name>.json`) once, in the
-current directory, so you can try it with no router. The argv comes from a8s's
-own expander, so it matches a wake: `$SENDER` is `--from` (default `operator`),
-`$RECIPIENT` is `--as` (default the tool name), `--var` sets per-node vars, and
-`ALLOW` defaults to the sender. A missing required var stops the verb and names
-it. Each `--attach` adds an `ATTACHED FILE:` line to the message; `-` reads the
-message from stdin. The reply prints instead of being sent, and attachments are
-copied to a temp directory named on stderr. The exit code is the tool's. It
-writes no a8s state. An unknown name lists the bundled tools.
+`ar3 tool <name> [--node NAME] [--from NAME] [--var KEY=VALUE]... [--attach PATH]... [--] [command... | -]`
+drives a bundled tool node (`apps/a8s/definitions/tool-<name>.json`) on this
+machine. The argv comes from a8s's own expander, so it matches a wake.
+
+Three modes:
+
+- With a command, it runs one script and prints the reply.
+- With `-`, it reads one script from stdin.
+- With no command, it starts a session: one command per line, each reply
+  printed when it is done. A failed command does not end the session. A line
+  that ends in `<<MARKER` opens a block that runs to a line holding `MARKER`.
+  Ctrl-D ends the session. A pipe works as well, with no prompt.
+
+`--node NAME` reads the node from the a8s registry. It takes the node's vars
+and its directory, and `$RECIPIENT` is the node's name. The node must run
+`tool-<name>`. The person at the keyboard is the operator: `ALLOW` is the
+sender (`--from`, default `operator`), so the ACL passes. `--var` overrides
+last; `--var ALLOW=alice` makes a refusal. Without `--node`, the run uses the
+tool's name and the current directory, and only the vars you give. A missing
+required var stops the verb and names it, with the `a8s vars` command that sets
+it when `--node` is given. `tool-vault` takes no `--node` and no session.
+
+Each `--attach` adds an `ATTACHED FILE:` line to the message; it needs a
+command or `-`. The reply prints instead of being sent, and attachments are
+copied to a temp directory named on stderr; each prints as `artifact: <path>`.
+The exit code is the tool's. It writes no a8s state. An unknown name lists the
+bundled tools.
 
 ## `ar3 doctor`
 

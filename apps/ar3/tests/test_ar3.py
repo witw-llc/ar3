@@ -5,6 +5,7 @@ stubbed, so no test reads real state or executes a real harness CLI.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import pathlib
@@ -1430,7 +1431,8 @@ def test_tool_command_shell_prints_the_reply(monkeypatch, capfd):
     _real_run(monkeypatch)
     assert ar3.main(["tool", "command-shell", "--", "echo", "ok"]) == 0
     out = capfd.readouterr().out
-    assert "to operator:" in out
+    assert "to operator:" not in out
+    assert "$ echo ok" in out
     assert out.rstrip().endswith("ok")
 
 
@@ -1441,8 +1443,7 @@ def test_tool_refused_sender_gets_no_reply(monkeypatch, capfd):
     )
     captured = capfd.readouterr()
     assert code == 0
-    assert "to mallory" not in captured.out
-    assert "ok" not in captured.out
+    assert "$ echo ok" not in captured.out
     assert "refused" in captured.out + captured.err
 
 
@@ -1461,6 +1462,144 @@ def test_tool_missing_required_var_names_it(tmp_path, monkeypatch, capsys):
 def test_tool_unknown_name_lists_the_bundled_tools(capfd):
     assert ar3.main(["tool", "nope"]) == 2
     assert "command-shell" in capfd.readouterr().err
+
+
+REPO = pathlib.Path(__file__).resolve().parents[3]
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    """A fake a8s registry with one command-shell node named shell1."""
+    root = tmp_path / "shell-root"
+    root.mkdir()
+    home = tmp_path / "a8s"
+    home.mkdir()
+    monkeypatch.setenv("A8S_HOME", str(home))
+    node = {
+        "root": str(root),
+        "definition": str(REPO / "apps/a8s/definitions/tool-command-shell.json"),
+        "vars": {"ALLOW": "iris", "TIMEOUT": "5", "env.AR3_PROBE": "from-registry"},
+    }
+    other = {
+        "root": str(root),
+        "definition": str(REPO / "apps/a8s/definitions/tool-browser.json"),
+        "vars": {},
+    }
+    (home / "a8s.json").write_text(
+        json.dumps({"agents": {"shell1": node, "web1": other}, "aliases": {}, "namespaces": {}})
+    )
+    return root, home
+
+
+def test_tool_node_loads_registry_vars_and_directory(registry, capfd):
+    root, _home = registry
+    assert ar3.main(["tool", "command-shell", "--node", "Shell1", "--", "pwd; echo $AR3_PROBE"]) == 0
+    out = capfd.readouterr().out
+    assert str(root) in out
+    assert "from-registry" in out
+
+
+def test_tool_node_operator_passes_the_acl(registry, capfd):
+    assert ar3.main(["tool", "command-shell", "--node", "shell1", "--", "echo ok"]) == 0
+    assert "exit 0" in capfd.readouterr().out
+
+
+def test_tool_node_var_overrides_win(registry, capfd):
+    code = ar3.main(
+        ["tool", "command-shell", "--node", "shell1", "--from", "mallory", "--var", "ALLOW=alice", "--", "echo ok"]
+    )
+    captured = capfd.readouterr()
+    assert code == 0
+    assert "$ echo ok" not in captured.out
+    assert "refused" in captured.out + captured.err
+    assert ar3.main(
+        ["tool", "command-shell", "--node", "shell1", "--var", "TIMEOUT=1", "--", "sleep 3"]
+    ) == 0
+    assert "timed out" in capfd.readouterr().out
+
+
+def test_tool_node_unregistered_is_refused(registry, capsys):
+    assert ar3.main(["tool", "command-shell", "--node", "nope", "--", "echo ok"]) == 2
+    assert capsys.readouterr().err.strip() == (
+        "ar3 tool: no node named 'nope' in the a8s registry. Run a8s ls to see the nodes."
+    )
+
+
+def test_tool_node_of_another_definition_is_refused(registry, capsys):
+    assert ar3.main(["tool", "command-shell", "--node", "web1", "--", "echo ok"]) == 2
+    assert capsys.readouterr().err.strip() == (
+        "ar3 tool: node 'web1' runs tool-browser, not tool-command-shell."
+    )
+
+
+def test_tool_node_missing_var_names_the_fix(registry, tmp_path, monkeypatch, capsys):
+    (tmp_path / "apps" / "a8s" / "definitions").mkdir(parents=True)
+    (tmp_path / "apps" / "a8s" / "definitions" / "tool-needy.json").write_text(
+        json.dumps({"invoke": ["$PYTHON", "-c", "pass", "$NEEDED", "$MESSAGE"]})
+    )
+    _root, home = registry
+    (home / "a8s.json").write_text(json.dumps({"agents": {"needy1": {
+        "root": str(tmp_path), "definition": "tool-needy", "vars": {}}}}))
+    real_defs = ar3._load_definitions()
+    monkeypatch.setattr(ar3, "_load_definitions", lambda: real_defs)
+    monkeypatch.setattr(ar3, "REPO_ROOT", tmp_path)
+    assert ar3.main(["tool", "needy", "--node", "needy1", "--", "hi"]) == 2
+    err = capsys.readouterr().err
+    assert "node 'needy1' has no NEEDED var. Set it with a8s vars needy1 set NEEDED <value>" in err
+
+
+def _lines(items):
+    items = list(items)
+
+    def readline(_prompt):
+        return items.pop(0) if items else None
+
+    return readline
+
+
+def test_read_submission_joins_a_block():
+    read = _lines(["run-code <<END", "a", "", "  END", "url"])
+    assert ar3._read_submission(read, "> ") == "run-code <<END\na\n\n  END"
+    assert ar3._read_submission(read, "> ") == "url"
+    assert ar3._read_submission(read, "> ") is None
+
+
+def test_read_submission_block_cut_by_end_of_input_runs_nothing(capsys):
+    read = _lines(["run-code <<END", "a"])
+    assert ar3._read_submission(read, "> ") is None
+    assert "no line reads END. The block did not run." in capsys.readouterr().err
+
+
+def test_tool_session_runs_each_line_and_continues(registry, monkeypatch, capfd):
+    monkeypatch.setattr("sys.stdin", io.StringIO("echo one\nfalse\n\necho two\n"))
+    assert ar3.main(["tool", "command-shell", "--node", "shell1"]) == 0
+    out = capfd.readouterr().out
+    assert "one" in out and "two" in out
+    assert out.count("$ ") == 3
+
+
+def test_tool_prints_artifact_lines_in_both_modes(registry, monkeypatch, capfd):
+    args = ["tool", "command-shell", "--node", "shell1", "--var", "INLINE_MAX=1"]
+    assert ar3.main([*args, "--", "echo hello world"]) == 0
+    out = capfd.readouterr().out
+    assert "artifact: " in out
+    for line in out.splitlines():
+        if line.startswith("artifact: "):
+            assert pathlib.Path(line[len("artifact: "):]).is_file()
+    monkeypatch.setattr("sys.stdin", io.StringIO("echo hello world\n"))
+    assert ar3.main(args) == 0
+    assert "artifact: " in capfd.readouterr().out
+
+
+def test_tool_session_refuses_attach_and_vault_takes_no_session(registry, tmp_path, capsys):
+    file = tmp_path / "f.txt"
+    file.write_text("x")
+    assert ar3.main(["tool", "command-shell", "--node", "shell1", "--attach", str(file)]) == 2
+    assert "--attach needs a command or -." in capsys.readouterr().err
+    assert ar3.main(["tool", "vault", "--node", "shell1", "--", "x"]) == 2
+    assert "vault takes no --node and no session" in capsys.readouterr().err
+    assert ar3.main(["tool", "vault"]) == 2
+    assert "vault takes no --node and no session" in capsys.readouterr().err
 
 
 def test_browser_tool_probes_are_optional_doctor_checks():

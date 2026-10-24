@@ -1620,7 +1620,10 @@ except ProcessLookupError:
     CHILD = (
         "import os, signal, sys, time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "open(sys.argv[1], 'w', encoding='utf-8', newline='').write(str(os.getpid()))\n"
+        "pid = str(os.getpid())\n"
+        "tmp = sys.argv[1] + '.' + pid + '.tmp'\n"
+        "open(tmp, 'w', encoding='utf-8', newline='').write(pid)\n"
+        "os.replace(tmp, sys.argv[1])\n"
         "time.sleep(60)\n"
     )
 

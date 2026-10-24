@@ -18,267 +18,170 @@ its bare name:
 a8s add mac-terminal ~/work tool-command-shell --ALLOW=operator,assistant
 ```
 
-## `tool-command-shell` — a command runner
+Each tool has its own README with the full command list, the reply shape, the
+vars, the state and the trust notes.
 
-Run a shell command sent as a message, and reply with its output. A poor man's
-SSH: stand up a node on any machine, allowlist who may drive it, and
+## Drive a tool in real time
 
-```bash
-tell mac-terminal ls -la
-```
+### From the node's machine
 
-runs `ls -la` on that machine and sends the output back. Each message is one
-command in its own process, in the node's directory. Nothing persists between
-commands — no session, no remembered working directory. Output that fits rides
-in the reply; larger output is attached as `stdout.txt` / `stderr.txt`.
-
-### The ACL is mandatory
-
-The `ALLOW` var lists the senders who may run commands — comma- or
-space-separated, case-insensitive. It is **required**: for a node registered
-without it, a8s aborts every wake before the tool runs and dead-letters the
-message (`a8s logs <node>` names the missing var), so a shell node can never
-run with no allowlist. A sender not on the list gets no reply; the refusal is
-logged on the node.
-
-`$SENDER` is the router's own stamp — filesystem ownership for a local send,
-the cluster secret across a remote — so the ACL is exactly as strong as cluster
-membership. Anyone who can send as an allowlisted name runs commands as the
-node's user. Allowlist only names you trust with a shell, and run the node as a
-user with the access you intend to lend.
-
-### Options (per-node vars)
-
-| Var | Default | Meaning |
-|---|---|---|
-| `ALLOW` | — (required) | Sender names permitted to run commands. |
-| `SHELL` | `sh` (POSIX), `cmd` (Windows) | Shell: `sh`, `bash`, `zsh`, `cmd`, `powershell`, `pwsh`, or any interpreter taking `-c`. |
-| `TIMEOUT` | `60` | Seconds before the command and everything it started are killed. Keep it under the definition's 600 s wake limit. |
-| `INLINE_MAX` | `4096` | Bytes of output carried inline; beyond it, output is attached. |
-| `OUTPUT_MAX` | `10485760` | Bytes kept per stream; the rest is read and dropped, and the reply says so. |
+`ar3 tool <name> --node <node>` drives a tool node from one terminal. It reads
+the node's vars from the a8s registry, runs in the node's directory, and prints
+each reply. The person at the keyboard is the operator and passes the ACL.
 
 ```bash
-a8s add win-box . tool-command-shell --ALLOW=operator --SHELL=powershell --TIMEOUT=120
-a8s vars mac-terminal set INLINE_MAX 8192
+ar3 tool command-shell --node mac-terminal                  # a session
+ar3 tool command-shell --node mac-terminal -- uname -a      # one script
+ar3 tool command-shell --node mac-terminal - <<'EOF'       # one script from stdin
+uname -a
+EOF
 ```
 
-### The reply
+With no command, `ar3 tool` starts a session. Type one command per line. Each
+reply prints when the command is done. A failed command prints its reply and
+the session goes on. A line that ends in `<<MARKER` opens a block that runs to
+a line holding `MARKER`. Press Ctrl-D to end the session. A session reads from
+a pipe as well, with no prompt. `--var KEY=VALUE` overrides a node var for the
+run. `--attach PATH` adds a file to a one-script run. Attachments print as
+`artifact: <path>`.
 
+A browser seat has one lock. `a8s stop` ends the script that holds the seat:
+its next command fails with `seat closed by a8s stop`. Every path that opens Chrome
+checks the stop, so a stop ends any operation that began before it. A new
+command after the stop opens Chrome again.
+
+`tool-vault` has no `--node` and no session. Its messages are sealed. Use the
+vault client.
+
+### From another node
+
+Open two terminals. In the first, inside the directory of your own node, watch
+for replies:
+
+```bash
+tells -f
 ```
-$ du -sh *
-exit 0 in 0.14s
 
-stdout:
-12K   docs
-4.0K  README.md
+In the second, send the tool a message. Send multi-line scripts on stdin so the
+shell never touches them:
+
+```bash
+tell mac-terminal - <<'EOF'
+uname -a
+EOF
 ```
 
-One message is one process tree: nothing a command starts outlives it. A
-background child the shell leaves behind is killed when the command ends,
-whether by exit, by `TIMEOUT`, or by a8s ending the wake (node stop, the 600 s
-wake limit), when the tool kills the tree before it goes. A child still
-holding the output pipes keeps the command running until `TIMEOUT`. The kill
-is the command's own process group on POSIX. Windows has no process group:
-the kill is `taskkill /T` on the shell's tree, which reaches what is running
-at the deadline while the shell is alive; a child the shell leaves behind
-after exiting is not reached, and a stop from a8s is a plain TerminateProcess
-the tool cannot see, so the command outlives both cases there. To leave something running on the machine,
-start it in its own session with its output redirected:
-`setsid my-server >/tmp/my-server.log 2>&1 &`. Output over `INLINE_MAX`
-comes back as attachments with a short head inline; a stream over `OUTPUT_MAX`
-keeps its first `OUTPUT_MAX` bytes, the rest is read and dropped, and the reply
-says so.
+The reply arrives in the first terminal. Attachments land in your node's
+`.files/<msg-ulid>/`.
 
-## `tool-vault` - encrypted file storage
+### Try a tool with no node
 
-An encrypted file store for agents. `/public-key`, `/connect` and `/help` travel
+`ar3 tool <name>` without `--node` runs the tool in the current directory with
+the vars you give by `--var`, with no registry:
+
+```bash
+ar3 tool command-shell -- "echo hello"
+ar3 tool command-shell -- help
+```
+
+## Ask a tool for help
+
+Send `help` to any tool node. The message must be a single line that reads
+`help`, `/help`, `--help` or `/?`, in any case. The node answers with its usage
+text and runs nothing: no command, no browser step, no Gemini turn. The text is
+the `## Usage` section of the tool's README, read when help is called. It lists
+the commands and the vars that shape the tool. The reply names the node and the
+tool and ends with the path of the README.
+
+```bash
+tell mac-terminal help
+```
+
+`help me open a page` is not help. It goes to the tool as a command. A sender
+who is not on the node's `ALLOW` list gets no reply, to `help` as to anything
+else. `tool-vault` has no ACL, so every sender gets its help in plaintext.
+
+## The tools
+
+### `tool-command-shell` - a command runner
+
+Run a shell command sent as a message, and reply with its output. A small SSH:
+each message is one command, in its own process, in the node's directory.
+Nothing persists between messages. Output that fits rides in the reply, and
+larger output is attached. Full reference:
+[apps/tools/command_shell/README.md](../apps/tools/command_shell/README.md).
+
+### `tool-vault` - encrypted file storage
+
+An encrypted file store for agents. `help`, `/public-key` and `/connect` travel
 in plaintext. Every other message is sealed to the vault's key, and every reply
-is sealed to the agent's throwaway key and signed. The crypto runs through the
-`openssl` command, which must be on `PATH` (or named by the `OPENSSL` var).
+is sealed and signed. There is no ACL var: every sender is served under its own
+name and needs an operator-issued voucher. Full reference:
+[apps/tools/vault/README.md](../apps/tools/vault/README.md).
 
-```bash
-a8s add vault ~/vault-seat tool-vault
-python3 <ar3>/apps/tools/vault init --node vault
-python3 <ar3>/apps/tools/vault voucher issue alice --node vault
-```
-
-There is no ACL var: every sender is served under its own section, keyed by its
-name, and no sender sees another's files. The operator issues the first voucher
-for each name on the vault host. The agent pins the key, connects, and
-authenticates with that voucher. The vault hands back a fresh voucher each time:
-
-```bash
-tell vault /public-key
-python3 <ar3>/apps/tools/vault client pin vault.pem --fingerprint <F>
-python3 <ar3>/apps/tools/vault client connect --to vault
-```
-
-`tell vault /help` shows the full protocol. Sealed commands are `/authenticate`,
-`/list`, `/store <name>`, `/retrieve <name>`, `/delete <name>`, `/voucher
-new|list|revoke-all` and `/logout`. A voucher works once, and a seat holds at
-most a fixed number unused.
-
-**State.** The key, pepper and index live in
-`${XDG_DATA_HOME:-~/.local/share}/ar3/vault/<node>/` (mode 0700), and the sealed
-files in its `data/` folder. Every tool node keeps its state under `ar3/`. The optional `VAULT_DIR` var (or environment variable) moves the
-whole root. Admin commands (`init`, `fingerprint`, `admin`, `voucher`, `seat`)
-take `--node` and `--dir` to find it.
-
-**Trust.** The vault shares a Unix user with whoever runs the node. Anyone who
-can read that user's files can read the key. Run it as its own user when that
-matters.
-
-## `tool-browser` - a signed-in Chrome seat
+### `tool-browser` - a signed-in Chrome seat
 
 A persistent Chrome that other agents drive by message. Each message is a
-script of browser commands. The tool runs the script in the seat's own Chrome
-profile and replies with a transcript. The profile keeps its logins between
-messages, so a page that needs a sign-in stays signed in.
+script of browser commands, one per line. The reply is a transcript, with
+snapshots, screenshots, console logs, videos and downloads attached. The
+profile keeps its logins between messages. Full reference, with every command:
+[apps/tools/browser/README.md](../apps/tools/browser/README.md).
 
-**Needs.** Chrome, Node, and the Playwright command line on the node's `PATH`:
+### `tool-gemini-web` - Gemini through a browser seat
 
-```bash
-npm install -g @playwright/cli
-a8s add garmin ~/browsers/garmin tool-browser --ALLOW=iris
-```
+Gemini on the web, as an a8s seat. The tool types each message into Gemini in a
+signed-in browser seat and sends the answer back. Each sender has its own
+conversation. Files go in and generated images come back. Full reference:
+[apps/tools/gemini_web/README.md](../apps/tools/gemini_web/README.md).
 
-A wake has no login profile. On Linux, put the Node bin directory (for
-example the nvm one) on the node's path, and name the display for a headed
-seat:
+## The ACL
 
-```bash
-a8s vars garmin set env.PATH "$HOME/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin"
-a8s vars garmin set env.DISPLAY :0
-```
+The tools that run something for a sender (`tool-command-shell`, `tool-browser`,
+`tool-gemini-web`) take a required `ALLOW` var: the senders who may use the
+node, comma- or space-separated, case-insensitive. For a node registered
+without it, a8s aborts every wake before the tool runs and dead-letters the
+message (`a8s logs <node>` names the missing var). A sender who is not on the
+list gets no reply, and the refusal is logged on the node.
 
-Chrome runs headed when `DISPLAY` is set on Linux, and headless otherwise.
-It stays running between wakes. `a8s stop` closes it. A wake
-attaches only to a Chrome that holds this seat's profile, on the port that
-profile recorded; a listener on the recorded port that is not that Chrome is
-never driven, and a fixed `PORT` that differs from the recorded port of a
-running seat is refused (close the seat first). `a8s stop` has 30
-seconds: the graceful close keeps to a shorter budget and then ends the
-process tree, so the forced cleanup always runs before the deadline.
+`$SENDER` is the router's own stamp: filesystem ownership for a local send, the
+cluster secret across a remote. The ACL is exactly as strong as cluster
+membership. Allowlist only names you trust with what the tool can do.
 
-**Use.** One command per line. The script stops at the first failure, and a
-failure attaches a snapshot of the page it stopped on.
-
-```bash
-tell garmin "open
-go https://example.com
-snap
-shot"
-```
-
-The vocabulary is fixed: `open`, `close`, `save`, `url`, `go`, `click`,
-`fill`, `press`, `type`, `text`, `wait`, `wait-for`, `wait-for-url`,
-`assert-text`, `assert-url`, `back`, `forward`, `reload`, `scroll`, `find`,
-`select`, `check`, `uncheck`, `hover`, `dialog-accept`, `dialog-dismiss`,
-`requests`, `console`, `video-start`, `video-stop`, `video-chapter`, `snap`,
-`shot`, `upload`, `drop`, `download`, `eval` and `run-code`. A line that ends
-in `<<MARKER` opens a block that runs to a line holding `MARKER`.
-
-The reply starts with `<node>: ok` or `<node>: failed: <reason>`, then lists
-each command with its output. A snapshot, screenshot, console log, video or
-download comes back as an attachment. The body is cut at 4000 characters.
-
-### Options (per-node vars)
-
-| Var | Default | Meaning |
-|---|---|---|
-| `ALLOW` | — (required) | Sender names permitted to drive the seat. A sender outside it gets no reply. |
-| `ALLOW_EVAL` | off | `1` permits `eval` and `run-code`. |
-| `CHROME` | found on `PATH` | The Chrome binary. |
-| `PORT` | Chrome picks a free one | A fixed Chrome debugging port. Unset, Chrome picks a free port and records it in the profile, so seats never collide. Set, Chrome writes no port record, so the seat proves ownership through the process holding the listening socket (`lsof`, or `ss` on Linux); it fails closed when another process holds the port, and when its own running Chrome recorded a different port. |
-
-**State.** The Chrome profile and the artifacts live in
-`${XDG_DATA_HOME:-~/.local/share}/ar3/browser/<node>/`.
-
-**Platforms.** Linux and macOS only. Process discovery, which both the attach
-check and the forced cleanup need, is not implemented on Windows, so a seat
-does not open there.
-
-**Try it by hand.** `ar3 tool browser --from operator --var ALLOW=operator -- snap`
-runs the tool once and prints the reply. This is a test surface, not a product
-surface.
-
-**Trust.** The profile holds a signed-in session, so a sender on `ALLOW`
-acts as that person on every site the profile has open. Allowlist few names.
-`eval` and `run-code` run any code in the page or the driver. They stay
-refused until `ALLOW_EVAL` is on, so leave it off unless the work needs it.
-
-## `tool-gemini-web` - Gemini through a browser seat
-
-Gemini on the web, as an a8s seat. The tool types each message into Gemini
-and sends the answer back as a message. Each sender has its own Gemini
-conversation, and the conversation continues across messages. Files go in with
-the message, and images Gemini makes come back as attachments. An answer too
-long for the reply body comes back as the file `gemini-reply.md`.
-
-**Needs.** A `tool-browser` seat, with its needs. A person must sign that
-seat's Chrome in to Gemini by hand first. This tool never signs in.
-
-```bash
-a8s add gemini ~/agents/gemini tool-gemini-web --ALLOW=iris --BROWSER_SEAT=gemini-profile
-a8s vars gemini set env.DISPLAY :0
-```
-
-The tool runs the browser tool by its path in the suite. It needs the same
-display and `PATH` setup as `tool-browser`: on Linux, a headed seat needs
-`env.DISPLAY`, and the node needs the Node bin directory on `env.PATH`.
-
-**Use.** Send plain text, and attach files to send them.
-
-```bash
-tell gemini "Draw a lighthouse at dusk"
-```
-
-The reply is Gemini's answer. A line after `--` in the reply is a note from
-the seat, for example an image or a file it could not carry.
-
-**Exit code.** Every exit is 0, because a8s dead-letters a message on a
-non-zero exit and does not retry. Two cases follow from this:
-
-- A turn that cannot run answers `Your message was not sent. Send it again.`
-  The seat is busy, the profile is not signed in, or the browser is not
-  reachable.
-- A reply that Gemini produced but `tell` could not deliver is held on disk
-  and delivered on the next wake. The turn is not run again.
-
-If the seat cannot tell whether Gemini received a message, it does not send it
-again. The reply says so, and the sender checks the conversation.
-
-### Options (per-node vars)
-
-| Var | Default | Meaning |
-|---|---|---|
-| `ALLOW` | — (required) | Sender names permitted to ask. A sender outside it gets no reply. |
-| `BROWSER_SEAT` | — (required) | The `tool-browser` node whose profile is signed in to Gemini. |
-| `MODEL` | Gemini's default | A model as Gemini's own menu names it, picked when a conversation is created. |
-
-**State.** The conversation map and the held replies live in
-`${XDG_DATA_HOME:-~/.local/share}/ar3/gemini-web/<node>/`. One turn runs at a
-time per node. A turn is bounded at 180 seconds.
-
-**Platforms.** Linux and macOS only. The turn lock uses `fcntl`; on Windows the
-seat answers every message "This seat runs on Linux and macOS only" and sends
-nothing to Gemini.
-
-**Try it by hand.** `ar3 tool gemini-web --from operator --var BROWSER_SEAT=gemini-profile -- hello`
-runs one turn and prints the reply. This is a test surface, not a product
-surface. `python3 <ar3>/apps/tools/gemini_web sessions` lists the
-conversations, and `forget <sender>` drops one so the next message starts anew.
-
-**Trust.** The Gemini account is the browser profile's account. Every sender
-on `ALLOW` talks as that account. `a8s stop` closes the Chrome of the browser
-seat.
+The person at the node's machine who runs `ar3 tool --node` is the operator
+and passes the ACL. The ACL is for senders on the network.
 
 ## Writing another tool node
 
-Each tool is its own module under `apps/tools/`, sharing `apps/tools/_runtime.py`
-for the parts every tool node does the same: read the wake, enforce the ACL,
-and reply through `a8s tell`. Cross-platform process control is the foundation
-(`ar3.proc`). A tool never imports an a8s module — its contract with a8s is the
-wake argv its `tool-<verb>.json` defines and the `a8s tell` CLI it replies
-through. Ship the definition in `apps/a8s/definitions/`, the handler and its
-tests under `apps/tools/`, and a section here.
+Each tool is its own module or package under `apps/tools/`, sharing
+`apps/tools/_runtime.py` for the parts every tool node does the same: read the
+wake, enforce the ACL, and reply through `a8s tell`. Cross-platform process
+control is the foundation (`ar3.proc`). A tool never imports an a8s module. Its
+contract with a8s is the wake argv its `tool-<verb>.json` defines and the
+`a8s tell` CLI it replies through.
+
+Ship these with the tool:
+
+- The definition, in `apps/a8s/definitions/`.
+- The handler and its tests, under `apps/tools/`.
+- A `README.md` beside the handler, with the sections the other tools use:
+  Needs, Register, Usage, State, Platforms, Try it by hand, Trust.
+  The `## Usage` section is the tool's help text (see below). Link it from this page.
+
+The help contract:
+
+1. Write a `## Usage` section in the tool's README. It is the help text, and
+   there is no other copy. It holds what an agent needs to drive the tool: one
+   line on what it does, the real-time loop, the commands with their syntax
+   (a table), the reply shape, and the vars (`### Options`). The wrapper reads
+   from the line after the heading to the next `## ` heading. Keep the section
+   readable as plain text, because it is sent as a message body.
+2. In the handler, after the ACL check and before any parsing of the message,
+   call `rt.is_help(message)`. When it is true, send
+   `rt.help_reply(tool, node, readme, suite_path)` with `rt.send_reply` and
+   return 0. `readme` is `Path(__file__).resolve().parent / "README.md"`.
+   `suite_path` is the README path inside the suite. A refused sender never
+   reaches this line, so it gets no reply. A README with no `## Usage` section
+   gets a one-line reply that says so.
+3. Anything dynamic, such as a key fingerprint, goes in the `extra` argument of
+   `rt.help_reply`, not in the README.
+4. Every exit is 0. a8s dead-letters a wake that exits with any other code.

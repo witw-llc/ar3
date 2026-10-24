@@ -57,6 +57,64 @@ def split_attachments(message: str) -> tuple[str, list[str]]:
     return "\n".join(lines), paths
 
 
+HELP_WORDS = ("help", "/help", "--help", "/?")
+
+
+def is_help(body: str) -> bool:
+    """Whether a message asks the tool for its usage. After the attachment
+    lines are peeled and the whitespace trimmed, the body must be one line equal
+    to `help`, `/help`, `--help` or `/?`, in any case. `help me open a page` is a
+    command for the tool, not a request for help."""
+    text, _paths = split_attachments(body or "")
+    text = text.strip()
+    return "\n" not in text and text.lower() in HELP_WORDS
+
+
+USAGE_HEADING = "## Usage"
+
+
+def usage_from_readme(readme: Path) -> str | None:
+    """The help text of a tool: the body of the first `## Usage` section of its
+    README. It runs from the line after the heading to the next line that starts
+    with `## `, or to the end of the file. `###` subsections and tables stay
+    verbatim. Leading and trailing blank lines are stripped. Returns None when
+    the file or the section is missing."""
+    try:
+        lines = Path(readme).read_text(encoding="utf-8").split("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    body: list[str] = []
+    inside = False
+    fence = False
+    for line in lines:
+        if line.startswith("```"):
+            fence = not fence
+        if not inside:
+            if not fence and line.rstrip() == USAGE_HEADING:
+                inside = True
+            continue
+        if not fence and line.startswith("## "):
+            break
+        body.append(line)
+    if not inside:
+        return None
+    return "\n".join(body).strip("\n").strip() or None
+
+
+def help_reply(tool: str, node: str, readme: Path, suite_path: str, extra: str = "") -> str:
+    """The help text for a tool node: a title line, the README's `## Usage`
+    section (or one line saying it is missing), the optional `extra` lines the
+    tool adds, and the README path inside the suite."""
+    section = usage_from_readme(readme)
+    if section is None:
+        section = f'no "{USAGE_HEADING}" section in {suite_path}'
+    parts = [f"{node}: {tool} \u2014 usage", section]
+    if extra.strip():
+        parts.append(extra.strip())
+    parts.append(f"README: {suite_path}")
+    return "\n\n".join(parts)
+
+
 def allowed(sender: str, allow_spec: str) -> bool:
     """Whether `sender` is on a node's ACL. `allow_spec` is the `$ALLOW` var —
     names separated by commas or whitespace. Matching is case-insensitive, as
@@ -85,20 +143,19 @@ def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> 
     and splits. Returns the CLI's exit code; a senderless wake sends nothing.
 
     When `AR3_TOOL_REPLY_DIR` is set (print mode, see `ar3 tool`) nothing is
-    sent: the reply prints as `to <recipient>:` plus the body, each attachment
-    is copied into that directory, and each copy prints as `attached: <path>`."""
+    sent: the reply prints as the body, each attachment is copied into that
+    directory, and each copy prints as `artifact: <path>`."""
     if not recipient:
         return 0
     reply_dir = os.environ.get(REPLY_DIR_ENV)
     if reply_dir:
-        print(f"to {recipient}:")
         print(body)
         dest = Path(reply_dir)
         dest.mkdir(parents=True, exist_ok=True)
         for src in attachments:
             copied = dest / Path(src).name
             shutil.copyfile(src, copied)
-            print(f"attached: {copied}")
+            print(f"artifact: {copied}")
         return 0
     argv = [sys.executable, str(_a8s_path()), "tell", "--verbatim"]
     argv += [f"--attach={p}" for p in attachments]

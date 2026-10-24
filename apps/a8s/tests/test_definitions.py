@@ -1324,6 +1324,8 @@ class TestBundledResidentEngineDefinitions:
             ("engine-agy-resident-unrestricted", "agy"),
             ("engine-codex-resident", "codex"),
             ("engine-codex-resident-unrestricted", "codex"),
+            ("engine-cursor-resident", "cursor"),
+            ("engine-cursor-resident-unrestricted", "cursor"),
         ),
     )
     def test_bundled_resident_definition_parses_all_three_wakes(

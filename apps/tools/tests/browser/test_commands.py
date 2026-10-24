@@ -7,7 +7,7 @@ from browser import plc
 
 def _stub_browser(monkeypatch, tmp_path, **overrides):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-    monkeypatch.setattr(commands.session, "ensure_running", lambda seat: None)
+    monkeypatch.setattr(commands.session, "ensure_running", lambda seat, **k: None)
     monkeypatch.setattr(commands.session, "current_url", lambda seat: "https://example.com/")
     monkeypatch.setattr(commands.session, "snapshot", lambda seat: "- button 'Sign in'")
     monkeypatch.setattr(plc, "run", lambda *a, **k: "### Result\nok\n")
@@ -342,7 +342,7 @@ def test_video_stop_does_not_open_the_browser(monkeypatch, tmp_path):
     _stub_browser(monkeypatch, tmp_path)
     monkeypatch.setattr(
         commands.session, "ensure_running",
-        lambda seat: pytest_fail("video-stop opened the browser"),
+        lambda seat, **k: pytest_fail("video-stop opened the browser"),
     )
     run = commands.run_script("seat", "video-stop")
     assert not run.ok
@@ -666,3 +666,22 @@ def test_text_arrives_as_the_page_wrote_it(monkeypatch, tmp_path):
         run = commands.run_script("seat", "text #reply\n")
         assert run.ok, run.error
         assert run.steps[0]["output"] == page_text
+
+
+def test_a_stop_between_steps_ends_the_script_with_the_stop_text(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    ran = []
+
+    def step(seat, verb, args, run, allow_eval, script_epoch=None):
+        ran.append(verb)
+        if verb == "url":
+            commands.session.bump_stop_epoch(seat)
+        return "ok"
+
+    monkeypatch.setattr(commands, "_step", step)
+    run = commands.run_script("seat", "url\nopen\nurl\n")
+    assert ran == ["url"]
+    assert not run.ok
+    assert [s["command"] for s in run.steps] == ["url", "open"]
+    assert run.error == "seat closed by a8s stop"
+    assert run.files == []

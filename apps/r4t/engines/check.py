@@ -219,6 +219,7 @@ def check_engine(
     The same flags `run` takes are accepted here, so a composition can be
     checked before it is spent."""
     report = EngineReport(engine=engine)
+    session_env: dict[str, str] = {}
     if model is None and engine.startswith("ollama-"):
         model = PROBE_MODEL
     try:
@@ -236,7 +237,9 @@ def check_engine(
         if resident:
             from engines import resident as resident_mod
 
-            template = resident_mod.compose_resident_argv(template, {}, engine=engine)
+            template = resident_mod.compose_resident_argv(
+                template, session_env, engine=engine,
+            )
     except RunError as exc:
         # r4t refused to compose it at all, which is a rejection the caller
         # needs to see in the same table as a CLI's.
@@ -294,6 +297,10 @@ def check_engine(
             f"{probe.help_binary} lists no {', '.join(unknown)}"
         )
         return report
+    if resident and engine == "cursor":
+        return _check_cursor_acp(
+            report, template, workdir or Path.cwd(), session_env,
+        )
     report.verdict = ACCEPTED
     return report
 
@@ -334,6 +341,32 @@ def _check_app_server(report: EngineReport, argv: list[str], workdir: Path) -> E
     if version != proven:
         report.detail = (
             f"app-server {version or '(version unknown)'} is not the proven "
+            f"{proven}; re-prove the resident adapter before relying on it"
+        )
+    return report
+
+
+def _check_cursor_acp(
+    report: EngineReport, argv: list[str], workdir: Path, env: dict[str, str],
+) -> EngineReport:
+    """`agent --help` cannot show that a resident session pinned its model.
+    This runs the ACP handshake (no prompt): initialize, authenticate,
+    session/new, and the catalog pin. A CLI version other than the one the
+    adapter was proven on is a note, not a rejection."""
+    from engines import resident as resident_mod
+
+    report.method = "acp handshake"
+    probe = resident_mod.cursor_acp_probe(resolve_argv0(argv), workdir, env=env)
+    if probe.get("error"):
+        report.verdict = REJECTED
+        report.detail = probe["error"]
+        return report
+    report.verdict = ACCEPTED
+    proven = resident_mod.CURSOR_ACP_PROVEN
+    version = report.version or ""
+    if version != proven:
+        report.detail = (
+            f"agent {version or '(version unknown)'} is not the proven "
             f"{proven}; re-prove the resident adapter before relying on it"
         )
     return report

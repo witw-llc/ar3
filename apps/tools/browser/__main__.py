@@ -18,4 +18,8 @@ if __name__ == "__main__":
     sys.path.insert(0, tools)
     from browser.cli import main
 
-    sys.exit(main())
+    try:
+        code = main()
+    except KeyboardInterrupt:
+        code = 130
+    sys.exit(code)

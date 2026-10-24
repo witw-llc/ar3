@@ -633,6 +633,11 @@ def _build_argv_template(
     if instruments is not None:
         extras += instruments.flags()
     argv = argv[:1] + extras + argv[1:]
+    if resident and engine == "cursor" and permissions != "bypass":
+        # Measured on agent 2026.10.22-27dcf5f: --force makes acp run a shell
+        # call without asking. The restricted resident definition does not
+        # pass it. --permissions bypass keeps it.
+        argv = [token for token in argv if token != "--force"]
     return [str(workdir) if a == "{workdir}" else a for a in argv], note
 
 

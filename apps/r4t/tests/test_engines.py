@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+from pathlib import Path
 
 import json
 
@@ -270,11 +272,15 @@ class TestCursorStateDb:
         (users / "ana").mkdir(parents=True)
         (users / "bo").mkdir(parents=True)
         monkeypatch.setattr(cursor, "_WSL_USERS_DIR", users)
-        found = [str(p) for p in cursor.state_db_candidates()]
-        assert any("ana/AppData/Roaming/Cursor" in p for p in found)
-        assert any("bo/AppData/Roaming/Cursor" in p for p in found)
+        found = list(cursor.state_db_candidates())
+        assert any(
+            {"ana", "AppData", "Roaming", "Cursor"} <= set(p.parts) for p in found
+        )
+        assert any(
+            {"bo", "AppData", "Roaming", "Cursor"} <= set(p.parts) for p in found
+        )
         # The Linux path stays first — a locally installed IDE outranks a guess.
-        assert ".config" in found[0]
+        assert ".config" in found[0].parts
 
     def test_wsl_candidates_absent_off_linux_and_without_mnt_c(
         self, monkeypatch, tmp_path
@@ -331,6 +337,106 @@ class TestCursorStateDb:
         assert "absent.vscdb" in message
         assert cursor.STATE_DB_ENV in message
         assert "cursor-agent" in message
+        assert "auth.json" in message
+
+    def test_permission_error_on_one_candidate_does_not_hide_the_next(
+        self, monkeypatch, tmp_path
+    ):
+        # Python 3.12 re-raises EACCES from Path.is_file. A Windows profile
+        # this process cannot stat sorts ahead of the one that holds the token.
+        blocked, real = tmp_path / "blocked.vscdb", tmp_path / "real.vscdb"
+        conn = sqlite3.connect(real)
+        conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable VALUES (?, ?)",
+            (cursor.ACCESS_TOKEN_KEY, '"tok-real"'),
+        )
+        conn.commit()
+        conn.close()
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if Path(path) == blocked:
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        monkeypatch.setattr(cursor, "state_db_candidates", lambda: [blocked, real])
+        assert cursor.state_db() == real
+        assert cursor._state_value(cursor.ACCESS_TOKEN_KEY) == "tok-real"
+
+    def test_disk_io_error_retries_immutable(self, monkeypatch, tmp_path):
+        # Measured on WSL: mode=ro against a Windows state.vscdb raises
+        # "disk I/O error"; mode=ro&immutable=1 reads the token.
+        db = tmp_path / "state.vscdb"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        conn.execute(
+            "INSERT INTO ItemTable VALUES (?, ?)",
+            (cursor.ACCESS_TOKEN_KEY, '"tok-imm"'),
+        )
+        conn.commit()
+        conn.close()
+        real_connect = sqlite3.connect
+        seen = []
+
+        def connect(target, *args, **kwargs):
+            seen.append(str(target))
+            if "immutable=1" not in str(target):
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_connect(target, *args, **kwargs)
+
+        monkeypatch.setattr(cursor.sqlite3, "connect", connect)
+        assert cursor._read_state(db, cursor.ACCESS_TOKEN_KEY) == "tok-imm"
+        assert any("mode=ro" in uri and "immutable=1" not in uri for uri in seen)
+        assert any("immutable=1" in uri for uri in seen)
+
+    def test_other_operational_errors_do_not_retry_immutable(self, monkeypatch, tmp_path):
+        db = tmp_path / "state.vscdb"
+        db.write_text("", encoding="utf-8")
+        seen = []
+
+        def connect(target, *args, **kwargs):
+            seen.append(str(target))
+            raise sqlite3.OperationalError("no such table: ItemTable")
+
+        monkeypatch.setattr(cursor.sqlite3, "connect", connect)
+        assert cursor._read_state(db, cursor.ACCESS_TOKEN_KEY) is None
+        assert len(seen) == 1
+        assert "immutable=1" not in seen[0]
+
+    def test_wsl_unreadable_profile_is_skipped(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(cursor.STATE_DB_ENV, raising=False)
+        monkeypatch.setattr(cursor.sys, "platform", "linux")
+        users = tmp_path / "Users"
+        (users / "ana").mkdir(parents=True)
+        (users / "locked").mkdir()
+        monkeypatch.setattr(cursor, "_WSL_USERS_DIR", users)
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if Path(path).name == "locked":
+                raise PermissionError(13, "Permission denied")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        found = list(cursor._wsl_candidates())
+        assert any(p.parts[-3:] == ("ana", "AppData", "Roaming") for p in found)
+        assert all("locked" not in p.parts for p in found)
+
+    def test_cli_auth_file_follows_the_platform(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(cursor.sys, "platform", "linux")
+        assert cursor.cli_auth_candidates() == [
+            Path.home() / ".config" / "cursor" / "auth.json"
+        ]
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        assert cursor.cli_auth_candidates() == [tmp_path / "cursor" / "auth.json"]
+        monkeypatch.setattr(cursor.sys, "platform", "darwin")
+        assert cursor.cli_auth_candidates() == [Path.home() / ".cursor" / "auth.json"]
+        monkeypatch.setattr(cursor.sys, "platform", "win32")
+        monkeypatch.setenv("APPDATA", str(tmp_path))
+        assert cursor.cli_auth_candidates() == [tmp_path / "Cursor" / "auth.json"]
 
 
 class _DeadCodex:

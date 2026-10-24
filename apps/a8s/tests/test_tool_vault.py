@@ -98,3 +98,17 @@ class TestWake:
         replies = _read_envelopes(outbox_dir(v_root))
         assert len(replies) == 1
         assert "/connect needs exactly one attached public key" in replies[0]["content"]
+
+
+class TestHelpWake:
+    @pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?"])
+    def test_every_spelling_answers_the_help_in_plaintext(self, fake_home, tmp_path, spelling):
+        a_root, v_root = _setup(tmp_path)
+        _init_vault(tmp_path)
+        _write_outbox("a", a_root, "vault", spelling, [])
+
+        assert attached_loop(["a", "vault"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(v_root))
+        assert len(replies) == 1
+        assert replies[0]["content"].startswith("vault: tool-vault \u2014 usage")
+        assert "README: apps/tools/vault/README.md" in replies[0]["content"]

@@ -107,3 +107,25 @@ class TestWake:
 
         assert attached_loop(["a", "sh"], 0.1, single_pass=True) == 0
         assert _read_envelopes(outbox_dir(sh_root)) == []
+
+
+class TestHelpWake:
+    @pytest.mark.parametrize("spelling", ["help", "/help", "--help", "/?"])
+    def test_help_answers_the_usage_and_runs_nothing(self, fake_home, shell_pair, spelling):
+        a_root, sh_root = shell_pair
+        _write_outbox("a", a_root, "sh", spelling, [])
+
+        assert attached_loop(["a", "sh"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(sh_root))
+        assert len(replies) == 1
+        assert replies[0]["to"] == "a"
+        assert replies[0]["content"].startswith("sh: tool-command-shell \u2014 usage")
+        assert "README: apps/tools/command_shell/README.md" in replies[0]["content"]
+
+    def test_help_me_is_a_command_not_help(self, fake_home, shell_pair):
+        a_root, sh_root = shell_pair
+        _write_outbox("a", a_root, "sh", "echo help", [])
+
+        assert attached_loop(["a", "sh"], 0.1, single_pass=True) == 0
+        replies = _read_envelopes(outbox_dir(sh_root))
+        assert replies[0]["content"].startswith("$ echo help")
