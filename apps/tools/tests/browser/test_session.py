@@ -3,6 +3,7 @@ import json
 import os
 import socket
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -625,6 +626,84 @@ def test_the_stop_epoch_is_empty_until_bumped_and_changes_each_bump():
     assert session.stop_epoch("fresh") == second
 
 
+def test_the_activity_stamp_is_missing_until_touched_and_then_reads_as_now():
+    assert session.last_activity("fresh") is None
+    before = time.time()
+    session.touch_activity("fresh")
+    stamp = session.last_activity("fresh")
+    assert before <= stamp <= time.time()
+    assert os.listdir(session.seat_home("fresh")) == ["last-active"]
+
+
+@pytest.mark.parametrize("text", ["", "  \n", "soon", "nan", "inf", "-inf", "12s"])
+def test_an_activity_stamp_that_is_not_a_number_reads_as_missing(text):
+    os.makedirs(session.seat_home("seat"))
+    with open(os.path.join(session.seat_home("seat"), "last-active"), "w") as handle:
+        handle.write(text)
+    assert session.last_activity("seat") is None
+
+
+def test_an_unreadable_activity_stamp_reads_as_missing():
+    os.makedirs(os.path.join(session.seat_home("seat"), "last-active"))
+    assert session.last_activity("seat") is None
+
+
+def test_the_activity_stamp_is_written_aside_and_renamed(monkeypatch):
+    # A reader polling the stamp must never meet a half-written file, so the
+    # write goes to a name only this process and thread use, then replaces it.
+    replaced = []
+    real = os.replace
+    monkeypatch.setattr(session.os, "replace", lambda a, b: (replaced.append((a, b)), real(a, b)))
+    session.touch_activity("seat")
+    (source, target), = replaced
+    assert os.path.basename(source) == f".last-active.{os.getpid()}.{threading.get_ident()}.tmp"
+    assert target == os.path.join(session.seat_home("seat"), "last-active")
+    assert session.last_activity("seat") is not None
+
+
+def test_a_reader_never_sees_a_partial_activity_stamp():
+    session.touch_activity("seat")
+    done = threading.Event()
+    bad = []
+
+    def read():
+        while not done.is_set():
+            if session.last_activity("seat") is None:
+                bad.append("unreadable")
+
+    def write():
+        for _ in range(300):
+            session.touch_activity("seat")
+
+    reader = threading.Thread(target=read)
+    writers = [threading.Thread(target=write) for _ in range(4)]
+    reader.start()
+    for thread in writers:
+        thread.start()
+    for thread in writers:
+        thread.join()
+    done.set()
+    reader.join()
+    assert bad == []
+    assert sorted(os.listdir(session.seat_home("seat"))) == ["last-active"]
+
+
+def test_a_stamp_that_cannot_be_written_is_ignored(tmp_path, monkeypatch):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    monkeypatch.setenv("XDG_DATA_HOME", str(blocker))
+    session.touch_activity("seat")
+    assert session.last_activity("seat") is None
+
+
+def test_chrome_running_is_the_profile_pgrep_and_starts_nothing(monkeypatch):
+    monkeypatch.setattr(session, "_profile_pids", lambda s: [])
+    assert session.chrome_running("seat") is False
+    monkeypatch.setattr(session, "_profile_pids", lambda s: ["7", "8"])
+    assert session.chrome_running("seat") is True
+    assert not os.path.exists(session.seat_home("seat"))
+
+
 def test_a_launch_waits_on_the_launch_lock_then_refuses_after_the_stop(monkeypatch):
     import textwrap
     launched = _closed_chrome(monkeypatch)
@@ -713,3 +792,419 @@ def test_the_restart_repair_cannot_leave_chrome_when_the_stop_lands_before_the_s
     with pytest.raises(session.plc.BrowserError, match="seat closed by a8s stop"):
         session._restart_browser("seat", "", session.stop_epoch("seat"))
     assert events == ["close", "spawn", "terminate"]
+
+
+# --- Chrome's password offer and breach check -------------------------------------
+
+BOTH_OFF = {"credentials_enable_service": False, "profile": {"password_manager_leak_detection": False}}
+
+
+def _launch(monkeypatch, tmp_path, seat="seat"):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    launched = []
+    monkeypatch.setattr(session, "spawn", lambda cmd, **k: launched.append(cmd))
+    session._launch_chrome(seat)
+    return launched
+
+
+def _preferences(seat="seat"):
+    with open(os.path.join(session.profile_dir(seat), "Default", "Preferences"), encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _write_preferences(tmp_path, prefs, seat="seat", **dump):
+    directory = os.path.join(session.profile_dir(seat), "Default")
+    os.makedirs(directory, exist_ok=True)
+    target = os.path.join(directory, "Preferences")
+    with open(target, "w") as handle:
+        json.dump(prefs, handle, **dump)
+    return target
+
+
+def test_a_new_profile_starts_with_the_password_offer_and_the_breach_check_off(monkeypatch, tmp_path):
+    launched = _launch(monkeypatch, tmp_path)
+    assert launched
+    assert _preferences() == BOTH_OFF
+
+
+def test_the_two_preferences_are_the_ones_chrome_reads(monkeypatch, tmp_path):
+    """Chrome 155 names them in Password Manager Internals: "Saving disabled" for the first,
+    "Leak detection disabled in settings" for the second."""
+    assert session.PASSWORD_PREFERENCES == (
+        (("credentials_enable_service",), False),
+        (("profile", "password_manager_leak_detection"), False),
+    )
+
+
+def test_an_existing_profile_keeps_its_preferences_and_loses_the_offer_and_the_check(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    kept = {
+        "credentials_enable_service": True,
+        "profile": {"name": "Person 1", "password_manager_leak_detection": True, "avatar_index": 26},
+        "browser": {"window_placement": {"top": 3}},
+        "intl": {"selected_languages": "en-US,en"},
+    }
+    _write_preferences(tmp_path, kept)
+    _launch(monkeypatch, tmp_path)
+    assert _preferences() == {
+        **kept,
+        "credentials_enable_service": False,
+        "profile": {"name": "Person 1", "password_manager_leak_detection": False, "avatar_index": 26},
+    }
+
+
+@pytest.mark.parametrize(
+    "present",
+    [
+        {"credentials_enable_service": False},
+        {"profile": {"password_manager_leak_detection": False}},
+        {"profile": {"name": "x"}},
+        {"credentials_enable_service": True},
+        {"profile": {"password_manager_leak_detection": True}},
+        {},
+    ],
+)
+def test_whichever_setting_is_missing_or_on_is_turned_off(monkeypatch, tmp_path, present):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    _write_preferences(tmp_path, dict(present))
+    _launch(monkeypatch, tmp_path)
+    prefs = _preferences()
+    assert prefs["credentials_enable_service"] is False
+    assert prefs["profile"]["password_manager_leak_detection"] is False
+    assert prefs["profile"].get("name") == present.get("profile", {}).get("name")
+
+
+def test_a_profile_with_both_already_off_is_not_rewritten(monkeypatch, tmp_path):
+    _launch(monkeypatch, tmp_path)
+    target = _write_preferences(tmp_path, {**BOTH_OFF, "intl": {"a": 1}}, indent=4)
+    before = (os.stat(target).st_ino, open(target, "rb").read())
+    _launch(monkeypatch, tmp_path)
+    assert (os.stat(target).st_ino, open(target, "rb").read()) == before
+
+
+def test_a_profile_with_only_one_off_is_rewritten_for_the_other(monkeypatch, tmp_path):
+    _launch(monkeypatch, tmp_path)
+    target = _write_preferences(tmp_path, {"credentials_enable_service": False, "intl": {"a": 1}})
+    before = os.stat(target).st_ino
+    _launch(monkeypatch, tmp_path)
+    assert os.stat(target).st_ino != before
+    assert _preferences() == {**BOTH_OFF, "intl": {"a": 1}}
+
+
+def test_the_preferences_are_written_aside_and_renamed(monkeypatch, tmp_path):
+    replaced = []
+    real = os.replace
+    monkeypatch.setattr(session.os, "replace", lambda a, b: (replaced.append((a, b)), real(a, b))[1])
+    _launch(monkeypatch, tmp_path)
+    (source, target), = [pair for pair in replaced if pair[1].endswith("Preferences")]
+    assert os.path.basename(source) == f".Preferences.{os.getpid()}.{threading.get_ident()}.tmp"
+    assert os.path.dirname(source) == os.path.dirname(target)
+    assert os.listdir(os.path.dirname(target)) == ["Preferences"]
+
+
+@pytest.mark.parametrize("damage", [b"{not json", b"", b"\xff\xfe\x00", b"[1, 2]", b"null", b'{"profile": "x"}', b'{"profile": [1]}'])
+def test_a_damaged_preferences_file_is_left_for_chrome_to_replace(monkeypatch, tmp_path, damage):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    directory = os.path.join(session.profile_dir("seat"), "Default")
+    os.makedirs(directory)
+    target = os.path.join(directory, "Preferences")
+    with open(target, "wb") as handle:
+        handle.write(damage)
+    launched = _launch(monkeypatch, tmp_path)
+    assert launched
+    assert open(target, "rb").read() == damage
+    assert os.listdir(directory) == ["Preferences"]
+
+
+def test_the_preferences_are_set_before_chrome_is_spawned(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    seen = []
+
+    def spawn(cmd, **kwargs):
+        seen.append(_preferences())
+
+    monkeypatch.setattr(session, "spawn", spawn)
+    session._launch_chrome("seat")
+    assert seen == [BOTH_OFF]
+
+
+# --- the seat directories ----------------------------------------------------------
+
+POSIX_MODES = pytest.mark.skipif(os.name == "nt", reason="file modes are POSIX")
+
+
+def _mode(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+@pytest.fixture
+def open_umask():
+    old = os.umask(0)
+    yield
+    os.umask(old)
+
+
+@POSIX_MODES
+def test_a_private_dir_is_made_0700_whatever_the_umask(tmp_path, open_umask):
+    session.private_dir(str(tmp_path / "made"))
+    assert _mode(tmp_path / "made") == 0o700
+
+
+@POSIX_MODES
+@pytest.mark.parametrize("mode", [0o775, 0o755, 0o750, 0o777, 0o710, 0o500, 0o000])
+def test_a_private_dir_that_exists_is_set_to_0700(tmp_path, mode):
+    target = tmp_path / "there"
+    target.mkdir()
+    os.chmod(target, mode)
+    try:
+        session.private_dir(str(target))
+        assert _mode(target) == 0o700
+    finally:
+        os.chmod(target, 0o700)
+
+
+@POSIX_MODES
+def test_a_private_dir_that_is_closed_already_is_left_alone(tmp_path, monkeypatch):
+    target = tmp_path / "there"
+    target.mkdir(mode=0o700)
+    os.chmod(target, 0o700)
+    monkeypatch.setattr(session.os, "chmod", lambda *a: pytest.fail("a closed directory was chmod-ed"))
+    session.private_dir(str(target))
+
+
+def test_a_private_dir_is_a_directory_and_its_parents_are_made(tmp_path):
+    session.private_dir(str(tmp_path / "a" / "b"))
+    assert (tmp_path / "a" / "b").is_dir()
+
+
+def test_a_private_dir_that_cannot_be_tightened_is_left_as_it_is(tmp_path, monkeypatch):
+    target = tmp_path / "there"
+    target.mkdir()
+    os.chmod(target, 0o755)
+
+    def refuse(*a):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(session.os, "chmod", refuse)
+    session.private_dir(str(target))
+    assert target.is_dir()
+
+
+@POSIX_MODES
+def test_the_seat_home_and_its_scratch_directory_are_closed_when_made(tmp_path, open_umask):
+    session.secure_seat("seat")
+    assert _mode(session.seat_home("seat")) == 0o700
+    assert _mode(os.path.join(session.seat_home("seat"), "scratch")) == 0o700
+
+
+@POSIX_MODES
+def test_the_seat_home_and_its_scratch_directory_are_tightened_when_they_exist(tmp_path):
+    home = session.seat_home("seat")
+    scratch = os.path.join(home, "scratch")
+    os.makedirs(scratch)
+    os.chmod(home, 0o775)
+    os.chmod(scratch, 0o755)
+    session.secure_seat("seat")
+    assert _mode(home) == 0o700 and _mode(scratch) == 0o700
+
+
+@POSIX_MODES
+def test_the_scratch_directory_call_tightens_both_directories(tmp_path):
+    home = session.seat_home("seat")
+    scratch = os.path.join(home, "scratch")
+    os.makedirs(scratch)
+    os.chmod(home, 0o775)
+    os.chmod(scratch, 0o775)
+    assert session.scratch_dir("seat") == scratch
+    assert _mode(home) == 0o700 and _mode(scratch) == 0o700
+
+
+def _create_stop_epoch(seat):
+    session.bump_stop_epoch(seat)
+
+
+def _create_activity(seat):
+    session.touch_activity(seat)
+
+
+def _create_launch_lock(seat):
+    with session.launch_lock(seat):
+        pass
+
+
+def _create_seat_lock(seat):
+    from browser import seatlock
+
+    with seatlock.hold(seat, "test"):
+        pass
+
+
+def _create_seat_lock_without_use(seat):
+    from browser import seatlock
+
+    with seatlock.hold(seat, "test", activity=False):
+        pass
+
+
+def _create_downloads(seat):
+    session.downloads_dir(seat)
+
+
+def _create_video_state(seat):
+    session.save_video_state(seat, {"path": "x"})
+
+
+def _create_state_file(seat, monkeypatch=None):
+    session.save_state(seat)
+
+
+def _create_artifact(seat):
+    from browser import commands
+
+    commands.artifact(seat, "x.txt")
+
+
+def _create_store(seat):
+    from browser import secretstore
+
+    secretstore.set_secret(seat, "PASSWORD", "value-one", ["https://app.example.com"])
+
+
+def _create_profile(seat):
+    session.private_dir(session.seat_home(seat))
+    session._launch_chrome(seat)
+
+
+@POSIX_MODES
+@pytest.mark.parametrize(
+    "create",
+    [
+        _create_stop_epoch, _create_activity, _create_launch_lock, _create_seat_lock,
+        _create_seat_lock_without_use, _create_downloads,
+        _create_video_state, _create_state_file, _create_artifact, _create_store, _create_profile,
+    ],
+    ids=lambda func: func.__name__.replace("_create_", ""),
+)
+def test_whatever_makes_the_seat_home_makes_it_0700(monkeypatch, tmp_path, open_umask, create):
+    monkeypatch.setattr(session, "spawn", lambda cmd, **k: None)
+    monkeypatch.setattr(session.plc, "run", lambda *a, **k: "")
+    # Through monkeypatch, so it is undone: a value left in os.environ reaches every later test, and the
+    # live tests pass the environment on to the tool they start.
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    create("seat")
+    assert _mode(session.seat_home("seat")) == 0o700
+
+
+# --- the state directory ----------------------------------------------------------
+
+
+def _root():
+    root = session.state_root()
+    os.makedirs(os.path.join(root, "seat"), exist_ok=True)
+    return root
+
+
+def test_the_root_and_everything_in_it_is_inside(tmp_path):
+    root = _root()
+    store = os.path.join(root, "seat", "secrets.json")
+    open(store, "w").close()
+    for inside in (root, root + "/", os.path.join(root, "seat"), store, os.path.join(root, "seat", "never-was"),
+                   os.path.join(root, "other-seat", "secrets.json"), os.path.join(root, "seat", "..", "seat", "secrets.json"),
+                   os.path.join(root, ".", "seat"), root + "//seat//secrets.json"):
+        assert session.inside_state_root(inside), inside
+
+
+def test_a_path_beside_the_root_is_not_inside(tmp_path):
+    root = _root()
+    for outside in (str(tmp_path), str(tmp_path / "page.html"), root + "-sibling", root + "-sibling/x",
+                    os.path.dirname(root), "/", "/tmp", os.path.join(os.path.dirname(root), "browser2", "x")):
+        assert not session.inside_state_root(outside), outside
+
+
+def test_a_symlink_that_leads_in_is_inside(tmp_path):
+    root = _root()
+    store = os.path.join(root, "seat", "secrets.json")
+    open(store, "w").close()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file").symlink_to(store)
+    (outside / "dir").symlink_to(root)
+    (outside / "chain").symlink_to(outside / "file")
+    for inside in (outside / "file", outside / "dir", outside / "dir" / "seat" / "secrets.json", outside / "chain"):
+        assert session.inside_state_root(str(inside)), inside
+
+
+def test_a_symlink_that_leads_out_is_not_inside(tmp_path):
+    root = _root()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "page.html").write_text("x")
+    os.symlink(elsewhere, os.path.join(root, "seat", "to-elsewhere"))
+    # A path through the link is outside once the link is followed.
+    assert not session.inside_state_root(os.path.join(root, "seat", "to-elsewhere", "page.html"))
+
+
+def test_a_dot_dot_after_a_link_is_read_both_ways(tmp_path):
+    """The browser drops `link/..` before it looks at the file system. The kernel follows the link first."""
+    root = _root()
+    deep = tmp_path / "elsewhere" / "deep"
+    deep.mkdir(parents=True)
+    os.symlink(deep, os.path.join(root, "seat", "link"))
+    # Read by the URL: root/seat/secrets.json, inside. Read by the kernel: elsewhere/secrets.json.
+    assert session.inside_state_root(os.path.join(root, "seat", "link", "..", "secrets.json"))
+    # The other way round: outside/link leads to root/seat, and `..` from there is the root.
+    (tmp_path / "out").mkdir()
+    os.symlink(os.path.join(root, "seat"), tmp_path / "out" / "link")
+    assert session.inside_state_root(str(tmp_path / "out" / "link" / ".." / "seat"))
+
+
+def test_a_path_with_a_nul_counts_as_inside_so_it_is_refused(tmp_path):
+    _root()
+    assert session.inside_state_root("/tmp/a\0b")
+
+
+def test_the_root_may_not_exist_yet(tmp_path):
+    root = session.state_root()
+    assert not os.path.exists(root)
+    assert session.inside_state_root(os.path.join(root, "seat", "secrets.json"))
+    assert not session.inside_state_root(str(tmp_path / "page.html"))
+
+
+def test_a_second_name_for_the_root_is_inside_by_device_and_inode(tmp_path, monkeypatch):
+    """A case-insensitive file system, or a bind mount, lets the root be written another way. The
+    path cannot be compared as text then, so a directory in the chain that is the same device and
+    inode as the root counts. Here the second name is a path the system resolves to the root."""
+    root = _root()
+    alias = str(tmp_path / "SECOND-NAME")
+    real_stat = os.stat
+    monkeypatch.setattr(
+        session.os, "stat", lambda path, *a, **k: real_stat(root if str(path) == alias else path, *a, **k)
+    )
+    assert session.inside_state_root(alias)
+    assert session.inside_state_root(alias + "/seat/secrets.json")
+    assert not session.inside_state_root(str(tmp_path / "SECOND-NAME-NOT"))
+
+
+# --- the leftovers of a run that died ------------------------------------------------------------
+
+
+def _scratch_dir_aged(seat, name, age):
+    path = os.path.join(session.scratch_dir(seat), name)
+    os.makedirs(path)
+    with open(os.path.join(path, "code.js"), "w") as handle:
+        handle.write("async (page) => 1")
+    past = time.time() - age
+    os.utime(path, (past, past))
+    return path
+
+
+def test_a_prune_removes_the_old_private_directories_of_a_secret_fill_and_of_a_code_file():
+    old_fill = _scratch_dir_aged("seat", "fill-secret-abc", 3600)
+    old_code = _scratch_dir_aged("seat", "run-code-abc", 3600)
+    young_code = _scratch_dir_aged("seat", "run-code-new", 5)
+    other = _scratch_dir_aged("seat", "unrelated-dir", 3600)
+    session.prune_scratch("seat")
+    assert not os.path.exists(old_fill) and not os.path.exists(old_code)
+    assert os.path.isdir(young_code) and os.path.isdir(other)

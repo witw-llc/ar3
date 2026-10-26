@@ -17,13 +17,16 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from commands import cmd_add
-from core import Participant, outbox_dir
-from daemon import attached_loop
+from core import Participant, agent_log_path, outbox_dir, read_last_wake, touch_last_active
+from daemon import attached_loop, maybe_run_idle
 from definitions import default_definition_path, resolve_definition_arg
 from mailbox import _write_outbox, ensure_mailboxes
 from registry import load_registry, save_registry
@@ -94,6 +97,13 @@ class TestAddBuiltin:
             assert flag in argv
         assert definition["max_wake_seconds"] == 600
         assert definition["stop"]["invoke"][2] == "close"
+        assert definition["idle"] == {
+            "timeout": "$TIMEOUT?",
+            "invoke": [
+                "$PYTHON", "$A8S_DIR/../tools/browser", "idle", "--seat", "$RECIPIENT",
+                "--timeout=$TIMEOUT?", "--chrome=$CHROME?", "--port=$PORT?",
+            ],
+        }
 
 
 class TestWake:
@@ -114,6 +124,52 @@ class TestWake:
 
         assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
         assert _read_envelopes(outbox_dir(b_root)) == []
+
+
+RECIPE = (
+    "from browser.recipe import Recipe\n"
+    "recipe = Recipe('mine', 'The own recipe of the node', origins=['https://mine.example.com'])\n"
+    "recipe.steps('go', help='Go.', steps='go https://mine.example.com/')\n"
+)
+
+
+class TestSiteRecipes:
+    """The wake passes the node's name as the seat. The browser tool finds the registered node of that
+    name in the a8s registry, and loads the recipes the operator keeps in the node's root. A message only
+    names a recipe."""
+
+    def test_a_wake_loads_the_recipes_directory_of_the_node_it_runs_for(self, fake_home, tmp_path, monkeypatch):
+        a_root, b_root = _setup(tmp_path, monkeypatch, "a")
+        monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+        (b_root / "recipes").mkdir()
+        (b_root / "recipes" / "mine.py").write_text(RECIPE)
+        _write_outbox("a", a_root, "stub", "recipe", [])
+
+        assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        (reply,) = _read_envelopes(outbox_dir(b_root))
+        assert reply["content"].startswith("stub: ok")
+        assert "mine  The own recipe of the node  [node]" in reply["content"]
+        assert sorted(path.name for path in (b_root / "recipes").iterdir()) == ["mine.py"]
+
+    def test_a_node_without_recipes_lists_none(self, fake_home, tmp_path, monkeypatch):
+        a_root, b_root = _setup(tmp_path, monkeypatch, "a")
+        monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+        _write_outbox("a", a_root, "stub", "recipe", [])
+
+        assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        (reply,) = _read_envelopes(outbox_dir(b_root))
+        assert reply["content"].startswith("stub: ok") and "[node]" not in reply["content"]
+
+    def test_a_script_that_failed_still_ends_the_wake_with_exit_zero(self, fake_home, tmp_path, monkeypatch):
+        a_root, b_root = _setup(tmp_path, monkeypatch, "a")
+        monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+        _write_outbox("a", a_root, "stub", "recipe nosuchsite", [])
+
+        assert attached_loop(["a", "stub"], 0.1, single_pass=True) == 0
+        (reply,) = _read_envelopes(outbox_dir(b_root))
+        assert reply["content"].startswith("stub: failed: unknown recipe: nosuchsite")
+        # a8s logs a wake that exited with another code, and dead-letters its message.
+        assert "(exit" not in agent_log_path("stub").read_text(encoding="utf-8")
 
 
 class TestSeatLock:
@@ -165,6 +221,127 @@ def test_live_open_go_snap_close(tmp_path):
     assert shutil.which("pgrep") is None or subprocess.run(
         ["pgrep", "-f", "ar3/browser/ar3livetest"], capture_output=True
     ).returncode == 1
+
+
+def _seat_home(tmp_path):
+    return tmp_path / "xdg" / "ar3" / "browser" / "stub"
+
+
+def _stamp_seat(tmp_path, age_seconds):
+    """The seat's last-active stamp, as a script that ended `age_seconds` ago
+    leaves it. Written aside and renamed, so the idle verb never reads half."""
+    home = _seat_home(tmp_path)
+    home.mkdir(parents=True, exist_ok=True)
+    aside = home / f".last-active.{os.getpid()}.{threading.get_ident()}.tmp"
+    aside.write_text(str(time.time() - age_seconds), encoding="utf-8")
+    os.replace(aside, home / "last-active")
+
+
+def _stand_in_chrome(tmp_path):
+    """A process the seat reads as its Chrome: it carries the seat's profile
+    flag and no `--type=`. No browser starts."""
+    profile = _seat_home(tmp_path) / "chrome"
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", f"--user-data-dir={profile}"],
+        start_new_session=True,
+    )
+
+
+def _idle_wake(tmp_path, monkeypatch, timeout="100"):
+    """A registered tool-browser node named `stub` whose idle check is due: its
+    last wake ended ten minutes ago. `fire()` runs that one check, as the
+    daemon's idle pass does, and returns the log. It does not run the whole
+    loop: the loop's last act is the stop hook, which closes Chrome too."""
+    _, b_root = _setup(tmp_path, monkeypatch, "a")
+    registry = load_registry()
+    if timeout is not None:
+        registry["stub"]["vars"]["TIMEOUT"] = timeout
+    save_registry(registry)
+
+    def fire():
+        touch_last_active("stub", datetime.now(timezone.utc) - timedelta(seconds=600))
+        maybe_run_idle(Participant("stub", b_root))
+        log = agent_log_path("stub")
+        return log.read_text(encoding="utf-8") if log.is_file() else ""
+
+    return fire
+
+
+@pytest.mark.skipif(shutil.which("pgrep") is None, reason="the seat finds its Chrome with pgrep")
+class TestIdle:
+    """a8s fires the browser tool's `idle` verb once the node is quiet, and the
+    verb closes the seat's Chrome only when no script used the seat for
+    TIMEOUT seconds. The Chrome here is a stand-in process; the verb, the
+    argv a8s builds for it and the close path are the real ones."""
+
+    def test_timeout_is_the_idle_timeout_and_an_unset_one_is_none(self):
+        from definitions import build_idle_command, idle_timeout_seconds
+
+        definition = json.loads(resolve_definition_arg("tool-browser").read_text())
+        assert idle_timeout_seconds(definition, {"ALLOW": "a"}) is None
+        node_vars = {"ALLOW": "a", "TIMEOUT": "300", "CHROME": "/c/chrome"}
+        assert idle_timeout_seconds(definition, node_vars) == 300.0
+        argv = build_idle_command(definition, "garmin", vars=node_vars)
+        assert argv[2:] == ["idle", "--seat", "garmin", "--timeout=300", "--chrome=/c/chrome"]
+
+    def test_a_seat_used_recently_keeps_its_chrome(self, fake_home, tmp_path, monkeypatch):
+        fire = _idle_wake(tmp_path, monkeypatch, timeout="100")
+        chrome = _stand_in_chrome(tmp_path)
+        try:
+            _stamp_seat(tmp_path, age_seconds=5)
+            log = fire()
+            assert "idle exec:" in log and "idle wake failed" not in log
+            assert "not idle" in log
+            assert chrome.poll() is None
+        finally:
+            chrome.kill()
+            chrome.wait()
+
+    def test_a_seat_idle_for_the_timeout_loses_its_chrome(self, fake_home, tmp_path, monkeypatch):
+        fire = _idle_wake(tmp_path, monkeypatch, timeout="100")
+        chrome = _stand_in_chrome(tmp_path)
+        try:
+            _stamp_seat(tmp_path, age_seconds=500)
+            log = fire()
+            assert "idle wake failed" not in log
+            assert "closed after 5" in log
+            assert chrome.wait(timeout=20) is not None
+            assert read_last_wake("stub") is True
+        finally:
+            if chrome.poll() is None:
+                chrome.kill()
+            chrome.wait()
+
+    def test_a_seat_with_no_activity_record_counts_as_idle(self, fake_home, tmp_path, monkeypatch):
+        fire = _idle_wake(tmp_path, monkeypatch, timeout="100")
+        chrome = _stand_in_chrome(tmp_path)
+        try:
+            log = fire()
+            assert "closed, idle with no activity record" in log
+            assert chrome.wait(timeout=20) is not None
+        finally:
+            if chrome.poll() is None:
+                chrome.kill()
+            chrome.wait()
+
+    def test_a_node_without_timeout_never_fires_idle(self, fake_home, tmp_path, monkeypatch):
+        fire = _idle_wake(tmp_path, monkeypatch, timeout=None)
+        chrome = _stand_in_chrome(tmp_path)
+        try:
+            log = fire()
+            assert "idle exec:" not in log
+            assert chrome.poll() is None
+        finally:
+            chrome.kill()
+            chrome.wait()
+
+    def test_a_seat_with_no_chrome_idles_in_silence(self, fake_home, tmp_path, monkeypatch):
+        fire = _idle_wake(tmp_path, monkeypatch, timeout="100")
+        log = fire()
+        assert "idle exec:" in log and "idle wake failed" not in log
+        assert "closed" not in log and "not idle" not in log
+        assert read_last_wake("stub") is True
+        assert not _seat_home(tmp_path).exists()
 
 
 class TestHelpWake:

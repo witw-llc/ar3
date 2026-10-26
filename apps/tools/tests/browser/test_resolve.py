@@ -5,7 +5,7 @@ from browser import resolve
 
 
 def _page(monkeypatch, verdict):
-    monkeypatch.setattr(resolve, "evaluate_json", lambda seat, expression: verdict)
+    monkeypatch.setattr(resolve, "evaluate_json", lambda seat, function, argument: verdict)
 
 
 def _verdict(**overrides):
@@ -302,7 +302,7 @@ def test_css_selector_resolution_is_untouched_by_normalisation(monkeypatch):
 def _fail_classify(monkeypatch):
     """If ref handling falls through to text/CSS classification, fail loudly
     rather than let a coincidental match hide the bug."""
-    def _boom(seat, expression):
+    def _boom(seat, function, argument):
         raise AssertionError("a ref must not reach the text/CSS classifier")
     monkeypatch.setattr(resolve, "evaluate_json", _boom)
 

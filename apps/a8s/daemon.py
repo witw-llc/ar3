@@ -95,6 +95,7 @@ from definitions import (
     files_ttl_seconds,
     has_batch_invoke,
     idle_timeout_seconds,
+    idle_timeout_var,
     is_file_proxy,
     load_agent_env,
     load_agent_vars,
@@ -920,12 +921,19 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
     idle for at least `definition.idle.timeout` seconds, run the configured
     argv via the wake subprocess machinery and refresh `last-active`. Returns
     True iff an idle invoke fired this call. Errors loading the definition are
-    logged and swallowed — idle never crashes the loop."""
+    logged and swallowed — idle never crashes the loop.
+
+    A timeout written as `$NAME` or `$NAME?` is read from the node's vars on
+    every pass, so `a8s vars <node> set` takes effect without a restart. The
+    vars load only for such a node: this runs once a second for every node."""
     try:
         definition = load_definition(p.name)
     except (FileNotFoundError, RuntimeError):
         return False
-    timeout = idle_timeout_seconds(definition)
+    timeout = idle_timeout_seconds(
+        definition,
+        load_agent_vars(p.name) if idle_timeout_var(definition) else None,
+    )
     if timeout is None:
         return False
 

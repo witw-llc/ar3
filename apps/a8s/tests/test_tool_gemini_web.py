@@ -118,9 +118,28 @@ class TestAddBuiltin:
         assert "--model=$MODEL?" in argv
         assert argv[:2] == ["$PYTHON", "$A8S_DIR/../tools/gemini_web"]
         assert definition["max_wake_seconds"] == 900
-        assert definition["idle"] == {"timeout": 0}
+        assert definition["idle"] == {
+            "timeout": "$TIMEOUT?",
+            "invoke": [
+                "$PYTHON", "$A8S_DIR/../tools/browser", "idle",
+                "--seat", "$BROWSER_SEAT", "--timeout=$TIMEOUT?",
+            ],
+        }
         assert definition["stop"]["invoke"] == [
             "$PYTHON", "$A8S_DIR/../tools/browser", "close", "--seat", "$BROWSER_SEAT",
+        ]
+
+    def test_timeout_turns_on_an_idle_close_of_the_browser_seat(self):
+        from core import SCRIPT_DIR
+        from definitions import build_idle_command, idle_timeout_seconds
+
+        definition = json.loads(resolve_definition_arg("tool-gemini-web").read_text())
+        assert idle_timeout_seconds(definition, {"BROWSER_SEAT": "g"}) is None
+        node_vars = {"BROWSER_SEAT": "g", "TIMEOUT": "300"}
+        assert idle_timeout_seconds(definition, node_vars) == 300.0
+        argv = build_idle_command(definition, "gem", vars=node_vars)
+        assert argv[1:] == [
+            f"{SCRIPT_DIR}/../tools/browser", "idle", "--seat", "g", "--timeout=300",
         ]
 
     def test_the_tool_package_exists_where_the_definition_points(self):

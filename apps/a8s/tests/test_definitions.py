@@ -1632,6 +1632,100 @@ class TestIdleTimeoutSeconds:
         assert idle_timeout_seconds({"idle": {"timeout": None}}) is None
 
 
+class TestIdleTimeoutFromAVar:
+    """`idle.timeout` may be wholly `$NAME` or `$NAME?`, read from the node's
+    vars. Anything the var cannot supply is "no idle wakes", never an error:
+    the daemon asks once per second."""
+
+    SPELLINGS = ("$TIMEOUT", "$TIMEOUT?")
+
+    @pytest.mark.parametrize("spelling", SPELLINGS)
+    def test_a_set_var_is_the_timeout(self, spelling):
+        from definitions import idle_timeout_seconds
+        defn = {"idle": {"timeout": spelling}}
+        assert idle_timeout_seconds(defn, {"TIMEOUT": "300"}) == 300.0
+        assert idle_timeout_seconds(defn, vars={"TIMEOUT": "2.5"}) == 2.5
+
+    @pytest.mark.parametrize("spelling", SPELLINGS)
+    @pytest.mark.parametrize("vars_", [None, {}, {"OTHER": "300"}])
+    def test_an_unset_var_gives_no_idle_wakes(self, spelling, vars_):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": spelling}}, vars_) is None
+
+    @pytest.mark.parametrize("spelling", SPELLINGS)
+    @pytest.mark.parametrize("value", ["", " ", "0", "-5", "abc", "15m", "nan", "1 2"])
+    def test_a_value_that_is_not_a_positive_number_gives_no_idle_wakes(self, spelling, value):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": spelling}}, {"TIMEOUT": value}) is None
+
+    def test_the_name_and_the_var_key_ignore_case(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": "$timeout?"}}, {"TIMEOUT": "7"}) == 7.0
+        assert idle_timeout_seconds({"idle": {"timeout": "$TIMEOUT?"}}, {"timeout": "8"}) == 8.0
+        assert idle_timeout_seconds({"idle": {"timeout": "$Timeout"}}, {"tImEoUt": "9"}) == 9.0
+
+    def test_a_literal_number_ignores_the_vars(self):
+        from definitions import idle_timeout_seconds
+        vars_ = {"TIMEOUT": "999"}
+        assert idle_timeout_seconds({"idle": {"timeout": 60}}, vars_) == 60.0
+        assert idle_timeout_seconds({"idle": {"timeout": 0}}, vars_) is None
+
+    def test_a_numeric_string_ignores_the_vars(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": "120"}}, {"TIMEOUT": "999"}) == 120.0
+
+    @pytest.mark.parametrize("raw", ["$TIMEOUT s", "60$TIMEOUT", "${TIMEOUT}", "$TIMEOUT$TIMEOUT", "$"])
+    def test_only_a_whole_reference_is_read(self, raw):
+        # A partial reference is never expanded: "5" + "0" must not become 50.
+        from definitions import idle_timeout_seconds, idle_timeout_var
+        assert idle_timeout_var({"idle": {"timeout": raw}}) is None
+        assert idle_timeout_seconds({"idle": {"timeout": raw}}, {"TIMEOUT": "5"}) is None
+
+    def test_padding_around_a_reference_is_ignored(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": " $TIMEOUT? "}}, {"TIMEOUT": "4"}) == 4.0
+
+    def test_a_built_in_name_is_not_a_node_var(self):
+        from definitions import idle_timeout_seconds
+        assert idle_timeout_seconds({"idle": {"timeout": "$PYTHON"}}, {"TIMEOUT": "4"}) is None
+
+    def test_the_var_name_comes_back_uppercase_only_for_a_reference(self):
+        from definitions import idle_timeout_var
+        assert idle_timeout_var({"idle": {"timeout": "$timeout?"}}) == "TIMEOUT"
+        assert idle_timeout_var({"idle": {"timeout": "$TIMEOUT"}}) == "TIMEOUT"
+        for definition in (
+            {},
+            {"idle": None},
+            {"idle": "$TIMEOUT"},
+            {"idle": {}},
+            {"idle": {"timeout": 60}},
+            {"idle": {"timeout": "60"}},
+            {"idle": {"timeout": None}},
+        ):
+            assert idle_timeout_var(definition) is None
+
+    def test_a_reference_is_not_an_unresolved_node(self, fake_home, tmp_path):
+        # Only the three mailbox path fields can leave a node unresolved. A
+        # node whose idle timeout names an unset var still routes mail. The
+        # second node is the positive control: an unset var in a path field is
+        # reported, so the check ran.
+        import registry
+        idle_ref = tmp_path / "idle-ref.json"
+        idle_ref.write_text(json.dumps({
+            "invoke": ["x"],
+            "idle": {"timeout": "$TIMEOUT", "invoke": ["x", "--timeout=$TIMEOUT"]},
+        }))
+        path_ref = tmp_path / "path-ref.json"
+        path_ref.write_text(json.dumps({"invoke": ["x"], "outbox_dir": "$TIMEOUT"}))
+        for name in ("X", "Y"):
+            (tmp_path / name).mkdir()
+        registry.save_registry({
+            "X": {"root": str(tmp_path / "X"), "definition": str(idle_ref)},
+            "Y": {"root": str(tmp_path / "Y"), "definition": str(path_ref)},
+        })
+        assert set(registry.unresolved_mailboxes()) == {"Y"}
+
+
 class TestHarnessProgram:
     """What a node actually needs installed (#121).
 

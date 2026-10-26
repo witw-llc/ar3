@@ -9,15 +9,19 @@ stores them the way it does for a person.
 Derived from b3t's session layer (neilobremski/bin), generalised so the seat
 name selects the profile.
 """
+import http.client
 import json
+import math
 import os
 import platform
 import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -48,6 +52,60 @@ def seat_home(seat):
     return os.path.join(state_root(), seat)
 
 
+def private_dir(path):
+    """Make `path` a directory only its owner can enter: made 0700, and set to 0700
+    when it exists with looser permissions. A directory this user does not own
+    stays as it is."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        if stat.S_IMODE(os.stat(path).st_mode) != 0o700:
+            os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def secure_seat(seat):
+    """Close the seat's home and scratch directories to everyone but their owner.
+    playwright-cli writes its snapshots and console logs under the scratch
+    directory with the permissions its umask gives, and a snapshot can hold a
+    value typed into a field. Every run starts here, so a directory made earlier
+    with looser permissions is tightened."""
+    private_dir(seat_home(seat))
+    private_dir(os.path.join(seat_home(seat), "scratch"))
+
+
+def inside_state_root(path):
+    """True when `path` is the browser state root or anything under it. That root
+    holds every seat's home: its secret store, profile, cookies and state file.
+    The path counts as the system resolves it, so a symlink that leads in is in,
+    and so is a spelling of the root a case-insensitive file system accepts. A
+    `..` is read both as a URL reads it (before any link is followed) and as the
+    kernel reads it (after). A path that cannot be resolved counts as in."""
+    try:
+        root = os.path.realpath(state_root())
+        try:
+            root_stat = os.stat(root)
+        except OSError:
+            root_stat = None
+        for candidate in {os.path.realpath(path), os.path.realpath(os.path.normpath(path))}:
+            while True:
+                if candidate == root:
+                    return True
+                if root_stat is not None:
+                    try:
+                        if os.path.samestat(os.stat(candidate), root_stat):
+                            return True
+                    except OSError:
+                        pass
+                parent = os.path.dirname(candidate)
+                if parent == candidate:
+                    break
+                candidate = parent
+    except ValueError:
+        return True
+    return False
+
+
 STOP_MESSAGE = "seat closed by a8s stop"
 
 
@@ -67,7 +125,7 @@ def stop_epoch(seat):
 def bump_stop_epoch(seat):
     """Write a new stop token atomically. Call it BEFORE anything is killed."""
     home = seat_home(seat)
-    os.makedirs(home, exist_ok=True)
+    private_dir(home)
     token = str(time.time_ns())
     tmp = os.path.join(home, f".stop-epoch.{os.getpid()}.tmp")
     with open(tmp, "w", encoding="utf-8") as handle:
@@ -76,10 +134,44 @@ def bump_stop_epoch(seat):
     return token
 
 
+def _activity_path(seat):
+    return os.path.join(seat_home(seat), "last-active")
+
+
+def touch_activity(seat):
+    """Stamp now as the last time a script used this seat. The write is atomic,
+    and a failed write is ignored: a missed stamp only makes the seat look idle
+    sooner."""
+    home = seat_home(seat)
+    tmp = os.path.join(home, f".last-active.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        private_dir(home)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(str(time.time()))
+        os.replace(tmp, _activity_path(seat))
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def last_activity(seat):
+    """When a script last used this seat, in seconds since the epoch; None when
+    the stamp is missing, unreadable or not a number."""
+    try:
+        with open(_activity_path(seat), encoding="utf-8") as handle:
+            stamp = float(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+    return stamp if math.isfinite(stamp) else None
+
+
 def launch_lock(seat, blocking=True):
     """The launch lock: held by a launch decision (milliseconds, plus Chrome's
     start, 12 s at most with the teardown of a failed start) and by the stop's
     epoch-and-kill. It is separate from the seat lock; a stop never forces past it."""
+    private_dir(seat_home(seat))
     return file_lock(Path(seat_home(seat)) / "launch-lock", blocking=blocking)
 
 
@@ -94,6 +186,7 @@ def artifacts_dir(seat):
 def downloads_dir(seat):
     """Where the seat's Chrome saves downloads — never the profile default,
     which is a person's own Downloads folder."""
+    private_dir(seat_home(seat))
     path = os.path.join(seat_home(seat), "downloads")
     os.makedirs(path, exist_ok=True)
     return path
@@ -103,15 +196,22 @@ def scratch_dir(seat):
     """The seat's working directory — playwright-cli drops per-command scratch
     (page-*.yml, console-*.log) under a `.playwright-cli` dir beneath its cwd,
     so the CLI runs from here instead of the caller's directory."""
-    path = os.path.join(seat_home(seat), "scratch")
-    os.makedirs(path, exist_ok=True)
-    return path
+    secure_seat(seat)
+    return os.path.join(seat_home(seat), "scratch")
+
+
+def cli_output_dir(seat):
+    """Where playwright-cli writes the files its replies link to: page snapshots
+    and console logs."""
+    return os.path.join(scratch_dir(seat), ".playwright-cli")
 
 
 def prune_scratch(seat, max_age=86400):
     """Bound the scratch playwright-cli leaves behind — it writes a file per
-    command, so an unpruned dir grows without limit on a busy seat."""
-    directory = os.path.join(scratch_dir(seat), ".playwright-cli")
+    command, so an unpruned dir grows without limit on a busy seat. Also remove
+    the private directory of a secret fill that a killed run left behind."""
+    _prune_secret_leftovers(seat)
+    directory = cli_output_dir(seat)
     try:
         names = os.listdir(directory)
     except OSError:
@@ -123,6 +223,24 @@ def prune_scratch(seat, max_age=86400):
             stale = os.path.getmtime(path) < cutoff
             if os.path.isfile(path) and not os.path.islink(path) and stale:
                 os.remove(path)
+        except OSError:
+            pass
+
+
+def _prune_secret_leftovers(seat, max_age=300):
+    """A secret fill, or a recipe's code file, ends within its call timeout, so a
+    directory this old is a run that died between writing the file and removing it."""
+    scratch = scratch_dir(seat)
+    try:
+        names = os.listdir(scratch)
+    except OSError:
+        return
+    cutoff = time.time() - max_age
+    for name in names:
+        path = os.path.join(scratch, name)
+        try:
+            if name.startswith((plc.SECRET_DIR_PREFIX, plc.CODE_DIR_PREFIX)) and os.path.getmtime(path) < cutoff:
+                shutil.rmtree(path)
         except OSError:
             pass
 
@@ -141,7 +259,7 @@ def video_state(seat):
 
 
 def save_video_state(seat, state):
-    os.makedirs(seat_home(seat), exist_ok=True)
+    private_dir(seat_home(seat))
     path = video_state_path(seat)
     with open(path + ".tmp", "w") as handle:
         json.dump(state, handle)
@@ -351,6 +469,12 @@ def _main_pids(seat):
     return pids
 
 
+def chrome_running(seat):
+    """True when a Chrome holds this seat's profile, attached or not. One
+    pgrep; it starts nothing."""
+    return bool(_profile_pids(seat))
+
+
 def _daemon_pids(seat):
     """playwright-cli's per-seat daemon; a broken one can outlive its browser."""
     if platform.system() == "Windows":
@@ -414,13 +538,67 @@ def _spawn_quiet(argv, cwd):
             os.close(fd)
 
 
+# Chrome has no launch flag for either password setting; each is a profile preference.
+# `credentials_enable_service` is "Offer to save passwords and passkeys".
+# `profile.password_manager_leak_detection` is "Warn you if passwords are exposed
+# in a data breach": Chrome runs a breach check on each credential a form submits.
+PASSWORD_PREFERENCES = (
+    (("credentials_enable_service",), False),
+    (("profile", "password_manager_leak_detection"), False),
+)
+
+
+def _set_password_preferences(seat):
+    """Turn Chrome's password offer and its breach check off in the profile before
+    Chrome starts.
+
+    With the offer on, Chrome asks to keep a password typed into a sign-in form
+    that submits. A secret the tool types must stay in the seat's secret store,
+    not be copied into the profile. Chrome keeps filling passwords it already
+    holds. With the check on, Chrome runs its breach check on each credential a
+    form submits, and the seat has no use for it. Both are plain profile
+    preferences, which Chrome keeps when it rewrites the file on exit. A damaged
+    file is left for Chrome to replace.
+    """
+    directory = os.path.join(profile_dir(seat), "Default")
+    target = os.path.join(directory, "Preferences")
+    try:
+        with open(target, encoding="utf-8") as handle:
+            prefs = json.load(handle)
+    except FileNotFoundError:
+        prefs = {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(prefs, dict):
+        return
+    changed = False
+    for keys, wanted in PASSWORD_PREFERENCES:
+        section = prefs
+        for key in keys[:-1]:
+            section = section.setdefault(key, {})
+            if not isinstance(section, dict):
+                return
+        if section.get(keys[-1]) is not wanted:
+            section[keys[-1]] = wanted
+            changed = True
+    if not changed:
+        return
+    os.makedirs(directory, exist_ok=True)
+    aside = os.path.join(directory, f".Preferences.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(aside, "w", encoding="utf-8") as handle:
+        json.dump(prefs, handle, separators=(",", ":"))
+    os.replace(aside, target)
+
+
 def _launch_chrome(seat):
     """Start Chrome in its own session, so a wake killed at its time limit
     leaves the signed-in browser running; only `close` ends it."""
     binary = chrome_path()
     if not binary:
         raise plc.BrowserError("no Chrome found — set AR3_BROWSER_CHROME")
+    private_dir(seat_home(seat))
     os.makedirs(profile_dir(seat), exist_ok=True)
+    _set_password_preferences(seat)
     # A stale record must never be read as the new Chrome's port.
     try:
         os.remove(_port_file(seat))
@@ -451,7 +629,7 @@ def _route_downloads_js(seat, directory=None):
     set it stays attached, so one session is kept on the driver's Browser object
     for the life of the attach and reused on every call.
     """
-    return (
+    return plc.Own(
         "const br = page.context().browser();"
         " if (!br.__a8sDownloads) br.__a8sDownloads = await br.newBrowserCDPSession();"
         " await br.__a8sDownloads.send('Browser.setDownloadBehavior',"
@@ -487,7 +665,7 @@ def _start_chrome(seat):
 
 def _attach(seat, base):
     try:
-        plc.run(seat, "attach", f"--cdp={base}", timeout=15)
+        plc.run(seat, "attach", plc.Own(f"--cdp={base}"), timeout=15)
     except plc.BrowserError:
         _terminate_profile(seat)
         raise
@@ -535,8 +713,10 @@ def close_browser(seat):
         # beside the seat's.
         graceful(15, lambda t: plc.run_code(
             seat,
-            "const s = await page.context().browser().newBrowserCDPSession();"
-            " await s.send('Browser.close');",
+            plc.Own(
+                "const s = await page.context().browser().newBrowserCDPSession();"
+                " await s.send('Browser.close');"
+            ),
             timeout=t,
         ))
         graceful(30, lambda t: plc.run(seat, "close", timeout=t))
@@ -556,7 +736,7 @@ def _probe_js(seat):
     genuine zero-window Chrome; visibilityState cannot tell that apart from a
     window that is merely covered or minimised, which also read "hidden".
     """
-    return _route_downloads_js(seat) + (
+    return plc.Own(_route_downloads_js(seat) + (
         " const s = await page.context().newCDPSession(page);"
         " try {"
         " let w = null;"
@@ -566,22 +746,24 @@ def _probe_js(seat):
         " return JSON.stringify({url: page.url(), visible,"
         " window: w && w.windowId, state: w && w.bounds.windowState});"
         " } finally { await s.detach(); }"
-    )
+    ))
 
 
 BLANK_URLS = ("", "about:blank")
 
 
 def _window_of_page(seat):
-    return plc.parse_json(plc.result_of(plc.run_code(seat, _probe_js(seat), timeout=15)))
+    return plc.parse_json(plc.result_of(plc.run_code(seat, _probe_js(seat), timeout=15), seat), seat)
 
 
 def _unminimise(seat, window_id):
     plc.run_code(
         seat,
-        "const s = await page.context().newCDPSession(page);"
-        f" try {{ await s.send('Browser.setWindowBounds', {{windowId: {int(window_id)},"
-        " bounds: {windowState: 'normal'}}); } finally { await s.detach(); }",
+        plc.Own(
+            "const s = await page.context().newCDPSession(page);"
+            f" try {{ await s.send('Browser.setWindowBounds', {{windowId: {int(window_id)},"
+            " bounds: {windowState: 'normal'}}); } finally { await s.detach(); }"
+        ),
         timeout=15,
     )
 
@@ -589,8 +771,10 @@ def _unminimise(seat, window_id):
 def _bring_to_front(seat):
     plc.run_code(
         seat,
-        "const s = await page.context().newCDPSession(page);"
-        " try { await s.send('Page.bringToFront'); } finally { await s.detach(); }",
+        plc.Own(
+            "const s = await page.context().newCDPSession(page);"
+            " try { await s.send('Page.bringToFront'); } finally { await s.detach(); }"
+        ),
         timeout=15,
     )
 
@@ -670,10 +854,31 @@ def ensure_running(seat, script_epoch=None):
         _bring_to_front(seat)
 
 
+def _make_private(path):
+    """The file at `path` exists and is mode 0600 (made empty, at that mode, when it is not there)."""
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+    os.chmod(path, 0o600)
+
+
 def save_state(seat, timeout=30):
+    """Write the profile's storage state, its cookies and the local storage of each site, to `state.json` in
+    the seat's directory, and return the path. The file is mode 0600 before the driver writes into it and
+    after. A site keeps in its storage whatever it chooses, a value typed into one of its fields among it, so
+    the file is as private as the profile it comes from. No verb attaches, returns or uploads it."""
     path = os.path.join(seat_home(seat), "state.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    plc.run(seat, "state-save", path, timeout=timeout)
+    private_dir(seat_home(seat))
+    existed = os.path.exists(path)
+    _make_private(path)
+    try:
+        plc.run(seat, "state-save", plc.Own(path), timeout=timeout)
+    except plc.BrowserError:
+        if not existed:
+            try:
+                os.remove(path)  # the empty file this call made
+            except OSError:
+                pass
+        raise
+    _make_private(path)
     return path
 
 
@@ -682,7 +887,128 @@ def snapshot(seat):
 
 
 def current_url(seat):
-    return plc.evaluate(seat, "window.location.href")
+    return plc.evaluate(seat, plc.Own("window.location.href"))
+
+
+CDP_ANSWER_SECONDS = 2
+_no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _recorded_identity(seat):
+    """(port, browser path) from the `DevToolsActivePort` file that Chrome wrote in this seat's own profile: its
+    port, and the path of its browser endpoint (`/devtools/browser/<id>`). The path is the seat's Chrome's own
+    name for itself, and what answers on the port under another one is not that Chrome. It is no secret from a
+    process that can reach the port: the endpoint has no login (see the README, Trust). Either is empty when
+    the file does not say."""
+    try:
+        with open(_port_file(seat)) as handle:
+            lines = handle.read().splitlines()
+        return int(lines[0].strip()), (lines[1].strip() if len(lines) > 1 else "")
+    except (OSError, ValueError, IndexError):
+        return 0, ""
+
+
+def _cdp_get(base, path):
+    """The body of one request to the DevTools endpoint. Any failure to get one, a server that speaks something
+    other than HTTP included, is an OSError."""
+    try:
+        with _no_proxy.open(f"{base}{path}", timeout=CDP_ANSWER_SECONDS) as response:
+            return response.read().decode("utf-8")
+    except (http.client.HTTPException, UnicodeDecodeError) as exc:
+        raise OSError(f"the DevTools endpoint answered with something that is not a page list: {exc}") from None
+
+
+def _own_cdp_base(seat):
+    """The DevTools base URL of this seat's own Chrome, proven by the browser endpoint it answers with: its
+    path is the one Chrome wrote in the seat's profile. Costs one request. A record that does not check out
+    (nothing answers, or what answers is not that Chrome) gives None. Chrome writes no record for a port the
+    owner fixed; then the proof is the one the attach uses (`cdp_base`: a process of the seat's profile holds
+    the listener), which costs a little more."""
+    port, browser_path = _recorded_identity(seat)
+    if port and browser_path:
+        for host in ("127.0.0.1", "[::1]"):
+            base = f"http://{host}:{port}"
+            try:
+                answer = json.loads(_cdp_get(base, "/json/version"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(answer, dict) and str(answer.get("webSocketDebuggerUrl", "")).endswith(browser_path):
+                return base
+        return None
+    if _port_override():
+        try:
+            return cdp_base(seat)
+        except plc.BrowserError:
+            return None
+    return None
+
+
+def pages(seat):
+    """[(id, url)] for every page (tab) that the seat's own Chrome has open, read from its DevTools endpoint:
+    two requests on the loopback, no playwright-cli call. None when the endpoint does not answer or is not
+    proven to be this seat's Chrome (see `_own_cdp_base`); the caller then asks the driver."""
+    base = _own_cdp_base(seat)
+    if base is None:
+        return None
+    try:
+        listing = json.loads(_cdp_get(base, "/json"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(listing, list):
+        return None
+    return [
+        (str(target.get("id", "")), target["url"])
+        for target in listing
+        if isinstance(target, dict) and target.get("type") == "page" and isinstance(target.get("url"), str)
+    ]
+
+
+def close_page(seat, page_id):
+    """Close one page by its id (`pages`). True when Chrome took the request."""
+    base = _own_cdp_base(seat)
+    if base is None or not re.fullmatch(r"[0-9A-Za-z-]+", page_id or ""):
+        return False
+    try:
+        _cdp_get(base, f"/json/close/{page_id}")
+    except OSError:
+        return False
+    return True
+
+
+def _sweep_mark_path(seat):
+    return os.path.join(seat_home(seat), "swept-at")
+
+
+def sweep_mark(seat):
+    """The time, in nanoseconds since the epoch, that the last sweep of the driver's files began (see
+    `commands.sweep_outputs`); None when there was none or the mark cannot be read."""
+    try:
+        with open(_sweep_mark_path(seat), encoding="utf-8") as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def mark_swept(seat, stamp):
+    """Record `stamp` (nanoseconds since the epoch) as the start of the last sweep. The write is atomic and
+    the file is mode 0600. A write that fails changes nothing: the next sweep looks at more files."""
+    target = _sweep_mark_path(seat)
+    aside = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        private_dir(seat_home(seat))
+        try:
+            descriptor = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            os.unlink(aside)
+            descriptor = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(str(int(stamp)))
+        os.replace(aside, target)
+    except OSError:
+        try:
+            os.unlink(aside)
+        except OSError:
+            pass
 
 
 def status(seat):

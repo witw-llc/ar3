@@ -5,9 +5,11 @@ import time
 from pathlib import Path
 
 import pytest
+from ar3.locking import file_lock
 from ar3.proc import spawn
 
 from browser import seatlock
+from browser import session
 
 TOOLS = str(Path(__file__).resolve().parents[2])
 LIB = str(Path(__file__).resolve().parents[4] / "lib")
@@ -128,3 +130,69 @@ def test_the_wait_comes_from_the_environment(monkeypatch):
     assert seatlock.seat_wait() == seatlock.SEAT_WAIT_SECONDS
     monkeypatch.setenv("AR3_BROWSER_SEAT_WAIT", "0.25")
     assert seatlock.seat_wait() == 0.25
+
+
+def test_a_hold_stamps_the_seat_when_it_starts_and_again_when_it_ends():
+    assert session.last_activity("t") is None
+    with seatlock.hold("t", "browser cli"):
+        started = session.last_activity("t")
+        assert started is not None
+        time.sleep(0.05)
+        assert session.last_activity("t") == started
+    assert session.last_activity("t") > started
+
+
+def test_a_hold_that_fails_still_stamps_its_end():
+    with pytest.raises(RuntimeError):
+        with seatlock.hold("t", "browser cli"):
+            started = session.last_activity("t")
+            time.sleep(0.05)
+            raise RuntimeError("script failed")
+    assert session.last_activity("t") > started
+
+
+def test_a_hold_that_asks_for_no_activity_leaves_the_stamp_alone():
+    with seatlock.hold("t", "idle close", activity=False):
+        pass
+    assert session.last_activity("t") is None
+    session.touch_activity("t")
+    stamp = session.last_activity("t")
+    time.sleep(0.05)
+    with seatlock.hold("t", "a8s stop", activity=False):
+        assert session.last_activity("t") == stamp
+    assert session.last_activity("t") == stamp
+
+
+def test_the_end_stamp_is_written_while_the_seat_is_still_held(monkeypatch):
+    # An idle check that takes the seat the moment a script lets go must read
+    # the stamp of the script's end, not of its start.
+    held = []
+    real = session.touch_activity
+
+    def touch(seat):
+        try:
+            with file_lock(seatlock.lock_path(seat), blocking=False):
+                held.append(False)
+        except BlockingIOError:
+            held.append(True)
+        real(seat)
+
+    monkeypatch.setattr(session, "touch_activity", touch)
+    with seatlock.hold("t", "browser cli"):
+        pass
+    assert held == [True, True]
+
+
+def test_a_busy_seat_is_not_stamped_by_the_one_that_gave_up(env):
+    first = _start_holder(env)
+    try:
+        stamp = session.last_activity("t")
+        assert stamp is not None
+        time.sleep(0.05)
+        with pytest.raises(seatlock.SeatBusy):
+            with seatlock.hold("t", "browser cli", wait=0.3):
+                pass
+        assert session.last_activity("t") == stamp
+    finally:
+        first.kill()
+        first.wait()

@@ -79,7 +79,11 @@ Three modes:
   Ctrl-D ends the session. A pipe works as well, with no prompt.
 
 `--node NAME` reads the node from the a8s registry. It takes the node's vars
-and its directory, and `$RECIPIENT` is the node's name. The node must run
+and its directory, and `$RECIPIENT` is the node's name. The environment is
+left as found, because the person at the keyboard is no wake. A tool that
+needs the node's own files, such as the `recipes/` directory of the browser
+tool, reads them from the registry by that name; the current directory and
+the environment decide nothing. The node must run
 `tool-<name>`. The person at the keyboard is the operator: `ALLOW` is the
 sender (`--from`, default `operator`), so the ACL passes. `--var` overrides
 last; `--var ALLOW=alice` makes a refusal. Without `--node`, the run uses the

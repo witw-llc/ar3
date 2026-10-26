@@ -1,0 +1,5 @@
+[
+  {"id": 1, "title": "First item", "body": "The first item body."},
+  {"id": 2, "title": "Second item", "body": "The second item body, with <b>markup</b> shown as text."},
+  {"id": 3, "title": "Third item", "body": "The third item body."}
+]

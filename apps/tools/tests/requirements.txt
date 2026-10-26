@@ -1,1 +1,4 @@
 pytest
+# test_layers.py has ports of the fold writers of PyYAML 6.0.1 and compares them with PyYAML where it is installed. 6.0.1 has
+# no wheel for Python 3.13 and fails to build there, so a newer Python skips that one comparison.
+pyyaml==6.0.1; python_version < "3.13"

@@ -157,10 +157,14 @@ def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> 
             shutil.copyfile(src, copied)
             print(f"artifact: {copied}")
         return 0
+    # The body goes in on stdin (`-`), not as an argument: `ps` shows every local user the arguments of every
+    # process, and a reply holds what a page said.
     argv = [sys.executable, str(_a8s_path()), "tell", "--verbatim"]
     argv += [f"--attach={p}" for p in attachments]
-    argv += ["--", recipient, body]
-    proc = subprocess.run(argv, capture_output=True, text=True)
+    argv += ["--", recipient, "-"]
+    proc = subprocess.run(
+        argv, input=body, capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"},
+    )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
     return proc.returncode

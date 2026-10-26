@@ -1570,6 +1570,103 @@ def test_read_submission_block_cut_by_end_of_input_runs_nothing(capsys):
     assert "no line reads END. The block did not run." in capsys.readouterr().err
 
 
+def test_tool_node_leaves_the_node_variable_alone_as_the_person_at_the_terminal_is_not_a_wake(
+    registry, monkeypatch, capfd
+):
+    """A wake names its node in A8S_TURN_RECIPIENT, and a8s reads that as "an agent's turn". The operator who
+    drives a node by hand is not one, and no tool reads the variable to find a node."""
+    monkeypatch.delenv("A8S_TURN_RECIPIENT", raising=False)
+    assert ar3.main(["tool", "command-shell", "--node", "shell1", "--", "echo node=[$A8S_TURN_RECIPIENT]"]) == 0
+    assert "node=[]" in capfd.readouterr().out
+    monkeypatch.setenv("A8S_TURN_RECIPIENT", "the-caller")
+    assert ar3.main(["tool", "command-shell", "--node", "shell1", "--", "echo node=[$A8S_TURN_RECIPIENT]"]) == 0
+    assert "node=[the-caller]" in capfd.readouterr().out
+
+
+def _isolated_browser(tmp_path, monkeypatch):
+    """The browser tool keeps its seats under XDG_DATA_HOME, and playwright-cli is a stand-in."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "playwright-cli"
+    stub.write_text("#!/bin/sh\necho '### Error'\necho 'no browser here'\nexit 1\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def test_tool_exits_with_the_code_of_the_tool_when_the_browser_script_failed(registry, tmp_path, monkeypatch, capfd):
+    _isolated_browser(tmp_path, monkeypatch)
+    assert ar3.main(["tool", "browser", "--node", "web1", "--", "recipe", "nosuchsite"]) == 1
+    out = capfd.readouterr().out
+    assert out.startswith("web1: failed: unknown recipe: nosuchsite")
+    assert "! recipe nosuchsite" in out
+    assert ar3.main(["tool", "browser", "--node", "web1", "--", "recipe"]) == 0
+    assert capfd.readouterr().out.startswith("web1: ok")
+
+
+def _marker_recipe(directory, marker, name="mine"):
+    """`directory/<name>.py`, a recipe that writes `marker` when it is imported, so a test can see that it ran."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.py").write_text(
+        "import pathlib\n"
+        f"pathlib.Path({str(marker)!r}).write_text('imported')\n"
+        "from browser.recipe import Recipe\n"
+        f"recipe = Recipe({name!r}, 'The own recipe of the node', origins=['https://mine.example.com'])\n"
+        "recipe.steps('go', help='Go.', steps='go https://mine.example.com/')\n"
+    )
+
+
+def test_tool_with_a_node_loads_the_recipes_directory_of_that_node(registry, tmp_path, monkeypatch, capfd):
+    _isolated_browser(tmp_path, monkeypatch)
+    root, _home = registry
+    marker = tmp_path / "imported"
+    _marker_recipe(root / "recipes", marker)
+    assert ar3.main(["tool", "browser", "--node", "web1", "--", "recipe"]) == 0
+    assert "mine  The own recipe of the node  [node]" in capfd.readouterr().out
+    assert marker.exists(), "the marker proves that a recipe the tool lists has been imported"
+
+
+def test_tool_without_a_node_loads_no_recipe_from_the_working_directory_whatever_the_environment_holds(
+    registry, tmp_path, monkeypatch, capfd
+):
+    """Every agent wake carries A8S_TURN_RECIPIENT. A recipe in the directory the agent happens to stand in is
+    code that would act with the seat's signed-in identity, so it is never loaded."""
+    _isolated_browser(tmp_path, monkeypatch)
+    here, marker = tmp_path / "somewhere", tmp_path / "imported"
+    _marker_recipe(here / "recipes", marker)
+    monkeypatch.chdir(here)
+    for value in ("some-agent", "web1", None):
+        if value is None:
+            monkeypatch.delenv("A8S_TURN_RECIPIENT", raising=False)
+        else:
+            monkeypatch.setenv("A8S_TURN_RECIPIENT", value)
+        assert ar3.main(["tool", "browser", "--", "recipe"]) == 0
+        out = capfd.readouterr().out
+        assert out.startswith("browser: ok") and "mine" not in out and "[node]" not in out
+        assert not marker.exists(), f"the recipe of the working directory was imported (A8S_TURN_RECIPIENT={value})"
+
+
+def test_tool_without_a_node_loads_the_recipes_of_a_registered_node_of_the_name_of_the_tool_and_no_other(
+    registry, tmp_path, monkeypatch, capfd
+):
+    """With no --node the seat is named for the tool, `browser`. A node of that name is that seat's node."""
+    _isolated_browser(tmp_path, monkeypatch)
+    root, home = registry
+    marker = tmp_path / "imported"
+    _marker_recipe(root / "recipes", marker)
+    agents = json.loads((home / "a8s.json").read_text())
+    agents["agents"]["browser"] = {
+        "root": str(root), "definition": str(REPO / "apps/a8s/definitions/tool-command-shell.json"), "vars": {},
+    }
+    (home / "a8s.json").write_text(json.dumps(agents))
+    assert ar3.main(["tool", "browser", "--", "recipe"]) == 0
+    assert "mine" not in capfd.readouterr().out and not marker.exists(), "a node of another kind loads nothing"
+    agents["agents"]["browser"]["definition"] = str(REPO / "apps/a8s/definitions/tool-browser.json")
+    (home / "a8s.json").write_text(json.dumps(agents))
+    assert ar3.main(["tool", "browser", "--", "recipe"]) == 0
+    assert "mine  The own recipe of the node  [node]" in capfd.readouterr().out and marker.exists()
+
+
 def test_tool_session_runs_each_line_and_continues(registry, monkeypatch, capfd):
     monkeypatch.setattr("sys.stdin", io.StringIO("echo one\nfalse\n\necho two\n"))
     assert ar3.main(["tool", "command-shell", "--node", "shell1"]) == 0

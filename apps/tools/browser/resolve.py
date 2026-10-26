@@ -13,6 +13,13 @@ of that: it names one element playwright-cli itself already knows how to find
 way and handed back as the target verbatim, never run through text or CSS
 matching.
 
+The selector that comes back is an argument of a playwright-cli command line, and a page can make an id, a
+class or a test id from a value it was given (a user name typed into a field becomes the id of the next
+button). So a selector is used only when it holds no value that must stay out of a command line. When the
+best one does, the element is named by its path of tag names and positions (`body > div:nth-of-type(2) >
+button`), which holds nothing the page put in it. An element with no such name is an error that says to use a
+ref from `snap`.
+
 Text matching runs two tiers. The page-side pass compares literal text first
 (case-insensitive), because that is the common case and needs no Python round
 trip. When that finds nothing, the second tier compares after normalising
@@ -24,7 +31,8 @@ import unicodedata
 from difflib import get_close_matches
 
 from . import plc
-from .plc import BrowserError, evaluate_json, js_string
+from . import session
+from .plc import BrowserError
 
 # playwright-cli's own shape for a ref it printed: an optional frame index
 # (`f<n>`) followed by an element index (`e<n>`) — see `targetLocators` in
@@ -78,6 +86,32 @@ const cssPath = (el) => {
   }
   return parts.join(' > ');
 };
+const structuralPath = (el) => {
+  const parts = [];
+  let node = el;
+  while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
+    let part = CSS.escape(node.localName);
+    const parent = node.parentElement;
+    if (parent) {
+      const kin = Array.from(parent.children).filter((c) => c.localName === node.localName);
+      if (kin.length > 1) part += ':nth-of-type(' + (kin.indexOf(node) + 1) + ')';
+    }
+    parts.unshift(part);
+    node = node.parentElement;
+  }
+  return parts.join(' > ');
+};
+const embedsOf = (el) => {
+  const out = [];
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    if (node.id) out.push(node.id);
+    const testid = node.getAttribute('data-testid');
+    if (testid) out.push(testid);
+    const cls = node.getAttribute('class');
+    if (cls) out.push(cls);
+  }
+  return out;
+};
 const bestSelector = (el) => {
   if (el.id && uniq('#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
   const testid = el.getAttribute('data-testid');
@@ -92,18 +126,21 @@ const dropAncestors = (list) => list.filter((el) => !list.some((o) => o !== el &
 """
 
 CLICK_JS = r"""
-let selectorValid = true, selectorCount = 0, selectorVisibleCount = 0, selectorTarget = '';
+let selectorValid = true, selectorCount = 0, selectorVisibleCount = 0, selectorTarget = '', selectorPlain = '', selectorEmbeds = [];
 try {
   const matches = Array.from(document.querySelectorAll(arg));
   selectorCount = matches.length;
   const actionable = matches.filter((el) => isVisible(el) && isEnabled(el));
   selectorVisibleCount = actionable.length;
   selectorTarget = actionable.length ? bestSelector(actionable[0]) : '';
+  selectorPlain = actionable.length ? structuralPath(actionable[0]) : '';
+  selectorEmbeds = actionable.length ? embedsOf(actionable[0]) : [];
 } catch (e) { selectorValid = false; }
 const target = norm(arg).toLowerCase();
 const normTarget = normalize(arg);
 const SEL = 'button, a, [role="button"], [role="link"], [role="tab"], [role="menuitem"], input[type="button"], input[type="submit"], label, [onclick]';
-const describe = (el) => ({ tag: el.tagName.toLowerCase(), text: norm(el.textContent), selector: bestSelector(el) });
+const describe = (el) => ({ tag: el.tagName.toLowerCase(), text: norm(el.textContent), selector: bestSelector(el), plain: structuralPath(el), embeds: embedsOf(el) });
+const brief = (el) => ({ tag: el.tagName.toLowerCase(), text: norm(el.textContent) });
 const tier = (vis, predicate) => dropAncestors(vis.filter(predicate));
 const gather = (pool) => {
   const vis = pool.filter(isVisible);
@@ -130,22 +167,24 @@ if (m.exact.length === 0 && m.sub.length === 0) {
 const normExact = tier(pool, (el) => normalize(el.textContent) === normTarget);
 const normSub = tier(pool, (el) => normalize(el.textContent).includes(normTarget));
 return {
-  selectorValid, selectorCount, selectorVisibleCount, selectorTarget,
+  selectorValid, selectorCount, selectorVisibleCount, selectorTarget, selectorPlain, selectorEmbeds,
   exact: m.exact.map(describe), substring: m.sub.map(describe),
   normExact: normExact.map(describe), normSub: normSub.map(describe),
-  candidates: pool.map(describe),
+  candidates: pool.map(brief),
 };
 """
 
 FILL_JS = r"""
 const FILLABLE = 'input:not([type="button"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea, select, [contenteditable=""], [contenteditable="true"]';
-let selectorValid = true, selectorCount = 0, selectorVisibleCount = 0, selectorTarget = '';
+let selectorValid = true, selectorCount = 0, selectorVisibleCount = 0, selectorTarget = '', selectorPlain = '', selectorEmbeds = [];
 try {
   const matches = Array.from(document.querySelectorAll(arg)).filter((el) => el.matches(FILLABLE));
   selectorCount = matches.length;
   const actionable = matches.filter((el) => isVisible(el) && isEnabled(el));
   selectorVisibleCount = actionable.length;
   selectorTarget = actionable.length ? bestSelector(actionable[0]) : '';
+  selectorPlain = actionable.length ? structuralPath(actionable[0]) : '';
+  selectorEmbeds = actionable.length ? embedsOf(actionable[0]) : [];
 } catch (e) { selectorValid = false; }
 const target = norm(arg).toLowerCase();
 const labelsFor = (el) => {
@@ -162,22 +201,30 @@ const labelsFor = (el) => {
 };
 const withLabel = Array.from(document.querySelectorAll(FILLABLE)).filter(isVisible)
   .map((el) => ({ el, labels: labelsFor(el) })).filter((x) => x.labels.length);
-const mk = (x) => ({ tag: x.el.tagName.toLowerCase(), text: x.label, selector: bestSelector(x.el) });
+const mk = (x) => ({ tag: x.el.tagName.toLowerCase(), text: x.label, selector: bestSelector(x.el), plain: structuralPath(x.el), embeds: embedsOf(x.el) });
 const exact = withLabel.map((x) => ({ ...x, label: x.labels.find((label) => label.toLowerCase() === target) })).filter((x) => x.label);
 const sub = withLabel.map((x) => ({ ...x, label: x.labels.find((label) => label.toLowerCase().includes(target)) })).filter((x) => x.label);
 const candidates = [];
 withLabel.forEach((x) => {
   const selector = bestSelector(x.el);
+  const plain = structuralPath(x.el);
+  const embeds = embedsOf(x.el);
   const tag = x.el.tagName.toLowerCase();
-  x.labels.forEach((label) => candidates.push({ tag, text: label, selector }));
+  x.labels.forEach((label) => candidates.push({ tag, text: label, selector, plain, embeds }));
 });
-return { selectorValid, selectorCount, selectorVisibleCount, selectorTarget, exact: exact.map(mk), substring: sub.map(mk), candidates };
+return { selectorValid, selectorCount, selectorVisibleCount, selectorTarget, selectorPlain, selectorEmbeds, exact: exact.map(mk), substring: sub.map(mk), candidates };
 """
 
 
+def evaluate_json(seat, function, argument):
+    """What `function`, the source of a JavaScript function of one argument, returns in the page for `argument`.
+    The argument is the caller's text. It goes in a private file with the function (see `plc.call_in_page`),
+    never in a command line."""
+    return plc.call_in_page(seat, function, [argument], session.scratch_dir(seat))
+
+
 def _classify(seat, argument, body_js):
-    expression = f"((arg) => {{{HELPERS_JS}{body_js}}})('{js_string(argument)}')"
-    return evaluate_json(seat, expression)
+    return evaluate_json(seat, f"(arg) => {{{HELPERS_JS}{body_js}}}", argument)
 
 
 def _dedupe_by_selector(candidates):
@@ -224,13 +271,42 @@ def _normalized_tier(argument, verdict):
     return _normalized_matches(argument, verdict.get("candidates", []))
 
 
-def _pick(argument, verdict, noun):
+def _named(seat, element):
+    """The selector to hand playwright-cli for `element`, a dict with its best `selector`, its `plain` path of tag
+    names and positions, and the strings the best selector is made of, `embeds` (the id, test id and class of the
+    element and of each parent). The best one is used unless it, or a string it is made of, holds a value that
+    must stay out of a command line (see the top of this module): a selector joins the classes of an element
+    with dots, so a value of several words is not in it as it was written, but it is in the class attribute.
+    Then the plain path is used. None when neither is free of one."""
+    best = element.get("selector")
+    if best and not plc.holds_protected(seat, best) and not any(
+        plc.holds_protected(seat, embedded) for embedded in element.get("embeds") or ()
+    ):
+        return best
+    plain = element.get("plain")
+    if plain and not plc.holds_protected(seat, plain):
+        return plain
+    return None
+
+
+def _name(seat, element, noun):
+    """`_named`, or the error that says the element has no name for a command line."""
+    found = _named(seat, element)
+    if found is None:
+        raise BrowserError(
+            f"{noun}: no selector for that element is free of a value that must not be in a command line. "
+            "Take a `snap` and use the ref of the element"
+        )
+    return found
+
+
+def _pick(seat, argument, verdict, noun):
     """One match acts; zero or many is an error naming what to do next."""
     candidates = verdict["exact"] or verdict["substring"]
     if not candidates:
         candidates = _normalized_tier(argument, verdict)
     if len(candidates) == 1:
-        return candidates[0]["selector"]
+        return _name(seat, candidates[0], noun)
     if not candidates:
         hint = _closest_hint(argument, verdict.get("candidates", []))
         raise BrowserError(
@@ -238,8 +314,10 @@ def _pick(argument, verdict, noun):
         )
     lines = [f"{noun}: {len(candidates)} elements match {argument!r} — pick one by selector:"]
     for candidate in candidates:
-        text = candidate["text"][:60]
-        lines.append(f'  {candidate["tag"]}  "{text}"  {candidate["selector"]}')
+        # A text that was cut at 60 characters shows the start of a value cut in two. So the cut comes after.
+        text = plc.scrub_protected(seat, candidate["text"])[:60]
+        named = _named(seat, candidate) or "(no selector without a protected value: use a ref from `snap`)"
+        lines.append(f'  {candidate["tag"]}  "{text}"  {named}')
     raise BrowserError("\n".join(lines))
 
 
@@ -254,7 +332,7 @@ def _resolve_ref(seat, ref):
     verb gets the same clear failure for a ref that fell off the page.
     """
     try:
-        plc.run(seat, "eval", "() => true", ref, timeout=10)
+        plc.run(seat, "eval", plc.Own("() => true"), ref, timeout=10)
     except BrowserError as exc:
         if "not found in the current page snapshot" in str(exc):
             raise BrowserError(
@@ -271,8 +349,12 @@ def _target(seat, argument, body_js, noun):
     if verdict["selectorValid"] and verdict["selectorCount"] >= 1:
         if verdict["selectorVisibleCount"] < 1:
             raise BrowserError(f"{noun}: selector {argument!r} matched nothing visible and enabled")
-        return verdict["selectorTarget"] or argument
-    return _pick(argument, verdict, noun)
+        element = {
+            "selector": verdict["selectorTarget"] or argument, "plain": verdict.get("selectorPlain"),
+            "embeds": verdict.get("selectorEmbeds"),
+        }
+        return _name(seat, element, noun)
+    return _pick(seat, argument, verdict, noun)
 
 
 def click_target(seat, argument):

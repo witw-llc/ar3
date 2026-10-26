@@ -932,7 +932,7 @@ class TestAttachedLoopKillRequest:
 
 # ---------- idle invoke ----------
 
-def _write_idle_def(path: Path, fixtures_dir: Path, timeout: int) -> None:
+def _write_idle_def(path: Path, fixtures_dir: Path, timeout: int | str) -> None:
     """Write a definition that wakes via mock_cli.py on tells AND has an
     idle.invoke that prints a distinguishable string. The idle command's
     argv echoes 'IDLE-FIRED-FOR:$RECIPIENT' so we can grep the per-agent
@@ -1034,6 +1034,90 @@ class TestMaybeRunIdle:
         # Even with no last-active, timeout<=0 means idle is off.
         assert maybe_run_idle(Participant("X", d)) is False
 
+
+    @pytest.mark.parametrize(
+        "node_vars,fires",
+        [
+            ({"TIMEOUT": "1"}, True),
+            ({"timeout": "1"}, True),
+            ({"TIMEOUT": "300"}, False),
+            ({"TIMEOUT": "0"}, False),
+            ({"TIMEOUT": "15m"}, False),
+            ({"TIMEOUT": ""}, False),
+            ({"OTHER": "1"}, False),
+            ({}, False),
+        ],
+    )
+    def test_a_timeout_var_decides_whether_idle_fires(
+        self, fake_home, tmp_path, fixtures_dir, node_vars, fires
+    ):
+        # The node was last active a minute ago. With TIMEOUT=1 the wake is
+        # past due and fires; with it unset, empty, 0 or not a number the node
+        # has no idle wakes at all, and its last-active stays where it was.
+        from core import touch_last_active, read_last_active
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout="$TIMEOUT?")
+        entry = {"root": str(d), "definition": str(defp)}
+        if node_vars:
+            entry["vars"] = node_vars
+        save_registry({"X": entry})
+        ensure_mailboxes(Participant("X", d))
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=60)
+        touch_last_active("X", stamp)
+        assert maybe_run_idle(Participant("X", d)) is fires
+        log = _read_log("X")
+        if fires:
+            assert "IDLE-FIRED-FOR:X" in log
+            assert read_last_active("X") > stamp
+        else:
+            assert "idle exec:" not in log
+            assert read_last_active("X") == stamp
+
+    def test_setting_the_timeout_var_turns_idle_on_without_a_restart(
+        self, fake_home, tmp_path, fixtures_dir
+    ):
+        from core import touch_last_active
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout="$TIMEOUT?")
+        entry = {"root": str(d), "definition": str(defp)}
+        save_registry({"X": entry})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+        p = Participant("X", d)
+        assert maybe_run_idle(p) is False
+        save_registry({"X": {**entry, "vars": {"TIMEOUT": "1"}}})
+        assert maybe_run_idle(p) is True
+        assert "IDLE-FIRED-FOR:X" in _read_log("X")
+
+    def test_node_vars_load_only_for_a_timeout_that_names_one(
+        self, fake_home, tmp_path, fixtures_dir, monkeypatch
+    ):
+        # maybe_run_idle runs once a second for every node; a node whose
+        # timeout is a plain number must not pay a registry read for it.
+        import daemon as daemon_mod
+        from core import touch_last_active
+        loads: list[str] = []
+        real = daemon_mod.load_agent_vars
+        monkeypatch.setattr(
+            daemon_mod, "load_agent_vars", lambda name: loads.append(name) or real(name)
+        )
+        registry = {}
+        for name, timeout in (("N", 300), ("V", "$TIMEOUT?")):
+            root = tmp_path / name
+            root.mkdir()
+            defp = tmp_path / f"idle-{name}.json"
+            _write_idle_def(defp, fixtures_dir, timeout=timeout)
+            registry[name] = {"root": str(root), "definition": str(defp), "vars": {"TIMEOUT": "300"}}
+        save_registry(registry)
+        for name in registry:
+            ensure_mailboxes(Participant(name, tmp_path / name))
+            touch_last_active(name, datetime.now(timezone.utc) - timedelta(seconds=10))
+        assert maybe_run_idle(Participant("N", tmp_path / "N")) is False
+        assert loads == []
+        assert maybe_run_idle(Participant("V", tmp_path / "V")) is False
+        assert loads == ["V"]
 
     def test_a_failed_idle_wake_is_a_failed_wake(self, fake_home, tmp_path):
         # No envelope, so no dead letter; still one WAKE_FAILED row, or a node
@@ -1159,6 +1243,28 @@ class TestAttachedLoopIdleIntegration:
         log = _read_log("X")
         assert "idle exec:" in log
         assert "IDLE-FIRED-FOR:X" in log
+
+    @pytest.mark.parametrize("node_vars,fires", [({"TIMEOUT": "1"}, True), ({}, False)])
+    def test_a_timeout_var_gates_the_idle_pass(
+        self, fake_home, tmp_path, fixtures_dir, node_vars, fires
+    ):
+        # The same node, stale by a minute: it idles when TIMEOUT is set and
+        # past due, and stays quiet when TIMEOUT is unset.
+        from core import touch_last_active
+        d = tmp_path / "X"; d.mkdir()
+        defp = tmp_path / "idle.json"
+        _write_idle_def(defp, fixtures_dir, timeout="$TIMEOUT?")
+        entry = {"root": str(d), "definition": str(defp)}
+        if node_vars:
+            entry["vars"] = node_vars
+        save_registry({"X": entry})
+        ensure_mailboxes(Participant("X", d))
+        touch_last_active("X", datetime.now(timezone.utc) - timedelta(seconds=60))
+
+        assert attached_loop(["X"], 0.1, single_pass=True) == 0
+        log = _read_log("X")
+        assert ("IDLE-FIRED-FOR:X" in log) is fires
+        assert ("idle exec:" in log) is fires
 
     def test_wake_refreshes_last_active_so_idle_doesnt_fire(self, fake_home, tmp_path, fixtures_dir):
         # If a real wake happened this iteration, last-active was just

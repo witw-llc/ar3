@@ -912,14 +912,37 @@ def build_batch_command(
     return cmd
 
 
-def idle_timeout_seconds(definition: dict) -> float | None:
-    """Returns `definition.idle.timeout` as a positive float, or None if
-    not configured / not a positive number. Loose typing tolerated:
-    `"60"` strings parse the same as `60`."""
+def idle_timeout_var(definition: dict) -> str | None:
+    """The var `definition.idle.timeout` reads, uppercased, when its whole
+    value is `$NAME` or `$NAME?`; None for any other value."""
     idle = definition.get("idle")
     if not isinstance(idle, dict):
         return None
     raw = idle.get("timeout")
+    if not isinstance(raw, str):
+        return None
+    ref = PLACEHOLDER_RE.fullmatch(raw.strip())
+    return ref.group(1).upper() if ref else None
+
+
+def idle_timeout_seconds(
+    definition: dict, vars: dict[str, str] | None = None
+) -> float | None:
+    """Returns `definition.idle.timeout` as a positive float, or None if
+    not configured / not a positive number. Loose typing tolerated:
+    `"60"` strings parse the same as `60`.
+
+    A value that is wholly `$NAME` or `$NAME?` reads the node var NAME from
+    `vars`, case-insensitive like argv. Either spelling gives None when the var
+    is unset, empty, not a number, or 0 or less: the node has no idle wakes.
+    Neither raises, because the daemon asks once per second."""
+    idle = definition.get("idle")
+    if not isinstance(idle, dict):
+        return None
+    raw = idle.get("timeout")
+    name = idle_timeout_var(definition)
+    if name is not None:
+        raw = {k.upper(): v for k, v in (vars or {}).items()}.get(name)
     if raw is None:
         return None
     try:

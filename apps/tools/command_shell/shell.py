@@ -24,7 +24,9 @@ Limits, each a per-node a8s var with a default:
 The command runs in its own session, and nothing it starts outlives it: a
 background child it leaves in that session is killed when the command ends, by
 exit, by the timeout, or by a stop signal to the tool (a8s ending the wake),
-which kills the tree first and then takes effect. On Windows the tree is killed through `taskkill /T`, and a stop from
+which kills the tree first and then takes effect. The handler for a stop is in
+place before the command starts, and a stop that comes while the command is
+being started waits for it and then takes it down. On Windows the tree is killed through `taskkill /T`, and a stop from
 a8s is a plain TerminateProcess that no handler sees, so the command is on its
 own there; the drain after a kill is bounded either way.
 """
@@ -134,30 +136,63 @@ def _kill_tree(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
     terminate_group(proc, grace_seconds=grace_seconds)
 
 
-@contextlib.contextmanager
-def _command_dies_with_us(proc: subprocess.Popen):
-    """While the command runs, a stop signal to this process kills the
-    command's group first, then lands as it would have. The command is in its
-    own session so the tool's timeout can kill the whole tree without killing
-    itself, which also puts it outside the wake's group — a8s ending the wake
-    (max wake time, node stop) with `terminate_group` would otherwise leave
-    the command running. No grace: the caller already chose to stop us."""
-    if os.name != "posix" or threading.current_thread() is not threading.main_thread():
-        yield
-        return
+# Windows has no SIGHUP. The forwarder is installed on POSIX only, but the module must import everywhere.
+_STOP_SIGNALS = tuple(
+    getattr(signal, name) for name in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, name)
+)
 
-    def forward(signum, _frame):
-        _kill_tree(proc, grace_seconds=0)
+
+class _StopForwarder:
+    """What a stop signal does while a command runs: it kills the command's group first, then lands as it would have.
+    The handler is in place BEFORE the command starts, so there is no moment in which the command lives and a stop
+    kills only the tool. A stop that comes while the command is being started (`proc` is not known yet) is
+    remembered, and `arm` acts on it the moment the command is known."""
+
+    def __init__(self):
+        self.proc = None
+        self.signum = None  # a stop that came before there was a command to take down
+
+    def handle(self, signum, _frame):
+        if self.proc is None:
+            if self.signum is None:
+                self.signum = signum
+            return
+        self.forward(signum)
+
+    def forward(self, signum):
+        """Kill the command's group, with no grace (the caller already chose to stop us), and let the signal land."""
+        if self.proc is not None:
+            _kill_tree(self.proc, grace_seconds=0)
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
-    stop_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
-    previous = {sig: signal.signal(sig, forward) for sig in stop_signals}
+    def arm(self, proc: subprocess.Popen):
+        """The command is started: from here a stop takes it down, and one that came while it started does now."""
+        self.proc = proc
+        if self.signum is not None:
+            self.forward(self.signum)
+
+
+@contextlib.contextmanager
+def _stops_reach_the_command():
+    """While the block runs, a stop signal to this process kills the command's group first, then lands as it would have.
+    The command is in its own session so the tool's timeout can kill the whole tree without killing itself, which
+    also puts it outside the wake's group: a8s ending the wake (max wake time, node stop) with `terminate_group` would
+    otherwise leave the command running. It yields the `_StopForwarder` to `arm` once the command is started. The
+    handlers are installed before the command is, which is the point: a stop between the start of the command and the
+    handler (two threads to start, on a loaded machine) used to kill the tool and leave the command behind."""
+    stop = _StopForwarder()
+    if os.name != "posix" or threading.current_thread() is not threading.main_thread():
+        yield stop
+        return
+    previous = {sig: signal.signal(sig, stop.handle) for sig in _STOP_SIGNALS}
     try:
-        yield
+        yield stop
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+        if stop.signum is not None and stop.proc is None:
+            os.kill(os.getpid(), stop.signum)  # a stop that came with no command to take down lands as it would have
 
 
 def run_command(
@@ -176,24 +211,28 @@ def run_command(
     started outlives it: its whole process group ends when it finishes."""
     argv = build_argv(shell, command)
     start = time.monotonic()
-    proc = subprocess.Popen(
-        argv,
-        cwd=cwd or os.getcwd(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=(os.name == "posix"),
-    )
-    out = _Capture(proc.stdout, output_max)
-    err = _Capture(proc.stderr, output_max)
-    deadline = start + timeout
     timed_out = False
     code = None
     # The shell exiting is not the command ending: a child it left in the
     # group may still hold the pipes and still be working. The command ends
     # when both pipes close or the deadline passes, whichever is first, and
-    # the stop-signal forward covers that whole span.
-    with _command_dies_with_us(proc):
+    # the stop-signal forward covers that whole span, from before the command
+    # starts to after its group is gone.
+    with _stops_reach_the_command() as stop:
+        if stop.signum is not None:
+            stop.forward(stop.signum)  # a stop that came before the command: it is not started
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd or os.getcwd(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+        )
+        stop.arm(proc)
+        out = _Capture(proc.stdout, output_max)
+        err = _Capture(proc.stderr, output_max)
+        deadline = start + timeout
         try:
             code = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:

@@ -1,10 +1,17 @@
 import json
+import os
+from pathlib import Path
 
 import pytest
 
 from browser import commands
 from browser import handler
+from browser import plc
 from browser import seatlock
+from browser import secretstore
+from browser import session
+
+from fake_browser import FakeBrowser
 
 
 def _capture(monkeypatch):
@@ -173,6 +180,23 @@ def test_help_without_a_usage_section_says_so(monkeypatch, tmp_path):
     assert 'no "## Usage" section in apps/tools/browser/README.md' in sent[0][1]
 
 
+def test_a_wake_that_runs_a_script_is_use_of_the_seat(monkeypatch):
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: commands.Run("seat"))
+    assert session.last_activity("seat") is None
+    assert handler.handle("seat", "iris", "url", allow="iris") == 0
+    assert session.last_activity("seat") is not None
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize("sender, message", [("iris", "help"), ("stranger", "url")])
+def test_a_wake_that_runs_no_script_is_not_use_of_the_seat(monkeypatch, sender, message):
+    _capture(monkeypatch)
+    _no_run(monkeypatch)
+    assert handler.handle("seat", sender, message, allow="iris") == 0
+    assert session.last_activity("seat") is None
+
+
 def _hold_elsewhere(seat):
     """Take the seat lock through a second descriptor, as another process would."""
     import contextlib
@@ -315,3 +339,258 @@ def test_a_do_that_begins_after_the_stop_opens_chrome(monkeypatch, capsys, tmp_p
     monkeypatch.setattr(sys, "argv", ["browser", "--seat", "s", "do", str(script)])
     assert cli.main() == 0
     assert events == ["spawn"]
+
+
+VALUE = "hunter2-value"
+
+
+def _seat_with_secret(monkeypatch, seat="garmin"):
+    secretstore.set_secret(seat, "PASSWORD", VALUE, ["https://app.example.com"])
+    monkeypatch.setattr(commands.session, "ensure_running", lambda seat, **k: None)
+    monkeypatch.setattr(commands.session, "current_url", lambda seat: f"https://example.com/?pw={VALUE}")
+    monkeypatch.setattr(commands.session, "snapshot", lambda seat: f'- textbox "Password": {VALUE}')
+
+
+def test_a_reply_holds_a_stored_value_nowhere_in_its_body_or_attachments(monkeypatch):
+    _seat_with_secret(monkeypatch)
+    sent = _capture(monkeypatch)
+    monkeypatch.setattr(plc, "run", lambda *a, **k: f"### Result\nok {VALUE}\n")
+    assert handler.handle("garmin", "iris", f"url\nsnap\ntype {VALUE}\nbogus", allow="iris") == 0
+    (recipient, body, files), = sent
+    assert body.startswith("garmin: failed: unknown command: bogus")
+    assert VALUE not in body
+    assert "https://example.com/?pw=[secret:PASSWORD]" in body
+    assert files
+    for path in files:
+        with open(path, "rb") as handle:
+            assert VALUE.encode() not in handle.read()
+
+
+def test_the_reply_body_is_scrubbed_a_second_time_after_it_is_built(monkeypatch):
+    run = commands.Run("garmin", secretstore.Scrubber({"PASSWORD": {"value": VALUE, "origins": ["https://app.example.com"]}}))
+    run.steps.append({"command": "x", "ok": True, "output": f"typed {VALUE}"})
+    run.error = f"failed with {VALUE}"
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: run)
+    sent = _capture(monkeypatch)
+    handler.handle("garmin", "iris", "url", allow="iris")
+    body = sent[0][1]
+    assert VALUE not in body
+    assert body.startswith("garmin: failed: failed with [secret:PASSWORD]")
+    assert "typed [secret:PASSWORD]" in body
+
+
+def test_the_body_is_cut_after_the_scrub_not_before(monkeypatch):
+    """The cut lands five characters into the value. Cut first, the reply would end in `hunte`."""
+    header = "garmin: ok\n\n  text p\n      "
+    run = commands.Run("garmin", secretstore.Scrubber({"PASSWORD": {"value": VALUE, "origins": ["https://app.example.com"]}}))
+    run.note("text p", "x" * (handler.MAX_BODY - len(header) - 5) + VALUE + "y" * 100)
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: run)
+    sent = _capture(monkeypatch)
+    handler.handle("garmin", "iris", "text p", allow="iris")
+    body = sent[0][1]
+    assert len(body) == handler.MAX_BODY
+    assert "hunte" not in body
+    assert body.endswith("[secr")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="file modes are POSIX")
+def test_a_store_that_cannot_be_read_gets_a_failed_reply_and_no_script_runs(monkeypatch):
+    _seat_with_secret(monkeypatch)
+    target = secretstore.path("garmin")
+    os.chmod(target, 0o644)
+    monkeypatch.setattr(commands.session, "ensure_running", lambda *a, **k: pytest.fail("Chrome opened"))
+    sent = _capture(monkeypatch)
+    assert handler.handle("garmin", "iris", "url", allow="iris") == 0
+    (recipient, body, files), = sent
+    assert body.startswith("garmin: failed: secret store ")
+    assert f"chmod 600 {target}" in body
+    assert VALUE not in body
+    assert files == []
+
+
+@pytest.mark.parametrize("line", ["secret set PASSWORD other-value", "secret list", "secret rm PASSWORD"])
+def test_a_tell_cannot_set_list_or_remove_a_secret(monkeypatch, line):
+    _seat_with_secret(monkeypatch)
+    target = secretstore.path("garmin")
+    before = open(target, "rb").read()
+    sent = _capture(monkeypatch)
+    assert handler.handle("garmin", "iris", line, allow="iris") == 0
+    assert sent[0][1].startswith("garmin: failed: unknown command: secret")
+    assert open(target, "rb").read() == before
+
+
+# --- the exit code: a wake always 0, `ar3 tool` 1 when the script failed ---------------------------------
+
+
+def _print_mode(monkeypatch, tmp_path):
+    monkeypatch.setenv("AR3_TOOL_REPLY_DIR", str(tmp_path / "replies"))
+
+
+def _failed_run(seat="seat"):
+    run = commands.Run(seat)
+    run.fail("click Submit", "nothing visible matching 'Submit'")
+    return run
+
+
+def test_a_wake_exits_zero_when_the_script_failed(monkeypatch):
+    monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: _failed_run())
+    sent = _capture(monkeypatch)
+    assert handler.handle("seat", "iris", "click Submit", allow="iris") == 0
+    assert sent[0][1].startswith("seat: failed: nothing visible")
+
+
+def test_a_wake_exits_zero_when_the_seat_was_busy(monkeypatch):
+    monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+    monkeypatch.setenv("AR3_BROWSER_SEAT_WAIT", "0.3")
+    sent = _capture(monkeypatch)
+    _no_run(monkeypatch)
+    with _hold_elsewhere("seat"):
+        assert handler.handle("seat", "iris", "url", allow="iris") == 0
+    assert sent[0][1].endswith("Nothing ran.")
+
+
+def test_ar3_tool_exits_one_when_the_script_failed_and_still_prints_the_reply(monkeypatch, tmp_path, capsys):
+    _print_mode(monkeypatch, tmp_path)
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: _failed_run())
+    assert handler.handle("seat", "operator", "click Submit", allow="operator") == 1
+    out = capsys.readouterr().out
+    assert out.startswith("seat: failed: nothing visible matching 'Submit'")
+    assert "! click Submit" in out
+
+
+def test_ar3_tool_exits_zero_when_the_script_ran_to_the_end(monkeypatch, tmp_path, capsys):
+    _print_mode(monkeypatch, tmp_path)
+    run = commands.Run("seat")
+    run.note("url", "https://example.com/")
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: run)
+    assert handler.handle("seat", "operator", "url", allow="operator") == 0
+    assert capsys.readouterr().out.startswith("seat: ok")
+
+
+def test_ar3_tool_exits_one_when_the_seat_was_busy_and_nothing_ran(monkeypatch, tmp_path, capsys):
+    _print_mode(monkeypatch, tmp_path)
+    monkeypatch.setenv("AR3_BROWSER_SEAT_WAIT", "0.3")
+    _no_run(monkeypatch)
+    with _hold_elsewhere("seat"):
+        assert handler.handle("seat", "operator", "url", allow="operator") == 1
+    assert capsys.readouterr().out.rstrip().endswith("Nothing ran.")
+
+
+def test_ar3_tool_help_exits_zero(monkeypatch, tmp_path, capsys):
+    _print_mode(monkeypatch, tmp_path)
+    _no_run(monkeypatch)
+    assert handler.handle("seat", "operator", "help", allow="operator") == 0
+
+
+def test_a_reply_that_could_not_be_sent_keeps_its_own_code_in_print_mode_too(monkeypatch, tmp_path):
+    _print_mode(monkeypatch, tmp_path)
+    monkeypatch.setattr(commands, "run_script", lambda *a, **k: _failed_run())
+    monkeypatch.setattr(handler.rt, "send_reply", lambda *a, **k: 7)
+    assert handler.handle("seat", "operator", "x", allow="operator") == 7
+
+
+def test_a_failed_recipe_step_makes_ar3_tool_exit_one(monkeypatch, tmp_path, capsys):
+    FakeBrowser(monkeypatch)
+    _print_mode(monkeypatch, tmp_path)
+    assert handler.handle("seat", "operator", "recipe nosuchsite", allow="operator") == 1
+    assert "failed: unknown recipe: nosuchsite" in capsys.readouterr().out
+    assert handler.handle("seat", "operator", "recipe", allow="operator") == 0
+
+
+# --- the node's own recipes ---------------------------------------------------------------------------------
+#
+# They come from `recipes/` in the root of the registered tool-browser node whose name is the seat. The
+# registry says which directory that is: the handler asks nothing of the working directory or the environment.
+
+
+NODE_RECIPE = (
+    "from browser.recipe import Recipe\n"
+    "recipe = Recipe('mine', 'The node recipe', origins=['https://mine.example.com'])\n"
+    "recipe.steps('go', help='Go.', steps='go https://mine.example.com/')\n"
+)
+TOOL_BROWSER = "/repo/apps/a8s/definitions/tool-browser.json"
+
+
+def _node(tmp_path, monkeypatch, seat="seat", definition=TOOL_BROWSER):
+    """A node directory with one recipe, registered under `seat` in an a8s home of its own."""
+    node = tmp_path / "node"
+    (node / "recipes").mkdir(parents=True)
+    (node / "recipes" / "mine.py").write_text(NODE_RECIPE)
+    home = tmp_path / "a8s-registry"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("A8S_HOME", str(home))
+    (home / "a8s.json").write_text(json.dumps({
+        "agents": {seat: {"root": str(node), "definition": definition, "vars": {}}},
+        "aliases": {}, "namespaces": {},
+    }))
+    return str(node)
+
+
+def test_a_wake_for_a_registered_node_loads_the_recipes_directory_of_that_node(monkeypatch, tmp_path):
+    from browser import recipe
+
+    node = _node(tmp_path, monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        commands, "run_script",
+        lambda seat, script, **k: seen.append(k["recipes"]) or commands.Run(seat),
+    )
+    _capture(monkeypatch)
+    handler.handle("seat", "iris", "recipe", allow="iris")
+    handler.handle("other", "iris", "recipe", allow="iris")
+    assert [library.dirs for library in seen] == [[Path(node) / "recipes"], []]
+    assert all(isinstance(library, recipe.Library) for library in seen)
+
+
+def test_the_listing_in_a_reply_names_the_node_recipe_and_a_seat_that_is_no_node_has_none(monkeypatch, tmp_path):
+    from browser import recipe
+
+    monkeypatch.setattr(recipe, "BUNDLED_DIR", tmp_path / "no-recipes-here")
+    _node(tmp_path, monkeypatch)
+    sent = _capture(monkeypatch)
+    handler.handle("seat", "iris", "recipe", allow="iris")
+    handler.handle("other", "iris", "recipe", allow="iris")
+    assert "mine  The node recipe  [node]" in sent[0][1]
+    assert "no recipes" in sent[1][1] and "mine" not in sent[1][1]
+
+
+def test_a_node_of_another_kind_loads_no_recipes_directory(monkeypatch, tmp_path):
+    from browser import recipe
+
+    monkeypatch.setattr(recipe, "BUNDLED_DIR", tmp_path / "no-recipes-here")
+    _node(tmp_path, monkeypatch, definition="/repo/apps/a8s/definitions/tool-command-shell.json")
+    sent = _capture(monkeypatch)
+    handler.handle("seat", "iris", "recipe", allow="iris")
+    assert "no recipes" in sent[0][1] and "mine" not in sent[0][1]
+
+
+def test_the_node_directory_is_not_taken_from_the_working_directory_or_the_environment(monkeypatch, tmp_path):
+    from browser import recipe
+
+    monkeypatch.setattr(recipe, "BUNDLED_DIR", tmp_path / "no-recipes-here")
+    node = _node(tmp_path, monkeypatch, seat="elsewhere")
+    monkeypatch.chdir(node)
+    monkeypatch.setenv("A8S_TURN_RECIPIENT", "seat")
+    sent = _capture(monkeypatch)
+    handler.handle("seat", "iris", "recipe", allow="iris")
+    assert "no recipes" in sent[0][1] and "mine" not in sent[0][1]
+
+
+def test_a_message_cannot_install_or_change_a_recipe(monkeypatch, tmp_path):
+    node = _node(tmp_path, monkeypatch)
+    attached = tmp_path / "evil.py"
+    attached.write_text(NODE_RECIPE.replace("mine", "evil").replace("The node recipe", "Evil"))
+    before = sorted((tmp_path / "node" / "recipes").iterdir())
+    FakeBrowser(monkeypatch)
+    sent = _capture(monkeypatch)
+    for message in (
+        f"recipe\n\nATTACHED FILE: {attached}",
+        "recipe evil",
+        "recipe mine go --recipes /tmp",
+        "recipe ../../evil",
+    ):
+        handler.handle("seat", "iris", message, allow="iris")
+    assert sorted((tmp_path / "node" / "recipes").iterdir()) == before
+    assert "evil" not in sent[0][1].replace("unknown recipe", "")
+    assert all(body[1].startswith("seat: ") for body in sent)

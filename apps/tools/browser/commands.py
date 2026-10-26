@@ -10,6 +10,7 @@ naming a verb is a different thing from a message carrying code: `eval` and
 `run-code` are the doors to arbitrary execution and they stay shut behind one
 opt-in unless the seat turns it on.
 """
+import contextlib
 import os
 import re
 import shlex
@@ -18,14 +19,23 @@ import time
 
 from . import plc
 from . import resolve
+from . import secretstore
 from . import session
 
 MAX_WAIT = 300.0
 
-# Verbs that must not auto-open the browser: `close` is the whole point, and
+# Verbs that must not auto-open the browser: `close` is the whole point,
 # `video-stop` needs to report a stale recording rather than launch Chrome to
-# discover one.
-NO_ENSURE = {"close", "video-stop"}
+# discover one, and `recipe` opens it only for the verb it runs: listing the
+# recipes or reading their help needs no browser.
+NO_ENSURE = {"close", "video-stop", "recipe"}
+
+# The verbs that capture the page into a file of the reply. None runs while a sensitive step is open.
+CAPTURE_VERBS = ("snap", "shot", "console", "video-start")
+
+# The tool opens no file of this machine. A seat holds live logins, and the page it shows may be the store of
+# another seat, which the scrub of this seat does not know and a screenshot is never scrubbed of.
+LOCAL_FILE = "local files are not opened"
 
 # Verbs whose argument is the rest of the line verbatim, not shlex words:
 # `eval console.log('x')` must keep its quotes, and `type don't` must not die
@@ -48,23 +58,79 @@ class ScriptError(Exception):
 
 
 class Run:
-    """The transcript of one script: what each step did, and what it produced."""
+    """The transcript of one script: what each step did, and what it produced.
 
-    def __init__(self, seat):
+    A run holds the seat's scrubber. A step's command, its output and its error
+    pass through it before they are kept, so no secret value reaches the
+    transcript, the JSON or the reply. It also holds the `recipe.Library` that
+    the `recipe` verb reads; None means the bundled recipes.
+    """
+
+    def __init__(self, seat, scrubber=None, recipes=None):
         self.seat = seat
+        self.scrubber = scrubber
+        self.recipes = recipes
         self.steps = []
         self.files = []
         self.error = None
+        # The sensitive steps open now, innermost last, and those whose cleanup did not confirm the page clear.
+        self.sensitive = []
+        self.uncleared = []
+        # What the running step started from: the time, and how many files the run had attached. A step that
+        # ends on a local file is undone back to it. The time is all it takes, so a run reads no directory
+        # until it must.
+        self.step_mark = None
+        self.page_used = False
+
+    @property
+    def capturing(self):
+        """False while a sensitive step is open, and for the rest of the run after one whose cleanup did not
+        confirm that the page is clear. Nothing of the page is captured then: no failure snapshot, no
+        screenshot, no console log, no video."""
+        return not self.sensitive and not self.uncleared
+
+    def begin_step(self):
+        self.step_mark = (time.time_ns(), len(self.files))
+        self.page_used = False
+
+    def clean(self, text):
+        return self.scrubber.scrub(text) if self.scrubber else text
+
+    def holds(self, text):
+        """True when `text` holds a value that the scrub of this run knows."""
+        return bool(self.scrubber) and self.scrubber.holds(text)
+
+    def secret(self, name):
+        """The stored {"value", "origins"} of `name`, or None."""
+        return self.scrubber.secrets.get(name) if self.scrubber else None
+
+    def hide(self, name, value):
+        """Scrub `value`, which a recipe read at run time, from now on as `[secret:NAME]` (see
+        `Scrubber.hide`). The files playwright-cli has already written may hold it, so they are
+        scrubbed now, and the ones a page call or a later step writes are scrubbed around it. A
+        console log that the page appends to between two calls is not reached."""
+        if self.scrubber is None:
+            self.scrubber = secretstore.Scrubber({})
+            plc.protect(self.seat, self.scrubber)
+        self.scrubber.hide(name, value)
+        for target in _cli_output_state(self.seat):
+            self.scrubber.scrub_file(target, remove_on_failure=True)
 
     def note(self, line, output=""):
-        self.steps.append({"command": line, "ok": True, "output": output})
+        self.steps.append({"command": self.clean(line), "ok": True, "output": self.clean(output)})
 
-    def fail(self, line, message):
-        self.steps.append({"command": line, "ok": False, "error": message})
+    def fail(self, line, message, output=""):
+        """`output` is what the step did before it failed: a recipe's page calls."""
+        message = self.clean(message)
+        step = {"command": self.clean(line), "ok": False, "error": message}
+        if output:
+            step["output"] = self.clean(output)
+        self.steps.append(step)
         self.error = message
 
     def attach(self, path):
-        self.files.append(path)
+        if path not in self.files:
+            self.files.append(path)
 
     @property
     def ok(self):
@@ -75,9 +141,9 @@ class Run:
         for step in self.steps:
             mark = "  " if step["ok"] else "! "
             lines.append(f"{mark}{step['command']}")
-            detail = step.get("output") or step.get("error") or ""
+            detail = "\n".join(part for part in (step.get("output"), step.get("error")) if part)
             for line in detail.splitlines():
-                lines.append(f"      {line}")
+                lines.append(f"      {line}" if line else "")
         return "\n".join(lines)
 
 
@@ -87,6 +153,7 @@ def artifact(seat, suffix):
     The stamp has one-second resolution, so two artifacts of one name in the
     same second get a counter rather than the same path.
     """
+    session.private_dir(session.seat_home(seat))
     directory = session.artifacts_dir(seat)
     os.makedirs(directory, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%S")
@@ -117,7 +184,7 @@ def _claim_artifact(seat, source, name):
 def _write_snapshot(seat, run, label="snapshot"):
     path = artifact(seat, f"{label}.txt")
     with open(path, "w") as handle:
-        handle.write(session.snapshot(seat))
+        handle.write(run.clean(session.snapshot(seat)))
     run.attach(path)
     return path
 
@@ -135,10 +202,35 @@ def _need(args, count, usage):
         raise plc.BrowserError(f"usage: {usage}")
 
 
+# What a URL parser drops from the head of a URL: the C0 controls and the space.
+URL_BLANKS = "".join(chr(code) for code in range(0x21))
+
+
+def is_local_file(url):
+    """True for a URL that names a file of this machine, also behind `view-source:` or `filesystem:`. A
+    browser reads the scheme without case, drops the blanks and control characters at the head of a URL,
+    and drops tabs and newlines wherever they stand in it."""
+    if not isinstance(url, str):
+        return False
+    head = url
+    while True:
+        head = re.sub(r"[\t\n\r]", "", head.lstrip(URL_BLANKS)[:128]).lower()
+        if not head.startswith(("view-source:", "filesystem:")):
+            return head.startswith("file:")
+        head = head.split(":", 1)[1]
+
+
+def refuse_local_url(url, verb):
+    """Raise the refusal of `verb` for a `file:` URL."""
+    if is_local_file(url):
+        raise plc.BrowserError(f"{verb}: refusing {url!r} — {LOCAL_FILE}")
+
+
 def _go(seat, args):
     _need(args, 1, "go <url>")
     url = args[0]
-    if not url.startswith(("http://", "https://", "file://", "about:")):
+    refuse_local_url(url, "go")
+    if not url.startswith(("http://", "https://", "about:")):
         raise plc.BrowserError(f"go: refusing {url!r} — give a full http(s) URL")
     plc.run(seat, "goto", url, timeout=60)
     return session.current_url(seat)
@@ -158,24 +250,54 @@ def _fill(seat, args):
     return target
 
 
+def _fill_secret(seat, args, run):
+    """`fill`, with the text taken from the seat's secret store, not from the script.
+
+    The sender names the secret and never holds the value. It is typed without
+    entering any argv (see `plc.fill_secret`), only on a page whose origin the
+    operator allowed for this secret, and the step reports the name only. A
+    refusal comes before any work on the page.
+    """
+    if len(args) != 2:
+        raise plc.BrowserError("usage: fill-secret <label or selector> <NAME>")
+    name = args[1]
+    entry = run.secret(name)
+    if entry is None:
+        raise plc.BrowserError(
+            f"secret {name} is not set for seat {seat}; "
+            f"the operator sets it with `browser secret set {name} --origin ORIGIN --seat {seat}`"
+        )
+    target = resolve.fill_target(seat, args[0])
+    selector = f"aria-ref={target}" if resolve.REF_RE.match(target) else target
+    origins = [secretstore.origin_parts(origin) for origin in entry["origins"]]
+    try:
+        plc.fill_secret(seat, selector, entry["value"], origins, session.scratch_dir(seat))
+    except plc.OriginRefused as exc:
+        raise plc.BrowserError(
+            f"fill-secret: secret {name} may not be typed on origin {exc.origin}; "
+            f"allowed origins: {', '.join(entry['origins'])}"
+        ) from None
+    except plc.BrowserError as exc:
+        # Playwright prints the value in the call log of a failed fill.
+        raise plc.BrowserError(run.clean(str(exc))) from None
+    except OSError as exc:
+        raise plc.BrowserError(f"fill-secret: cannot write its private code file: {exc.strerror}") from None
+    return f"{target} <- [secret:{name}]"
+
+
 def _text(seat, args):
     _need(args, 1, "text <selector>")
-    selector = plc.js_string(args[0])
-    return plc.evaluate(
-        seat, f"(document.querySelector('{selector}')?.innerText || '').trim()"
+    found = plc.call_in_page(
+        seat, "(selector) => (document.querySelector(selector)?.innerText || '').trim()",
+        [args[0]], session.scratch_dir(seat),
     )
+    return found if isinstance(found, str) else ""
 
 
 def _wait_for(seat, args):
     _need(args, 1, "wait-for <selector> [seconds]")
     timeout = _seconds(args[1]) if len(args) > 1 else 10.0
-    selector = plc.js_string(args[0])
-    plc.run_code(
-        seat,
-        f"await page.waitForSelector('{selector}', "
-        f"{{state: 'visible', timeout: {int(timeout * 1000)}}});",
-        timeout=timeout + 10,
-    )
+    plc.wait_for_selector(seat, args[0], timeout, session.scratch_dir(seat))
     return f"visible: {args[0]}"
 
 
@@ -193,8 +315,8 @@ def _wait_for_url(seat, args):
 def _assert_text(seat, args):
     _need(args, 1, "assert-text <text>")
     wanted = args[0]
-    found = plc.evaluate_json(
-        seat, f"(document.body?.innerText || '').includes('{plc.js_string(wanted)}')"
+    found = plc.call_in_page(
+        seat, "(wanted) => (document.body?.innerText || '').includes(wanted)", [wanted], session.scratch_dir(seat),
     )
     if not found:
         raise plc.BrowserError(f"assert-text: {wanted!r} is not on the page")
@@ -212,7 +334,7 @@ def _assert_url(seat, args):
 def _console(seat, args, run):
     """Attach the page's console log; the transcript keeps a copy inline."""
     argv = ["console", *args[:1]]
-    body = plc.result_or(plc.run(seat, *argv))
+    body = run.clean(plc.result_or(plc.run(seat, *argv)))
     path = artifact(seat, "console.log")
     with open(path, "w") as handle:
         handle.write(body + "\n")
@@ -225,8 +347,9 @@ def _video_start(seat, args):
     if active:
         raise plc.BrowserError(f"video-start: already recording {active['path']}")
     slug = "-".join(args) if args else "recording"
+    plc.refuse_protected(seat, slug)  # the path is the tool's own, but the slug in it is the caller's
     path = artifact(seat, f"{slug}.webm")
-    plc.run(seat, "video-start", path, "--size", "1280x1024")
+    plc.run(seat, "video-start", plc.Own(path), plc.Own("--size"), plc.Own("1280x1024"))
     session.save_video_state(
         seat, {"path": path, "started_at": time.time(), "chapters": 0}
     )
@@ -275,12 +398,18 @@ def _local_file(path, verb):
     Relative paths are refused rather than resolved: the seat's cwd is its own
     scratch dir, so a relative path from a sender means a file on the *sender's*
     machine, and quietly resolving it here would find something else or nothing.
+
+    A path inside the browser state directory is refused before it is looked at:
+    that directory holds every seat's secret store, and the answer must not say
+    whether a file is there.
     """
     if not os.path.isabs(path):
         raise plc.BrowserError(
             f"{verb}: {path!r} is not an absolute path — name the file by its full "
             "path on the machine holding the browser"
         )
+    if session.inside_state_root(path):
+        raise plc.BrowserError(f"{verb}: refusing {path!r} — it is inside the browser state directory")
     if not os.path.isfile(path):
         raise plc.BrowserError(f"{verb}: no such file: {path}")
     return path
@@ -317,16 +446,31 @@ def _drop(seat, args):
     and no chooser — one command, no intermediate state to get wedged in.
     """
     _need(args, 2, "drop <target> <path> [<path> ...]")
-    target = resolve.click_target(seat, args[0])
     paths = [_local_file(arg, "drop") for arg in args[1:]]
+    target = resolve.click_target(seat, args[0])
     argv = ["drop", target]
     for path in paths:
-        argv += ["--path", path]
+        argv += [plc.Own("--path"), path]
     plc.run(seat, *argv, timeout=120)
     return f"{target} <- " + ", ".join(os.path.basename(path) for path in paths)
 
 
 PARTIAL_DOWNLOAD = ".crdownload"
+
+
+# What a file name ends with that is an extension: a dot and a few letters or digits.
+_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,8}")
+
+
+def _download_name(seat, name):
+    """The name an artifact is given for a file that a page named: the page's, unless it holds a value that must not be shown.
+    The reply is sent with `a8s tell --attach=<path>`, so the name is in a command line. The extension is kept when it is
+    one, and the scrub of the name leaves it as it was: the end of a value (`Summer.2026`) is no extension."""
+    if not plc.holds_protected(seat, name):
+        return name
+    suffix = os.path.splitext(name)[1]
+    kept = _EXTENSION.fullmatch(suffix) and plc.scrub_protected(seat, name).endswith(suffix)
+    return "download" + (suffix if kept else "")
 
 
 def _download(seat, args, run):
@@ -363,11 +507,36 @@ def _download(seat, args, run):
             )
         time.sleep(0.25)
 
-    path = _claim_artifact(seat, os.path.join(directory, finished[0]), finished[0])
+    path = _claim_artifact(seat, os.path.join(directory, finished[0]), _download_name(seat, finished[0]))
     if not os.listdir(directory):
         os.rmdir(directory)
     run.attach(path)
     return path
+
+
+EVAL_OFF_WITH_SECRETS = (
+    "eval and run-code are off on a seat that holds secrets; they could read a field a secret "
+    "was typed into. Remove the secrets (browser secret rm) or use a seat without them."
+)
+EVAL_OFF_AFTER_HIDE = (
+    "eval and run-code are off in a script after a recipe has hidden a value in it; they could read the "
+    "field it was typed into. Run them in a script of their own."
+)
+
+
+def _refuse_on_a_seat_with_secrets(run):
+    """The caller's `eval` and `run-code` run code of the caller's choosing in the page and the
+    driver, which can read a field a secret was typed into and change what it read before the
+    scrub sees it, or open the state directory by a URL. The opt-in does not weigh against that,
+    so a seat whose store holds a secret refuses both, whatever `ALLOW_EVAL` says. So does the rest
+    of a script in which a recipe has hidden a value it typed (`Run.hide`), for the same reason.
+
+    The guard is on these two verbs. The tool's own code reaches the driver through `plc` and is
+    not the caller's: `fill-secret`'s file, the session and `wait-for` and `download` internals,
+    and any reviewed recipe that uses the Python API instead of the verbs.
+    """
+    if run.scrubber:
+        raise plc.BrowserError(EVAL_OFF_WITH_SECRETS if run.scrubber.secrets else EVAL_OFF_AFTER_HIDE)
 
 
 def _run_code(seat, args, allow_eval):
@@ -387,6 +556,12 @@ def _run_code(seat, args, allow_eval):
 
 
 def _step(seat, verb, args, run, allow_eval, script_epoch=None):
+    if verb in CAPTURE_VERBS and not run.capturing:
+        raise plc.BrowserError(f"{verb}: nothing of the page is captured while a sensitive step is open")
+    if verb == "recipe":
+        from . import recipe
+
+        return recipe.invoke(seat, args, run, allow_eval, script_epoch, run.recipes)
     if verb == "open":
         session.ensure_running(seat, script_epoch=script_epoch)
         return session.current_url(seat)
@@ -394,7 +569,8 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         session.close_browser(seat)
         return "closed"
     if verb == "save":
-        return session.save_state(seat)
+        session.save_state(seat)
+        return "saved"
     if verb == "url":
         return session.current_url(seat)
     if verb == "go":
@@ -403,6 +579,8 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         return _click(seat, args)
     if verb == "fill":
         return _fill(seat, args)
+    if verb == "fill-secret":
+        return _fill_secret(seat, args, run)
     if verb == "press":
         _need(args, 1, "press <key>")
         plc.run(seat, "press", args[0])
@@ -479,6 +657,8 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         return _drop(seat, args)
     if verb == "download":
         return _download(seat, args, run)
+    if verb in ("eval", "run-code"):
+        _refuse_on_a_seat_with_secrets(run)
     if verb == "eval":
         if not allow_eval:
             raise plc.BrowserError(
@@ -489,6 +669,198 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
     if verb == "run-code":
         return _run_code(seat, args, allow_eval)
     raise plc.BrowserError(f"unknown command: {verb}")
+
+
+def _cli_output_state(seat):
+    """{path: (mtime_ns, size)} of the files playwright-cli has written for this seat."""
+    state = {}
+    try:
+        with os.scandir(session.cli_output_dir(seat)) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        info = entry.stat(follow_symlinks=False)
+                        state[entry.path] = (info.st_mtime_ns, info.st_size)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return state
+
+
+@contextlib.contextmanager
+def scrubbed_outputs(seat, scrubber):
+    """Scrub the files playwright-cli writes while the body runs. The snapshot a
+    click links to holds the value of every field on the page, and the console
+    log holds whatever the page logged. With no secret stored, nothing is read."""
+    if not scrubber:
+        yield
+        return
+    before = _cli_output_state(seat)
+    try:
+        yield
+    finally:
+        for target, stamp in _cli_output_state(seat).items():
+            if before.get(target) != stamp:
+                scrubber.scrub_file(target, remove_on_failure=True)
+
+
+# playwright-cli writes these as pictures or recordings. They are not text, and a sweep skips them unread.
+BINARY_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".webm", ".pdf", ".zip")
+
+
+def sweep_outputs(seat, scrubber):
+    """Scrub the files that playwright-cli wrote for this seat since the last sweep, before anything of the
+    script can read them. The daemon appends to its console log after a call has returned, and
+    `scrubbed_outputs` looks only at the files a call changed, so a page that logs a value seconds after it
+    was typed leaves it in a file that no later call would scrub. The sweep starts every script and every
+    command of the CLI. It looks at each file changed since the last sweep began (a margin before it, for a
+    file system that stamps coarsely), or at every file when there was none, and makes each mode 0600. A file
+    that holds a value and cannot be rewritten is removed. With no value to hide it reads nothing and does
+    not move the mark: a secret stored later still finds the files that came before."""
+    if not scrubber:
+        return
+    began = time.time_ns()
+    since = session.sweep_mark(seat)
+    if since is not None and since > began + CLOCK_MARGIN_NS:
+        since = None  # the clock was set back since the last sweep: the stamps of the files cannot be compared with it
+    for target, (changed, _size) in _cli_output_state(seat).items():
+        if since is not None and changed < since - CLOCK_MARGIN_NS:
+            continue
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+        if not target.lower().endswith(BINARY_SUFFIXES):
+            scrubber.scrub_file(target, remove_on_failure=True)
+    session.mark_swept(seat, began)
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+# A file system may stamp a file to the second, or two. The files a moment before a step are undone with it.
+CLOCK_MARGIN_NS = 2_000_000_000
+# How long a Chrome that was closed may still be listed before it counts as one that would not close.
+CLOSE_WAIT_SECONDS = 3.0
+
+
+def close_chrome(seat):
+    """Close the seat's Chrome. True when no Chrome of the seat is left, which is looked at again for a
+    moment, because a process that was killed may still be listed. False when the close failed or Chrome
+    stayed."""
+    try:
+        session.close_browser(seat)
+        deadline = time.monotonic() + CLOSE_WAIT_SECONDS
+        while session.chrome_running(seat):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+        return True
+    except Exception:
+        return False
+
+
+def _undo_step(seat, run):
+    """Remove what the running step wrote: the files playwright-cli made or changed since it began, and the
+    files it attached to the reply."""
+    if run is None or run.step_mark is None:
+        return
+    started, attached = run.step_mark
+    for path, (changed, _size) in _cli_output_state(seat).items():
+        if changed >= started - CLOCK_MARGIN_NS:
+            _remove(path)
+    for path in run.files[attached:]:
+        _remove(path)
+    del run.files[attached:]
+
+
+def _discard_recording(seat):
+    """A recording keeps the frames of the page it ran on, and nothing scrubs pixels. Stop it, remove its
+    file, and forget it. True when there was one. Only a file inside the seat's artifacts is removed."""
+    state = session.video_state(seat)
+    if not state:
+        return False
+    try:
+        plc.run(seat, "video-stop", timeout=60)
+    except plc.BrowserError:
+        pass
+    session.clear_video_state(seat)
+    path = state.get("path") if isinstance(state, dict) else None
+    if isinstance(path, str):
+        artifacts = os.path.realpath(session.artifacts_dir(seat))
+        if os.path.realpath(path).startswith(artifacts + os.sep):
+            _remove(path)
+    return True
+
+
+def _close_local_pages(seat):
+    """Close each page of Chrome, other than the one the driver drives, that is a local file, through its
+    DevTools endpoint. Returns how many were closed, or None when one stayed open. A Chrome whose endpoint
+    does not answer has nothing to close here: the page the driver drives is the one that was looked at."""
+    found = session.pages(seat)
+    if found is None:
+        return 0
+    local = [page_id for page_id, url in found if is_local_file(url)]
+    for page_id in local:
+        session.close_page(seat, page_id)
+    if local:
+        after = session.pages(seat)
+        if after is None or any(is_local_file(url) for _page_id, url in after):
+            return None
+    return len(local)
+
+
+def leave_local_file(seat, run, verb):
+    """A page is a local file. Undo the step, send the page the driver drives to about:blank, close any other page
+    that is a local file, and return the error that fails the step. A page that cannot be sent or closed takes
+    Chrome with it: a local file on screen must not wait for the next step. A recording that was running is
+    discarded. The error holds no text of the page."""
+    _undo_step(seat, run)
+    discarded = _discard_recording(seat)
+    note = "The page was sent to about:blank."
+    try:
+        plc.run(seat, "goto", plc.Own("about:blank"), timeout=30)
+    except plc.BrowserError:
+        if close_chrome(seat):
+            note = "The page could not be sent to about:blank, so Chrome was closed."
+        else:
+            note = "The page could not be sent to about:blank, and Chrome could not be closed."
+    else:
+        closed = _close_local_pages(seat)
+        if closed is None:
+            if close_chrome(seat):
+                note = "A page in another tab could not be closed, so Chrome was closed."
+            else:
+                note = "A page in another tab could not be closed, and Chrome could not be closed."
+        elif closed:
+            note += f" {closed} other local {'page was' if closed == 1 else 'pages were'} closed."
+    if discarded:
+        note += " The recording was stopped and discarded."
+    return plc.BrowserError(f"{verb}: the page is a local file, and {LOCAL_FILE}. {note}")
+
+
+def refuse_a_local_page(seat, run, verb):
+    """Fail the step when a page of Chrome is a local file. `go` opens none, and the driver is started without the
+    switch that lets it, so this holds the case that a driver started some other way, or a page left from before,
+    brings one in. The addresses of all the pages come from Chrome's DevTools endpoint, which costs a few
+    milliseconds; when it does not answer, the driver is asked for the address of the page it drives, which costs
+    a call. A page whose address cannot be read is left to the step."""
+    found = session.pages(seat)
+    if found is not None:
+        if any(is_local_file(url) for _page_id, url in found):
+            raise leave_local_file(seat, run, verb)
+        return
+    try:
+        url = session.current_url(seat)
+    except plc.BrowserError:
+        return
+    if is_local_file(url):
+        raise leave_local_file(seat, run, verb)
 
 
 def script_commands(body):
@@ -543,11 +915,29 @@ def script_commands(body):
     return parsed
 
 
-def run_script(seat, body, allow_eval=False, epoch=None):
+def run_script(seat, body, allow_eval=False, epoch=None, recipes=None):
     """`epoch` is the stop epoch the caller read at its entry, before any wait
-    for the seat. None reads it now."""
-    run = Run(seat)
+    for the seat. None reads it now. `recipes` is the `recipe.Library` the
+    `recipe` verb reads; None means the bundled recipes."""
+    session.secure_seat(seat)
+    try:
+        # Read once. A store that cannot be read cannot be scrubbed with, so no
+        # script runs: a page may hold a value the reply would then show.
+        scrubber = secretstore.Scrubber(secretstore.read(seat))
+    except secretstore.SecretStoreError as exc:
+        run = Run(seat)
+        run.fail("secret store", str(exc))
+        return run
+    run = Run(seat, scrubber, recipes)
     session.prune_scratch(seat)
+    # The values to keep out of a command line are the ones this script holds, those it hides included.
+    with plc.protecting(seat, scrubber):
+        sweep_outputs(seat, scrubber)
+        _run_steps(seat, body, run, scrubber, allow_eval, epoch)
+    return run
+
+
+def _run_steps(seat, body, run, scrubber, allow_eval, epoch):
     try:
         # Parse the whole script before running any of it, so a block nobody
         # closed cannot run as a truncated body.
@@ -580,18 +970,30 @@ def run_script(seat, body, allow_eval=False, epoch=None):
             # so the block is the command's whole argument, for every verb.
             args = [block]
         try:
-            if verb not in NO_ENSURE:
-                session.ensure_running(seat, script_epoch=epoch0)
-            output = _step(seat, verb, args, run, allow_eval, script_epoch=epoch0)
+            with scrubbed_outputs(seat, scrubber):
+                run.begin_step()
+                if verb not in NO_ENSURE:
+                    session.ensure_running(seat, script_epoch=epoch0)
+                    run.page_used = True
+                try:
+                    output = _step(seat, verb, args, run, allow_eval, script_epoch=epoch0)
+                except plc.BrowserError:
+                    # A step that fails on a local page may hold its text in what it did before it failed.
+                    if run.page_used:
+                        refuse_a_local_page(seat, run, verb)
+                    raise
+                if run.page_used:
+                    refuse_a_local_page(seat, run, verb)
             run.note(line, str(output or ""))
         except plc.BrowserError as exc:
-            run.fail(line, str(exc))
+            run.fail(line, str(exc), getattr(exc, "output", ""))
             stopped = stopped or str(exc) == session.STOP_MESSAGE
             break
 
-    if not run.ok and not stopped:
+    if not run.ok and not stopped and run.capturing:
         try:
-            _write_snapshot(seat, run, "failure")
+            with scrubbed_outputs(seat, scrubber):
+                refuse_a_local_page(seat, run, "failure")
+                _write_snapshot(seat, run, "failure")
         except plc.BrowserError:
             pass
-    return run

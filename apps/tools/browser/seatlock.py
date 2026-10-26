@@ -68,11 +68,16 @@ def describe(record):
 
 
 @contextmanager
-def hold(seat, kind, sender="", verb="", wait=None, on_wait=None):
+def hold(seat, kind, sender="", verb="", wait=None, on_wait=None, activity=True):
     """Hold the seat until the block ends. Raises SeatBusy after `wait`
     seconds (default 60, or $AR3_BROWSER_SEAT_WAIT). `verb` goes in the record
-    only. Never put it in a message: script text can hold secrets."""
+    only. Never put it in a message: script text can hold secrets.
+
+    `activity` stamps the seat's last-active time once the lock is taken and
+    again while it is still held at the end, so the idle verb counts a script's
+    whole run as use. The stop and the idle check pass False: neither is use."""
     deadline = time.monotonic() + (seat_wait() if wait is None else wait)
+    session.private_dir(session.seat_home(seat))
     path = lock_path(seat)
     told = False
     with ExitStack() as stack:
@@ -100,6 +105,8 @@ def hold(seat, kind, sender="", verb="", wait=None, on_wait=None):
             path.write_text(json.dumps(record), encoding="utf-8")
         except OSError:
             pass
+        if activity:
+            session.touch_activity(seat)
         try:
             yield
         finally:
@@ -107,3 +114,5 @@ def hold(seat, kind, sender="", verb="", wait=None, on_wait=None):
                 path.write_text("", encoding="utf-8")
             except OSError:
                 pass
+            if activity:
+                session.touch_activity(seat)

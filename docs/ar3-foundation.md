@@ -18,7 +18,9 @@ app is relocated away from the repo (the isolation container copies
 `atomic_write_bytes`),
 `ar3.proc` (`spawn` / `terminate_group`, and `pid_alive` / `process_start_token`
 for reading a pid file), `ar3.envseam` (the reserved-env
-contract), and `ar3.vendor` (the vendoring hook). Beyond stdlib there are exactly
+contract), `ar3.nodes` (the a8s registry, read-only, by node name: a tool
+learns about its node here and never imports an a8s module), and `ar3.vendor`
+(the vendoring hook). Beyond stdlib there are exactly
 two tiers: **tier 1** is `ar3/_vendor/`, unmodified PyPI releases pinned with
 verified sha256 in `ar3/_vendor/vendor.txt`; **tier 2** is the foundation's deps
 mechanism, which fetches on demand.

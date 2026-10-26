@@ -23,6 +23,24 @@ def _profile_processes(profile):
     return out.stdout.strip()
 
 
+def _wait_until_attached(holder, home, out, timeout=90):
+    """Wait until the script holding the seat has launched Chrome and attached playwright-cli to it.
+
+    Chrome writes DevToolsActivePort as it starts, well before the attach has connected. A stop in that
+    gap kills Chrome under the attach, and the script's first step fails in the driver (a refused
+    connection, or a daemon that exits) and not with the stop. The script's first step is `snap`: the
+    snapshot it writes is there only once the attach is done and the page has answered, so it is the
+    readiness the test can see. The wait is bounded and says what it saw."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        assert holder.poll() is None, out.read_text()
+        snapshots = [path for path in (home / "artifacts").glob("*snapshot.txt") if path.stat().st_size > 0]
+        if snapshots:
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"the script had not attached within {timeout}s: {sorted(home.rglob('*'))[:20]}")
+
+
 def test_a_stop_during_a_script_leaves_no_chrome(tmp_path):
     seat = f"ar3scratch{os.getpid()}"
     env = {k: v for k, v in os.environ.items() if k != "DISPLAY"}
@@ -33,22 +51,23 @@ def test_a_stop_during_a_script_leaves_no_chrome(tmp_path):
     )
     tool = [sys.executable, str(TOOL)]
     script = tmp_path / "script"
-    script.write_text("wait 12\nopen\n")
+    script.write_text("snap\nwait 12\nopen\n")
     out = open(tmp_path / "out", "w")
     err = open(tmp_path / "err", "w")
     holder = subprocess.Popen(
         tool + ["--seat", seat, "do", str(script), "--json"],
         env=env, stdout=out, stderr=err,
     )
-    profile = tmp_path / "data/ar3/browser" / seat / "chrome"
+    home = tmp_path / "data/ar3/browser" / seat
+    profile = home / "chrome"
     try:
-        # `wait` runs after ensure_running, so the script launches Chrome itself.
-        deadline = time.monotonic() + 40
-        while not (profile / "DevToolsActivePort").exists() and time.monotonic() < deadline:
-            assert holder.poll() is None, (tmp_path / "out").read_text()
-            time.sleep(0.2)
+        # `snap` is the first step, so the script launches Chrome itself and the stop lands in `wait`.
+        _wait_until_attached(holder, home, tmp_path / "out")
+        # The snapshot file is there before the step is over. The script then looks at the page the step ended
+        # on, probes the window for the next step, and only then does `wait` begin. A stop that lands before
+        # that ends the script at `wait`, which is right, but is not the case this test is for.
+        time.sleep(3)
         assert (profile / "DevToolsActivePort").exists()
-        time.sleep(1)
         assert holder.poll() is None
         closed = subprocess.run(
             tool + ["close", "--seat", seat], env=env,

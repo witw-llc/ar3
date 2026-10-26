@@ -82,6 +82,7 @@ Set with `a8s add ... --KEY=VALUE` or `a8s vars <node> set KEY VALUE`.
 | `ALLOW` | none (required) | Sender names permitted to ask. A sender outside it gets no reply. |
 | `BROWSER_SEAT` | none (required) | The `tool-browser` node whose profile is signed in to Gemini. |
 | `MODEL` | Gemini's default | A model as Gemini's own menu names it, picked when a conversation is created. |
+| `TIMEOUT` | unset | Seconds with no script on the browser seat before its Chrome closes. The next turn opens Chrome again. Unset, Chrome stays up until `a8s stop`. |
 
 ## State
 
@@ -116,4 +117,5 @@ python3 apps/tools/gemini_web forget <sender> # the next message starts anew
 ## Trust
 
 The Gemini account is the browser profile's account. Every sender on `ALLOW`
-talks as that account. `a8s stop` closes the Chrome of the browser seat.
+talks as that account. `a8s stop` closes the Chrome of the browser seat, and so
+does `TIMEOUT` when it is set.

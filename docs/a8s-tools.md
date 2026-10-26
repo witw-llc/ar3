@@ -124,14 +124,53 @@ name and needs an operator-issued voucher. Full reference:
 A persistent Chrome that other agents drive by message. Each message is a
 script of browser commands, one per line. The reply is a transcript, with
 snapshots, screenshots, console logs, videos and downloads attached. The
-profile keeps its logins between messages. Full reference, with every command:
+profile keeps its logins between messages. Chrome stays up between messages. Set
+the node's `TIMEOUT` var, in seconds, and Chrome closes once no script has used
+the seat for that long; the next script opens it again. A script that is
+running is never cut off. Full reference, with every command:
 [apps/tools/browser/README.md](../apps/tools/browser/README.md).
+
+A script can sign in without its sender holding the password. The operator
+stores the value on the node's machine, with the origins it may be typed on
+(`browser secret set NAME --origin https://app.example.com --seat <node>`), and
+the script names it (`fill-secret <target> NAME`). The tool types it only on
+those origins, never lets it into a command line (the driver is not started with it
+in one, and an element a page named from it is named by its position instead),
+replaces it with `[secret:NAME]` in replies, snapshots and console logs, and stops
+Chrome offering to save it or checking it for a breach. What the browser and the
+driver write on their own, such as the profile and `state.json`, stays in the seat's
+directory, mode 0700, and no verb returns it. A script cannot reach the store: the
+tool opens no local file as a page (`go` refuses every `file:` URL, and a step that
+ends with a `file:` page in any tab fails), `upload` and `drop` refuse the browser
+state directory, and `eval` and `run-code` are off on a seat that holds a secret. Screenshots and video are not
+scrubbed. The Secrets section of the README lists the limits.
+
+A seat can also run site recipes. A recipe gives a website named commands, so a
+person or an agent uses the site as an API that runs in a signed-in browser:
+`recipe shop list --limit 3` in a message to the node, or `ar3 tool browser --node
+garmin -- recipe shop read weekly newsletter` by hand. A recipe declares its
+verbs, the origins it may use and whether a verb needs a sign-in. The tool derives
+the help, the argument checks and a health check (`recipe shop check`) from that
+declaration, and a verb that needs a sign-in stops with `needs a person` when the
+seat is signed out. A recipe is reviewed code, kept in `apps/tools/browser/recipes/`
+or in `recipes/` in the root the node was registered with. The tool finds the node
+in the a8s registry by the seat's name, so a recipe in the directory a run stands in
+is never loaded. A message can name a recipe and can never install or change one. A
+recipe that handles a value it must not show, such as a one-time passcode, keeps it
+in a sensitive step: a failure there reports one line, attaches no snapshot, and
+closes Chrome when the recipe cannot confirm that the page holds nothing of the
+value. `ar3 tool` exits 1 when the script failed, so an alias
+works in a shell script, and a wake exits 0 for every script. The suite bundles
+`givebacks` (alias `gb`), which reads a GiveBacks organization's newsletters. The
+README lists the commands, and `apps/tools/browser/recipes/README.md` lists the
+bundled recipes and is the guide to writing a recipe.
 
 ### `tool-gemini-web` - Gemini through a browser seat
 
 Gemini on the web, as an a8s seat. The tool types each message into Gemini in a
 signed-in browser seat and sends the answer back. Each sender has its own
-conversation. Files go in and generated images come back. Full reference:
+conversation. Files go in and generated images come back. The node's `TIMEOUT`
+var closes the browser seat's Chrome in the same way. Full reference:
 [apps/tools/gemini_web/README.md](../apps/tools/gemini_web/README.md).
 
 ## The ACL
@@ -157,7 +196,11 @@ Each tool is its own module or package under `apps/tools/`, sharing
 wake, enforce the ACL, and reply through `a8s tell`. Cross-platform process
 control is the foundation (`ar3.proc`). A tool never imports an a8s module. Its
 contract with a8s is the wake argv its `tool-<verb>.json` defines and the
-`a8s tell` CLI it replies through.
+`a8s tell` CLI it replies through. A tool that must learn about its node, such
+as the directory the node was registered with, reads the a8s registry by the
+node's name through `ar3.nodes`. The name is the one the caller gives (a wake
+passes `$RECIPIENT`). The tool never takes a node from the working directory or
+from the wake's environment (`A8S_TURN_RECIPIENT`).
 
 Ship these with the tool:
 

@@ -65,6 +65,34 @@ class TestSendReply:
         env = self._reply(outbox)
         assert [f["filename"] for f in env["files"]] == ["report.txt"]
 
+    def test_the_body_goes_in_on_stdin_and_not_in_a_command_line(self, tmp_path, monkeypatch):
+        """`ps` shows every local user the arguments of every process, and a reply holds what a page said."""
+        seen = {}
+
+        class Done:
+            returncode, stdout, stderr = 0, "", ""
+
+        def run(argv, **kwargs):
+            seen["argv"], seen["input"] = argv, kwargs.get("input")
+            return Done()
+
+        monkeypatch.setattr(rt.subprocess, "run", run)
+        monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+        body = "browser: ok\n\n  url\n      https://example.com/?user=somebody\n" + "x" * 5000
+        assert rt.send_reply("alice", body, ("/tmp/a.txt",)) == 0
+        assert seen["input"] == body
+        assert seen["argv"][-3:] == ["--", "alice", "-"] and "--attach=/tmp/a.txt" in seen["argv"]
+        assert not any("somebody" in part or "xxxx" in part for part in seen["argv"])
+
+    def test_a_body_with_non_ascii_text_arrives_whole_through_stdin(self, tmp_path, monkeypatch):
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+        monkeypatch.delenv("AR3_TOOL_REPLY_DIR", raising=False)
+        body = "caf\u00e9 \u2014 \u2603 \U0001F600\n  indented\n\ttabbed\nline with trailing space \n"
+        assert rt.send_reply("alice", body) == 0
+        assert self._reply(outbox)["content"] == body
+
     def test_no_recipient_sends_nothing(self, tmp_path, monkeypatch):
         outbox = tmp_path / "outbox"
         outbox.mkdir()

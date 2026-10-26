@@ -10,6 +10,282 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.119
+
+The first release of the 0.1.118 changes below. 0.1.118 was merged but not published:
+GitHub moved the release runner to ubuntu-26.04, and the release suites failed there.
+
+### Fixed
+
+- The release runs on ubuntu-24.04. GitHub moved `ubuntu-latest` to ubuntu-26.04, where the
+  a8s test broker (mosquitto 2.0.22) does not start, so the release's a8s suite failed at the
+  first test that needs it (#358).
+
+## 0.1.118
+
+### Added
+
+- The browser tool closes a Chrome that nobody uses. Set the node's `TIMEOUT`
+  var, in seconds (`a8s vars <node> set TIMEOUT 300`), on `tool-browser` or
+  `tool-gemini-web`. Once the node has been quiet that long, a8s runs the new
+  `browser idle --seat <seat> --timeout <seconds>` verb. It quits Chrome as
+  `close` does when no script has used the seat for that long. It leaves Chrome
+  up when a script holds the seat, when a launch is in progress, and when the
+  seat was used more recently. It never starts a Chrome. An idle close is not a
+  stop: it leaves the stop token alone, so the next script opens Chrome again.
+  With `TIMEOUT` unset, nothing changes: Chrome stays up until `a8s stop`. A
+  script that holds a seat stamps `last-active` in the seat directory when it
+  starts and when it ends, and `idle` reads that stamp. The stop hook does not
+  stamp it.
+- A definition's `idle.timeout` may be `$NAME` or `$NAME?` in place of a number.
+  a8s reads that node var on each check, so `a8s vars <node> set` takes effect
+  with no restart. A var that is unset, empty, not a number or 0 or less turns
+  idle off for the node, and no wake fails. The bundled browser tool
+  definitions use `"$TIMEOUT?"`.
+- The browser tool signs in without the sender seeing the password, and only
+  where the operator allows it. The operator stores a secret on the node's
+  machine with `browser secret set NAME --origin ORIGIN --seat <seat>`, with
+  at least one origin (`https://app.example.com`, or `https://*.example.org`
+  for any subdomain; a wildcard needs two labels after `*.`, so
+  `https://*.com` is refused, and `*.localhost` is the one exception), and
+  `browser secret list` and `rm` manage it. The value comes from stdin or a
+  hidden prompt and goes to `secrets.json` in the seat directory, mode 0600,
+  with its origins. A script fills a field with the new
+  `fill-secret <target> NAME` verb. Right before it types, the verb asks the
+  field for the origin of its own document, so a cross-origin iframe counts as
+  its own origin. On any other origin the step fails, names the origin it saw
+  and the allowed list, and types nothing. The value reaches the page through
+  a private file that `playwright-cli run-code --filename` reads, so it is in
+  no command line, and the transcript shows `[secret:NAME]`. The tool replaces
+  every stored value with `[secret:NAME]` in step output, errors, the reply,
+  snapshots, console output and the files `playwright-cli` writes under the
+  scratch directory. No script verb sets, lists or reads a secret. `upload`
+  and `drop` refuse any path that resolves inside the browser state directory,
+  which holds every seat's home. The tool opens no local file as a page: `go`
+  refuses every `file:` URL, and the tool takes
+  `PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS` out of the environment of
+  every `playwright-cli` call, so the driver it starts cannot open one. A step
+  that ends on a `file:` page fails whatever brought the page there: a driver
+  started some other way, a page left from before, or a link on a page. The
+  page is sent to `about:blank`, the files the step wrote are removed, a
+  recording that was running is stopped and discarded, and no text of the page
+  leaves. `eval` and `run-code` are off on a seat that holds a
+  secret, whatever `ALLOW_EVAL` says, because they could read a field a secret
+  was typed into; the refusal names the fix, and the tool's own code is not
+  affected. Each seat's home and scratch directories are mode 0700, made so
+  and tightened at the start of every run. The seat's Chrome does not offer to
+  save a typed password and does not run its breach check on it: each launch
+  sets the profile preferences `credentials_enable_service` and
+  `profile.password_manager_leak_detection` to false. Screenshots and video
+  are pixels and are not scrubbed, and a short window separates the origin
+  check from the fill. A stored value, and a value a recipe hid, is in no
+  command line of `playwright-cli`: the tool looks at every argument before it
+  starts the driver, in any form the scrub knows, and refuses the call with a
+  message that names nothing when one holds a value, whether the script's text
+  brought it or the page did. The scrub finds a value one character at a time, so
+  it finds it in any mix of raw text, the percent escapes and `+` of a URL, the
+  escapes of a string, the escapes of CSS (a digit is escaped at the start of an
+  identifier and not in the middle), entities, and the U+21B5 and U+21C6 that the
+  preview of an element in Playwright's call log makes of a line feed and a tab,
+  and it finds the start of a
+  value, 4 characters or more, that a tool cut and ended with an ellipsis (one
+  character or three dots, with dots of the text after them, and a value that
+  begins or ends in dots), however much of it the tool shows and also when the cut
+  is in the middle of an escape. It
+  finds a value under more than one layer of them too, as when a page prints
+  `JSON.stringify({user: value})` in an element and a snapshot quotes the text in
+  YAML: around the places where the letters and digits of the value show, it
+  undoes the escapes of a string, of YAML in single quotes, of CSS, of a URL and
+  of markup, in any order, up to three times, and replaces exactly the stretch
+  the value was made into. For a value with a space or a line break in it, the
+  lines of YAML are undone too: PyYAML breaks a long plain string, or one in
+  single quotes, at a space and indents the next line, and a line break of a
+  value is read with the spaces after it, as in a `|` block, also when the
+  writer breaks lines with U+0085, U+2028, U+2029 or a carriage return. A value
+  with a character over U+007F is looked for where a text has, in order, what any
+  escape of its characters holds (the hex or decimal number of the code, the
+  first and the last byte of its UTF-8, its name in markup), so that a page of
+  numbers makes no place for it. For a value with Latin-1 characters the bytes
+  of a URL are read as ISO-8859-1 as well as UTF-8, and a reference such as
+  `&#133;` as a browser reads it (an ellipsis) and as the code that wrote it
+  meant it (U+0085). A value of 4,097 to 16,384 characters is also matched a
+  character at a time, in pieces. Two values that overlap are one stretch. The work is
+  bounded: every match of a family of escapes is charged, the small windows of a
+  text are decoded first, and what the limit does not reach is scrubbed whole.
+  A download that a page names after a value is saved under a name that holds
+  none, because the reply goes with its path in a command line, and the extension
+  stays when it is a dot and up to eight letters or digits that the scrub leaves
+  alone (`Summer.2026` has none). A recipe's `artifact` refuses bytes that are
+  not UTF-8 text and hold a value, as UTF-8, ISO-8859-1, Windows-1252, UTF-16 or
+  UTF-32. A value that a script hides is at most 4,096 characters, and one that
+  cannot be searched for leaves the scrubber as it was.
+  On a seat that holds a secret, or after a script hid a value, an error of the driver
+  is only its kind (`TimeoutError` or `Error`) and a note that the driver's message is withheld:
+  Playwright cuts the text of an element in its previews at 50 characters and the attributes at
+  500, in the call log and in the first line of some errors, and a value that a page wrote under
+  two layers of escapes and that was cut so is one the scrub does not find.
+  The tool's own messages about odd output quote nothing there. The scrubbed failure snapshot is
+  attached as before, and on a seat with no secret an error is whole.
+  Text that looks like a snapshot ref is exempt from the check of a command line
+  only where a verb takes the element it acts on (`click e1234`); `type e482916`
+  and `fill #user e482916` are refused for the PIN 482916. A page can
+  make an id from a field's value, so a selector that holds a value is not used:
+  the element is named by its path of tag names and positions, or by a `snap`
+  ref. The target of `click`, `hover`, `check`, `uncheck`, `fill`, `select`,
+  `drop`, `download`, `text`, `assert-text` and `wait-for` travels to the page
+  in a private file. The tool's own paths, ports and code are not looked at. The
+  files the browser and the driver write on their own are inside the same
+  boundary as the profile: the seat directory is mode 0700, `state.json` is mode
+  0600 and no verb returns it (`save` replies `saved`), the driver runs with a
+  umask that makes what it writes mode 0600 and without the environment
+  variables that move its output, and its page files and console log are
+  scrubbed at the start of every script and every CLI command, because the
+  daemon appends to them after a call has returned, and again as each step ends.
+  A reply goes to `a8s tell` on stdin, not in a command line. A site that keeps a value in its own
+  storage keeps it in the profile and in `state.json`, for the OS user only.
+- Site recipes for the browser tool. A recipe is a Python module that gives a
+  website named commands, with the tool as the engine. `recipe <site> <verb>
+  [arguments]` is a new line of the command language, so it works in a message
+  to the node, through `ar3 tool`, and inside a longer script. `recipe` lists the
+  recipes, `recipe <site>` describes one, `recipe <site> status` prints `in`,
+  `out` or `unknown`, and `recipe <site> check` runs each read verb that
+  declares an example and prints healthy or failing for each. A recipe declares
+  its origins, node settings, secret names and verbs once, and the help, the
+  argparse argument checks and the health check come from that declaration. A
+  step verb is a template of script lines whose values each bind as one value,
+  and no value goes into an `eval` or `run-code` line: a recipe with one does
+  not load. A code verb is a Python function over a page facade: the verbs of
+  the command language, the snapshot as text, an in-page `fetch` with the
+  page's cookies, plain HTTP, tabs, and files. Every facade call checks the
+  stop epoch, writes a scrubbed line under the `recipe` step, and keeps the
+  recipe on its origins: a URL outside them is refused before any request, and
+  a page that a link or a redirect took outside them fails the verb. An
+  in-page `fetch` follows no redirect and fails the call with a message
+  instead, so no request reaches an address outside the recipe's origins. A
+  verb that needs a sign-in runs the recipe's status probe first and stops with
+  `needs a person: ...` on `out` or `unknown`. A verb returns text, data
+  (attached as `result.json`) and files. The bundled recipes are in
+  `apps/tools/browser/recipes/`. A registered node also loads `recipes/` in
+  the root it was registered with. The tool finds the node in the a8s registry
+  by the seat's name, and only when the node runs `tool-browser`; the working
+  directory and the environment decide nothing, so a recipe in the directory a
+  run stands in is never loaded, whatever the environment holds.
+  `browser do --recipes DIR` adds a directory by hand. A node's recipe
+  replaces a bundled one of its name, and a file that fails to load is listed
+  as broken and stops nothing else. No message can install or change a recipe.
+  `apps/tools/browser/recipes/README.md` is the guide to writing one.
+- A bundled `givebacks` site recipe, alias `gb`, reads an organization's
+  newsletters from GiveBacks in the seat's signed-in Chrome. Its verbs and flags
+  are the ones people already type for GiveBacks: `login`, `list [--limit 10]`,
+  `open --id ID`, `pull --id ID [-o FILE]` and `screenshot --id ID [--dir DIR]`.
+  A file comes back as an attachment and not as a path. `pull -o FILE` names the
+  attachment by the last part of `FILE` and writes nothing at `FILE` (with no
+  `-o` it is `givebacks-design.json`). `screenshot` attaches a full-page
+  `newsletter-preview.png` and accepts `--dir` and ignores it. `list` prints one line
+  per draft and returns the rows as `result.json`. Two node settings are required by
+  every verb, and a missing one fails the step and names it: `GIVEBACKS_BASE`, the
+  organization's site, which is the recipe's site origin, and `GIVEBACKS_CAUSE_ID`.
+  The recipe's other origins are `https://api.givebacks.com` and Outlook web. `login`
+  signs in with the stored secrets `GIVEBACKS_USER` and `GIVEBACKS_PASS`, reads the
+  one-time passcode from Outlook web in a second tab, types it into the six boxes
+  and ticks "trust this browser". The passcode is not a stored secret, and it is in
+  no transcript line, error, result or file: the recipe hides it when it reads it
+  and keeps the whole of it in one sensitive step (see below). The other
+  four verbs need a signed-in
+  page: the status probe opens the message list and answers `in`, `out` or
+  `unknown`, and `recipe gb check` runs it and `list --limit 3`. An alias for a
+  shell needs `--`, because `ar3 tool` reads a word that starts with `-` as its own
+  option: `alias gb='ar3 tool browser --node <node> -- recipe gb'`.
+- A recipe can hold a value it reads from one page and type it into another
+  without showing it. `page.hide(name, value)` makes the value a scrubbed value for
+  the rest of the script, as a stored secret is: `[secret:NAME]` replaces it in the
+  transcript, errors, return values, the reply and snapshots, and in the files
+  `playwright-cli` has already written. `page.fill_hidden(target, text)` types it
+  through the private code file, so it is in no command line. The transcript names
+  the field only, and a failure reports only the kind of the driver's error, because
+  the driver's message can print the text. `playwright-cli` follows each click and
+  key press with a snapshot file of the page, which holds a value typed into several
+  boxes one piece to a line, where no scrub finds it. `with page.no_page_files():`
+  deletes the files its block writes when the block ends, with an error or without.
+  After a recipe has hidden a value, `eval` and `run-code` are refused in the rest of
+  the script. `page.screenshot(name, full_page=True)` takes the whole scrollable
+  page.
+- A recipe can keep a sensitive part of a verb safe even when its own cleanup
+  fails. `with page.sensitive("passcode", cleanup):` takes the part that reads
+  and types such a value. While it is open, nothing of the page is captured: a
+  failure attaches no snapshot, `snap`, `shot`, `console`, `video-start` and
+  `page.screenshot` are refused, the step does not open while a video is
+  recording, and the page files its calls write are deleted when it ends. The
+  error that leaves a failed step is `<recipe> <verb>: the <name> step failed`
+  and holds no text of the page or the driver, which may be the value
+  (`NeedsPerson` and `UsageError` keep their text when the cleanup confirms).
+  When the block ends, with an error or without, the tool calls the recipe's
+  `cleanup()`, which must look at the browser and return `True` when it holds
+  nothing of the value. Any other answer, and any error, closes the seat's
+  Chrome before the failure is reported, and the error says so. The lines under
+  the recipe's step show each call's verb and target and nothing the page
+  answered. After a cleanup that did not confirm, capture stays off for the rest
+  of the script. The
+  `givebacks` login runs its whole passcode part in one, opened before the
+  Outlook tab and closed after the code page is left; its cleanup closes every
+  tab the step opened, at whatever address the mail ended, and loads the code
+  page again, or empties its boxes, when digits are in them, and looks again.
+  `page.tabs()` returns the addresses of the open tabs.
+
+### Changed
+
+- A step reads the address of every page of Chrome from its DevTools endpoint
+  after the step (about 2 ms), and no longer asks the driver for the page it
+  drives (about 0.9 s). The endpoint is the seat's own Chrome when the browser
+  path it reports is the one Chrome wrote in the seat's profile. A `file:` page
+  in any tab now fails the step: the page the driver drives goes to `about:blank`
+  and any other such tab is closed. When the endpoint does not answer, as for a
+  port the owner fixed, the check asks the driver as before.
+- `save` replies `saved`. It replied with the path of `state.json`.
+- `ar3 tool browser` exits 1 when the script failed or the seat was busy and
+  nothing ran, and 0 when the script ran to the end, so an alias works in a shell
+  script. It exited 0 either way. An a8s wake still exits 0 for every script,
+  because a8s dead-letters a wake that exits with another code.
+
+### Fixed
+
+- **The live stop tests raced the start of Chrome, and a test left the Chrome path
+  set.** The test that stops a script waited one second after Chrome wrote its port
+  file. Under load `playwright-cli` had not attached by then, so the stop killed
+  Chrome under the attach and the script's first step failed in the driver, not
+  with the stop. The test now waits for the first step of its script, which is done
+  only once the attach is. A session test set `AR3_BROWSER_CHROME` in the process
+  environment and never undid it, so the live tests that ran after it in one pytest
+  run started a Chrome that was not there. It sets the variable through
+  `monkeypatch` now.
+- **The tool tests could write under the real state directory.** The
+  isolation lived in a conftest of `tests/browser/`. A pytest command line that
+  visits that directory, leaves it for a file outside, and comes back makes a
+  second collection node for it, and the second node has none of that
+  conftest's fixtures. Those tests then used `~/.local/share/ar3/browser` and
+  left seats in it, next to the seats of a live node. The isolation is now a
+  plugin of the whole session, `apps/tools/tests/state_guard.py`, which every
+  test under `apps/tools/tests` gets whatever order the arguments come in.
+  `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `A8S_HOME` point at a temp directory
+  for the whole run and at a directory of its own for each test. A guard
+  refuses and records each file-system change under the tools' real state
+  directories (`browser`, `gemini-web`, `vault`) and the a8s home, and fails
+  the test that made it, even when the code under test hides the refusal. The
+  run fails when a child process leaves a new name at the top of a real
+  state directory, or makes the a8s home from nothing. The check that fails a
+  test which reaches the launch of a real Chrome moved into the plugin too,
+  because that second node had lost it as well. The plugin also ends the
+  protection of a seat with each test (`browser.plc._protected`), so a test that
+  protects a seat by hand cannot close the tests after it.
+- **A stop signal that came while `tool-command-shell` was starting a command left
+  the command running.** The tool put its stop handler in place after it started the
+  command and after it started two threads to read its output. A stop from a8s (node
+  stop, the wake limit) in that gap killed the tool of the signal and left the command,
+  which runs in a session of its own, for the rest of its time. On a loaded machine the
+  gap is long enough for a test to hit it. The handler is in place before the command
+  starts now, a stop that comes while the command is being started waits until the
+  command is known, and then it takes the command down and lands.
+
 ## 0.1.117
 
 ### Fixed

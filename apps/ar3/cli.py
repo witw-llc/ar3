@@ -52,6 +52,7 @@ except ImportError:
         return "unknown (no VERSION file beside this copy)"
 
 from ar3 import deps as ar3_deps  # noqa: E402
+from ar3 import nodes  # noqa: E402
 from ar3.home import app_home  # noqa: E402
 from ar3.proc import pid_alive, process_start_token  # noqa: E402
 from typing import Callable, Optional
@@ -150,8 +151,7 @@ def _first_line(text: str) -> str:
 
 # ---------- a8s ----------
 
-def a8s_home() -> Path:
-    return app_home("a8s", os.environ.get("A8S_HOME"), legacy=Path.home() / ".a8s")
+a8s_home = nodes.a8s_home
 
 
 def _live_pid(path: Path) -> int | None:
@@ -952,18 +952,8 @@ def _a8s_names() -> tuple[set[str], dict[str, list[str]]]:
     """(agent names, alias→members) from a8s's own registry file — the
     data `a8s start <alias>` resolves against. Missing or malformed reads
     as empty: no alias matches, and groups fall back to per-node starts."""
-    try:
-        data = json.loads((a8s_home() / "a8s.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return set(), {}
-    if not isinstance(data, dict):
-        return set(), {}
-    agents = data.get("agents")
-    aliases = data.get("aliases")
-    return (
-        set(agents) if isinstance(agents, dict) else set(),
-        aliases if isinstance(aliases, dict) else {},
-    )
+    agents, aliases = nodes.read()
+    return set(agents), aliases
 
 
 def _expand_alias(

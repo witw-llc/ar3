@@ -99,7 +99,8 @@ bytes. The rest is read and dropped, and the reply says so.
 One message is one process tree. Nothing a command starts outlives it. A
 background child the shell leaves behind is killed when the command ends,
 whether by exit, by `TIMEOUT`, or by a8s ending the wake (node stop, the 600
-second wake limit). A child that still holds the output pipes keeps the command
+second wake limit), also when the stop comes in the first moments, while the
+command is still being started. A child that still holds the output pipes keeps the command
 running until `TIMEOUT`. To leave something running on the machine, start it in
 its own session with its output redirected:
 `setsid my-server >/tmp/my-server.log 2>&1 &`.

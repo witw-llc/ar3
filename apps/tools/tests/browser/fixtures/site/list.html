@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Items</title></head>
+<body>
+<h1>Items</h1>
+<ul id="items"><li>loading</li></ul>
+<p>
+  <a id="signout" href="/signout">Sign out</a>
+  <a id="elsewhere" href="{{OTHER}}/">Another site</a>
+</p>
+<script>
+fetch('/api/items', {credentials: 'include'})
+  .then((response) => response.json())
+  .then((data) => {
+    const list = document.getElementById('items');
+    list.textContent = '';
+    for (const item of data.items) {
+      const entry = document.createElement('li');
+      const link = document.createElement('a');
+      link.href = '/item/' + item.id;
+      link.textContent = item.title;
+      entry.appendChild(link);
+      list.appendChild(entry);
+    }
+  });
+</script>
+</body>
+</html>
