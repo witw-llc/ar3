@@ -1,0 +1,36 @@
+{
+  "verified": {
+    "sessionId": "session-a",
+    "approvalMode": {
+      "mode": "onRequest"
+    },
+    "permissionState": {
+      "profileId": ":ask-me",
+      "reviewerAuthority": "human",
+      "reviewerAttached": true,
+      "axes": {
+        "filesystem": "sandboxed",
+        "network": "off",
+        "approval": "onRequest",
+        "reviewer": "human"
+      }
+    }
+  },
+  "unverified": {
+    "sessionId": "session-a",
+    "approvalMode": {
+      "mode": "onRequest"
+    },
+    "permissionState": {
+      "profileId": ":auto-review",
+      "reviewerAuthority": "autoReview",
+      "reviewerAttached": true,
+      "axes": {
+        "filesystem": "sandboxed",
+        "network": "off",
+        "approval": "onRequest",
+        "reviewer": "autoReview"
+      }
+    }
+  }
+}

@@ -25,6 +25,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from ar3.proc import launch_options
+
 from services import StorageError, StorageService, resolve_prefix
 
 _KNOWN_OPTS: set[str] = {"prefix", "timeout_s", "rclone_path"}
@@ -131,6 +133,7 @@ class RcloneService(StorageService):
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_s,
+                **launch_options(),
             )
         except FileNotFoundError as e:
             raise StorageError(

@@ -103,8 +103,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ar3` is not always reachable there.
+from ar3.proc import launch_options
+
+
 try:
     from ar3.envseam import ROUTING_OWNED as _ROUTING_OWNED
 except ImportError:
@@ -272,9 +273,8 @@ HARNESS_PRESETS: dict[str, dict] = {
         # 1.0.1), so there is no headless continuation to splice. `muse exec
         # --session-id` names a session rather than resuming the last one,
         # which is where per-member pinning (#17) will look.
-        # No `mcp` idiom either: muse speaks MSP and serves it (`muse serve`),
-        # so it is an MCP *server*'s counterpart, not a client that can be
-        # handed one.
+        # Resident MSP sessions inject MCP servers at session/start. The
+        # one-shot exec preset has no per-invocation MCP idiom.
         "text_tier": "big",
         "description": "Meta Muse (`muse`) — matches apps/a8s/definitions/muse.json",
         "a8s_definition": "muse.json",
@@ -1664,8 +1664,8 @@ def mcp_unsupported_reason(preset: str | None) -> str:
         return "bare `ollama run` has no tool use at all"
     if preset == "muse":
         return (
-            "muse speaks MSP and serves it (`muse serve`); it hosts sessions "
-            "for a client rather than consuming MCP servers itself"
+            "muse exec has no per-invocation MCP idiom; "
+            "resident MSP sessions inject servers at session/start"
         )
     if preset:
         return f"preset {preset!r} has no per-invocation MCP idiom"
@@ -1821,6 +1821,7 @@ def _git_exclude(path: Path) -> None:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return
@@ -2396,6 +2397,7 @@ def agy_model_names(timeout: float = AGY_MODELS_TIMEOUT_SECONDS) -> list[str]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **launch_options(),
         )
     except FileNotFoundError as e:
         raise RigError(f"could not run `agy models` to resolve --model: {e}") from e

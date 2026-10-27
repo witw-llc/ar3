@@ -38,10 +38,13 @@ if _R4T_DIR not in sys.path:
 
 from ar3.fsio import atomic_write_text
 from ar3.locking import file_lock
-from ar3.proc import pid_alive, process_start_token, terminate_group
+from ar3.proc import launch_options, pid_alive, process_start_token, terminate_group
 from ar3.ulid import new as new_ulid
+from ar3.wake_outcome import origin_from_env, report_failure, valid_origin
 
-from engines.acp import AcpSession, ParsedFrame
+from engines.acp import AcpSession, ParsedFrame, acp_mcp_servers
+from engines import devin_resident
+from engines.muse_resident import MuseSession, compose_muse_argv
 from engines.run import (
     CLI_TELL_STEP, CODEX_MCP_TELL_STEP, LESSON_LINE_RULE, MCP_TELL_STEP, RunError,
 )
@@ -50,7 +53,7 @@ from rig import (
     _toml_string,
 )
 
-RESIDENT_ENGINES = frozenset({"agy", "claude", "codex", "cursor", "ollama-claude"})
+RESIDENT_ENGINES = frozenset({"agy", "claude", "codex", "cursor", "devin", "muse", "ollama-claude"})
 RESIDENT_DIR_NAME = ".engine-resident"
 # Quiet time, not session life: the session ends after this many seconds with
 # no turn in flight and no activity.
@@ -59,6 +62,7 @@ DEFAULT_RESIDENT_SECONDS = 2700
 # against a turn; a tighter loop costs CPU for the whole window.
 POLL_SECONDS = 0.5
 LOG_ROTATE_BYTES = 1024 * 1024
+IS_WINDOWS = os.name == "nt"
 # At the end of the quiet window: how long a turn still running may finish before
 # the wrap-up turn is queued behind it, and how long the wrap-up itself gets.
 WRAPUP_WAIT_SECONDS = 120
@@ -87,6 +91,11 @@ class ResidentAdapter:
     # False: the engine's stderr goes straight to resident.log instead of
     # sharing its stdout pipe, where a stderr line can split a long frame.
     merge_stderr: bool = True
+    leads_process_group: bool = False
+    eof_grace_seconds: float = 10.0
+    term_grace_seconds: float = 2.0
+    cancel_session: bool = False
+    fatal_diagnostic_prefixes: tuple[str, ...] = ()
 
 
 def _safe_agent_key(agent: str | None) -> str:
@@ -318,6 +327,29 @@ def _sweep_group(pgid: int) -> None:
         time.sleep(0.2)
 
 
+def _end_published_bridge(home: Path, state: dict) -> None:
+    if os.name != "posix":
+        return
+    try:
+        pid = int(_pid_file(home).read_text(encoding="utf-8").strip())
+        token = _pid_start_file(home).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return
+    if pid <= 0 or state.get("pid") != pid or not token:
+        return
+    if pid_alive(pid):
+        if process_start_token(pid) != token:
+            return
+        try:
+            if os.getpgid(pid) != pid:
+                return
+        except OSError:
+            return
+    elif not _published_group_from_this_boot({"engine_start": token}):
+        return
+    _sweep_group(pid)
+
+
 def _try_lock(home: Path, seconds: float):
     """The lock within `seconds`, or None when its holder is stuck. Release
     with `.__exit__(None, None, None)`."""
@@ -429,8 +461,29 @@ def _parse_claude_frame(frame: dict) -> ParsedFrame:
         return ParsedFrame(assistant_text=_extract_claude_assistant_text(frame))
     if ftype == "result":
         res_text = frame.get("result")
+        result_text = res_text.strip() if isinstance(res_text, str) else ""
+        subtype = frame.get("subtype")
+        errors = frame.get("errors")
+        if (
+            frame.get("is_error") is True
+            or (isinstance(subtype, str) and subtype.startswith("error_"))
+        ):
+            details = "\n".join(
+                item.strip() for item in errors
+                if isinstance(item, str) and item.strip()
+            ) if isinstance(errors, list) else ""
+            return ParsedFrame(
+                error_text=(
+                    details or result_text
+                    or (subtype if isinstance(subtype, str) else "")
+                    or "Claude result reported an error"
+                ),
+                turn_completed=True,
+                fatal=True,
+                turn_failed=True,
+            )
         return ParsedFrame(
-            result_text=res_text.strip() if isinstance(res_text, str) else "",
+            result_text=result_text,
             turn_completed=True,
         )
     return ParsedFrame()
@@ -458,6 +511,7 @@ def _parse_agy_frame(frame: dict) -> ParsedFrame:
         assistant_text=resp.strip() if isinstance(resp, str) else "",
         error_text=err.strip() if isinstance(err, str) else "",
         turn_completed=True,
+        turn_failed=bool(err),
     )
 
 
@@ -466,6 +520,7 @@ CLAUDE_ADAPTER = ResidentAdapter(
     encode_user_turn=_encode_claude_user_turn,
     parse_frame=_parse_claude_frame,
     tell_step=MCP_TELL_STEP,
+    fatal_diagnostic_prefixes=("Failed to authenticate:",),
 )
 
 AGY_ADAPTER = ResidentAdapter(
@@ -486,9 +541,11 @@ AGY_ADAPTER = ResidentAdapter(
 CODEX_APP_SERVER_PROVEN = "0.163.0"
 CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 CODEX_APPROVAL_POLICY = "never"
+CODEX_HANDSHAKE_DEADLINE_SECONDS = 20.0
 # `(engine, permissions)` → the note a resident run prints in place of the
 # one-shot one, whose flag the resident argv no longer carries.
 RESIDENT_PERMISSION_NOTES = {
+    ("muse", "bypass"): "muse resident bypass selects allowAll and disables the shell sandbox; workspace rules are trusted for this run.",
     ("codex", "bypass"): (
         'codex resident \'bypass\' is -c sandbox_mode="danger-full-access" with '
         '-c approval_policy="never": the session is no longer confined to its '
@@ -639,6 +696,22 @@ class CodexSession:
         self.next_id = _CODEX_THREAD_ID + 1
         self.version: str | None = None
         self.lock = threading.Lock()
+        self.started = time.monotonic()
+        self.initialized = False
+        self.handshake_done = False
+        self.handshake_expired = False
+
+    def _expire_handshake(self) -> bool:
+        if (not self.handshake_done
+                and time.monotonic() - self.started >= CODEX_HANDSHAKE_DEADLINE_SECONDS):
+            self.handshake_expired = True
+        return self.handshake_expired
+
+    def deadline_error(self) -> str | None:
+        with self.lock:
+            if self._expire_handshake():
+                return f"codex handshake was not ready after {CODEX_HANDSHAKE_DEADLINE_SECONDS:g}s"
+            return None
 
     def opening_lines(self) -> list[str]:
         return codex_opening(self.cwd)
@@ -654,19 +727,24 @@ class CodexSession:
         }})
 
     def _release(self) -> tuple[str, ...]:
-        if self.thread_id is not None and not self.busy and self.held:
+        if self._expire_handshake():
+            return ()
+        self.handshake_done = self.initialized and self.thread_id is not None
+        if self.handshake_done and not self.busy and self.held:
             return (self._turn_start(self.held.popleft()),)
         return ()
 
     def turn_lines(self, text: str) -> list[str]:
         with self.lock:
-            if self.thread_id is None or self.busy:
+            if self._expire_handshake() or not self.handshake_done or self.busy:
                 self.held.append(text)
                 return []
             return [self._turn_start(text)]
 
     def on_frame(self, frame: dict) -> ParsedFrame:
         with self.lock:
+            if self._expire_handshake():
+                return ParsedFrame()
             return self._on_frame(frame)
 
     def _on_frame(self, frame: dict) -> ParsedFrame:
@@ -708,6 +786,7 @@ class CodexSession:
                 result_text=finals[-1].strip() if finals else "",
                 error_text=error,
                 turn_completed=True,
+                turn_failed=bool(error),
                 replies=self._release(),
             )
         if method == "error" and not params.get("willRetry", False):
@@ -728,7 +807,8 @@ class CodexSession:
                 f" (not the proven {CODEX_APP_SERVER_PROVEN})"
             )
             _log(f"codex app-server {self.version or 'version unknown'}{note}")
-            return ParsedFrame()
+            self.initialized = True
+            return ParsedFrame(replies=self._release())
         if rid == _CODEX_THREAD_ID:
             if error is not None:
                 return ParsedFrame(error_text=f"codex thread/start failed: {message}", fatal=True)
@@ -750,6 +830,7 @@ class CodexSession:
                 return ParsedFrame(
                     error_text=f"codex turn/start failed: {message}",
                     turn_completed=True,
+                    turn_failed=True,
                     replies=self._release(),
                 )
         return ParsedFrame()
@@ -775,7 +856,7 @@ def codex_app_server_probe(argv: list[str], cwd: Path, *, timeout: float = 15.0)
         proc = subprocess.Popen(
             argv + ["--strict-config"], cwd=str(cwd), stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8",
-            errors="replace",
+            errors="replace", **launch_options(windows=IS_WINDOWS),
         )
     except OSError as exc:
         errors.close()
@@ -951,21 +1032,6 @@ def _cursor_model_select(config_options: object) -> dict | None:
     return None
 
 
-def cursor_mcp_servers(env: dict[str, str]) -> list[dict]:
-    """The a8s server in the ACP `mcpServers` shape: `env` is a list of
-    `{name, value}`, which is what `session/new` accepted."""
-    from rig import MCP_SERVER_NAME, _mcp_command, _mcp_server_env
-
-    command = _mcp_command()
-    pinned = _mcp_server_env(env)
-    return [{
-        "name": MCP_SERVER_NAME,
-        "command": command[0],
-        "args": command[1:],
-        "env": [{"name": key, "value": value} for key, value in pinned.items()],
-    }]
-
-
 def _compose_cursor_argv(
     template: list[str],
     env: dict[str, str],
@@ -1045,11 +1111,11 @@ class CursorSession(AcpSession):
     def auth_method(self) -> str:
         return "cursor_login"
 
-    def allows_permission(self) -> bool:
+    def allows_permission(self, params: dict) -> bool:
         return "--force" in self.argv
 
     def mcp_servers(self) -> list:
-        return cursor_mcp_servers(self.env)
+        return acp_mcp_servers(self.env)
 
     def after_session_new(self, result: dict) -> ParsedFrame | None:
         if not self.model_requested:
@@ -1122,29 +1188,29 @@ def _cursor_unused_parse(_frame: dict) -> ParsedFrame:
     raise RuntimeError("cursor frames go through CursorSession.on_frame")
 
 
-def cursor_acp_probe(
+def _acp_probe(
     argv: list[str], cwd: Path, *, timeout: float = 20.0,
     env: dict[str, str] | None = None,
+    session_type, eof_grace_seconds: float,
 ) -> dict:
-    """The handshake a check runs: initialize, authenticate, session/new, and
-    the model pin. No session/prompt, so no turn is spent. `env` is the dict
-    compose filled; the child still inherits the real environment, without
-    the session-only keys. Returns `model` (the catalog value in force) and
-    `error`. A missing initialize or authenticate reply, or a protocol
-    version other than 1, leaves the session unready and is an error."""
+    """Run the engine's handshake and config pins without sending a prompt.
+
+    The session class owns authentication and effective-value checks. The
+    caller supplies the engine's EOF allowance; it is not shared by protocol.
+    """
     import tempfile
 
     session_env = dict(os.environ)
     if env:
         session_env.update(env)
-    session = CursorSession(argv, cwd, session_env)
+    session = session_type(argv, cwd, session_env)
     errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:
-        leads_group = os.name != "nt"
+        leads_group = not IS_WINDOWS
         proc = subprocess.Popen(
             argv, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=errors, text=True, encoding="utf-8", errors="replace",
-            start_new_session=leads_group,
+            **launch_options(windows=IS_WINDOWS, new_session=leads_group),
         )
         engine_group = proc.pid if leads_group else None
     except OSError as exc:
@@ -1185,10 +1251,10 @@ def cursor_acp_probe(
             write(line)
         reader.join(timeout=timeout)
     except OSError as exc:
-        out["error"] = f"agent acp pipe broke: {exc}"
+        out["error"] = f"acp pipe broke: {exc}"
     finally:
         stop_engine(
-            proc, group=engine_group, grace_seconds=ACP_STOP_GRACE_SECONDS,
+            proc, group=engine_group, grace_seconds=eof_grace_seconds,
         )
         errors.seek(0)
         lines = [ln.strip() for ln in errors.read().splitlines() if ln.strip()]
@@ -1197,10 +1263,20 @@ def cursor_acp_probe(
         out["error"] = session.error
     elif not session.ready and "error" not in out:
         tail = f": {lines[-1]}" if lines else ""
-        out["error"] = f"agent acp did not finish its handshake in {timeout:.0f}s{tail}"
+        out["error"] = f"acp did not finish its handshake in {timeout:.0f}s{tail}"
     if session.model_value:
         out["model"] = session.model_value
     return out
+
+
+def cursor_acp_probe(argv, cwd, *, timeout=20.0, env=None):
+    return _acp_probe(argv, cwd, timeout=timeout, env=env,
+                      session_type=CursorSession, eof_grace_seconds=1.5)
+
+
+def devin_acp_probe(argv, cwd, *, timeout=20.0, env=None):
+    return _acp_probe(argv, cwd, timeout=timeout, env=env,
+                      session_type=devin_resident.DevinSession, eof_grace_seconds=10.0)
 
 
 CURSOR_ADAPTER = ResidentAdapter(
@@ -1210,6 +1286,9 @@ CURSOR_ADAPTER = ResidentAdapter(
     tell_step=MCP_TELL_STEP,
     session=CursorSession,
     merge_stderr=False,
+    leads_process_group=True,
+    eof_grace_seconds=1.5,
+    cancel_session=True,
 )
 
 CODEX_ADAPTER = ResidentAdapter(
@@ -1221,12 +1300,43 @@ CODEX_ADAPTER = ResidentAdapter(
     merge_stderr=False,
 )
 
+DEVIN_ADAPTER = ResidentAdapter(
+    compose_argv=devin_resident.compose_argv,
+    encode_user_turn=devin_resident.unused_encode,
+    parse_frame=devin_resident.unused_parse,
+    tell_step=MCP_TELL_STEP,
+    session=devin_resident.DevinSession,
+    merge_stderr=False,
+    leads_process_group=True,
+    eof_grace_seconds=10.0,
+    cancel_session=True,
+)
+
+def _muse_unused(*_args):
+    raise RuntimeError("muse turns go through MuseSession")
+
+
+MUSE_ADAPTER = ResidentAdapter(
+    compose_argv=compose_muse_argv,
+    encode_user_turn=_muse_unused,
+    parse_frame=_muse_unused,
+    tell_step=MCP_TELL_STEP,
+    session=MuseSession,
+    merge_stderr=False,
+    leads_process_group=True,
+    eof_grace_seconds=10.0,
+    cancel_session=True,
+)
+
+
 RESIDENT_ADAPTERS: dict[str, ResidentAdapter] = {
     "claude": CLAUDE_ADAPTER,
     "ollama-claude": CLAUDE_ADAPTER,
     "agy": AGY_ADAPTER,
     "codex": CODEX_ADAPTER,
     "cursor": CURSOR_ADAPTER,
+    "devin": DEVIN_ADAPTER,
+    "muse": MUSE_ADAPTER,
 }
 
 
@@ -1285,9 +1395,11 @@ def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
     )
 
 
-def _enqueue_message(home: Path, message: str) -> None:
+def _enqueue_message(home: Path, message: str, origin: dict | None = None) -> None:
     msg_id = new_ulid()
     payload = {"id": msg_id, "queued_at": time.time(), "message": message}
+    if origin is not None:
+        payload["origin"] = origin
     atomic_write_text(
         _inbox_dir(home) / f"{msg_id}.json", json.dumps(payload, ensure_ascii=False)
     )
@@ -1315,6 +1427,22 @@ def _drain_inbox(home: Path) -> list[dict]:
         path.unlink(missing_ok=True)
         if isinstance(data, dict) and isinstance(data.get("message"), str):
             items.append(data)
+    return items
+
+
+def _item_origins(items: list[dict], home: Path, agent: str | None = None) -> list[dict]:
+    return [item["origin"] for item in items
+            if valid_origin(item.get("origin"), agent or home.name)]
+
+
+def _fail_inbox(
+    home: Path, reason: str, agent: str | None = None, *,
+    settled_origin: dict | None = None,
+) -> list[dict]:
+    items = _drain_inbox(home)
+    for origin in _item_origins(items, home, agent):
+        if origin != settled_origin:
+            report_failure(origin, reason)
     return items
 
 
@@ -1360,6 +1488,7 @@ def enqueue_or_start(
     skipped and only `stop` signals a recorded pid."""
     home = resident_home(dir_path, agent)
     spawn_env = dict(os.environ if env is None else env)
+    origin = origin_from_env(spawn_env, agent)
     spec = {
         "engine": engine,
         "dir_path": str(dir_path.resolve()),
@@ -1389,10 +1518,10 @@ def enqueue_or_start(
         state = read_state(home) or {}
         if live_pid is not None:
             if state.get("status") == "stopping":
-                return 0
+                return 1
             if state.get("status") == "closing" and charge_hook is not None:
                 charge_hook()
-            _enqueue_message(home, message)
+            _enqueue_message(home, message, origin)
             return 0
 
         # A bridge that died outright left its engine in this record. End
@@ -1402,31 +1531,33 @@ def enqueue_or_start(
         # sweep is skipped there. stop still signals a recorded pid.
         if _has_start_token_reader():
             _end_published_engine(state)
+            _end_published_bridge(home, state)
 
         if charge_hook is not None:
             charge_hook()
-        _enqueue_message(home, message)
+        _enqueue_message(home, message, origin)
         clean_env = {k: v for k, v in spawn_env.items() if not k.startswith("A8S_TURN_")}
 
-        flags: dict = {}
-        if os.name == "nt":
-            flags["creationflags"] = (
-                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            )
-        else:
-            flags["start_new_session"] = True
-
-        with _open_log(home) as log_fh:
-            proc = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "serve", str(home)],
-                cwd=str(dir_path),
-                env=clean_env,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=log_fh,
-                close_fds=True,
-                **flags,
-            )
+        try:
+            with _open_log(home) as log_fh:
+                proc = subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), "serve", str(home)],
+                    cwd=str(dir_path),
+                    env=clean_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fh,
+                    stderr=log_fh,
+                    close_fds=True,
+                    **launch_options(windows=IS_WINDOWS, new_session=True),
+                )
+        except OSError as exc:
+            # This enqueuer's nonzero exit accounts for its own wake. Earlier
+            # accepted wakes still need detached failure records, even idle
+            # wakes with no envelopes to deduplicate in the router.
+            _fail_inbox(home, f"cannot start resident bridge: {exc}", agent,
+                        settled_origin=origin)
+            _log(f"resident failed to start bridge: {exc}")
+            return 1
         _write_pid_files(home, proc.pid)
         _write_state(home, pid=proc.pid, engine_pid=None, status="starting")
     return 0
@@ -1538,6 +1669,7 @@ def _stop_windows(
     signaled: dict,
     wake: threading.Event | None = None,
     also: threading.Event | None = None,
+    term_seconds: float = ACP_STOP_TERM_SECONDS,
 ) -> None:
     """Wait out the EOF grace, then terminate(), then up to 2 s, then kill().
 
@@ -1553,7 +1685,7 @@ def _stop_windows(
         except OSError:
             pass
     try:
-        proc.wait(timeout=ACP_STOP_TERM_SECONDS)
+        proc.wait(timeout=term_seconds)
     except subprocess.TimeoutExpired:
         pass
     if proc.poll() is None:
@@ -1575,6 +1707,7 @@ def _stop_posix(
     signaled: dict,
     wake: threading.Event | None = None,
     also: threading.Event | None = None,
+    term_seconds: float = ACP_STOP_TERM_SECONDS,
 ) -> None:
     _wait_out_grace(proc, grace, wake, also)
     if group is not None:
@@ -1588,7 +1721,7 @@ def _stop_posix(
             signaled["hit"] = True
         if _signal_group(group, signal.SIGTERM):
             return
-        if _wait_group_empty(proc, group, ACP_STOP_TERM_SECONDS):
+        if _wait_group_empty(proc, group, term_seconds):
             return
         _signal_group(group, signal.SIGKILL)
     else:
@@ -1597,7 +1730,7 @@ def _stop_posix(
             _signal_pid(proc, signal.SIGTERM)
         if proc.poll() is None:
             try:
-                proc.wait(timeout=ACP_STOP_TERM_SECONDS)
+                proc.wait(timeout=term_seconds)
             except subprocess.TimeoutExpired:
                 pass
             _signal_pid(proc, signal.SIGKILL)
@@ -1615,6 +1748,7 @@ def stop_engine(
     write_line: Callable[[str], bool] | None = None,
     turn_settled: Callable[[], bool] | None = None,
     grace_seconds: float = EOF_GRACE_SECONDS,
+    term_seconds: float = ACP_STOP_TERM_SECONDS,
     signaled: dict | None = None,
     wake: threading.Event | None = None,
     also: threading.Event | None = None,
@@ -1648,9 +1782,9 @@ def stop_engine(
     if signaled is None:
         signaled = {}
     if _use_windows_stop():
-        _stop_windows(proc, grace_seconds, signaled, wake, also)
+        _stop_windows(proc, grace_seconds, signaled, wake, also, term_seconds)
         return
-    _stop_posix(proc, group, grace_seconds, signaled, wake, also)
+    _stop_posix(proc, group, grace_seconds, signaled, wake, also, term_seconds)
 
 
 def _run_session(
@@ -1687,7 +1821,7 @@ def _run_session(
             )
         )
     except RunError as exc:
-        dropped = _drain_inbox(home)
+        dropped = _fail_inbox(home, f"cannot compose {engine}: {exc}", agent)
         _log(f"resident cannot compose {engine}: {exc}; dropped {len(dropped)} message(s)")
         return 1
     child_env = {
@@ -1701,12 +1835,9 @@ def _run_session(
     with file_lock(_lock_file(home)):
         if stop_requested.is_set() or (read_state(home) or {}).get("status") == "stopping":
             stop_requested.set()
-            return 0
-        leads_group = (
-            os.name != "nt"
-            and isinstance(adapter.session, type)
-            and issubclass(adapter.session, AcpSession)
-        )
+            dropped = _fail_inbox(home, "stop before engine spawn", agent)
+            return 1 if dropped else 0
+        leads_group = not IS_WINDOWS and adapter.leads_process_group
         try:
             proc = subprocess.Popen(
                 argv,
@@ -1724,11 +1855,11 @@ def _run_session(
                 # without signaling the bridge. The group id is the pid, and
                 # it has to be stored now: getpgid after the leader exits
                 # cannot see the children it left behind.
-                start_new_session=leads_group,
+                **launch_options(windows=IS_WINDOWS, new_session=leads_group),
             )
             engine_group = proc.pid if leads_group else None
         except OSError as exc:
-            dropped = _drain_inbox(home)
+            dropped = _fail_inbox(home, f"cannot spawn {argv[0]}: {exc}", agent)
             _log(f"resident failed to spawn {argv[0]!r}: {exc}; dropped {len(dropped)} message(s)")
             return 1
         current["proc"] = proc
@@ -1792,6 +1923,9 @@ def _run_session(
 
     turns_completed = threading.Condition()
     in_flight_turns = 0
+    turn_origins: deque[list[dict]] = deque()
+    session_origin: dict | None = None
+    outcome = {"failed": False, "reported": False, "reason": ""}
     collected_outputs: list[str] = []
     fatal = threading.Event()
 
@@ -1808,6 +1942,11 @@ def _run_session(
                 frame = json.loads(line)
             except json.JSONDecodeError:
                 _log(line)
+                if line.startswith(adapter.fatal_diagnostic_prefixes):
+                    outcome["failed"] = True
+                    outcome["reason"] = line
+                    fatal.set()
+                    break
                 continue
             if not isinstance(frame, dict):
                 # Claude and agy merge stderr onto this pipe, and a bare
@@ -1832,14 +1971,22 @@ def _run_session(
                 _log(parsed.assistant_text)
             if parsed.error_text:
                 _log(f"error: {parsed.error_text}")
+            if parsed.turn_failed or parsed.fatal:
+                outcome["failed"] = True
+                outcome["reason"] = parsed.error_text or "engine reported failure"
             if parsed.turn_completed:
                 if parsed.result_text and not collected_outputs:
                     collected_outputs.append(parsed.result_text)
                 with turns_completed:
                     last_activity = time.monotonic()
+                    completed_origins = turn_origins.popleft() if turn_origins else []
                     if in_flight_turns > 0:
                         in_flight_turns -= 1
                     turns_completed.notify_all()
+                if parsed.turn_failed or parsed.fatal:
+                    for origin in completed_origins:
+                        report_failure(origin, outcome["reason"])
+                    outcome["reported"] |= bool(completed_origins)
                 publish_turns()
             if parsed.replies and not write_lines(parsed.replies):
                 _log("resident engine closed stdin")
@@ -1858,14 +2005,16 @@ def _run_session(
         end_flags["write_failed"] = True
         fatal.set()
 
-    def send_user_turn(prompt_text: str) -> bool:
+    def send_user_turn(prompt_text: str, origins: list[dict] | None = None) -> bool:
         nonlocal in_flight_turns, last_activity
-        if proc.poll() is not None or proc.stdin is None:
-            return False
         with turns_completed:
             in_flight_turns += 1
+            turn_origins.append(origins or [])
             last_activity = time.monotonic()
         publish_turns()
+        if proc.poll() is not None or proc.stdin is None:
+            end_flags["write_failed"] = True
+            return False
         lines = (
             session.turn_lines(prompt_text) if session is not None
             else [adapter.encode_user_turn(prompt_text)]
@@ -1924,7 +2073,7 @@ def _run_session(
 
     def end_engine() -> None:
         line = None
-        if isinstance(session, AcpSession) and not fatal.is_set():
+        if adapter.cancel_session and session is not None and not fatal.is_set():
             line = session.cancel_line()
         # The EOF grace is only a quiet expiry or a wrap-up that finished.
         # A stop, a fatal, a missed deadline, a failed write, or an engine
@@ -1940,14 +2089,18 @@ def _run_session(
         )
         if abrupt:
             grace = 0.0
-        elif isinstance(session, AcpSession):
-            grace = ACP_STOP_GRACE_SECONDS
         else:
-            grace = EOF_GRACE_SECONDS
+            grace = adapter.eof_grace_seconds
 
         def settled() -> bool:
             with turns_completed:
                 return in_flight_turns == 0
+
+        # Protocols that announce host closure on EOF may recognize it only
+        # after this bridge has finished all work and chooses a quiet shutdown.
+        begin_shutdown = getattr(session, "begin_shutdown", None)
+        if not abrupt and settled() and begin_shutdown is not None:
+            begin_shutdown()
 
         stop_engine(
             proc,
@@ -1956,6 +2109,7 @@ def _run_session(
             write_line=(lambda text: write_lines([text])) if line else None,
             turn_settled=settled if line else None,
             grace_seconds=grace,
+            term_seconds=adapter.term_grace_seconds,
             signaled=bridge_signaled,
             wake=stop_requested,
             also=fatal,
@@ -1978,9 +2132,8 @@ def _run_session(
             if session is not None:
                 late = getattr(session, "deadline_error", lambda: None)()
                 if late:
+                    handshake_missed = True
                     _log(late)
-                    if not getattr(session, "handshake_done", True):
-                        handshake_missed = True
                     break
             with turns_completed:
                 idle = quiet()
@@ -1993,6 +2146,9 @@ def _run_session(
 
             batch = _drain_inbox(home)
             if batch:
+                origins = _item_origins(batch, home, agent)
+                if origins:
+                    session_origin = origins[-1]
                 combined = "\n\n".join(item["message"] for item in batch)
                 if not booted:
                     booted = True
@@ -2034,7 +2190,7 @@ def _run_session(
                 else:
                     prompt_text = combined
 
-                if not send_user_turn(prompt_text):
+                if not send_user_turn(prompt_text, origins):
                     break
 
             slept = 0.0
@@ -2100,12 +2256,14 @@ def _run_session(
             code is not None and code != 0 and not bridge_signaled["hit"]
         )
         bad = (
-            fatal.is_set()
+            outcome["failed"]
+            or fatal.is_set()
             or still_open
             or self_nonzero
             or handshake_missed
             or wrapup_missed
             or not handshake_ready
+            or (not booted and _inbox_waiting(home))
         )
         session_outcome = 1 if bad else 0
         if bad:
@@ -2119,12 +2277,22 @@ def _run_session(
                 cause = "fatal"
             else:
                 cause = "engine exit"
+            reason = outcome["reason"] or cause
+            with turns_completed:
+                remaining = [origin for origins in turn_origins for origin in origins]
+                turn_origins.clear()
+            for origin in remaining:
+                report_failure(origin, reason)
+            dropped_items = _fail_inbox(home, reason, agent)
+            outcome["reported"] |= bool(remaining or _item_origins(dropped_items, home, agent))
+            if not outcome["reported"] and session_origin is not None:
+                report_failure(session_origin, reason, session=True)
             drop_held_turns(cause)
-        exit_code = proc.returncode if proc.returncode is not None else 1
+        exit_code = session_outcome
         if not booted:
             # The engine ended before it read anything. A failed wake simply
             # fails: drop what it never read rather than respawn on it forever.
-            dropped = _drain_inbox(home)
+            dropped = _fail_inbox(home, "engine exited before its first turn", agent)
             if dropped:
                 _log(f"engine exited before its first turn; dropped {len(dropped)} message(s)")
         if memory_turn is not None:
@@ -2132,9 +2300,11 @@ def _run_session(
                 memory_turn.finish("\n\n".join(collected_outputs), session_outcome)
             except Exception:
                 pass
-        _log(f"resident session exited (code {exit_code})")
+        raw_code = proc.returncode
+        detail = f", engine code {raw_code}" if raw_code != exit_code else ""
+        _log(f"resident session exited (code {exit_code}{detail})")
 
-    return exit_code
+    return session_outcome
 
 
 def serve_resident(home: Path) -> int:
@@ -2154,30 +2324,53 @@ def serve_resident(home: Path) -> int:
     signal.signal(signal.SIGINT, _on_signal)
 
     my_pid = os.getpid()
-    exit_code = 0
-    while True:
-        try:
-            spec = json.loads(_spec_file(home).read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            _log(f"resident spec unreadable: {exc}")
+    watcher_done = threading.Event()
+    watcher = None
+    if IS_WINDOWS:
+        # Windows SIGTERM kills the bridge rather than running its handler.
+        # The stop verb publishes this request atomically under the enqueue
+        # lock. Observe only our generation, including while teardown waits.
+        def watch_stop():
+            while not watcher_done.is_set():
+                state = read_state(home) or {}
+                if state.get("pid") == my_pid and state.get("status") == "stopping":
+                    stop_requested.set()
+                    return
+                watcher_done.wait(0.05)
+
+        watcher = threading.Thread(
+            target=watch_stop, name="resident-stop-watcher", daemon=True,
+        )
+        watcher.start()
+    try:
+        exit_code = 0
+        while True:
+            try:
+                spec = json.loads(_spec_file(home).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                _log(f"resident spec unreadable: {exc}")
+                with file_lock(_lock_file(home)):
+                    _fail_inbox(home, f"resident spec unreadable: {exc}")
+                    _clear_pid_files(home, expected_pid=my_pid)
+                return 1
+            exit_code = _run_session(home, spec, stop_requested, current)
             with file_lock(_lock_file(home)):
-                _drain_inbox(home)
-                _clear_pid_files(home, expected_pid=my_pid)
-            return 1
-        exit_code = _run_session(home, spec, stop_requested, current)
-        with file_lock(_lock_file(home)):
-            if stop_requested.is_set() or (read_state(home) or {}).get("status") == "stopping":
-                # A stop is a stop: what was queued must not replay as live
-                # input when the node next starts.
-                dropped = _drain_inbox(home)
-                if dropped:
-                    _log(f"stopped; dropped {len(dropped)} queued message(s)")
-                _clear_pid_files(home, expected_pid=my_pid)
-                return exit_code
-            if not _inbox_waiting(home):
-                _clear_pid_files(home, expected_pid=my_pid)
-                return exit_code
-            _write_state(home, pid=my_pid, engine_pid=None, status="starting")
+                if stop_requested.is_set() or (read_state(home) or {}).get("status") == "stopping":
+                    # A stop is a stop: what was queued must not replay as live
+                    # input when the node next starts.
+                    dropped = _fail_inbox(home, "stop", spec.get("agent"))
+                    if dropped:
+                        _log(f"stopped; dropped {len(dropped)} queued message(s)")
+                    _clear_pid_files(home, expected_pid=my_pid)
+                    return exit_code
+                if not _inbox_waiting(home):
+                    _clear_pid_files(home, expected_pid=my_pid)
+                    return exit_code
+                _write_state(home, pid=my_pid, engine_pid=None, status="starting")
+    finally:
+        watcher_done.set()
+        if watcher is not None:
+            watcher.join()
 
 
 def status_resident(dir_path: Path, agent: str | None) -> str | None:
@@ -2213,7 +2406,8 @@ def stop_resident(
 
     Ownership is decided under the lock the enqueuer and the bridge take: the
     session is marked `stopping`, so no message joins it and the bridge spawns
-    no new engine. The bridge then gets SIGTERM and ends its engine itself;
+    no new engine. The bridge observes that request on Windows, or gets
+    SIGTERM elsewhere, and ends its engine itself;
     one still alive after `grace_seconds` is killed with its process group.
     The engine group published at spawn is signaled as well when the leader
     has already been reaped, but only when its start token is from this boot.
@@ -2230,7 +2424,8 @@ def stop_resident(
         if pid is None:
             if held is not None:
                 _end_published_engine(read_state(home) or {})
-                _drain_inbox(home)
+                _end_published_bridge(home, read_state(home) or {})
+                _fail_inbox(home, "stop", agent)
                 _clear_pid_files(home)
             return False
         if held is not None:
@@ -2243,10 +2438,11 @@ def stop_resident(
             held.__exit__(None, None, None)
 
     if held is not None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        if not IS_WINDOWS:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
         deadline = time.monotonic() + grace_seconds
         while time.monotonic() < deadline and read_live_pid(home) == pid:
             time.sleep(0.1)
@@ -2261,7 +2457,7 @@ def stop_resident(
         if current is not None and current != pid:
             return True
         _end_published_engine(read_state(home) or {})
-        _drain_inbox(home)
+        _fail_inbox(home, "stop", agent)
         _clear_pid_files(home, expected_pid=pid)
     return True
 

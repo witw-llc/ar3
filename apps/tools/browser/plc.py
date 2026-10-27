@@ -14,6 +14,8 @@ import sys
 import tempfile
 import threading
 
+from ar3.proc import launch_options
+
 INSTALL_CMD = ["npm", "install", "-g", "@playwright/cli"]
 _asked = False
 
@@ -184,7 +186,8 @@ def _offer_install():
     _asked = True
 
     command = " ".join(INSTALL_CMD)
-    if os.environ.get("AR3_BROWSER_INSTALL_PLAYWRIGHT", "").lower() not in ("1", "true", "yes"):
+    interactive = os.environ.get("AR3_BROWSER_INSTALL_PLAYWRIGHT", "").lower() not in ("1", "true", "yes")
+    if interactive:
         try:
             terminal = open("/dev/tty", "r+")
         except OSError:
@@ -201,7 +204,8 @@ def _offer_install():
     if shutil.which(INSTALL_CMD[0]) is None:
         return False
     print(f"$ {command}", file=sys.stderr)
-    subprocess.run(INSTALL_CMD, check=False)
+    # A terminal-approved install inherits the console; opt-in background installs do not.
+    subprocess.run(INSTALL_CMD, check=False, **launch_options(interactive=interactive))
     return shutil.which("playwright-cli") is not None
 
 
@@ -273,7 +277,7 @@ def run(seat, *args, timeout=30):
     check_command(seat, args)
     cmd = [require(), f"-s={seat}", *args]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **_driver_options())
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **_driver_options(), **launch_options())
     except subprocess.TimeoutExpired:
         raise BrowserError(f"playwright-cli timed out after {timeout}s") from None
     if result.returncode != 0:
@@ -336,7 +340,7 @@ def sessions():
         return []
     try:
         result = subprocess.run(
-            ["playwright-cli", "list"], capture_output=True, text=True, timeout=10, **_driver_options()
+            ["playwright-cli", "list"], capture_output=True, text=True, timeout=10, **_driver_options(), **launch_options()
         )
     except subprocess.TimeoutExpired:
         return []

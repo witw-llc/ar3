@@ -35,7 +35,6 @@ import hashlib
 import os
 import shutil
 import shlex
-import signal
 import subprocess
 import sys
 from collections.abc import Callable
@@ -65,8 +64,6 @@ from rig import (
     splice_session,
 )
 
-# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ar3` is not always reachable there.
 try:
     from ar3.fsio import atomic_write_bytes as _atomic_write_bytes
 except ImportError:
@@ -84,42 +81,7 @@ except ImportError:
     def missing_interpreter(program: Path | str, path: str | None = None) -> str | None:
         return None
 
-try:
-    from ar3.proc import spawn as _proc_spawn, terminate_group as _terminate_group
-except ImportError:
-    def _proc_spawn(
-        argv: list[str], *, cwd: Path, env: dict[str, str] | None = None
-    ) -> subprocess.Popen:
-        return subprocess.Popen(
-            argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
-            start_new_session=(os.name == "posix"), env=env,
-        )
-
-    def _terminate_group(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
-        # Mirrors ar3.proc.terminate_group: the pgid is resolved once, before
-        # SIGTERM, so a leader that exits during the grace period cannot
-        # strand SIGKILL with no pid left to resolve; pid stands in as the
-        # pgid when getpgid cannot answer (true for any start_new_session
-        # leader).
-        if os.name != "posix":
-            proc.kill()
-            return
-        pid = proc.pid
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            pgid = pid
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(pgid, sig)
-            except OSError:
-                try:
-                    os.kill(pid, sig)
-                except OSError:
-                    pass
-            if sig is signal.SIGTERM:
-                import time as _time
-                _time.sleep(grace_seconds)
+from ar3.proc import spawn as _proc_spawn, terminate_group as _terminate_group
 
 __all__ = [
     "RUN_ENGINES",
@@ -613,6 +575,15 @@ def _build_argv_template(
                 "--resident cannot be combined with --continue or --session: "
                 "a resident session holds its own live conversation"
             )
+    if resident and engine == "devin":
+        from engines.devin_resident import build_template
+
+        argv = build_template(model, effort, permissions)
+        try:
+            argv = apply_allowed_tools(argv, engine, allowed_tools, where="r4t engine: ")
+        except RigError as exc:
+            raise RunError(str(exc)) from exc
+        return argv, None
     try:
         argv = build_preset_invoke(engine, model=model, effort=effort)
         argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")

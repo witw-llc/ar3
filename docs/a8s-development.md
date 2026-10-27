@@ -3,6 +3,12 @@
 Historical decisions, hard constraints, and things that didn't work.
 Read [a8s.md](a8s.md) first for concept and usage.
 
+A resident wake can return after enqueue, before its detached engine finishes.
+Consume its foundation-defined local failure records after the enqueue wake
+settles, then record the local failure and affected envelope dead letters.
+Never add a retry, sender notification, or reliable-delivery promise for this
+accounting path. Completed turns stay completed if a later session step fails.
+
 ## Hard constraints when refactoring
 
 - **a8s is best-effort messaging.** a8s is lightweight, best-effort messaging

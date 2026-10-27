@@ -66,12 +66,13 @@ def test_every_top_level_shim_has_an_entry_point_covered():
 
 
 def test_a_relocated_entry_point_still_runs(real_subprocess, tmp_path):
-    """The isolation container copies `apps/r4t` alone to /opt/r4t, so the repo
-    root is not two levels up and `ar3ver` is not importable. A CLI must not
-    die on import because the version file moved."""
+    """An isolated app carries its foundation; missing version metadata is safe."""
     import shutil
 
-    staged = tmp_path / "opt" / "r4t"
+    bundle = tmp_path / "opt"
+    staged = bundle / "apps" / "r4t"
+    shutil.copytree(_ROOT / "lib", bundle / "lib",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(_ROOT / "apps" / "r4t", staged,
                     ignore=shutil.ignore_patterns("tests", "__pycache__", ".venv"))
     proc = _REAL_RUN(

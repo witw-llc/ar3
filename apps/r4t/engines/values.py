@@ -11,6 +11,9 @@ from __future__ import annotations
 import re
 import subprocess
 
+from ar3.proc import launch_options
+
+
 from rig import HARNESS_PRESETS, RigError
 
 LIST_TIMEOUT_SECONDS = 30
@@ -60,6 +63,7 @@ def _lines(argv: list[str]) -> list[str]:
             text=True,
             timeout=LIST_TIMEOUT_SECONDS,
             stdin=subprocess.DEVNULL,
+            **launch_options(),
         )
     except OSError as exc:
         raise ValuesError(f"could not run `{' '.join(argv)}`: {exc}") from exc

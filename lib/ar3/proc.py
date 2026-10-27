@@ -36,6 +36,29 @@ import time
 from pathlib import Path
 
 
+def launch_options(
+    *, new_session: bool = False, interactive: bool = False,
+    windows: bool | None = None,
+) -> dict:
+    """Subprocess policy: hide background consoles and preserve explicit groups.
+
+    Interactive children inherit the caller's console. On Windows,
+    DETACHED_PROCESS would defeat CREATE_NO_WINDOW, so it is never combined
+    with the hidden-console policy. ``windows`` permits platform-branch tests.
+    A new Windows process group disables Ctrl+C for that group; it does not
+    provide POSIX tree termination. GUI and vendor-created child windows are
+    outside this policy. I/O, environment and lifetime remain the caller's decisions.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        flags = 0 if interactive else 0x08000000  # CREATE_NO_WINDOW
+        if new_session:
+            flags |= 0x00000200  # CREATE_NEW_PROCESS_GROUP
+        return {"creationflags": flags} if flags else {}
+    return {"start_new_session": True} if new_session else {}
+
+
 def spawn(
     argv: list[str],
     *,
@@ -50,7 +73,7 @@ def spawn(
         argv,
         cwd=str(cwd),
         stdin=subprocess.DEVNULL if stdin_devnull else None,
-        start_new_session=(os.name == "posix"),
+        **launch_options(new_session=True, interactive=not stdin_devnull),
         env=env,
     )
 
@@ -208,6 +231,7 @@ def process_start_token(pid: int) -> str | None:
             text=True,
             timeout=5,
             env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

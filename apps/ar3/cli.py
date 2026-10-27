@@ -32,14 +32,13 @@ from pathlib import Path
 # suite semver and the shared code. That directory goes to the FRONT of
 # sys.path, never the end: appended, it loses to site-packages, and any
 # unrelated distribution named `ar3` then answers these imports instead. A
-# copy of this tree relocated away from the repo root (the isolation container
-# copies apps/r4t alone to /opt/r4t) has no `lib` beside it; the version is a
-# nicety, never a dependency, so a missing module degrades to "unknown"
-# instead of killing the CLI on import.
+# relocated bundle carries its foundation at the same relative path. Version
+# metadata is optional and may report "unknown"; foundation code is required.
 _AR3_LIB = str(Path(__file__).resolve().parents[2] / "lib")
 while _AR3_LIB in sys.path:
     sys.path.remove(_AR3_LIB)
 sys.path.insert(0, _AR3_LIB)
+from ar3.proc import launch_options
 try:
     from ar3ver import update_note, version_line  # noqa: E402
 except ImportError:
@@ -136,6 +135,7 @@ def _run(argv: list[str], timeout: float) -> tuple[int | None, str]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            **launch_options(),
         )
     except (subprocess.TimeoutExpired, OSError):
         return None, ""
@@ -588,6 +588,7 @@ def _git_out(root: Path, *args: str) -> Optional[str]:
         done = subprocess.run(
             ["git", "-C", str(root), *args],
             capture_output=True, text=True, timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -893,7 +894,7 @@ def _run_engine_updates(names: list[str]) -> int:
             continue
         print(f"ar3 update: {name}: {' '.join(argv)}")
         try:
-            done = subprocess.run(argv, env={**os.environ, **env})
+            done = subprocess.run(argv, env={**os.environ, **env}, **launch_options(interactive=True))
         except OSError as e:
             print(f"ar3 update: {name}: cannot run {argv[0]}: {e}", file=sys.stderr)
             failures += 1
@@ -926,7 +927,8 @@ def _running_groups(a8s: str) -> dict[int, list[str]] | None:
     single remote session identity."""
     try:
         done = subprocess.run(
-            [a8s, "ps"], capture_output=True, text=True, timeout=30
+            [a8s, "ps"], capture_output=True, text=True, timeout=30,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1052,7 +1054,7 @@ def _stop_nodes(a8s: str, names: list[str], stopped: list[str]) -> None:
             continue
         print(f"ar3 update: stopping node {name}")
         try:
-            done = subprocess.run([a8s, "stop", name])
+            done = subprocess.run([a8s, "stop", name], **launch_options())
         except OSError as e:
             print(f"ar3 update: {name}: cannot stop: {e}", file=sys.stderr)
             continue
@@ -1083,7 +1085,7 @@ def _start_nodes(a8s: str, names: list[str]) -> int:
     for name in names:
         print(f"ar3 update: starting node {name}")
         try:
-            done = subprocess.run([a8s, "start", name])
+            done = subprocess.run([a8s, "start", name], **launch_options())
         except OSError as e:
             print(f"ar3 update: {name}: cannot start: {e}", file=sys.stderr)
             failures += 1
@@ -1143,7 +1145,7 @@ def _update_suite(script: Path) -> int:
     # operator just invoked.
     env = {**os.environ, "AR3_DIR": str(REPO_ROOT)}
     try:
-        done = subprocess.run([sh, str(script)], env=env)
+        done = subprocess.run([sh, str(script)], env=env, **launch_options(interactive=True))
     except OSError as e:
         print(f"ar3 update: cannot run {script}: {e}", file=sys.stderr)
         return 1
@@ -1316,6 +1318,7 @@ def _tool_run(argv, env, cwd, reply_dir) -> int:
             env={**env, "AR3_TOOL_REPLY_DIR": str(reply_dir)},
             cwd=cwd,
             stdin=subprocess.DEVNULL,
+            **launch_options(interactive=True),
         )
     except OSError as exc:
         print(f"ar3 tool: cannot run {argv[0]}: {exc}", file=sys.stderr)

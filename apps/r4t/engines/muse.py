@@ -30,6 +30,8 @@ import tempfile
 import threading
 import time
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError, iso_from_unix, window_label
 
 # Muse's live read is the only one in the registry that is not free: a cold
@@ -83,6 +85,7 @@ def _rpc_usage() -> dict:
             stdout=subprocess.PIPE,
             stderr=errors,
             text=True,
+            **launch_options(),
         )
     except OSError as exc:
         raise QuotaError(f"cannot run muse serve: {exc}") from exc

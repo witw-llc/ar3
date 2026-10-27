@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Iterator, NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "lib"))
+from ar3.proc import launch_options
 sys.path.insert(0, str(REPO_ROOT / ".github"))
 
 from pii_check import NoPatterns, load_patterns  # noqa: E402
@@ -98,6 +100,7 @@ def tracked_entries() -> list[Entry]:
     proc = subprocess.run(
         ["git", "ls-files", "-s", "-z"],
         cwd=REPO_ROOT, capture_output=True, check=False,
+        **launch_options(),
     )
     if proc.returncode != 0:
         # Fail closed. An empty file list and an unreadable repository are
@@ -156,6 +159,7 @@ def blob_bytes(entries: list[Entry]) -> Iterator[tuple[Entry, bytes]]:
         ["git", "cat-file", "--batch"],
         cwd=REPO_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        **launch_options(),
     )
     try:
         for entry in entries:

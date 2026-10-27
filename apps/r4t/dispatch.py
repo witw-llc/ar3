@@ -61,12 +61,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ar3` is not always reachable there —
-# and a caged turn is exactly the case that needs the zone stated, because a
-# container boots UTC until `rig.env` sets `TZ`. So the fallback reimplements
-# the display contract rather than degrading to a stub: local time, always
-# carrying its zone, with `ar3.clock`'s abbreviation rule.
+from ar3.proc import launch_options
 try:
     from ar3.clock import (
         local_now,
@@ -108,6 +103,7 @@ except ImportError:
             return str(ts)
         fmt = "%Y-%m-%d %H:%M:%S" if seconds else "%Y-%m-%d %H:%M"
         return f"{dt.strftime(fmt)} {local_zone(dt)}"
+
 
 def zoned_stamp() -> str:
     """History and day-log heading stamp: local display plus the UTC offset,
@@ -993,7 +989,7 @@ def _run_harness_turn(
             stderr=subprocess.STDOUT,
             text=True,
             env=turn_env,
-            start_new_session=True,
+            **launch_options(new_session=True),
         )
     except FileNotFoundError:
         return (

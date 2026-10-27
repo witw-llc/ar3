@@ -74,6 +74,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from rig import (
     HARNESS_PRESETS,
     PERMISSION_MODES,
@@ -360,6 +362,7 @@ def _read_a8s_vars(node: str) -> dict[str, str]:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return {}

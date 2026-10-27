@@ -25,6 +25,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from ar3.proc import launch_options
+
 BATTLESHIP = '''\
 import sys
 
@@ -185,6 +188,7 @@ def main() -> int:
             capture_output=True,
             text=True,
             timeout=30,
+            **launch_options(),
         )
         print(f"fake-agent: battleship.py exited {result.returncode}")
         if result.returncode == 0 and "WIN" in result.stdout:

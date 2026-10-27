@@ -462,9 +462,6 @@ class TestWakeSpawnFlags:
     @staticmethod
     def _capture(monkeypatch, is_windows: bool) -> list[dict]:
         monkeypatch.setattr(daemon_mod, "IS_WINDOWS", is_windows)
-        monkeypatch.setattr(
-            daemon_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
-        )
         seen: list[dict] = []
 
         def popen(cmd, **kwargs):
@@ -483,7 +480,7 @@ class TestWakeSpawnFlags:
     def test_wake_gets_a_hidden_console_on_windows(self, fake_home, tmp_path, monkeypatch):
         seen = self._capture(monkeypatch, True)
         assert not daemon_mod._start_wake_subprocess("A", ["x"], tmp_path)
-        assert seen[0]["creationflags"] == 0x08000000
+        assert seen[0]["creationflags"] == 0x08000000 | 0x200
         assert "start_new_session" not in seen[0]
 
     @staticmethod

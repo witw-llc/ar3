@@ -1,0 +1,90 @@
+{
+  "description": "Devin CLI as a resident ACP engine with one serial conversation. Pins accept-edits; permission requests are rejected once. Uses the existing login without starting browser authentication. MODEL accepts an exact advertised catalog ID; EFFORT selects an advertised thinking level. TIMEOUT sets the quiet window (default 2700 seconds); a live turn never expires. Stop and status hooks manage the resident session. MEMORY and git identity variables follow the engine definitions.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "devin",
+    "run",
+    "--resident",
+    "--memory=$MEMORY?",
+    "--memory-home=$MEMORY_HOME?",
+    "--memory-writer=$MEMORY_WRITER?",
+    "--memory-people=$MEMORY_PEOPLE?",
+    "--timeout=$TIMEOUT?",
+    "--effort=$EFFORT?",
+    "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "stop",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "status": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "devin",
+      "status",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

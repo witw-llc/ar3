@@ -996,7 +996,7 @@ def engine_argv_pairs():
     proc = subprocess.run(
         [sys.executable, "-c", _PERMISSION_PROBE, json.dumps(list(RUN_ENGINE_IDS))],
         cwd=_R4T_DIR,
-        env={**os.environ, "PYTHONPATH": f"{_R4T_DIR}{os.pathsep}{_REPO_ROOT}"},
+        env={**os.environ, "PYTHONPATH": f"{_R4T_DIR}{os.pathsep}{_REPO_ROOT / 'lib'}"},
         capture_output=True,
         text=True,
     )

@@ -31,6 +31,9 @@ import sys
 import threading
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+from ar3.proc import launch_options
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "a8s"
 SERVER_VERSION = "1.0.0"
@@ -116,6 +119,7 @@ def send(recipient: str, body: str, attachments: list[str] | None = None) -> tup
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            **launch_options(),
         )
     except OSError as e:
         return False, f"tell failed to run: {e}"

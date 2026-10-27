@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError
 from state import r4t_home
 
@@ -83,6 +85,7 @@ def _gh_user() -> dict:
             capture_output=True,
             text=True,
             timeout=TIMEOUT_S,
+            **launch_options(),
         )
     except subprocess.TimeoutExpired as exc:
         raise QuotaError(f"gh api did not answer in {TIMEOUT_S}s") from exc
@@ -242,6 +245,7 @@ def _probe(argv: list[str]) -> str:
             errors="replace",
             timeout=PROBE_TIMEOUT_S,
             stdin=subprocess.DEVNULL,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

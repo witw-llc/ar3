@@ -81,9 +81,9 @@ tool) plus this turn's own measurement flags (see
 - `--git-name NAME`, `--git-email EMAIL` — the author and committer of each
   new commit the turn makes; see [git identity](#git-identity).
 - `--resident` — keep one long-running session alive across arrivals
-  (`claude`, `ollama-claude`, `agy`, `codex`, and `cursor`); `--timeout`
+  (`claude`, `ollama-claude`, `agy`, `codex`, `cursor`, `devin`, and `muse`); `--timeout`
   then sets the quiet window. See
-  [resident sessions](#resident-sessions--claude-ollama-claude-agy-codex-and-cursor).
+  [resident sessions](#resident-sessions).
 - Exit code is the CLI's own (124 on a timeout kill); stdout/stderr stream
   through unchanged.
 
@@ -423,7 +423,7 @@ Prepended to `PROMPT`. The prelude is byte-identical across runs in the same
 `--dir` (no timestamps, no counters), so the prompt cache misses only on what
 follows it: the `LESSONS.md` note when one applies, then the routed input,
 which always comes last. A one-shot turn and a
-[resident session](#resident-sessions--claude-ollama-claude-agy-codex-and-cursor) start
+[resident session](#resident-sessions) start
 from the same prelude; only the closing steps differ.
 
 ```
@@ -524,7 +524,7 @@ input is `PROMPT` if given, else the built-in idle consolidation prompt
 Any run *without* `--idle` removes the marker first — real work re-arms the
 latch, so the next quiet tick gets exactly one consolidation pass again.
 
-### Resident sessions — `claude`, `ollama-claude`, `agy`, `codex`, and `cursor`
+### Resident sessions
 
 Resuming `claude -p` across a process boundary misses the provider's prompt
 cache 40.6% of the time against a 2.5% same-process baseline (measured, #155).
@@ -582,7 +582,7 @@ user turn, so the session needs no `tells` monitor of its own.
   are dropped and the bridge exits; the next message starts again.
 - State lives in `<DIR>/.engine-resident/<agent>/`, which ignores itself in
   git. `resident.log` there holds the bridge's log and the engine's replies.
-- Supported on `claude`, `ollama-claude`, `agy`, `codex`, and `cursor`; other
+- Supported on `claude`, `ollama-claude`, `agy`, `codex`, `cursor`, `devin`, and `muse`; other
   engines fail closed with the supported set. Cannot be combined with
   `--continue` or `--session`.
 
@@ -606,6 +606,9 @@ stdio) holding one thread. Proven on codex-cli 0.163.0.
 - The thread/start answer names the policy in force. The session ends before
   its first turn when that is not approvals `never` and the composed sandbox;
   `resident.log` names both values.
+- Initialization and verified thread creation share a 20-second deadline from
+  session creation. Both must succeed before queued input reaches the model.
+  A missing response ends the session and records held messages as failed.
 - One turn is on the wire at a time. app-server merges a turn sent mid-turn
   into the running turn, so a message that arrives mid-turn waits for the next
   turn, as on Claude.
@@ -621,6 +624,11 @@ stdio) holding one thread. Proven on codex-cli 0.163.0.
   `resident.log` shows codex's warning ("Codex's Linux sandbox uses bubblewrap
   and needs access to create user namespaces"). Use `--permissions bypass` on
   such a host only for an agent on its own machine and its own account.
+- On Linux, stop and replacement enqueue can sweep a dead bridge's recorded
+  process group after Codex has exited, including descendants that ignore
+  SIGTERM. Matching pid/state records and a captured start token are required;
+  a live leader must match that token and group, and an absent leader must be
+  from the current boot. Missing or mismatched evidence prevents this sweep.
 - `r4t engine codex check --resident` runs the handshake without a turn:
   `initialize` for the version and an ephemeral `thread/start` for the policy
   in force. A version other than the proven 0.163.0 is accepted with a note.
@@ -732,6 +740,91 @@ still exit on stdin EOF.
   follows the authenticate answer. No prompt is sent. A version other than
   2026.10.22-27dcf5f is accepted with a note.
 
+### Devin ACP
+
+`r4t engine devin run --resident` uses `devin acp` with the existing CLI login.
+The adapter sends initialize then session/new; it never calls the advertised
+browser authentication method. Missing login fails locally without retry.
+
+The session pins its advertised controls before sending any prompt: default
+permissions use `accept-edits`, `auto` uses `smart`, `ask` uses Devin's read-only
+`ask` mode, and `bypass` uses `bypass`. Standard mode permits one a8s tell
+when native metadata identifies that exact tool in the active turn. Missing,
+conflicting, stale or consumed call identities are rejected. Ask and smart
+reject client permission requests; bypass selects only the offered `allow_once`.
+After 256 distinct tracked call IDs, standard mode denies further grants in
+that session instead of forgetting replay protection.
+These are vendor permission controls, not an operating-system sandbox.
+
+`--model` requires an exact value from the session's model catalog. `--effort`
+selects a value from the resulting model's `thought_level` catalog. Missing
+controls, unknown values, rejected pins, or an effective-value mismatch fail
+before prompts. One-shot Devin retains its separate permission restrictions.
+The a8s MCP server is supplied through session/new without writing Devin config.
+
+`r4t engine devin check --resident` verifies that handshake and effective pins
+without a model prompt. Devin 3000.11.205 was measured on Linux: idle EOF exits
+cleanly; quiet teardown permits 10 seconds. Explicit stop has no EOF grace.
+Native Windows behavior requires separate host verification.
+`engine-devin-resident` and `engine-devin-resident-unrestricted` provide message,
+batch, idle, stop, and status hooks; the latter explicitly selects bypass.
+
+### Muse MSP
+
+A resident Muse session uses MSP on stdio. The adapter is measured on
+Muse Code 1.4.13 on Linux with its local echo provider. Windows and provider
+model turns require separate validation.
+
+The bridge sends `initialize`, waits for schema version 1 and the
+`sessionMcp` capability, then sends `initialized` and `session/start`.
+Every command carries a UUIDv7 command id. The returned session must confirm
+the requested model and approval mode before the first turn is released.
+`MODEL` selects `session/start.modelId`; `EFFORT` is supplied on every
+`turn/start`. Unset values keep the engine defaults.
+
+The base definition and `auto` select the native `:ask-me` profile with
+`onRequest` approvals. Before prompts, the adapter verifies the profile's
+human reviewer authority, sandboxed filesystem and disabled local-command
+network access through the experimental permission-state API. It grants only
+the offered once choice for an exact a8s tell in the active parent turn;
+other approval requests are rejected. `--permissions ask` selects the same
+profile but rejects every client approval request. Missing policy evidence,
+changed profiles or unexpected automatic review fail the session.
+After 256 tracked call identities, the session denies further tell grants
+instead of forgetting consumed identities.
+
+The unrestricted definition selects `allowAll`, disables the shell sandbox,
+and trusts the workspace's rules for this run. An explicit approval request
+from an enforced policy is still rejected with its offered reject-once choice,
+including native `abort`. Review completion alone never triggers a decision.
+No permission grant is saved or user configuration file replaced. User-input
+requests are cancelled. One-shot Muse retains its separate permission controls.
+
+The a8s MCP server is required session configuration, with line-delimited
+JSON framing. Muse connects and lists its tools when the first turn starts;
+session creation alone does not prove tool availability. A missing
+`sessionMcp` grant fails startup. Required-server failures are surfaced in
+the local session log and turn outcome. The echo-provider proof verifies
+server initialization and tool listing; it does not prove a provider model
+can use the tool under every policy.
+
+Only one turn is submitted at a time. `turn/start` acceptance is not
+completion: the bridge correlates the turn id and waits for
+`turn/completed`. Failed or cancelled outcomes are failures. A reclaimed
+queued turn or a reported gap in the event stream fails the session. Final
+`item/completed` agent messages supply the text. Stop sends `turn/cancel`
+only for an admitted active turn, then closes stdin and applies the shared
+process-group teardown. Measured idle and echo-turn EOF exits took less
+than 0.1 seconds; the normal EOF allowance is a conservative 10 seconds.
+An immediate stop skips that allowance. Cursor keeps its separate measured
+1.5-second EOF allowance.
+
+`r4t engine muse check --resident` checks `serve --help` and creates an MSP
+session to verify policy and model. Restricted checks require a durable empty
+session because Muse's ephemeral sessions cannot select a named profile.
+The check sends no turn and does not test the lazy MCP connection. No
+authentication action is issued.
+
 ## `check` — does the installed CLI still accept this argv?
 
 ```bash
@@ -821,7 +914,8 @@ of 900s.
 All definitions also carry `--effort=$EFFORT?` on invoke, batch, and idle:
 `a8s vars my-bare-node set EFFORT low` selects reasoning effort for that node.
 Unset drops the token. Cursor keeps effort inside `MODEL` bracket syntax;
-setting a separate `EFFORT` on Cursor or Devin is ignored, with one warning.
+setting a separate `EFFORT` on Cursor or one-shot Devin is ignored, with one warning.
+Resident Devin validates `EFFORT` against the session model’s thinking-level catalog.
 See [reasoning effort](#reasoning-effort) for each engine's values.
 `r4t engine <id> efforts` and `r4t engine <id> models` list what `MODEL` and `EFFORT` accept (see [`models` and `efforts`](#models-and-efforts--what---model-and---effort-accept)).
 
@@ -864,7 +958,8 @@ For long-running seats that stay warm across bursts of messages,
 `engine-claude-resident`, `engine-claude-resident-unrestricted`,
 `engine-agy-resident`, `engine-agy-resident-unrestricted`,
 `engine-codex-resident`, `engine-codex-resident-unrestricted`,
-`engine-cursor-resident`, and `engine-cursor-resident-unrestricted` wire
+`engine-cursor-resident`, `engine-cursor-resident-unrestricted`,
+`engine-muse-resident`, and `engine-muse-resident-unrestricted` wire
 `r4t engine <id> run --resident` across `invoke`, `batch.invoke` and
 `idle.invoke`, `r4t engine <id> stop` as `stop.invoke`, and `r4t engine <id> status` as
 `status.invoke`:

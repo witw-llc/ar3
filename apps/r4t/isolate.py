@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 if sys.platform != "win32":
     import pwd
 else:
@@ -158,6 +160,7 @@ def _run_probe(
         capture_output=True,
         text=True,
         timeout=PROBE_TIMEOUT_SECONDS,
+        **launch_options(),
     )
 
 
@@ -393,6 +396,7 @@ def kill_container(name: str) -> None:
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT_SECONDS,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         pass

@@ -17,6 +17,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -221,6 +223,7 @@ def _refresh_via_cli() -> None:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=45,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise QuotaError(f"`claude doctor` could not refresh the token ({exc}) — {remedy}") from exc
@@ -250,6 +253,7 @@ def _keychain_credentials() -> dict | None:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -273,7 +277,8 @@ def _file_credentials() -> dict | None:
 def _cli_version() -> str:
     try:
         proc = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=10
+            ["claude", "--version"], capture_output=True, text=True, timeout=10,
+            **launch_options(),
         )
         word = proc.stdout.strip().split()[0]
         if word and word[0].isdigit():

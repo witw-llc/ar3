@@ -20,6 +20,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError
 
 
@@ -303,6 +305,7 @@ def _keychain_token() -> str | None:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

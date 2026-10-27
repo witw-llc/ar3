@@ -13,6 +13,8 @@ import re
 import subprocess
 import tempfile
 
+from ar3.proc import launch_options
+
 MAGIC = b"A8S-VAULT-1"
 WIRE = "A8SV1:"
 MIN_RSA_BITS = 2048
@@ -32,7 +34,7 @@ def _openssl():
 
 
 def _run(args, data=b""):
-    proc = subprocess.run([_openssl(), *args], input=data, capture_output=True)
+    proc = subprocess.run([_openssl(), *args], input=data, capture_output=True, **launch_options())
     if proc.returncode:
         detail = proc.stderr.decode(errors="replace").strip().splitlines()
         raise CryptoError(f"openssl {args[0]} failed: {detail[0] if detail else proc.returncode}")
@@ -131,6 +133,7 @@ def verify(pub_pem, data, signature):
         proc = subprocess.run(
             [_openssl(), "dgst", "-sha256", "-verify", pub, "-signature", sig],
             input=data, capture_output=True,
+            **launch_options(),
         )
     return proc.returncode == 0
 

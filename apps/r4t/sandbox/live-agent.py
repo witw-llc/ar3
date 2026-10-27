@@ -20,6 +20,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
+from ar3.proc import launch_options
+
 BATTLESHIP = '''\
 import sys
 
@@ -103,7 +106,7 @@ def run_harness(prompt: str) -> int:
     argv = [a.replace("{prompt}", prompt) for a in harness_invoke()]
     print(f"live-agent: running harness ({argv[0]})", file=sys.stderr, flush=True)
     llm_timeout = int(os.environ.get("R4T_SANDBOX_LLM_TIMEOUT", "480"))
-    proc = subprocess.Popen(argv, text=True, start_new_session=True)
+    proc = subprocess.Popen(argv, text=True, **launch_options(new_session=True))
     try:
         proc.wait(timeout=llm_timeout)
     except subprocess.TimeoutExpired:
@@ -238,6 +241,7 @@ def verify_battleship() -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=30,
+            **launch_options(),
         )
     except subprocess.TimeoutExpired:
         return False, "battleship.py timed out"

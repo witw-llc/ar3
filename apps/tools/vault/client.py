@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import time
 
+from ar3.proc import launch_options
+
 try:
     import fcntl
 except ImportError:   # Windows: no fcntl, lock with msvcrt instead (see _lock_fd)
@@ -58,7 +60,7 @@ def _tell(to, body, files=()):
     argv = ["tell", to, "-"]
     for path in files:
         argv += ["--attach", path]
-    subprocess.run(argv, input=body, text=True, check=True)
+    subprocess.run(argv, input=body, text=True, check=True, **launch_options())
 
 
 def pin(pem_path, expected=None):

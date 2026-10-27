@@ -71,10 +71,6 @@ if sys.platform == "win32":
 else:
     import fcntl
 
-# The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
-# container with no repo root, so `ar3` is not always reachable — unlike
-# ar3ver's "unknown version" degrade, a ULID has no no-op fallback, so the
-# except branch carries a working minimal reimplementation instead of a stub.
 try:
     from ar3.ulid import new as new_ulid
 except ImportError:
@@ -88,8 +84,6 @@ except ImportError:
         chars = [alphabet[(n >> (5 * i)) & 0x1F] for i in range(25, -1, -1)]
         return "".join(chars)
 
-# Same relocation concern as `new_ulid` above; r4t carries no legacy config
-# dir, so the fallback needs neither an override nor a migration path.
 try:
     from ar3.home import app_home as _app_home
 except ImportError:
@@ -101,9 +95,6 @@ except ImportError:
         base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
         return base / app
 
-# Same relocation concern again; the fallback keeps the same-dir-tmp +
-# os.replace + cleanup-on-failure contract, minus the fsync/mode knobs no
-# r4t call site needs.
 try:
     from ar3.fsio import atomic_write_text as _atomic_write
 except ImportError:
@@ -349,8 +340,6 @@ def archive_history(node: str, name: str) -> Path | None:
 
 # ---------- locks ----------
 
-# Same relocation concern as the ar3 imports at the top; the container copy
-# is POSIX-only, so the fallback keeps only the POSIX probe.
 try:
     from ar3.proc import pid_alive as _pid_alive
 except ImportError:

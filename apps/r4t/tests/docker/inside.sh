@@ -8,8 +8,11 @@ echo "== provisioning (the operator's job; r4t never does this) =="
 apt-get update -qq
 apt-get install -y -qq python3 sudo >/dev/null
 
-# A container-owned, writable copy of the r4t tree (the mount is read-only).
-cp -a /src-r4t /opt/r4t
+# Keep the app/foundation layout so isolated launches use the shared policy.
+mkdir -p /opt/ar3/apps
+cp -a /src-r4t /opt/ar3/apps/r4t
+cp -a /src-lib /opt/ar3/lib
+ln -s /opt/ar3/apps/r4t /opt/r4t
 export PYTHONDONTWRITEBYTECODE=1
 
 # --- users and groups ---------------------------------------------------------

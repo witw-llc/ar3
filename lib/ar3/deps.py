@@ -35,6 +35,7 @@ import sys
 import sysconfig
 from pathlib import Path
 
+from ar3.proc import launch_options
 from ar3.ulid import new as new_ulid
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -183,7 +184,7 @@ def install_group(group: str) -> Path:
         if installer
         else [sys.executable, "-m", "pip", "install", "--target", str(tmp_dir), "-r", str(req_file)]
     )
-    result = subprocess.run(argv)
+    result = subprocess.run(argv, **launch_options())
     if result.returncode != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise RuntimeError(

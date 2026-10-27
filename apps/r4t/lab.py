@@ -28,6 +28,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from rig import RigError, default_config_path, load_rig_config
 from state import new_ulid, r4t_home, utc_now
 
@@ -197,6 +199,7 @@ def _r4t_git_describe() -> str:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
@@ -206,7 +209,8 @@ def _r4t_git_describe() -> str:
 def _ollama_version() -> str:
     try:
         proc = subprocess.run(
-            ["ollama", "--version"], capture_output=True, text=True, timeout=10
+            ["ollama", "--version"], capture_output=True, text=True, timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         raise LabError(f"could not run `ollama --version`: {e}") from e
@@ -218,7 +222,8 @@ def _ollama_models() -> list[tuple[str, str]]:
     """(name, digest) pairs from `ollama list`."""
     try:
         proc = subprocess.run(
-            ["ollama", "list"], capture_output=True, text=True, timeout=15
+            ["ollama", "list"], capture_output=True, text=True, timeout=15,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         raise LabError(f"could not run `ollama list`: {e}") from e
@@ -323,7 +328,8 @@ def _binary_version(binary: str) -> tuple[str | None, str | None]:
     binary has no usable --version — recorded, never invented."""
     try:
         proc = subprocess.run(
-            [binary, "--version"], capture_output=True, text=True, timeout=10
+            [binary, "--version"], capture_output=True, text=True, timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None, f"{binary} has no usable --version"
@@ -556,7 +562,8 @@ def _run_judge(
     argv = [prompt if a == "{prompt}" else a for a in invoke]
     try:
         proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, cwd=str(cwd)
+            argv, capture_output=True, text=True, timeout=timeout, cwd=str(cwd),
+            **launch_options(),
         )
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"

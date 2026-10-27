@@ -35,6 +35,7 @@ class ParsedFrame:
     turn_completed: bool = False
     replies: tuple[str, ...] = ()
     fatal: bool = False
+    turn_failed: bool = False
 
 
 def rpc(payload: dict) -> str:
@@ -103,7 +104,7 @@ class AcpSession:
         """Method id to authenticate with, or None when this engine skips it."""
         return None
 
-    def allows_permission(self) -> bool:
+    def allows_permission(self, params: dict) -> bool:
         """Select allow_once when True. A product session decides; the default
         rejects. `--force` is Cursor's, so it does not live here."""
         return False
@@ -265,7 +266,7 @@ class AcpSession:
                 return self._fail(
                     "acp session/request_permission named a different session"
                 )
-            allow = self.allows_permission()
+            allow = self.allows_permission(params or {})
             result = permission_outcome(options, allow=allow)
             stance = "allowed once" if allow else "rejected"
             if result["outcome"]["outcome"] == "cancelled":
@@ -369,6 +370,7 @@ class AcpSession:
             return ParsedFrame(
                 error_text=f"acp session/prompt failed: {message}",
                 turn_completed=True,
+                turn_failed=True,
                 replies=self._release(),
             )
         result = frame.get("result")
@@ -388,5 +390,21 @@ class AcpSession:
             result_text=text.strip(),
             error_text=error,
             turn_completed=True,
+            turn_failed=bool(error),
             replies=self._release(),
         )
+
+
+def acp_mcp_servers(env: dict[str, str]) -> list[dict]:
+    """The a8s server in the ACP `mcpServers` shape: `env` is a list of
+    `{name, value}`, which is what `session/new` accepted."""
+    from rig import MCP_SERVER_NAME, _mcp_command, _mcp_server_env
+
+    command = _mcp_command()
+    pinned = _mcp_server_env(env)
+    return [{
+        "name": MCP_SERVER_NAME,
+        "command": command[0],
+        "args": command[1:],
+        "env": [{"name": key, "value": value} for key, value in pinned.items()],
+    }]

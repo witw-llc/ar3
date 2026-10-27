@@ -49,6 +49,8 @@ import sys
 import time
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 import state
 from rig import RigConfig, resolve_framing, resolve_knowledge_bytes
 
@@ -163,6 +165,7 @@ def _run_k7e(
         text=True,
         env=env,
         timeout=timeout,
+        **launch_options(),
     )
 
 

@@ -40,3 +40,28 @@ def test_timeout_ends_the_command_and_what_it_forked(store, tmp_path, monkeypatc
         time.sleep(0.05)
     assert _gone(grandchild), f"the model process {grandchild} outlived the timeout"
     assert ("summarize", "timed out (1s)") in engine._llm_failures
+
+
+def test_windows_model_launch_uses_hidden_process_group(store, monkeypatch):
+    from ar3.proc import launch_options
+    import config
+
+    class LaunchReached(BaseException):
+        pass
+    calls = []
+    def intercept(argv, **kwargs):
+        calls.append((argv, kwargs))
+        raise LaunchReached
+    monkeypatch.setattr(config, "resolve_command", lambda purpose: "fake-model")
+    monkeypatch.setattr(engine, "launch_options", lambda **kw: launch_options(windows=True, **kw))
+    monkeypatch.setattr(engine.subprocess, "Popen", intercept)
+    with pytest.raises(LaunchReached):
+        engine._call_llm("prompt")
+    assert calls[0][0] == ["fake-model"]
+    opts = calls[0][1]
+    assert opts["creationflags"] == 0x08000200
+    assert not opts.get("start_new_session", False)
+    assert opts["stdin"] == engine.subprocess.PIPE
+    assert opts["stdout"] == engine.subprocess.PIPE
+    assert opts["stderr"] == engine.subprocess.PIPE
+    assert opts["encoding"] == "utf-8"

@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError
 
 TIMEOUT_S = 8
@@ -89,6 +91,7 @@ def _usage_command() -> dict:
             text=True,
             timeout=USAGE_CMD_TIMEOUT_S,
             stdin=subprocess.DEVNULL,
+            **launch_options(),
         )
     except subprocess.TimeoutExpired as exc:
         raise QuotaError(
@@ -169,6 +172,7 @@ def _find_language_server() -> tuple[int, str]:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise QuotaError(f"cannot list processes: {exc}") from exc
@@ -201,6 +205,7 @@ def _listen_ports(pid: int) -> list[int]:
             capture_output=True,
             text=True,
             timeout=10,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise QuotaError(f"lsof failed discovering the local API port: {exc}") from exc

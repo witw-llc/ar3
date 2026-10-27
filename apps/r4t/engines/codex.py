@@ -20,6 +20,8 @@ import subprocess
 import tempfile
 import threading
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError, iso_from_unix, window_label
 
 TIMEOUT_S = 15
@@ -60,6 +62,7 @@ def _rpc_rate_limits() -> dict:
             stdout=subprocess.PIPE,
             stderr=errors,
             text=True,
+            **launch_options(),
         )
     except OSError as exc:
         raise QuotaError(f"cannot run codex app-server: {exc}") from exc

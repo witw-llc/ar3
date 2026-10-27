@@ -10,10 +10,12 @@ in `.gmail-told` before its tell and is never told again."""
 from __future__ import annotations
 
 import sys
+from functools import partial
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from ar3.proc import launch_options
 
 _CONNECTOR_DIR = Path(__file__).resolve().parent.parent.parent.parent / "connectors" / "gmail"
 sys.path.insert(0, str(_CONNECTOR_DIR))
@@ -76,7 +78,9 @@ def _thread(thread_id: str, message_id: str, subject: str) -> dict:
 
 # ---------- tests ----------
 
-def test_happy_path_unread_to_tell(monkeypatch):
+@pytest.mark.parametrize('windows', [False, True])
+def test_happy_path_unread_to_tell(monkeypatch, windows):
+    monkeypatch.setattr(gmail_cron, 'launch_options', partial(launch_options, windows=windows))
     monkeypatch.setenv("GAS_BRIDGE_URL", "https://example/exec")
     monkeypatch.setenv("GAS_BRIDGE_KEY", "TESTKEY")
 
@@ -104,6 +108,7 @@ def test_happy_path_unread_to_tell(monkeypatch):
         # Cron must NOT pass cwd explicitly — it inherits from a8s,
         # which sets it to the agent's root for force-stamping.
         assert "cwd" not in kwargs, "cron must not override cwd"
+        assert kwargs == ({'creationflags': 0x08000000} if windows else {})
         tell_calls.append({"argv": list(argv), "check": check})
         return _Result()
 

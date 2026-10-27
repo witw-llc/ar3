@@ -27,7 +27,7 @@ import urllib.request
 from pathlib import Path
 
 from ar3.locking import file_lock
-from ar3.proc import spawn
+from ar3.proc import launch_options, spawn
 
 from . import plc
 
@@ -319,6 +319,7 @@ def _listening_endpoints(port):
         result = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pn"],
             capture_output=True, text=True,
+            **launch_options(),
         )
         pid = None
         for line in result.stdout.splitlines():
@@ -329,7 +330,8 @@ def _listening_endpoints(port):
         return endpoints
     if shutil.which("ss"):
         result = subprocess.run(
-            ["ss", "-Hltnp", f"sport = :{port}"], capture_output=True, text=True
+            ["ss", "-Hltnp", f"sport = :{port}"], capture_output=True, text=True,
+            **launch_options(),
         )
         for line in result.stdout.splitlines():
             fields = line.split()
@@ -446,7 +448,8 @@ def _profile_pids(seat):
     if platform.system() == "Windows":
         return []
     result = subprocess.run(
-        ["pgrep", "-f", "--", _profile_pattern(seat)], capture_output=True, text=True
+        ["pgrep", "-f", "--", _profile_pattern(seat)], capture_output=True, text=True,
+        **launch_options(),
     )
     return result.stdout.split()
 
@@ -459,7 +462,8 @@ def _main_pids(seat):
     if platform.system() == "Windows":
         return []
     result = subprocess.run(
-        ["pgrep", "-af", "--", _profile_pattern(seat)], capture_output=True, text=True
+        ["pgrep", "-af", "--", _profile_pattern(seat)], capture_output=True, text=True,
+        **launch_options(),
     )
     pids = []
     for line in result.stdout.splitlines():
@@ -482,6 +486,7 @@ def _daemon_pids(seat):
     result = subprocess.run(
         ["pgrep", "-f", f"cliDaemon.js {re.escape(seat)}([[:space:]]|$)"],
         capture_output=True, text=True,
+        **launch_options(),
     )
     return result.stdout.split()
 

@@ -30,6 +30,9 @@ import urllib.request
 from pathlib import Path
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "lib"))
+from ar3.proc import launch_options
+
 TIMEOUT_S = 30
 
 # A cron host has no guarantee that the shims are on PATH, so the connector
@@ -191,7 +194,8 @@ def _process_thread(
         # No explicit cwd: a8s fired idle with cwd = the connector's
         # registered root, which is what tell needs for force-stamping.
         result = subprocess.run(
-            [sys.executable, str(A8S_PY), "tell", target, body], check=False
+            [sys.executable, str(A8S_PY), "tell", target, body], check=False,
+            **launch_options(),
         )
     except OSError as e:
         print(f"[gmail-cron] tell shell-out failed: {e}", file=sys.stderr)

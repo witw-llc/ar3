@@ -2,6 +2,8 @@
 
 ## Hard constraints
 
+- **Use the foundation process-launch helper for every subprocess.** Windows console policy lives only in `ar3.proc.launch_options`; background launches are hidden, intentional interactive launches declare that intent, and no consumer invents Windows creation flags. Preserve each caller’s I/O, environment, grouping and teardown contract.
+
 - **Every node distilled from a turn names the turn; a node born from a file
   the member read names the file.** An operator answers "where did that come
   from" from the capture and the node, never from journals.
@@ -47,11 +49,50 @@
   second engine beside it. Pid files clear under the same lock the enqueuer
   takes. `--timeout` is the quiet window, not the session's life, and `engine stop` sends no
   wrap-up and drops the queue.
+- **Resident enqueue success means queued, not completed.** Carry the originating
+  wake context through combined prompts; report known failures through the
+  foundation local-outcome seam. Never report a completed turn as failed because
+  a later turn or wrap-up failed. Do not retry or send failure messages over the
+  network; a bridge hard-kill has no durable in-flight recovery.
+- **Bound the Codex handshake with one 20-second clock.** Initialization and
+  verified thread creation must both finish before held prompts are released.
+  Do not reset the clock between phases; timeout settles each held origin once.
+- **Recover a dead bridge group only with recorded ownership evidence.** Under
+  the enqueue lock, require matching state and pid-file identities and a captured
+  start token before clearing or replacing state. A live leader must match its
+  token and group; an absent leader requires the same Linux boot id. Refuse
+  missing, mismatched or cross-boot evidence. Keep process-group layout unchanged.
+- **Resident adapters use the installed vendor protocol and verify effective policy before prompts.** Keep teardown settings per engine. Muse and Devin target modern installed versions; do not add older-version compatibility paths. A successful handshake or local echo turn does not prove model-driven tool replies or native Windows behavior.
+- **Accept Muse host shutdown only after locally initiated, settled EOF.** Require
+  the completed handshake and no active or held turns. Unsolicited shutdown and
+  other closure reasons fail; a closure notification never completes a turn.
+- **Treat Muse review completion as activity, not a client decision request.**
+  Reject through the native offered reject-once choice, including `abort`.
+  Never infer exact-tool mediation from `onRequest`: verify reviewer authority
+  before relying on a client decision to control execution.
+- **Pin restricted Muse sessions to the native human-review profile.** Select
+  durable `:ask-me` and verify effective mode and permission axes before prompts:
+  human reviewer, sandboxed filesystem, network off and `onRequest` profile
+  approval. Runtime reviewer attachment alone does not identify its authority.
+  Standard mode grants only the offered once choice for native exact
+  `mcp__a8s__tell` in the active parent turn; explicit ask rejects all requests.
+  Reject stale, conflicting or consumed identities and fail on policy changes
+  or unexpected automated review. Never rewrite user configuration or use an
+  undocumented reviewer override. Connection checks use a durable no-turn
+  session because ephemeral hosts cannot select named profiles.
+- **Grant standard Devin replies only by exact native MCP identity.** Correlate
+  `mcp__a8s__tell` metadata by tool-call ID within the active session and turn,
+  choose only allow-once, and reject missing, conflicting, stale or consumed
+  identities. Never use titles or argument text, grant the whole server, or
+  replace user configuration to add the grant.
 - **A stop owns the session under the enqueue lock.** It marks the session
   `stopping`, and a message that finds `stopping` is dropped; it clears only
   the generation it stopped. The bridge spawns its engine and publishes the
   engine's pid in one hold of that lock, never spawns once `stopping` is set,
   and installs its signal handlers before the first engine exists.
+  On Windows, observe the owned generation's `stopping` state during active
+  work and EOF grace before bounded hard termination; SIGTERM cannot notify
+  the bridge cooperatively. Preserve each engine's immediate stop policy.
 
 ## Testing
 

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 
+from ar3.proc import launch_options
+
 
 def _in_fenced_code_block(text: str) -> bool:
     return text.count("```") % 2 == 1
@@ -234,6 +236,7 @@ class GlowStream:
                 text=True,
                 check=False,
                 env=_glow_subprocess_env(),
+                **launch_options(),
             )
         except OSError:
             return markdown

@@ -18,6 +18,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R4T_DIR="$(cd "$HERE/../.." && pwd)"   # apps/r4t
+AR3_LIB="$(cd "$R4T_DIR/../../lib" && pwd)"
 # ubuntu:24.04 is the CI default; override to reuse an already-pulled base
 # locally (e.g. R4T_TEST_IMAGE=ubuntu:latest) when a registry pull is awkward.
 IMAGE="${R4T_TEST_IMAGE:-ubuntu:24.04}"
@@ -34,6 +35,7 @@ fi
 echo "run-as.sh: launching ${IMAGE} (installs python3+sudo; slow by design)..."
 exec docker run --rm \
   -v "$R4T_DIR":/src-r4t:ro \
+  -v "$AR3_LIB":/src-lib:ro \
   -e DEBIAN_FRONTEND=noninteractive \
   "$IMAGE" \
   bash /src-r4t/tests/docker/inside.sh

@@ -24,10 +24,8 @@ from pathlib import Path
 # suite semver and the shared code. That directory goes to the FRONT of
 # sys.path, never the end: appended, it loses to site-packages, and any
 # unrelated distribution named `ar3` then answers these imports instead. A
-# copy of this tree relocated away from the repo root (the isolation container
-# copies apps/r4t alone to /opt/r4t) has no `lib` beside it; the version is a
-# nicety, never a dependency, so a missing module degrades to "unknown"
-# instead of killing the CLI on import.
+# relocated bundle preserves apps/r4t beside lib. VERSION may be absent in
+# a test bundle; only that version display degrades to "unknown".
 _AR3_LIB = str(Path(__file__).resolve().parents[2] / "lib")
 while _AR3_LIB in sys.path:
     sys.path.remove(_AR3_LIB)
@@ -39,6 +37,7 @@ except ImportError:
         import platform
 
         return f"{app} unknown (ar3, python {platform.python_version()})"
+from ar3.proc import launch_options
 from typing import NamedTuple
 
 import knowledge
@@ -2657,7 +2656,8 @@ def _resolve_add_runbook(root: Path, raw: str | None) -> tuple[Path, bool]:
 
 def _a8s(*argv: str) -> tuple[int, str]:
     result = subprocess.run(
-        [sys.executable, str(A8S_PY), *argv], capture_output=True, text=True
+        [sys.executable, str(A8S_PY), *argv], capture_output=True, text=True,
+        **launch_options(),
     )
     detail = (result.stderr or result.stdout or "").strip()
     return result.returncode, detail
@@ -3141,8 +3141,8 @@ def build_parser() -> argparse.ArgumentParser:
     rig_run_p.add_argument(
         "--resident",
         action="store_true",
-        help="Run or feed a detached long-running stream-json session "
-        "(claude, ollama-claude, and agy).",
+        help="Run or feed a detached long-running engine session "
+        "(claude, ollama-claude, agy, codex, cursor, devin, and muse).",
     )
     _memory_options(rig_run_p)
     rig_run_p.set_defaults(func=cmd_rig_run)
@@ -3457,8 +3457,8 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "--resident",
         action="store_true",
-        help="run: run or feed a detached long-running stream-json session "
-        "(claude, ollama-claude, and agy).",
+        help="run: run or feed a detached long-running engine session "
+        "(claude, ollama-claude, agy, codex, cursor, devin, and muse).",
     )
     engine_p.set_defaults(func=cmd_engine)
 

@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 
+from ar3.proc import launch_options
+
 # The browser tool, by its path inside the suite: never PATH, never a separate
 # install.
 BROWSER_TOOL = os.path.join(
@@ -80,7 +82,8 @@ class BrowserSeat:
         argv = [sys.executable, BROWSER_TOOL, "-s", self.seat, "do", "-", "--json"]
         try:
             proc = subprocess.run(
-                argv, input=script, capture_output=True, text=True, timeout=self.timeout
+                argv, input=script, capture_output=True, text=True, timeout=self.timeout,
+                **launch_options(),
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             if isinstance(exc, OSError):

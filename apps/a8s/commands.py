@@ -28,6 +28,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 from core import (
     ENTRYPOINT,
     SCRIPT_DIR,
@@ -1407,17 +1409,6 @@ def cmd_start(args: list[str]) -> int:
     return _each_name(args, _start_one)
 
 
-def _detached_spawn_flags() -> dict:
-    """A node outlives the console that started it. On POSIX a new session
-    takes it out of the terminal's process group. On Windows, where
-    `start_new_session` is ignored, a console's Ctrl+C reaches every process
-    attached to it, so a node left attached ends with the operator's Ctrl+C
-    out of `a8s logs -f` in that console."""
-    if IS_WINDOWS:
-        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
-
-
 def _start_one(name: str) -> int:
     # Validate (resolve_name raises if unknown / cycle).
     try:
@@ -1442,7 +1433,7 @@ def _start_one(name: str) -> int:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        **_detached_spawn_flags(),
+        **launch_options(new_session=True, windows=IS_WINDOWS),
     )
     if len(members) == 1:
         print(f"started {members[0]} as PID {proc.pid}")
@@ -1493,6 +1484,7 @@ def _engine_check_probe(
             capture_output=True,
             text=True,
             timeout=_ENGINE_CHECK_TIMEOUT_SECONDS,
+            **launch_options(windows=IS_WINDOWS),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

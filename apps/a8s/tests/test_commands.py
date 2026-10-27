@@ -836,11 +836,9 @@ class TestSeveralNames:
         # Windows ignores start_new_session; a console's Ctrl+C reaches every
         # process attached to it, so the node must leave the console outright.
         monkeypatch.setattr("commands.IS_WINDOWS", True)
-        monkeypatch.setattr("commands.subprocess.DETACHED_PROCESS", 0x8, raising=False)
-        monkeypatch.setattr("commands.subprocess.CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
         seen = self._spawn_kwargs(monkeypatch)
         assert cmd_start(["a1"]) == 0
-        assert seen[0]["creationflags"] == 0x8 | 0x200
+        assert seen[0]["creationflags"] == 0x08000000 | 0x200
         assert "start_new_session" not in seen[0]
 
     def test_stop_takes_several_names(self, three, monkeypatch, capsys):

@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ar3.proc import launch_options
+
 import state
 
 
@@ -69,6 +71,7 @@ def sweep(
             cwd=str(workplace),
             capture_output=True,
             text=True,
+            **launch_options(),
         )
     except OSError as e:
         raise CheckError(f"cannot list files in {workplace}: {e}") from e

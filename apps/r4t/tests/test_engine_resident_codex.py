@@ -111,6 +111,7 @@ class TestCodexSession:
         opening = [_rpc(x) for x in sess.opening_lines()]
         assert [m.get("method") for m in opening] == ["initialize", "initialized", "thread/start"]
         assert opening[2]["params"]["cwd"] == str(tmp_path)
+        sess.on_frame(_out("pingpong", lambda m: m.get("id") == 1))
         return sess
 
     def _thread_answer(self, policy="never", sandbox="workspaceWrite"):
@@ -182,6 +183,43 @@ class TestCodexSession:
         sess = self._ready(tmp_path)
         assert sess.on_frame({"id": 1, "error": {"code": -1, "message": "no"}}).fatal
         assert sess.on_frame({"id": 2, "error": {"code": -1, "message": "no"}}).fatal
+
+    @pytest.mark.parametrize("first", [1, 2])
+    @pytest.mark.parametrize("poll_first", [False, True])
+    def test_handshake_requires_both_replies_with_one_total_deadline(
+        self, monkeypatch, tmp_path, first, poll_first,
+    ):
+        clock = [100.0]
+        monkeypatch.setattr(resident_mod.time, "monotonic", lambda: clock[0])
+        sess = resident_mod.CodexSession(
+            ["codex", "app-server", "-c", 'sandbox_mode="workspace-write"'], tmp_path,
+        )
+        replies = {1: _out("pingpong", lambda m: m.get("id") == 1),
+                   2: self._thread_answer()}
+        assert sess.turn_lines("held") == []
+        clock[0] = 119.0
+        assert sess.on_frame(replies[first]).replies == ()
+        assert not sess.handshake_done and sess.deadline_error() is None
+        clock[0] = 120.0
+        if poll_first:
+            assert sess.deadline_error() == "codex handshake was not ready after 20s"
+        assert list(sess.held) == ["held"]
+        parsed = sess.on_frame(replies[3 - first])
+        assert parsed == resident_mod.ParsedFrame()
+        assert not sess.handshake_done and sess.handshake_expired
+        assert sess.turn_lines("late") == []
+        assert sess._release() == ()
+        assert list(sess.held) == ["held", "late"]
+        clock[0] = 1000.0
+        assert sess.deadline_error() == "codex handshake was not ready after 20s"
+
+    def test_completed_handshake_disarms_deadline(self, monkeypatch, tmp_path):
+        sess = self._ready(tmp_path)
+        sess.on_frame(self._thread_answer())
+        assert sess.handshake_done
+        monkeypatch.setattr(resident_mod.time, "monotonic", lambda: sess.started + 1000)
+        assert sess.deadline_error() is None
+        assert len(sess.turn_lines("later turn")) == 1
 
     def test_an_approval_request_is_declined_with_its_own_id(self, tmp_path):
         sess = self._ready(tmp_path)
@@ -853,3 +891,225 @@ def test_the_wrap_up_turn_asks_for_reply_text_and_no_message(tmp_path):
         "The session closes right after."
     ) in text
     assert "Reply briefly" not in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+@pytest.mark.parametrize("missing", ["initialize", "thread/start"])
+@pytest.mark.parametrize("reply_after_deadline", [False, True])
+def test_missing_codex_handshake_reply_drops_origins_within_stop_budget(
+    monkeypatch, tmp_path, capsys, missing, reply_after_deadline,
+):
+    import threading
+    import time
+
+    from ar3.wake_outcome import origin_from_env, take_failures
+
+    init = _out("pingpong", lambda m: m.get("id") == 1)
+    thread = TestCodexSession()._thread_answer()
+    record = tmp_path / "received.jsonl"
+    release = tmp_path / "release-late-reply"
+    fake = tmp_path / "silent_handshake.py"
+    fake.write_text(
+        "import json, sys, time, threading\nfrom pathlib import Path\n"
+        f"answers = {{'initialize': {init!r}, 'thread/start': {thread!r}}}\n"
+        "def late_reply(method):\n"
+        f"    while not Path({str(release)!r}).exists(): time.sleep(0.005)\n"
+        "    print(json.dumps(answers[method]), flush=True)\n"
+        "for line in sys.stdin:\n"
+        f"    with open({str(record)!r}, 'a', encoding='utf-8') as out: out.write(line)\n"
+        "    request = json.loads(line)\n"
+        "    method = request.get('method')\n"
+        f"    if method in answers and method != {missing!r}:\n"
+        "        print(json.dumps(answers[method]), flush=True)\n"
+        f"    elif method == {missing!r} and {reply_after_deadline!r}:\n"
+        "        threading.Thread(target=late_reply, args=(method,), daemon=True).start()\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(resident_mod, "CODEX_HANDSHAKE_DEADLINE_SECONDS", 0.3)
+    monkeypatch.setattr(resident_mod, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(engine_run, "resolve_argv0", lambda argv: [sys.executable, str(fake)])
+    late_processed = threading.Event()
+    on_frame = resident_mod.CodexSession.on_frame
+    def observed_frame(session, frame):
+        parsed = on_frame(session, frame)
+        if release.exists() and frame.get("id") == (1 if missing == "initialize" else 2):
+            late_processed.set()
+        return parsed
+    monkeypatch.setattr(resident_mod.CodexSession, "on_frame", observed_frame)
+    log = resident_mod._log
+    def release_during_deadline_log(message):
+        if reply_after_deadline and message.startswith("codex handshake was not ready"):
+            release.touch()
+            assert late_processed.wait(2), "fake app-server did not deliver late reply"
+        log(message)
+    monkeypatch.setattr(resident_mod, "_log", release_during_deadline_log)
+    home = tmp_path / "resident"
+    (home / "inbox").mkdir(parents=True)
+    failure_dir = tmp_path / "failures"
+    for name in ("first", "second"):
+        origin = origin_from_env({
+            "A8S_TURN_RECIPIENT": "probe",
+            "A8S_TURN_ENVELOPES": json.dumps([name + ".json"]),
+            "A8S_TURN_OUTCOME_DIR": str(failure_dir),
+        }, "probe")
+        resident_mod._enqueue_message(home, name, origin)
+    reports = []
+    report = resident_mod.report_failure
+    monkeypatch.setattr(resident_mod, "report_failure", lambda *a, **kw: (
+        reports.append((a, kw)), report(*a, **kw))[1])
+    stop = threading.Event()
+    watchdog = threading.Timer(5, stop.set)
+    watchdog.daemon = True
+    watchdog.start()
+    started = time.monotonic()
+    try:
+        code = resident_mod._run_session(home, {
+            "engine": "codex", "dir_path": str(tmp_path), "template": _template(),
+            "agent": "probe", "timeout": 30, "scaffold": True,
+        }, stop, {})
+    finally:
+        watchdog.cancel()
+    elapsed = time.monotonic() - started
+    assert not stop.is_set(), "missing handshake left bridge alive"
+    assert late_processed.is_set() == reply_after_deadline
+    assert code == 1 and elapsed < 0.3 + resident_mod.ACP_STOP_TERM_SECONDS + 2
+    state = resident_mod.read_state(home)
+    assert state["turns"] == 0 and state["status"] != "closing"
+    assert not resident_mod.pid_alive(state["engine_pid"])
+    requests = [json.loads(line) for line in record.read_text().splitlines()]
+    assert [r["method"] for r in requests] == ["initialize", "initialized", "thread/start"]
+    output = capsys.readouterr().out
+    assert "codex handshake was not ready after 0.3s" in output
+    assert "dropped 1 held message(s): deadline" in output
+    assert "sending wrap-up" not in output
+    assert len(reports) == 2 and all(args[1] == "deadline" for args, _ in reports)
+    failures = list(take_failures(failure_dir, "probe"))
+    assert len(failures) == 2
+    assert sorted(f["envelopes"] for f in failures) == [["first.json"], ["second.json"]]
+    assert list((home / "inbox").glob("*.json")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX")
+@pytest.mark.parametrize("case", [
+    "missing_pid", "bad_pid", "missing_token", "empty_token", "mismatched_pid",
+    "old_boot", "unknown_boot", "reused_leader", "unknown_leader_token",
+    "wrong_group", "unreadable_group", "dead_same_boot", "live_matching",
+])
+def test_published_bridge_group_requires_matching_identity(monkeypatch, tmp_path, case):
+    pid = 12000
+    home = tmp_path / "resident"
+    home.mkdir()
+    (home / "pid").write_text(str(pid))
+    (home / "pid.start").write_text("this-boot 123")
+    state = {"pid": pid}
+    if case == "missing_pid":
+        (home / "pid").unlink()
+    elif case == "bad_pid":
+        (home / "pid").write_text("invalid")
+    elif case == "missing_token":
+        (home / "pid.start").unlink()
+    elif case == "empty_token":
+        (home / "pid.start").write_text("")
+    elif case == "mismatched_pid":
+        state["pid"] += 1
+    live = case in {"reused_leader", "unknown_leader_token", "wrong_group",
+                    "unreadable_group", "live_matching"}
+    monkeypatch.setattr(resident_mod, "pid_alive", lambda p: live)
+    token = {"reused_leader": "this-boot 456", "unknown_leader_token": None}.get(
+        case, "this-boot 123")
+    monkeypatch.setattr(resident_mod, "process_start_token", lambda p: token)
+    def getpgid(p):
+        if case == "unreadable_group":
+            raise ProcessLookupError(p)
+        return p + 1 if case == "wrong_group" else p
+    monkeypatch.setattr(resident_mod.os, "getpgid", getpgid)
+    monkeypatch.setattr(resident_mod, "_published_group_from_this_boot",
+                        lambda s: case not in {"old_boot", "unknown_boot"})
+    swept = []
+    monkeypatch.setattr(resident_mod, "_sweep_group", swept.append)
+    resident_mod._end_published_bridge(home, state)
+    assert swept == ([pid] if case in {"dead_same_boot", "live_matching"} else [])
+
+
+def _abandoned_codex_child(tmp_path):
+    import signal
+    import subprocess
+
+    record = tmp_path / "orphan.json"
+    ready = tmp_path / "child-ready"
+    child_code = (
+        "import signal, time\nfrom pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"Path({str(ready)!r}).write_text('ready')\n"
+        "time.sleep(60)\n"
+    )
+    engine_code = (
+        "import json, os, subprocess, sys, time\nfrom pathlib import Path\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"Path({str(record)!r}).write_text(json.dumps({{'engine': os.getpid(), 'child': child.pid}}))\n"
+        "for line in sys.stdin: pass\n"
+    )
+    bridge_code = (
+        "import subprocess, sys, time\n"
+        f"engine = subprocess.Popen([sys.executable, '-c', {engine_code!r}], stdin=subprocess.PIPE)\n"
+        "time.sleep(60)\n"
+    )
+    bridge = subprocess.Popen([sys.executable, "-c", bridge_code], start_new_session=True)
+    try:
+        _wait_until(ready.exists, timeout=5)
+        ids = json.loads(record.read_text())
+        home = resident_mod.resident_home(tmp_path, "probe")
+        resident_mod._write_pid_files(home, bridge.pid)
+        resident_mod._write_state(home, pid=bridge.pid, engine_pid=ids["engine"], status="running")
+        os.kill(bridge.pid, signal.SIGKILL)
+        bridge.wait(timeout=3)
+        _wait_until(lambda: not resident_mod.pid_alive(ids["engine"]), timeout=5)
+        assert resident_mod.pid_alive(ids["child"])
+        assert os.getpgid(ids["child"]) == bridge.pid
+        return bridge, ids["child"], home
+    except BaseException:
+        try:
+            os.killpg(bridge.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        bridge.wait(timeout=3)
+        raise
+
+
+@pytest.mark.skipif(not Path("/proc/sys/kernel/random/boot_id").is_file(),
+                    reason="leaderless bridge recovery requires Linux boot identity")
+@pytest.mark.parametrize("operation", ["stop", "enqueue"])
+def test_dead_bridge_and_exited_codex_leave_no_child_after_recovery(
+    monkeypatch, tmp_path, operation,
+):
+    import signal
+
+    bridge, child, home = _abandoned_codex_child(tmp_path)
+    try:
+        if operation == "stop":
+            assert resident_mod.stop_resident(tmp_path, "probe") is False
+            assert not (home / "pid").exists()
+        else:
+            _patch_codex(monkeypatch, tmp_path)
+            write_state = resident_mod._write_state
+            replacements = []
+            def checked_write(*args, **kwargs):
+                if kwargs["pid"] != bridge.pid:
+                    assert not resident_mod.pid_alive(child)
+                    replacements.append(kwargs["pid"])
+                return write_state(*args, **kwargs)
+            monkeypatch.setattr(resident_mod, "_write_state", checked_write)
+            assert resident_mod.enqueue_or_start(
+                "codex", "hello", dir_path=tmp_path, template=_template(), model=None,
+                effort=None, agent="probe", timeout=30, scaffold=False,
+            ) == 0
+            assert replacements
+        _wait_until(lambda: not resident_mod.pid_alive(child), timeout=3)
+    finally:
+        resident_mod.stop_resident(tmp_path, "probe", grace_seconds=2)
+        try:
+            os.killpg(bridge.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

@@ -1,0 +1,96 @@
+{
+  "description": "Muse as a resident MSP node with bypass permissions and the shell sandbox disabled.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../r4t/r4t.py",
+    "engine",
+    "muse",
+    "run",
+    "--resident",
+    "--memory=$MEMORY?",
+    "--memory-home=$MEMORY_HOME?",
+    "--memory-writer=$MEMORY_WRITER?",
+    "--memory-people=$MEMORY_PEOPLE?",
+    "--timeout=$TIMEOUT?",
+    "--effort=$EFFORT?",
+    "--model=$MODEL?",
+    "--git-name=$GIT_NAME?",
+    "--git-email=$GIT_EMAIL?",
+    "--permissions",
+    "bypass",
+    "--agent",
+    "$RECIPIENT",
+    "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
+  ],
+  "batch": {
+    "limit": 20,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--permissions",
+      "bypass",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "idle": {
+    "timeout": 900,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "run",
+      "--resident",
+      "--memory=$MEMORY?",
+      "--memory-home=$MEMORY_HOME?",
+      "--memory-writer=$MEMORY_WRITER?",
+      "--memory-people=$MEMORY_PEOPLE?",
+      "--timeout=$TIMEOUT?",
+      "--effort=$EFFORT?",
+      "--model=$MODEL?",
+      "--git-name=$GIT_NAME?",
+      "--git-email=$GIT_EMAIL?",
+      "--permissions",
+      "bypass",
+      "--idle",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "stop",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  },
+  "status": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../r4t/r4t.py",
+      "engine",
+      "muse",
+      "status",
+      "--agent",
+      "$RECIPIENT"
+    ]
+  }
+}

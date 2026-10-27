@@ -7,6 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
+from ar3.proc import launch_options
+
 TellFn: TypeAlias = Callable[[str, str], None]
 
 SIMULATE_ENV = "R4T_SIMULATE_TELL"
@@ -19,7 +21,7 @@ A8S_PY = Path(__file__).resolve().parent.parent / "a8s" / "a8s.py"
 
 
 def default_tell(agent: str, body: str) -> None:
-    subprocess.run([sys.executable, str(A8S_PY), "tell", agent, body], check=False)
+    subprocess.run([sys.executable, str(A8S_PY), "tell", agent, body], check=False, **launch_options())
 
 
 def visible_a8s_names() -> dict[str, str]:
@@ -41,7 +43,7 @@ def visible_a8s_names() -> dict[str, str]:
         if command == "ls":
             argv.append("-q")
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=10, **launch_options())
         except (OSError, subprocess.SubprocessError):
             continue
         if res.returncode != 0:

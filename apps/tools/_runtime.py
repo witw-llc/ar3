@@ -29,6 +29,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+
+from ar3.proc import launch_options
+
 # Print mode. `ar3 tool` sets this to a directory when it runs a tool by hand:
 # the reply then goes to stdout and attachments are copied into the directory,
 # so a tool can be tried with no router, no outbox and no `a8s tell`.
@@ -164,6 +168,7 @@ def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> 
     argv += ["--", recipient, "-"]
     proc = subprocess.run(
         argv, input=body, capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"},
+        **launch_options(),
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)

@@ -45,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lib"))
 
-from ar3.proc import terminate_group  # noqa: E402
+from ar3.proc import launch_options, terminate_group  # noqa: E402
 
 import _runtime as rt  # noqa: E402
 
@@ -129,6 +129,7 @@ def _kill_tree(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
         subprocess.run(
             ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            **launch_options(),
         )
         if proc.poll() is None:
             proc.kill()
@@ -227,7 +228,7 @@ def run_command(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            start_new_session=(os.name == "posix"),
+            **launch_options(new_session=True),
         )
         stop.arm(proc)
         out = _Capture(proc.stdout, output_max)

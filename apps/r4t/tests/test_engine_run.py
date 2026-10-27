@@ -1571,24 +1571,13 @@ class TestEngineRunFlagsCli:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
-class TestRelocatedFallbackTeardown:
-    """The relocated-copy fallbacks (ar3 unimportable) must carry the same
-    capture-pgid-before-SIGTERM behavior as ar3.proc: a leader that has
-    already been reaped when SIGKILL fires must not strand a SIGTERM-ignoring
-    grandchild in the still-live process group."""
+class TestRelocatedFoundationTeardown:
+    """A relocated app bundle retains the shared process teardown contract."""
 
     SCENARIO = """
-import importlib.abc, os, pathlib, signal, sys, time
+import os, pathlib, signal, sys, time
 
-
-class BlockAr3(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == "ar3" or fullname.startswith("ar3."):
-            raise ImportError("ar3 blocked (relocated-copy simulation)")
-        return None
-
-
-sys.meta_path.insert(0, BlockAr3())
+sys.path.insert(0, {lib_dir!r})
 sys.path.insert(0, {r4t_dir!r})
 
 {import_and_kill}
@@ -1632,28 +1621,35 @@ except ProcessLookupError:
         [
             (
                 "from engines import run as m\n"
-                "assert m._terminate_group.__module__ == 'engines.run'\n"
+                "assert m._terminate_group.__module__ == 'ar3.proc'\n"
                 "kill = m._terminate_group"
             ),
             (
                 "import sandbox as m\n"
-                "assert m._terminate_group.__module__ == 'sandbox'\n"
+                "assert m._terminate_group.__module__ == 'ar3.proc'\n"
                 "def kill(proc, *, grace_seconds):\n"
                 "    m._terminate_group(proc.pid, grace_seconds=grace_seconds)"
             ),
         ],
-        ids=["engines.run-fallback", "sandbox-fallback"],
+        ids=["engines.run-foundation", "sandbox-foundation"],
     )
-    def test_fallback_kills_grandchild_after_leader_is_reaped(
+    def test_relocated_foundation_kills_grandchild_after_leader_is_reaped(
         self, tmp_path, import_and_kill
     ):
         child_script = tmp_path / "child.py"
         child_script.write_text(self.CHILD, encoding="utf-8")
         scenario = tmp_path / "scenario.py"
-        r4t_dir = str(Path(__file__).resolve().parent.parent)
+        import shutil
+        source = Path(__file__).resolve().parent.parent
+        bundle = tmp_path / "bundle"
+        r4t_dir = bundle / "apps" / "r4t"
+        lib_dir = bundle / "lib"
+        shutil.copytree(source, r4t_dir, ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        shutil.copytree(source.parents[1] / "lib", lib_dir,
+                        ignore=shutil.ignore_patterns("__pycache__"))
         scenario.write_text(
             self.SCENARIO.format(
-                r4t_dir=r4t_dir,
+                r4t_dir=str(r4t_dir), lib_dir=str(lib_dir),
                 import_and_kill=import_and_kill,
                 pidfile=str(tmp_path / "child.pid"),
                 child_script=str(child_script),

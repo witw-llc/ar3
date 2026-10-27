@@ -32,7 +32,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -40,14 +39,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import state
-
-# The isolation test (tests/docker/run-as.sh) copies apps/r4t alone into a
-# container with no repo root, so `ar3` is not always reachable there — and a
-# caged turn is exactly the case that needs the zone stated, because a
-# container boots UTC until `rig.env` sets `TZ`. So the fallback reimplements
-# the display contract rather than degrading to a stub: local time, always
-# carrying its zone, with `ar3.clock`'s abbreviation rule.
 try:
     from ar3.clock import stamp as local_stamp
 except ImportError:
@@ -82,40 +73,10 @@ except ImportError:
             return str(ts)
         fmt = "%Y-%m-%d %H:%M:%S" if seconds else "%Y-%m-%d %H:%M"
         return f"{dt.strftime(fmt)} {_local_zone(dt)}"
+from ar3.proc import launch_options, terminate_group as _terminate_group
 
+import state
 from rig import RigError, build_preset_invoke, format_preset_invoke, preset_names
-
-# The isolation test (apps/r4t/tests/docker/run-as.sh) copies apps/r4t alone
-# into a container with no repo root, so `ar3` is not always reachable there.
-try:
-    from ar3.proc import terminate_group as _terminate_group
-except ImportError:
-    def _terminate_group(pid: int, *, grace_seconds: float = 0.5) -> None:
-        # Mirrors ar3.proc.terminate_group: the pgid is resolved once, before
-        # SIGTERM, so a leader that exits during the grace period cannot
-        # strand SIGKILL with no pid left to resolve; pid stands in as the
-        # pgid when getpgid cannot answer (true for any start_new_session
-        # leader).
-        if os.name != "posix":
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                pass
-            return
-        try:
-            pgid = os.getpgid(pid)
-        except OSError:
-            pgid = pid
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(pgid, sig)
-            except OSError:
-                try:
-                    os.kill(pid, sig)
-                except OSError:
-                    pass
-            if sig is signal.SIGTERM:
-                time.sleep(grace_seconds)
 
 R4T_DIR = Path(__file__).resolve().parent
 SANDBOX_DIR = R4T_DIR / "sandbox"
@@ -152,6 +113,7 @@ def _a8s(*args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=60,
+        **launch_options(),
     )
     if result.returncode != 0:
         raise SandboxError(
@@ -360,7 +322,8 @@ def _stop_handlers(a8s_home: Path) -> None:
 
 def _orphans(tmp: Path) -> list[str]:
     result = subprocess.run(
-        ["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True
+        ["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True,
+        **launch_options(),
     )
     needle = str(tmp)
     return [line.strip() for line in result.stdout.splitlines() if needle in line]
@@ -396,6 +359,7 @@ def _run_program(repo: Path) -> tuple[bool, str]:
             text=True,
             timeout=30,
             cwd=str(repo),
+            **launch_options(),
         )
     except subprocess.TimeoutExpired:
         return False, f"{program.name} timed out after 30s"

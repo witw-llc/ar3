@@ -33,7 +33,7 @@ from pathlib import Path
 from ar3.home import app_home
 from ar3.fsio import atomic_write_text
 from ar3.locking import file_lock
-from ar3.proc import terminate_group
+from ar3.proc import launch_options, terminate_group
 
 
 def _k7e_home():
@@ -1263,7 +1263,7 @@ def _call_llm(prompt, purpose="summarize", timeout=120, timeout_raises=False):
                 # through the ANSI code page.
                 encoding="utf-8", errors="replace",
                 cwd=scratch,
-                start_new_session=(os.name == "posix"),
+                **launch_options(new_session=True),
             )
             try:
                 stdout, stderr = proc.communicate(prompt, timeout=timeout)

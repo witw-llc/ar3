@@ -29,6 +29,8 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
+from ar3.proc import launch_options
+
 from engines.base import QuotaError
 
 BOOT_TIMEOUT_S = 20
@@ -164,7 +166,7 @@ def _usage_screen() -> str:
                 stdout=slave,
                 stderr=slave,
                 env=env,
-                start_new_session=True,
+                **launch_options(new_session=True),
             )
         except OSError as exc:
             os.close(master)

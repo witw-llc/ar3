@@ -1,0 +1,129 @@
+[
+  {
+    "method": "approval/request",
+    "params": {
+      "sessionId": "session-a",
+      "approvalId": "approval-a",
+      "currentRequirementId": {
+        "approvalId": "approval-a",
+        "sourceIndex": 0
+      },
+      "judgeEscalated": false,
+      "protectedWrite": false,
+      "toolName": "mcp__a8s__tell",
+      "toolCallId": "call-a",
+      "itemId": "item-a",
+      "turnId": "turn-a",
+      "availableChoices": [
+        {
+          "choiceId": "allow_once",
+          "decision": "approved",
+          "scope": "once"
+        },
+        {
+          "choiceId": "allow_session",
+          "decision": "approvedForSession",
+          "scope": "session"
+        },
+        {
+          "choiceId": "allow_local_mcp_tool",
+          "decision": "approvedPolicyAmendment",
+          "scope": "localPersistent"
+        },
+        {
+          "choiceId": "abort",
+          "decision": "abort",
+          "scope": "once"
+        }
+      ],
+      "subject": {
+        "kind": "tool",
+        "toolName": "mcp__a8s__tell"
+      }
+    },
+    "id": "presentation-a"
+  },
+  {
+    "method": "approval/requested",
+    "params": {
+      "sessionId": "session-a",
+      "approvalId": "approval-a",
+      "currentRequirementId": {
+        "approvalId": "approval-a",
+        "sourceIndex": 0
+      },
+      "judgeEscalated": false,
+      "protectedWrite": false,
+      "toolName": "mcp__a8s__tell",
+      "toolCallId": "call-a",
+      "itemId": "item-a",
+      "turnId": "turn-a",
+      "availableChoices": [
+        {
+          "choiceId": "allow_once",
+          "decision": "approved",
+          "scope": "once"
+        },
+        {
+          "choiceId": "allow_session",
+          "decision": "approvedForSession",
+          "scope": "session"
+        },
+        {
+          "choiceId": "allow_local_mcp_tool",
+          "decision": "approvedPolicyAmendment",
+          "scope": "localPersistent"
+        },
+        {
+          "choiceId": "abort",
+          "decision": "abort",
+          "scope": "once"
+        }
+      ],
+      "subject": {
+        "kind": "tool",
+        "toolName": "mcp__a8s__tell"
+      }
+    }
+  },
+  {
+    "method": "approval/resolved",
+    "params": {
+      "sessionId": "session-a",
+      "approvalId": "approval-a",
+      "decision": "abort",
+      "policyResult": "deny",
+      "resolvedBy": "user",
+      "itemId": "item-a",
+      "turnId": "turn-a"
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "sessionId": "session-a",
+      "item": {
+        "kind": "toolCall",
+        "tool": "mcp__a8s__tell",
+        "callId": "call-a",
+        "itemId": "item-a",
+        "turnId": "turn-a",
+        "status": "rejected"
+      }
+    }
+  },
+  {
+    "method": "item/updated",
+    "params": {
+      "sessionId": "session-a",
+      "item": {
+        "kind": "toolCall",
+        "tool": "mcp__a8s__tell",
+        "callId": "call-a",
+        "itemId": "item-a",
+        "turnId": "turn-a",
+        "status": "rejected"
+      }
+    }
+  }
+]

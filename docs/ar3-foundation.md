@@ -11,12 +11,12 @@ shim and a directory cannot share a name with a file beside it. Every app
 reaches it the way it already reaches `ar3ver`, which lives there too — each
 entry point puts `<repo>/lib` at the front of `sys.path` — ahead of
 site-packages, so an installed package named `ar3` cannot answer the import —
-then imports `ar3.<module>`, with import sites degrading gracefully when one
-app is relocated away from the repo (the isolation container copies
-`apps/r4t` alone). The shared modules are
+then imports `ar3.<module>`. An isolated app bundle carries `lib/` alongside
+its `apps/` directory so it uses the same foundation implementation. Missing
+version metadata may report `unknown`; missing foundation code is a broken bundle. The shared modules are
 `ar3.ulid`, `ar3.home` (config-home resolution), `ar3.fsio` (`atomic_write_text`,
 `atomic_write_bytes`),
-`ar3.proc` (`spawn` / `terminate_group`, and `pid_alive` / `process_start_token`
+`ar3.proc` (`launch_options`, `spawn` / `terminate_group`, and `pid_alive` / `process_start_token`
 for reading a pid file), `ar3.envseam` (the reserved-env
 contract), `ar3.nodes` (the a8s registry, read-only, by node name: a tool
 learns about its node here and never imports an a8s module), and `ar3.vendor`
@@ -67,6 +67,7 @@ learned the grammar of all of them, including the ones that do not exist yet.
 
 ## 4. Processes
 
+- **One subprocess launch policy**, `ar3.proc.launch_options`, used by all production Python consumers. Background console applications launch without a window on Windows; intentional interactive launches explicitly inherit the console. Process-group intent is explicit. The flag contract follows [Microsoft process creation flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags). Do not set Windows creation flags in consumers or combine hidden launches with `DETACHED_PROCESS`. Each caller keeps its I/O, environment and teardown contract. Test fixtures and archived experiments may launch raw processes to reproduce platform behavior.
 - **One spawn/kill escalation policy**, `ar3.proc`, used everywhere: `SIGTERM`,
   a grace period, then `SIGKILL`, applied to the **process group** rather than
   the process.

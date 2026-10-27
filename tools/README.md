@@ -234,3 +234,7 @@ tools/version-bump.py 0.1.95 1.0.0
 Exit 0 and silent when the PR's version is one of the three allowed next
 versions. Exit 1 with a one-line message naming all three otherwise. The
 per-PR `version` job runs this against `main`'s `VERSION` on every PR.
+
+## Process launch policy
+
+Run `python3 tools/process-launch-audit.py` to check every production Python subprocess in apps, foundation, repository tools and CI helpers. Each launch must call `ar3.proc.launch_options`; Windows flags belong only to the foundation. Intentional inherited-console launches declare `interactive=True`. Test fixtures, vendored code and archived experiments are excluded. `--self-test` checks alias detection and bypass rejection. The release workflow runs both.

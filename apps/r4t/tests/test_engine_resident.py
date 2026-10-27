@@ -300,7 +300,7 @@ class TestComposeResidentArgv:
         assert "{prompt}" not in composed
 
     def test_rejects_non_resident_engines(self, tmp_path):
-        for engine in ("copilot", "opencode", "muse", "devin"):
+        for engine in ("copilot", "opencode"):
             with pytest.raises(engine_run.RunError, match="does not support --resident"):
                 engine_run._build_argv_template(
                     engine, model=None, timeout=900, workdir=tmp_path, resident=True
@@ -932,7 +932,7 @@ class TestResidentStopOwnership:
         home.mkdir(parents=True)
         resident_mod._write_pid_files(home, os.getpid())
         resident_mod._write_state(home, pid=os.getpid(), engine_pid=None, status="stopping")
-        assert self._enqueue(tmp_path, engine, "too late") == 0
+        assert self._enqueue(tmp_path, engine, "too late") == 1
         assert resident_mod.read_live_pid(home) == os.getpid()
         assert not any((home / "inbox").glob("*.json"))
 

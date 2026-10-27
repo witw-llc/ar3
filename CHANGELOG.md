@@ -10,6 +10,45 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.120
+
+### Added
+
+- Devin resident engines use ACP with verified permission, model and effort controls.
+- Muse resident engines use MSP with session-scoped a8s tools and serial turns.
+  Both engines include standard and unrestricted definitions with idle, stop and
+  status hooks.
+
+### Fixed
+
+- A detached resident engine failure appears in the local a8s failure count,
+  status and log, with affected messages marked as dead letters. Enqueue remains
+  asynchronous; a later failure does not undo an already completed turn.
+- Background subprocesses across the suite use one shared Windows launch policy,
+  covering resident vendors, model lookups, memory workers, tool processes and
+  connection checks. Intentional interactive commands inherit the console. A
+  repository check rejects launch sites that bypass the shared helper.
+- Claude resident error results and explicit authentication-failure diagnostics
+  end the session with a local failure instead of leaving a wake pending or
+  entering successful memory capture.
+- Windows resident stops let the bridge record interrupted work before bounded
+  forced termination, preserving the engine's immediate stop behavior.
+- Standard Devin residents grant a8s replies once when native tool metadata
+  identifies the injected tell tool in the active turn. Other requests retain
+  their configured permission policy.
+- Muse residents accept host shutdown after locally initiated idle EOF without
+  reporting a false failure. Unexpected closure and unfinished work still fail.
+- Muse residents recognize native abort choices and do not race an automatic
+  approval review by treating review completion as a new decision request.
+- Standard Muse residents verify the native human-review profile before prompts
+  and grant only an exact a8s reply once in the active turn. Explicit ask mode
+  rejects client approval requests; unrestricted mode remains separate.
+
+- Codex resident initialization and thread creation share a 20-second deadline;
+  missing handshake responses fail held messages instead of hanging forever.
+- On Linux, stop and replacement enqueue clean recorded dead-bridge process
+  groups with matching ownership evidence, including tools whose engine exited.
+
 ## 0.1.119
 
 The first release of the 0.1.118 changes below. 0.1.118 was merged but not published:

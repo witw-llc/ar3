@@ -32,8 +32,11 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ar3.proc import launch_options
 
 from engines.run import (
     RUN_ENGINES, RunError, _build_argv_template, interpreter_gap, resolve_argv0,
@@ -169,6 +172,7 @@ def _run(argv: list[str]) -> tuple[int, str]:
             errors="replace",
             timeout=PROBE_TIMEOUT_SECONDS,
             stdin=subprocess.DEVNULL,
+            **launch_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return -1, str(exc)
@@ -251,6 +255,8 @@ def check_engine(
     report.argv = template
     report.binary = template[0]
     probe = PROBES[engine]
+    if resident and engine == "muse":
+        probe = Probe("muse", ("serve", "--help"), "muse serve flags are checked against its own help")
     report.installed = shutil.which(report.binary) is not None
     if not report.installed:
         report.runnable = False
@@ -273,6 +279,8 @@ def check_engine(
                 f"exit {code}",
             )
             return report
+        if resident and engine == "devin":
+            return _check_devin_acp(report, template, workdir or Path.cwd(), session_env)
         if resident and engine in APP_SERVER_ENGINES:
             return _check_app_server(report, template, workdir or Path.cwd())
         report.verdict = ACCEPTED
@@ -301,6 +309,22 @@ def check_engine(
         return _check_cursor_acp(
             report, template, workdir or Path.cwd(), session_env,
         )
+    if resident and engine == "muse":
+        from engines.muse_resident import probe_muse
+
+        if not re.search(r"(?im)^\s*Usage:\s+muse(?:\.exe)?\s+serve(?:\s|$)", help_text):
+            report.verdict = REJECTED
+            report.detail = "muse help did not confirm the serve subcommand"
+            return report
+        report.method = "MSP handshake"
+        result = probe_muse(resolve_argv0(template), workdir or Path.cwd(), session_env)
+        if result.get("version"):
+            report.version = "Muse MSP " + result["version"]
+        if result.get("error"):
+            report.verdict = REJECTED
+            report.detail = result["error"]
+            return report
+        report.detail = "MSP session policy confirmed; MCP connects at the first turn"
     report.verdict = ACCEPTED
     return report
 
@@ -369,6 +393,23 @@ def _check_cursor_acp(
             f"agent {version or '(version unknown)'} is not the proven "
             f"{proven}; re-prove the resident adapter before relying on it"
         )
+    return report
+
+
+def _check_devin_acp(report, argv, workdir, env):
+    from engines import resident
+    from engines.devin_resident import PROVEN_VERSION
+
+    report.method = "acp handshake"
+    probe = resident.devin_acp_probe(resolve_argv0(argv), workdir, env=env)
+    if probe.get("error"):
+        report.verdict = REJECTED
+        report.detail = probe["error"]
+        return report
+    report.verdict = ACCEPTED
+    observed = (report.version or "").removeprefix("devin ").split(" ", 1)[0]
+    if observed != PROVEN_VERSION:
+        report.detail = f"devin {observed or '(version unknown)'} differs from proven {PROVEN_VERSION}"
     return report
 
 

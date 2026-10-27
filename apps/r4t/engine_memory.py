@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 
 from ar3.fsio import atomic_write_text
 from ar3.locking import file_lock
-from ar3.proc import terminate_group
+from ar3.proc import launch_options, terminate_group
 from ar3.ulid import new as new_ulid
 from dispatch import class_from_meta
 import knowledge
@@ -150,14 +150,9 @@ def kick(home):
         return
     home.mkdir(parents=True, exist_ok=True)
     with (home / "worker.log").open("ab") as log:
-        flags = {}
-        if os.name == "nt":
-            flags["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            flags["start_new_session"] = True
         subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", str(home)],
                          stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                         close_fds=True, **flags)
+                         close_fds=True, **launch_options(new_session=True))
 
 
 def _command(argv):
@@ -167,7 +162,7 @@ def _command(argv):
 def stop_process(proc):
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, **launch_options())
         if proc.poll() is None:
             proc.kill()
     else:
@@ -186,7 +181,7 @@ def memory_argv(argv):
 def spawn(argv, directory, timeout, env):
     proc = subprocess.Popen(memory_argv(argv), cwd=directory, env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            start_new_session=os.name != "nt")
+                            **launch_options(new_session=True))
     chunks = []
 
     def stream():
@@ -231,7 +226,7 @@ def _run_job(home, capture, timeout):
     env = {**os.environ, "K7E_HOME": str(home), "K7E_DISTILL_COMMAND": bridge}
     argv = [sys.executable, str(knowledge.K7E_ENTRY), "distill", str(capture), "--job", capture.stem]
     proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=os.name != "nt")
+                            **launch_options(new_session=True))
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -251,7 +246,7 @@ def _run_compile(home, capture, timeout):
     env = {**os.environ, "K7E_HOME": str(home), "K7E_COMPILE_COMMAND": bridge}
     proc = subprocess.Popen([sys.executable, str(knowledge.K7E_ENTRY), "compile", "--due"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=os.name != "nt")
+                            **launch_options(new_session=True))
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -347,7 +342,7 @@ def writer(capture_path):
     argv = memory_argv(argv)
     os.chdir(workdir)
     if os.name == "nt":
-        return subprocess.call(argv, env=env)
+        return subprocess.call(argv, env=env, **launch_options())
     os.execvpe(argv[0], argv, env)
 
 

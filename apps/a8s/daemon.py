@@ -55,7 +55,10 @@ from pathlib import Path
 import core
 from ar3 import clock
 from ar3.fsio import atomic_write_text
-from ar3.proc import terminate_group
+from ar3.wake_outcome import (
+    ENVELOPES_ENV, OUTCOME_DIR_ENV, RECIPIENT_ENV, outcome_dir, take_failures,
+)
+from ar3.proc import launch_options, terminate_group
 from settings import DEFAULTS, get_float, get_setting
 from core import (
     Participant,
@@ -75,6 +78,8 @@ from core import (
     clear_inbox_waiting_since,
     clear_wake_pid,
     mark_dead_letter,
+    dead_letters_dir,
+    wake_pid_path,
     read_inbox_waiting_since,
     read_last_active,
     touch_inbox_waiting_since,
@@ -185,8 +190,7 @@ def _clear_wake_state(rc: int | None = None) -> None:
     global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     global _WAKE_STDOUT_THREAD, _WAKE_STDOUT_QUEUE
-    if _CURRENT_WAKE_NAME is not None:
-        clear_wake_pid(_CURRENT_WAKE_NAME)
+    settled_name = _CURRENT_WAKE_NAME
     _CURRENT_WAKE_PROC = None
     _CURRENT_WAKE_NAME = None
     _WAKE_STARTED_MONO = None
@@ -195,8 +199,12 @@ def _clear_wake_state(rc: int | None = None) -> None:
     _WAKE_STDOUT_QUEUE = None
     on_complete = _WAKE_ON_COMPLETE
     _WAKE_ON_COMPLETE = None
-    if on_complete is not None:
-        on_complete(rc)
+    try:
+        if on_complete is not None:
+            on_complete(rc)
+    finally:
+        if settled_name is not None:
+            clear_wake_pid(settled_name)
 
 
 def _log_wake_line(name: str, line: str) -> None:
@@ -407,18 +415,6 @@ def _sweep_stuck_wake_readers() -> None:
 IS_WINDOWS = os.name == "nt"
 
 
-def _wake_spawn_flags(*, new_session: bool) -> dict:
-    """Popen flags for a process the node spawns. The node has no console
-    on Windows (#338), and a console child of a console-less parent gets a
-    new visible console. `CREATE_NO_WINDOW` gives it a hidden one that its
-    own children (the engine CLI) inherit. It cannot be combined with
-    `DETACHED_PROCESS`. `start_new_session` is ignored on Windows, so POSIX
-    alone gets it, and only when `new_session` asks."""
-    if IS_WINDOWS:
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
-    return {"start_new_session": True} if new_session else {}
-
-
 def _start_wake_subprocess(
     name: str,
     cmd: list[str],
@@ -458,7 +454,7 @@ def _start_wake_subprocess(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            **_wake_spawn_flags(new_session=True),
+            **launch_options(new_session=True, windows=IS_WINDOWS),
         )
     except FileNotFoundError:
         ts = clock.time_stamp()
@@ -562,9 +558,12 @@ def _wake_env(p: Participant, definition: dict, envelopes=()) -> dict[str, str]:
     than a node that does not answer. The node's own `env.<NAME>` vars are read
     from the registry on every wake, so a change lands on the next one.
     """
+    directory = outcome_dir(agent_dir(p.name))
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     return {**wake_env(definition, load_agent_env(p.name)), **_tell_outbox_env(p),
-            "A8S_TURN_RECIPIENT": p.name,
-            "A8S_TURN_ENVELOPES": json.dumps([str(path.resolve()) for path in envelopes])}
+            OUTCOME_DIR_ENV: str(directory.resolve()),
+            RECIPIENT_ENV: p.name,
+            ENVELOPES_ENV: json.dumps([str(path.resolve()) for path in envelopes])}
 
 
 def _deliver_file_proxy(p: Participant) -> None:
@@ -704,6 +703,25 @@ def _dead_letter(name: str, filenames: list[str], reason: str) -> None:
         txlog.log("DROPPED", msg_id=Path(fname).stem, recipient=name, detail=f"{reason}; dead letter in trash")
     ids = ", ".join(Path(f).stem for f in filenames)
     out_agent(name, f"[{name}] {reason}: {len(filenames)} dead letter(s) left in trash: {ids}")
+
+
+def _consume_wake_failures(name: str) -> None:
+    # The enqueuer can fail before its parent observes exit 0. Settle that
+    # parent first, or its success overwrites the detached child's failure.
+    if _CURRENT_WAKE_NAME == name:
+        return
+    if wake_pid_path(name).exists():
+        holder = _read_handler_pid(name)
+        if holder is not None and holder != os.getpid():
+            return
+    for event in take_failures(outcome_dir(agent_dir(name)), name):
+        filenames = [f for f in event["envelopes"]
+                     if (trash_dir(name) / f).is_file()
+                     and not (dead_letters_dir(name) / f).exists()]
+        if event["envelopes"] and not filenames:
+            continue
+        _dead_letter(name, filenames,
+                     f"resident wake failed ({event['reason']}; origin {event['id']})")
 
 
 def _wake_completion(
@@ -1230,6 +1248,7 @@ def run_stop_hook(name: str) -> None:
         _run_stop_hook(name)
     finally:
         _mark_stop_hook_ran(name)
+        _consume_wake_failures(name)
 
 
 def _hook_launch(name: str, p: Participant, build) -> tuple[list[str], dict[str, str]] | None:
@@ -1269,7 +1288,7 @@ def probe_node_status(name: str) -> str | None:
             # Its own group: a timeout ends the probe and every child it
             # left, not only the leader. A child keeping stdout open would
             # otherwise hold the pipe, and `ps`, for as long as it lives.
-            **_wake_spawn_flags(new_session=True),
+            **launch_options(new_session=True, windows=IS_WINDOWS),
         )
     except (OSError, RegistryUnreadable, FileNotFoundError, RuntimeError, ValueError):
         return None
@@ -1358,7 +1377,7 @@ def _run_stop_hook(name: str) -> None:
             text=True,
             encoding="utf-8",
             errors="replace",
-            **_wake_spawn_flags(new_session=False),
+            **launch_options(windows=IS_WINDOWS),
         )
     except OSError as e:
         out_agent(name, f"[{name}] stop hook failed: {e}")
@@ -1428,9 +1447,11 @@ def run_stop_hook_if_owed(name: str, handler: int) -> None:
         deadline = _time.monotonic() + STOP_HOOK_SECONDS
         while _hook_process_alive(mark) and _time.monotonic() < deadline:
             _time.sleep(0.1)
+        _consume_wake_failures(name)
         return
     if mark is None and _read_handler_pid(name) is None:
         run_stop_hook(name)
+    _consume_wake_failures(name)
 
 
 def release(name: str) -> None:
@@ -1672,6 +1693,7 @@ def _process_command(pid: int) -> str:
             done = subprocess.run(
                 ["ps", "-o", "command=", "-p", str(pid)],
                 capture_output=True, text=True, timeout=2,
+                **launch_options(windows=IS_WINDOWS),
             )
             cmd = done.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -2020,6 +2042,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
                         services=load_services(),
                     )
                 _service_in_flight_wake()
+                for p in handled:
+                    _consume_wake_failures(p.name)
                 if drain_seconds > 0:
                     for p in handled:
                         while not _STOP_EVENT.is_set():
@@ -2134,6 +2158,8 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
         while _CURRENT_WAKE_PROC is not None:
             _service_in_flight_wake()
             _time.sleep(0.05)
+        for name in names:
+            _consume_wake_failures(name)
         txlog.log("RUN_STOP", sender=label, detail=stop_reason or "loop exited")
         # After the last write, so the closing row goes into a store this
         # process is still holding.
