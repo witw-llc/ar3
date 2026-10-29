@@ -844,7 +844,8 @@ class TestSeveralNames:
     def test_stop_takes_several_names(self, three, monkeypatch, capsys):
         stopped: list[tuple[str, bool]] = []
 
-        def fake_stop_one(name, force):
+        def fake_stop_one(name, force, *, disarm=True):
+            assert disarm is True
             stopped.append((name, force))
             return 1 if name == "b2" else 0
 

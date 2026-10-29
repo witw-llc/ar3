@@ -55,7 +55,7 @@ from registry import resolve_name
 from services import StorageService
 from transports import OnMessage, PublishAmbiguous, Transport, TransportError
 import txlog
-from ar3.fsio import atomic_write_text
+from ar3.fsio import atomic_write_text, stat_or_none
 from ar3.ulid import is_ulid, parse as parse_ulid
 
 
@@ -507,11 +507,11 @@ def _service_config_stamp() -> tuple:
         # The path itself is part of the stamp: a8s tests relocate the config
         # home, and two homes that both lack the file would otherwise look
         # identical and share a cached answer.
-        try:
-            st = path.stat()
-            marks.append((str(path), st.st_mtime_ns, st.st_size))
-        except OSError:
+        st = stat_or_none(path)
+        if st is None:
             marks.append((str(path), None, None))
+        else:
+            marks.append((str(path), st.st_mtime_ns, st.st_size))
     return tuple(marks)
 
 

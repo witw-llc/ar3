@@ -144,7 +144,7 @@ class TestCmdRunParsesDrainFlag:
     def test_drain_value_passed(self, fake_home, monkeypatch):
         captured = {}
 
-        def mock_attached_loop(members, interval, *, single_pass=False, drain_seconds=0):
+        def mock_attached_loop(members, interval, *, single_pass=False, drain_seconds=0, **_kw):
             captured["members"] = members
             captured["drain_seconds"] = drain_seconds
             return 0
@@ -160,7 +160,7 @@ class TestCmdRunParsesDrainFlag:
     def test_drain_without_value_defaults_to_one(self, fake_home, monkeypatch):
         captured = {}
 
-        def mock_attached_loop(members, interval, *, single_pass=False, drain_seconds=0):
+        def mock_attached_loop(members, interval, *, single_pass=False, drain_seconds=0, **_kw):
             captured["drain_seconds"] = drain_seconds
             return 0
 

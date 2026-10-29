@@ -36,6 +36,9 @@ class ParsedFrame:
     replies: tuple[str, ...] = ()
     fatal: bool = False
     turn_failed: bool = False
+    # Only a session that tracks submission tokens fills this: the exact
+    # tokens the frame settled. The bridge settles those and no others.
+    settled: tuple[int, ...] = ()
 
 
 def rpc(payload: dict) -> str:

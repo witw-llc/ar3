@@ -48,7 +48,7 @@ def _pinned():
             pem = handle.read()
     except FileNotFoundError as exc:
         raise ClientError(
-            "no pinned vault key: `vault client pin vault.pem --fingerprint F`") from exc
+            "no pinned vault key: `ar3 tool vault client pin vault.pem --fingerprint F`") from exc
     want = os.environ.get("A8S_VAULT_FINGERPRINT", "").strip().lower()
     got = crypto.fingerprint(pem)
     if want and want != got:
@@ -135,7 +135,7 @@ def seal_command(cmd, file_path=None):
     """Return (wire_body, [attachment paths]) for one sealed command."""
     vault_pem = _pinned()
     if not os.path.exists(_path("conn.key")):
-        raise ClientError("not connected: `vault client connect` first")
+        raise ClientError("not connected: use `ar3 tool vault client connect` first")
     files, declared = [], {}
     if file_path:
         with open(file_path, "rb") as handle:

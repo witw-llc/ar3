@@ -1054,7 +1054,7 @@ def _stop_nodes(a8s: str, names: list[str], stopped: list[str]) -> None:
             continue
         print(f"ar3 update: stopping node {name}")
         try:
-            done = subprocess.run([a8s, "stop", name], **launch_options())
+            done = subprocess.run([a8s, "stop", "--keep-autostart", name], **launch_options())
         except OSError as e:
             print(f"ar3 update: {name}: cannot stop: {e}", file=sys.stderr)
             continue
@@ -1268,7 +1268,7 @@ def _tool_target(defs, args, definition):
     exit code 2 after a message. With --node the registry supplies all four.
     Without it the run is the tool's name in the current directory."""
     if not args.node:
-        return args.name, {}, {}, Path.cwd()
+        return args.seat or args.name, {}, {}, Path.cwd()
     try:
         found = defs.resolve_recipient(args.node)
     except OSError as exc:
@@ -1305,6 +1305,124 @@ def _tool_argv(defs, definition, path, sender, node, node_vars, message):
         vars=node_vars,
     )
     return defs.wrap_wake_argv(definition, argv)
+
+
+SECRET_VERBS = ("list", "set", "rm")
+_TOOL_VALUE_OPTIONS = ("--from", "--node", "--seat", "--var", "--attach")
+_LOCAL_COMMANDS = {
+    "browser": ("open", "close", "status", "doctor", "go", "snap", "console", "do", "idle", "secret"),
+    "gemini-web": ("sessions", "forget"),
+    "vault": ("init", "fingerprint", "admin", "voucher", "seat", "client"),
+}
+
+
+def _split_local(words: list[str]):
+    """Split before a local command; preserve the remaining arguments byte for byte."""
+    position, name = 0, None
+    while position < len(words):
+        word = words[position]
+        if word == "--":
+            return None
+        if word.startswith("--") and "=" not in word and word in _TOOL_VALUE_OPTIONS:
+            position += 2
+        elif word.startswith("--") and "=" in word:
+            position += 1
+        elif word in ("-h", "--help") and name is not None:
+            return words[:position], ["--help"]
+        elif word.startswith("-") and word != "-":
+            position += 1
+        elif name is None:
+            name = word
+            position += 1
+        else:
+            break
+    if position >= len(words) or words[position] not in _LOCAL_COMMANDS.get(name, ()):
+        return None
+    return words[:position], words[position:]
+
+
+def _tool_local(args, node, node_vars, env, cwd, words) -> int:
+    option_words = words[:words.index("--")] if "--" in words else words
+    help_only = "--help" in option_words or "-h" in option_words
+    if not help_only:
+        if args.attach:
+            print("ar3 tool: --attach needs a message. Use -- before the message.", file=sys.stderr)
+            return 2
+        if any(word.split("=", 1)[0] in ("--node", "--seat", "-s") for word in option_words):
+            print("ar3 tool: put --node or --seat before the local command.", file=sys.stderr)
+            return 2
+        if args.name == "browser" and any(word.split("=", 1)[0] == "--recipes" for word in option_words):
+            print("ar3 tool: --recipes is not available. Put recipes in the registered node's recipes directory.", file=sys.stderr)
+            return 2
+        if args.name == "browser" and words[0] == "secret":
+            if not args.node and not args.seat:
+                print("ar3 tool: secret needs --node NAME or --seat NAME.", file=sys.stderr)
+                return 2
+            if len(words) < 2 or words[1] not in SECRET_VERBS:
+                print("ar3 tool: secret needs one of: " + ", ".join(SECRET_VERBS), file=sys.stderr)
+                return 2
+    native = list(words)
+    if not help_only:
+        inject = []
+        if args.name in ("browser", "gemini-web"):
+            inject = ["--seat", node]
+        elif args.name == "vault" and words[0] != "client":
+            inject = ["--node", node]
+        position = native.index("--") if "--" in native else len(native)
+        native[position:position] = inject
+        mappings = {
+            "browser": {"CHROME": "AR3_BROWSER_CHROME", "ALLOW_EVAL": "AR3_BROWSER_ALLOW_EVAL"},
+            "vault": {"VAULT_DIR": "VAULT_DIR", "OPENSSL": "OPENSSL"},
+        }
+        for key, env_name in mappings.get(args.name, {}).items():
+            if key in node_vars:
+                env[env_name] = node_vars[key]
+        if args.name == "browser" and words[0] == "idle" and "TIMEOUT" in node_vars:
+            if not any(word.split("=", 1)[0] == "--timeout" for word in option_words):
+                position = native.index("--") if "--" in native else len(native)
+                native[position:position] = ["--timeout", node_vars["TIMEOUT"]]
+    env["AR3_TOOL_PROG"] = f"ar3 tool {args.name}"
+    argv = [sys.executable, str(REPO_ROOT / "apps" / "tools" / args.name.replace("-", "_")), *native]
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        proc = subprocess.Popen(argv, env=env, cwd=cwd, **launch_options(interactive=True))
+    except OSError as exc:
+        print(f"ar3 tool: cannot run {argv[0]}: {exc.strerror}", file=sys.stderr)
+        return 127
+    while True:
+        try:
+            return proc.wait()
+        except KeyboardInterrupt:
+            pass
+
+
+def _tool_help(args, definition):
+    name = args.name
+    print(f"Run {name} on this machine.\n")
+    print(f"Usage: ar3 tool {name} [OPTIONS] [--] [MESSAGE... | -]")
+    print("Use -- before a message that starts with a local command name.")
+    print("Use - to read one message from stdin. Omit the message to start a session.")
+    print("Vault has no message session. Use its client commands.")
+    print("\nOptions (put these before a local command):")
+    print("  --node NAME       Use a registered node's settings and directory.")
+    print("  --seat NAME       Use a local seat name without loading node settings.")
+    print("  --var KEY=VALUE   Override a setting. Repeat for more settings.")
+    print("  --from NAME       Set the sender name. The default is operator.")
+    print("  --attach PATH     Attach a file to a message. Repeat for more files.")
+    commands = _LOCAL_COMMANDS.get(name, ())
+    if commands:
+        print("\nLocal commands: " + ", ".join(commands))
+        print(f"Use ar3 tool {name} COMMAND --help for command options.")
+    if name == "vault":
+        print("Client commands use the sender's directory and environment.")
+        print("Do not use --node or --seat with client. Use --to for the vault name.")
+    settings = sorted(set(re.findall(r"\$([A-Z][A-Z_]+)", json.dumps(definition))) -
+                      {"PYTHON", "A8S_DIR", "RECIPIENT", "SENDER", "MESSAGE"})
+    if settings:
+        print("\nSettings for --var: " + ", ".join(settings))
+    print(f"Read apps/tools/{name.replace('-', '_')}/README.md for setup and examples.")
+    return 0
 
 
 def _tool_run(argv, env, cwd, reply_dir) -> int:
@@ -1410,15 +1528,24 @@ def cmd_tool(args: argparse.Namespace) -> int:
         print(f"ar3 tool: cannot read {path.name}: {exc}", file=sys.stderr)
         return 2
     words = list(args.message)
+    local = getattr(args, "local_argv", None)
+    if local == ["--help"]:
+        return _tool_help(args, definition)
+    local_options = local[:local.index("--")] if local and "--" in local else local
+    if local_options and ("--help" in local_options or "-h" in local_options):
+        return _tool_local(args, args.name, {}, dict(os.environ), Path.cwd(), local)
+    if local and args.name == "vault" and local[0] == "client" and (args.node or args.seat):
+        print("ar3 tool: vault client takes no --node or --seat. Run it from the sender's directory. Use --to for the vault name.", file=sys.stderr)
+        return 2
     session = not words
-    if args.name in NO_SESSION and (args.node or session):
+    if local is None and args.name in NO_SESSION and (args.node or session):
         print(
             f"ar3 tool: {args.name} takes no --node and no session. "
             "Its messages are sealed. Use the vault client.",
             file=sys.stderr,
         )
         return 2
-    if session and args.attach:
+    if local is None and session and args.attach:
         print("ar3 tool: --attach needs a command or -.", file=sys.stderr)
         return 2
     overrides = []
@@ -1444,7 +1571,8 @@ def cmd_tool(args: argparse.Namespace) -> int:
             node_vars[key.upper()] = value
     try:
         env = {**os.environ, **defs.wake_env(definition, node_env)}
-        _tool_argv(defs, definition, path, sender, node, node_vars, "")
+        if local is None:
+            _tool_argv(defs, definition, path, sender, node, node_vars, "")
     except defs.UndefinedVarsError as exc:
         for name in exc.names:
             if args.node:
@@ -1460,6 +1588,9 @@ def cmd_tool(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"ar3 tool: {exc}", file=sys.stderr)
         return 2
+
+    if local is not None:
+        return _tool_local(args, node, node_vars, env, cwd, local)
 
     def run_message(message, reply_dir):
         argv = _tool_argv(defs, definition, path, sender, node, node_vars, message)
@@ -1518,7 +1649,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor.set_defaults(func=cmd_doctor)
     tool = sub.add_parser(
         "tool",
-        usage="ar3 tool <name> [--node NAME] [--from NAME] [--var KEY=VALUE]... "
+        usage="ar3 tool <name> [--node NAME | --seat NAME] [--from NAME] [--var KEY=VALUE]... "
         "[--attach PATH]... [--] [command... | -]",
         help="Drive a bundled tool node from this terminal, replies printed",
         description=(
@@ -1534,8 +1665,11 @@ def main(argv: list[str] | None = None) -> int:
     tool.add_argument("name", help="Tool name, e.g. command-shell")
     tool.add_argument("--from", dest="sender", default="operator", metavar="NAME",
                       help="Sender name for $SENDER (default operator)")
-    tool.add_argument("--node", dest="node", default=None, metavar="NAME",
+    target = tool.add_mutually_exclusive_group()
+    target.add_argument("--node", dest="node", default=None, metavar="NAME",
                       help="A registered node to act as: its vars, its directory (default the tool name, in the current directory)")
+    target.add_argument("--seat", default=None, metavar="NAME",
+                        help="Use a local seat name without loading node settings")
     tool.add_argument("--var", action="append", default=[], metavar="KEY=VALUE",
                       help="A per-node a8s var; repeatable")
     tool.add_argument("--attach", action="append", default=[], metavar="PATH",
@@ -1596,7 +1730,13 @@ def main(argv: list[str] | None = None) -> int:
     if raw[:1] == ["tool"]:
         # Options may sit before or after the name; argparse's subparser path
         # cannot interleave them with a trailing variable-length message.
-        args = tool.parse_intermixed_args(raw[1:])
+        split = _split_local(raw[1:])
+        if split is None:
+            args = tool.parse_intermixed_args(raw[1:])
+            args.local_argv = None
+        else:
+            args = tool.parse_intermixed_args(split[0])
+            args.local_argv = split[1]
         args.func = cmd_tool
     else:
         args = parser.parse_args(raw)

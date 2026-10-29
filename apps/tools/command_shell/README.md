@@ -1,86 +1,92 @@
 # tool-command-shell
 
-A command runner. Each message is one shell command. The node runs it in its
-own directory and replies with the output. It is a small SSH: stand up a node
-on any machine, allowlist who may drive it, and send commands. Each message is
-one command in its own process. Nothing persists between messages: no session,
-no remembered working directory.
+Run a shell command and return its output. Each message starts a separate
+process in the node's directory. The tool does not keep a shell session or a
+working directory between messages.
 
-This page is the reference for the node. The tool overview is in
-[docs/a8s-tools.md](../../../docs/a8s-tools.md).
+Use `ar3 tool command-shell` from a terminal. Use `tell` from another node.
+See [Tool nodes](../../../docs/a8s-tools.md).
 
 ## Needs
 
-Nothing beyond the suite. The node runs commands with the shell its `SHELL`
-var names (`sh` on POSIX, `cmd` on Windows by default).
+Install AR3. The tool uses `sh` on POSIX and `cmd` on Windows by default.
+Set `SHELL` to select another shell.
 
 ## Register
 
 ```bash
-a8s add mac-terminal ~/work tool-command-shell --ALLOW=operator,assistant
+a8s add terminal ~/work tool-command-shell --ALLOW=operator,assistant
+a8s start terminal
 ```
 
-`ALLOW` is required. For a node registered without it, a8s aborts every wake
-before the tool runs and dead-letters the message (`a8s logs <node>` names the
-missing var). A shell node can never run with no allowlist. A sender not on the
-list gets no reply. The refusal is logged on the node.
+`ALLOW` is required. If it is missing, a8s stops the wake before the tool runs.
+It drops the message. Use `a8s logs terminal` to read the error. A sender outside `ALLOW` gets no reply. The node logs the refusal.
 
 ## Usage
 
-Run one shell command per message and reply with its output.
+Run one shell command per message and return its output.
 
-On the node's machine, `ar3 tool` drives the node from one terminal. It reads
-the node's vars from the a8s registry and runs in the node's directory. You
-are the operator, so you pass `ALLOW`:
+On the node's machine:
 
 ```bash
-ar3 tool command-shell --node mac-terminal                 # a session
-ar3 tool command-shell --node mac-terminal -- ls -la       # one command
-ar3 tool command-shell --node mac-terminal - <<'EOF'       # one command from stdin
+ar3 tool command-shell --node terminal
+ar3 tool command-shell --node terminal -- ls -la
+ar3 tool command-shell --node terminal - <<'EOF_SCRIPT'
 cd docs && du -sh *
-EOF
+EOF_SCRIPT
 ```
 
-A session takes one command per line. Each line runs in its own process in the
-node's directory, and its reply prints when it is done. `cd` does not carry
-from one line to the next. A line that ends in `<<EOF` (or another marker)
-opens a block. The block goes to the shell whole, up to the line that holds the
-marker. A failed command prints its reply and the session goes on. Ctrl-C stops
-the running command. Ctrl-D ends the session. Attachments print as
-`artifact: <path>`.
+The first command starts an interactive session. The second runs one command.
+The third reads one script from stdin. These script examples use a POSIX shell.
+Use commands for your selected shell on Windows.
 
-The tool takes no seat lock. Each message is its own process in its own
-session, so nothing is shared. A session command and a wake run side by side.
+`--node` loads the node's settings and directory. The local operator passes
+`ALLOW` unless `--var ALLOW=...` overrides that setting.
 
-From another node, work in real time with two terminals. In the first, inside
-the directory of your own node (the sender must be on `ALLOW`):
+Session rules:
+
+- Enter one command per line. Each line starts a separate process in the
+  node's directory. A `cd` command does not affect the next line.
+- To enter a script on several lines, end the first line with `<<MARKER`.
+  End the block with a line that contains only `MARKER`.
+- A failed command does not end the session.
+- Press Ctrl-C to stop the current command. Press Ctrl-D to end the session.
+- Attached files appear as `artifact: <path>`.
+
+The tool has no seat lock. Local commands and routed messages can run at the
+same time. They can access the same files.
+
+From another node, open two terminals in that node's directory. Run this in
+the first terminal:
 
 ```bash
 tells -f
 ```
 
-In the second:
+Send a command from the second terminal:
 
 ```bash
-tell mac-terminal ls -la
-tell mac-terminal - <<'EOF'
+tell terminal ls -la
+tell terminal - <<'EOF_SCRIPT'
 cd docs && du -sh *
-EOF
+EOF_SCRIPT
 ```
 
-The reply arrives in the first terminal. Output over `INLINE_MAX` is attached;
-attachments land under your node's `.files/<msg-ulid>/`.
+The sender must be on `ALLOW`. Replies appear in the first terminal.
+Attachments go to `.files/<msg-ulid>/` in the sender's directory.
 
 ### Commands
 
-| Message | Meaning |
+| Message | Result |
 |---|---|
-| `<command>` | The whole message (attachment lines removed) is run by the shell. An empty message answers `no command given`. |
-| `help` | The usage text. Also `/help`, `--help`, `/?`. The message must be that one line. Nothing runs. `help me` or `echo help` are commands, and run. |
+| `<command>` | Runs the message through the shell after attachment lines are removed. An empty message returns `no command given`. |
+| `help` | Returns this usage text. Also accepts `/help`, `--help`, and `/?`. The message must contain only that one line. No shell command runs. |
+
+`help me` and `echo help` are shell commands. They do not request tool help.
 
 ### Reply
 
-```
+```text
 $ du -sh *
 exit 0 in 0.14s
 
@@ -89,70 +95,90 @@ stdout:
 4.0K  README.md
 ```
 
-The reply names the command, then `exit <code> in <seconds>s`, then stdout and
-stderr. When both streams are empty it says `(no output)`. When the deadline
-passes it says `timed out after <n>s, process group killed`. Output over
-`INLINE_MAX` comes back as `stdout.txt` and `stderr.txt` attachments, with a
-short head inline. A stream over `OUTPUT_MAX` keeps its first `OUTPUT_MAX`
-bytes. The rest is read and dropped, and the reply says so.
+The reply shows the command, its exit code, its duration, stdout, and stderr.
+It shows `(no output)` when both output streams are empty. A timeout returns
+`timed out after <n>s, process group killed`.
 
-One message is one process tree. Nothing a command starts outlives it. A
-background child the shell leaves behind is killed when the command ends,
-whether by exit, by `TIMEOUT`, or by a8s ending the wake (node stop, the 600
-second wake limit), also when the stop comes in the first moments, while the
-command is still being started. A child that still holds the output pipes keeps the command
-running until `TIMEOUT`. To leave something running on the machine, start it in
-its own session with its output redirected:
-`setsid my-server >/tmp/my-server.log 2>&1 &`.
+The tool attaches output over `INLINE_MAX` as `stdout.txt` or `stderr.txt`.
+The reply includes the start of the output. For each stream, the tool keeps at
+most `OUTPUT_MAX` bytes. It discards the remaining bytes and reports this.
+
+On POSIX, the tool ends the command's process group when the command exits,
+times out, or receives an a8s stop. This also applies during startup. A child
+that keeps an output pipe open keeps the command active until `TIMEOUT`.
+To keep a service running independently on POSIX, start it in a separate
+session and redirect its output:
+
+```bash
+setsid my-server >/tmp/my-server.log 2>&1 &
+```
+
+See Platforms for Windows process limits.
 
 ### Options
 
-Set with `a8s add ... --KEY=VALUE` or `a8s vars <node> set KEY VALUE`.
+Set an option at registration with `a8s add ... --KEY=VALUE`. To change a
+registered option, use `a8s vars <node> set KEY VALUE`. Use
+`--var KEY=VALUE` before `--` for a change that applies to one local run.
 
-| Var | Default | Meaning |
+| Variable | Default | Function |
 |---|---|---|
-| `ALLOW` | none (required) | Sender names permitted to run commands. Comma or space separated, case-insensitive. |
-| `SHELL` | `sh` (POSIX), `cmd` (Windows) | Shell: `sh`, `bash`, `zsh`, `cmd`, `powershell`, `pwsh`, or any interpreter that takes `-c`. |
-| `TIMEOUT` | `60` | Seconds before the command and everything it started are killed. Keep it under the definition's 600 second wake limit. |
-| `INLINE_MAX` | `4096` | Bytes of output carried inline. Beyond it, output is attached. |
-| `OUTPUT_MAX` | `10485760` | Bytes kept per stream. |
+| `ALLOW` | Required | Lists permitted sender names. Separate names with commas or spaces. Names are not case-sensitive. |
+| `SHELL` | `sh` on POSIX; `cmd` on Windows | Selects `sh`, `bash`, `zsh`, `cmd`, `powershell`, `pwsh`, or another interpreter that accepts `-c`. |
+| `TIMEOUT` | `60` | Sets the command time limit in seconds. Keep it below the 600-second wake limit. |
+| `INLINE_MAX` | `4096` | Sets the output size in bytes above which the tool attaches a file. |
+| `OUTPUT_MAX` | `10485760` | Sets the maximum number of bytes kept for each output stream. |
 
 ```bash
-a8s add win-box . tool-command-shell --ALLOW=operator --SHELL=powershell --TIMEOUT=120
-a8s vars mac-terminal set INLINE_MAX 8192
+a8s vars terminal set INLINE_MAX 8192
+a8s vars terminal set SHELL powershell
+a8s vars terminal set TIMEOUT 120
+ar3 tool command-shell --node terminal --var TIMEOUT=10 -- "echo hello"
 ```
 
 ## State
 
-None. Each message runs in the node's directory. The tool keeps nothing
-between messages.
+The tool keeps no session state. A command can change files in the node's
+directory or anywhere else the node's OS user can write.
 
 ## Platforms
 
-POSIX and Windows. On POSIX the kill is the command's own process group. On
-Windows there is no process group: the kill is `taskkill /T` on the shell's
-tree. It reaches what is running at the deadline while the shell is alive. A
-child the shell leaves behind after it exits is not reached. A stop from a8s is
-a plain TerminateProcess that the tool cannot see, so the command outlives that
-stop on Windows.
+The tool supports POSIX and Windows. On POSIX, it ends the command's process
+group. On Windows, it uses `taskkill /T` on the shell's process tree. That
+command reaches children only while the shell is alive. It cannot reach a
+child after the shell exits.
+
+An a8s stop uses `TerminateProcess` on Windows. The tool cannot handle that
+stop, so a shell command can continue after it.
 
 ## Try it by hand
 
-On the node's machine, see Usage: `ar3 tool command-shell --node <node>`.
-For a directory that is not a node, run one wake and print the reply:
+Use a local directory without registration:
 
 ```bash
-ar3 tool command-shell --var ALLOW=operator -- "echo hello"
-ar3 tool command-shell --var ALLOW=operator -- help
+ar3 tool command-shell -- "echo hello"
+ar3 tool command-shell -- help
+ar3 tool command-shell --help
 ```
 
-The tool has no other CLI. Its wake entry is
-`python3 apps/tools/command_shell --from <sender> --allow <names> -- <message>`.
+Use `--help` before `--` for local command-line help. Use `-- help` for the
+message usage text. Configuration uses `a8s vars` or `--var`; no source-file
+path is needed.
+
+## Errors
+
+| Condition | Action |
+|---|---|
+| Missing `ALLOW` | Run `a8s vars terminal set ALLOW operator,assistant`. |
+| Shell not found | Install the shell or set `SHELL` to an available shell. |
+| Command times out | Check the command. Increase `TIMEOUT` only if the work needs more time. |
+| Output is incomplete | Read the attachments. Increase `OUTPUT_MAX` if the reply reports discarded bytes. |
 
 ## Trust
 
-`$SENDER` is the router's own stamp: filesystem ownership for a local send, the
-cluster secret across a remote. The ACL is exactly as strong as cluster
-membership. Anyone who can send as an allowlisted name runs commands as the
-node's user. Allowlist only names you trust with a shell, and run the node as a
-user with the access you intend to lend.
+A permitted sender runs commands as the node's OS user. Give access only to
+senders you trust with that user's files and programs.
+
+For local messages, a8s sets the sender from filesystem ownership. Remote
+sender identity depends on cluster membership and its shared secret. Use a
+separate OS user when the node needs restricted access.

@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ar3.fsio import stat_or_none
+
 # How far back to look for the newest turn's usage record. Transcripts reach
 # tens of megabytes; the rows we want are at the end, and a bounded read keeps
 # the probe off the critical path of every turn.
@@ -80,10 +82,10 @@ def _claude_conversation(workdir: Path) -> Conversation | None:
     if not sessions:
         return None
     newest = max(sessions, key=lambda p: p.stat().st_mtime)
-    try:
-        size = newest.stat().st_size
-    except OSError:
+    info = stat_or_none(newest)
+    if info is None:
         return None
+    size = info.st_size
 
     for line in reversed(_tail_lines(newest)):
         try:

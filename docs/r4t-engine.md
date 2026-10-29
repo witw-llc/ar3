@@ -554,6 +554,13 @@ then answers, and keeps running. Each later `run` queues its
 message and exits 0; the bridge pushes it into the same conversation as a new
 user turn, so the session needs no `tells` monitor of its own.
 
+All resident adapters serialize protocol writes with a five-second deadline
+covering writer admission, writing and flushing. Stop or fatal state interrupts
+the wait. A failed write ends the session without retry. Normal EOF close has
+one second to finish before the engine's quiet grace is forfeited. Abrupt exits
+terminate the engine before buffered stdin close or writer joins; these waits
+are bounded too.
+
 - `--timeout S` (default `2700`, 45 minutes, with `--resident`) — the
   quiet window, not the session's life. A turn in flight never ends the
   session, and any turn sent or frame received restarts the window. After
@@ -612,6 +619,17 @@ stdio) holding one thread. Proven on codex-cli 0.163.0.
 - One turn is on the wire at a time. app-server merges a turn sent mid-turn
   into the running turn, so a message that arrives mid-turn waits for the next
   turn, as on Claude.
+- Verified child completion notices request a bounded reconciliation turn after
+  active turns and queued messages finish. The parent is asked to inspect the
+  child results and continue only unfinished authorized work. Notices coalesce;
+  each notice gets at most one attempt, with at most 32 notices per turn and
+  32 attempts per session.
+  Stop, failure and session closing prevent new attempts. Rejection or a failed
+  write does not retry the notice. Identity or attempt limits end the session
+  with an error. This applies only to Codex and never starts an idle session.
+  Native activity and a completed reconciliation turn do not prove that the
+  model used the child result or avoided repeating work; live acceptance remains
+  unverified.
 - An approval request that comes anyway is declined. The bridge never grants
   more than the configured sandbox.
 - The engine's stderr goes to `resident.log` directly; its stdout carries only
@@ -673,11 +691,12 @@ still exit on stdin EOF.
   process group. Every exit (quiet expiry, a fatal frame, a missed
   handshake, `check --resident`, and `stop`) is one sequence:
   `session/cancel` when a turn is in flight and the session is not already
-  fatal, at most 1.5 s, then stdin EOF. The EOF grace applies only to a
+  fatal, at most 1.5 s including cancellation delivery and settlement. Normal
+  shutdown then closes stdin. The EOF grace applies only to a
   quiet expiry and a wrap-up that finished: cursor waits 1.5 s and codex,
   claude and agy wait 10 s. A stop, a fatal, a missed deadline, a failed
-  write, and an engine exit signal at once. A fatal that arrives during
-  that grace ends the wait, and the signal goes out at once. Then the termination. On POSIX,
+  write, and an engine exit terminate before buffered stdin close. A fatal
+  that arrives during the grace ends the wait, and the signal goes out at once. On POSIX,
   SIGTERM to the group recorded at spawn. The
   stop polls that group, reaping the leader, until it is empty or 2 s
   pass, then SIGKILL. The group id is the engine pid from
@@ -813,8 +832,9 @@ completion: the bridge correlates the turn id and waits for
 `turn/completed`. Failed or cancelled outcomes are failures. A reclaimed
 queued turn or a reported gap in the event stream fails the session. Final
 `item/completed` agent messages supply the text. Stop sends `turn/cancel`
-only for an admitted active turn, then closes stdin and applies the shared
-process-group teardown. Measured idle and echo-turn EOF exits took less
+only for an admitted active turn, within the shared bounded cancellation
+budget. Abrupt teardown terminates the process group before closing stdin.
+Measured idle and echo-turn EOF exits took less
 than 0.1 seconds; the normal EOF allowance is a conservative 10 seconds.
 An immediate stop skips that allowance. Cursor keeps its separate measured
 1.5-second EOF allowance.
@@ -1140,7 +1160,8 @@ spends a turn. `r4t engine list` shows which engines answer which verb.
 | agy | `agy models` ids; effort is part of each id | fixed list |
 | cursor | `cursor-agent models` | none; effort goes inside `--model` brackets |
 | devin | `devin models list` ids; effort is part of each id | none |
-| copilot, muse | no list verb | fixed list |
+| muse | MSP `model/list` asked of `muse serve` (no session, no turn) | fixed list |
+| copilot | no list verb | fixed list |
 | codex, opencode | no list verb | any value |
 
 Each verb ends in one of three outcomes:

@@ -11,6 +11,7 @@ One live test drives a real Chrome and is skipped unless
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -35,10 +36,12 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="the stub playwright-cli
 
 TOOL = Path(__file__).resolve().parents[2] / "tools" / "browser"
 
+# The driver session of seat `stub` (browser/plc.py `session_name`): a slug and a digest of the seat.
+STUB_SESSION = "stub-" + hashlib.sha256(b"stub").hexdigest()[:12]
 STUB = """#!/bin/sh
 # Stand-in for playwright-cli: one open session, one page.
 case "$1" in
-  list) printf -- '- stub:\\n  - status: open\\n' ;;
+  list) printf -- '- """ + STUB_SESSION + """:\\n  - status: open\\n' ;;
   *)
     shift
     case "$1" in
@@ -93,15 +96,16 @@ class TestAddBuiltin:
         argv = definition["invoke"]
         assert "$ALLOW" in argv
         assert "$ALLOW?" not in argv
-        for flag in ("--allow-eval=$ALLOW_EVAL?", "--chrome=$CHROME?", "--port=$PORT?"):
+        for flag in ("--allow-eval=$ALLOW_EVAL?", "--chrome=$CHROME?"):
             assert flag in argv
+        assert not any("PORT" in arg for arg in argv)
         assert definition["max_wake_seconds"] == 600
         assert definition["stop"]["invoke"][2] == "close"
         assert definition["idle"] == {
             "timeout": "$TIMEOUT?",
             "invoke": [
                 "$PYTHON", "$A8S_DIR/../tools/browser", "idle", "--seat", "$RECIPIENT",
-                "--timeout=$TIMEOUT?", "--chrome=$CHROME?", "--port=$PORT?",
+                "--timeout=$TIMEOUT?", "--chrome=$CHROME?",
             ],
         }
 

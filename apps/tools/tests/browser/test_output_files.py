@@ -450,7 +450,6 @@ def test_closing_the_browser_saves_the_state_privately_too(monkeypatch, tmp_path
     _stub_browser(monkeypatch, tmp_path)
     monkeypatch.setattr(plc, "is_open", lambda seat: True)
     monkeypatch.setattr(session, "_terminate_profile", lambda seat: None)
-    monkeypatch.setattr(session, "cdp_base", lambda seat: None)
     _daemon_writes(monkeypatch, "{}", 0o644)
     session.close_browser("seat")
     assert stat.S_IMODE(os.stat(_state_path()).st_mode) == 0o600

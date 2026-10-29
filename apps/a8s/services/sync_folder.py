@@ -44,7 +44,7 @@ from typing import Any
 
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
-from ar3.fsio import replace_with_retry
+from ar3.fsio import replace_with_retry, stat_or_none
 from ar3.ulid import new as new_ulid, parse as parse_ulid
 
 _KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
@@ -216,10 +216,8 @@ class SyncFolderService(StorageService):
             expected = int(entry.get("bytes"))
         except (TypeError, ValueError):
             return None
-        try:
-            if src.stat().st_size != expected:
-                return None
-        except OSError:
+        info = stat_or_none(src)
+        if info is None or info.st_size != expected:
             return None
         return src
 

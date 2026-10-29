@@ -254,6 +254,8 @@ def test_a_seat_that_is_not_signed_in_says_so_and_never_tries_to_fix_it(seat):
     assert "not signed in" in message
     assert seat.seat in message
     assert "never signs in" in message
+    assert f"ar3 tool browser --seat {seat.seat} open" in message
+    assert "python3" not in message
 
 
 def test_a_conversation_that_no_longer_opens_is_named_as_such(seat):

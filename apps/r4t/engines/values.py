@@ -8,10 +8,14 @@ all raises ValuesError.
 """
 from __future__ import annotations
 
+import json
+import queue
 import re
 import subprocess
+import threading
+import time
 
-from ar3.proc import launch_options
+from ar3.proc import launch_options, terminate_group
 
 
 from rig import HARNESS_PRESETS, RigError
@@ -24,7 +28,6 @@ NO_LIST_VERB = {
     "codex": "`-m` is passed through and a bad id fails at spawn with codex's own message",
     "copilot": "`--model` is passed through and a bad id fails at spawn with copilot's own message",
     "opencode": "`-m` is passed through as provider/model and a bad id fails at spawn with opencode's own message",
-    "muse": "`--model` is a model id for non-echo providers, passed through and checked by muse at spawn",
 }
 
 
@@ -114,6 +117,112 @@ def _devin_models() -> list[str]:
     return ids
 
 
+def _muse_models() -> list[str]:
+    """Ask `muse serve` for its catalog over MSP `model/list`: a query, so no
+    session starts and no model is prompted. The child inherits this
+    environment."""
+    argv = ["muse", "serve", "--disable-request-user-input"]
+    frames = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "clientInfo": {"name": "r4t", "version": "0"}, "capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "model/list", "params": {}},
+    ]
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True,
+            **launch_options(new_session=True),
+        )
+    except OSError as exc:
+        raise ValuesError(f"could not run `{' '.join(argv)}`: {exc}") from exc
+    lines: queue.Queue = queue.Queue(maxsize=64)
+    stopped = threading.Event()
+    overflow = threading.Event()
+
+    def pump():
+        while not stopped.is_set():
+            line = proc.stdout.readline(1024 * 1024 + 1)
+            if len(line) > 1024 * 1024:
+                overflow.set()
+                return
+            try:
+                lines.put(line or None, timeout=0.1)
+            except queue.Full:
+                overflow.set()
+                return
+            if not line:
+                return
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + LIST_TIMEOUT_SECONDS
+    def send(frame):
+        try:
+            proc.stdin.write(json.dumps(frame) + "\n")
+            proc.stdin.flush()
+        except OSError as exc:
+            raise ValuesError(f"`{' '.join(argv)}` closed its input: {exc}") from exc
+
+    initialized = False
+    try:
+        send(frames[0])
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValuesError(f"`{' '.join(argv)}` model/list timed out after {LIST_TIMEOUT_SECONDS}s")
+            if overflow.is_set():
+                raise ValuesError("muse model/list exceeded the response limit")
+            try:
+                line = lines.get(timeout=remaining)
+            except queue.Empty:
+                raise ValuesError(
+                    f"`{' '.join(argv)}` model/list timed out after {LIST_TIMEOUT_SECONDS}s"
+                ) from None
+            if line is None:
+                raise ValuesError(f"`{' '.join(argv)}` exited before answering model/list")
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(reply, dict) or "method" in reply:
+                continue
+            if not initialized:
+                if reply.get("id") != 1:
+                    continue
+                if "error" in reply or not isinstance(reply.get("result"), dict):
+                    raise ValuesError("muse initialization failed")
+                initialized = True
+                send(frames[1])
+                send(frames[2])
+                continue
+            if reply.get("id") != 2:
+                continue
+            if "error" in reply:
+                raise ValuesError(f"muse model/list failed: {reply['error']}")
+            result = reply.get("result")
+            rows = result.get("models") if isinstance(result, dict) else None
+            if not isinstance(rows, list):
+                raise ValuesError("muse model/list returned no models list")
+            return [
+                row["modelId"] for row in rows
+                if isinstance(row, dict) and isinstance(row.get("modelId"), str) and row["modelId"]
+            ]
+    finally:
+        stopped.set()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        # Keep the leader unreaped through POSIX group teardown so its pid
+        # cannot be reused while the shared helper sends its final signals.
+        terminate_group(proc)
+        proc.wait()
+        reader.join(timeout=0.2)
+        if not reader.is_alive():
+            proc.stdout.close()
+
+
 def _ollama_models() -> list[str]:
     rows = _lines(["ollama", "list"])
     return [row.split()[0] for row in rows[1:] if row.strip()]
@@ -136,6 +245,8 @@ def models(preset: str) -> tuple[list[str], str | None]:
         values = _cursor_models(entry["invoke"][0])
     elif key == "devin":
         values = _devin_models()
+    elif key == "muse":
+        values = _muse_models()
     else:
         values = _ollama_models()
     if not values:

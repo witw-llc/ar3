@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ar3.fsio import stat_or_none
 
 from core import harden_stdio, version_line as _version_line
 from tell import agent_root_from_outbox, find_outbox
@@ -497,9 +498,8 @@ def _inbox_fingerprints(inbox: Path) -> dict[str, tuple[int, int]]:
     for path in entries:
         if not (path.is_file() and path.name.endswith(".json")):
             continue
-        try:
-            st = path.stat()
-        except OSError:
+        st = stat_or_none(path)
+        if st is None:
             continue
         found[path.name] = (st.st_mtime_ns, st.st_size)
     return found

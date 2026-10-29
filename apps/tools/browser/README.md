@@ -1,153 +1,185 @@
 # tool-browser
 
-A persistent Chrome that other agents drive by message. Each message is a
-script: one command per line. The node runs the script in its own Chrome
-profile and replies with a transcript. The profile keeps its logins between
-messages, so a page that needs a sign-in stays signed in. Snapshots,
-screenshots, console logs, videos and downloads come back as attachments.
+Run browser commands in a saved Chrome profile. Each message is a script with
+one command per line. The tool returns a transcript and attachments. The
+profile keeps sign-ins between messages. Attachments can include snapshots,
+screenshots, console logs, videos, and downloads.
 
-This page is the reference for the node. The tool overview is in
-[docs/a8s-tools.md](../../../docs/a8s-tools.md).
+Use `ar3 tool browser` from a terminal. Use `tell` from another node.
+See [Tool nodes](../../../docs/a8s-tools.md).
 
 ## Needs
 
-Chrome, Node, and the Playwright command line on the node's `PATH`:
+Use Linux or macOS. Install Chrome and Node. Install the Playwright CLI:
 
 ```bash
 npm install -g @playwright/cli
-python3 apps/tools/browser doctor     # checks all three
+ar3 tool browser doctor
 ```
 
-A wake has no login profile. On Linux, put the Node bin directory (for
-example the nvm one) on the node's path, and name the display for a headed
-seat:
+The tool needs these executables on `PATH`. A routed wake does not load your
+shell startup files. If Node is in a version-manager directory, add that
+directory to the node's `env.PATH` after registration.
 
-```bash
-a8s vars garmin set env.PATH "$HOME/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin"
-a8s vars garmin set env.DISPLAY :0
-```
-
-Chrome runs headed when `DISPLAY` is set on Linux, and headless otherwise.
-With no display, your view of the page is `shot` and `snap`.
+On Linux, Chrome shows a window when `DISPLAY` is set. Without `DISPLAY`, it
+runs without a window. Use `shot` or `snap` to inspect the page in that mode.
+A person needs a visible window for manual sign-in. Set `env.XAUTHORITY` if
+your desktop requires it.
 
 ## Register
 
 ```bash
-a8s add garmin ~/browsers/garmin tool-browser --ALLOW=iris
+a8s add browser-seat ~/browsers/browser-seat tool-browser --ALLOW=assistant
 ```
 
-`ALLOW` is required. A sender outside it gets no reply.
+On Linux, set the display to your desktop display:
+
+```bash
+a8s vars browser-seat set env.DISPLAY :0
+```
+
+If Node is absent from the wake's path, set its complete path. Replace
+`<version>` with the installed Node version:
+
+```bash
+a8s vars browser-seat set env.PATH "$HOME/.nvm/versions/node/<version>/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+Check the settings and open a site:
+
+```bash
+ar3 tool browser --node browser-seat doctor
+ar3 tool browser --node browser-seat go https://example.com
+```
+
+For a site that requires sign-in, open its sign-in page with `go`. Sign in in
+that Chrome window. The tool uses its own profile, separate from your normal
+Chrome profile.
+
+Start the node to receive messages:
+
+```bash
+a8s start browser-seat
+```
+
+`ALLOW` is required for routed messages. Other senders get no reply.
 
 ## Usage
 
-Drive this node's signed-in Chrome. Each message is a script: one command per
-line.
+Run commands in this node's Chrome profile. Put one command on each line.
 
-On the node's machine, `ar3 tool` drives the node from one terminal. It reads
-the node's vars from the a8s registry. You are the operator, so you pass
-`ALLOW`:
+On the node's machine:
 
 ```bash
-ar3 tool browser --node garmin                          # a session
-ar3 tool browser --node garmin -- go https://example.com   # one script
-ar3 tool browser --node garmin - <<'EOF'                # one script from stdin
+ar3 tool browser --node browser-seat
+ar3 tool browser --node browser-seat -- go https://example.com
+ar3 tool browser --node browser-seat - <<'EOF_SCRIPT'
 go https://example.com
 snap
-EOF
+EOF_SCRIPT
 ```
 
-In a session, type one command per line. Each reply prints when the command
-is done. Session rules:
+The first command starts an interactive session. The second runs one script.
+The third reads one script from stdin. `--node` loads the node's settings and
+directory. The local operator passes `ALLOW` unless `--var ALLOW=...` overrides
+that setting.
 
-- One command per line. A line that ends in `<<MARKER` opens a block that runs
-  over several lines, up to the line that holds `MARKER`.
-- A failed command prints its reply, and the session goes on.
-- Ctrl-C stops the running command. Ctrl-D ends the session.
-- `close` quits Chrome. The next command opens it again.
-- Attachments print as `artifact: <path>`.
-- `help` prints this text.
-- `--node` reads the node's vars. `--var KEY=VALUE` overrides one for the run.
+Session rules:
 
-From another node, work in real time with two terminals. In the first, inside
-the directory of your own node (the sender must be on `ALLOW`):
+- Enter one command per line. Each reply prints when the command ends.
+- End a command line with `<<MARKER` to begin a block. End the block with a
+  line that contains only `MARKER`.
+- A failed command does not end the session.
+- Press Ctrl-C to stop the current command. Press Ctrl-D to end the session.
+- `close` closes Chrome. A later browser command can open it again.
+- Attached files appear as `artifact: <path>`.
+- `help` returns this text without a browser operation.
+- Use `--var KEY=VALUE` before a command to override one setting for that run.
+
+Store passwords locally with a hidden prompt:
+
+```bash
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool browser --node browser-seat secret list
+```
+
+A script uses `fill-secret <target> PASSWORD`. Messages cannot set, list, or
+remove secrets. See Secrets for stdin input and origin limits.
+
+From another node, open two terminals in that node's directory. Run this in
+the first terminal:
 
 ```bash
 tells -f
 ```
 
-In the second, send a script on stdin so the shell never touches it:
+Send a script from the second terminal:
 
 ```bash
-tell garmin - <<'EOF'
-open
+tell browser-seat - <<'EOF_SCRIPT'
 go https://example.com
 snap
 shot
-EOF
+EOF_SCRIPT
 ```
 
-The reply arrives in the first terminal. Attachments land under your node's
-`.files/<msg-ulid>/` (`screen.png`, `snapshot.txt`, `console.log`, and so on).
-`a8s convo <you> --json` shows the files of each message.
+The sender must be on `ALLOW`. Replies appear in the first terminal.
+Attachments go to `.files/<msg-ulid>/` in the sender's directory.
+Use `a8s convo <you> --json` to find a message's files.
 
-Rules of the script:
+Script rules:
 
-- The whole script is parsed first, then run. It stops at the first failure
-  and attaches a `*-failure.txt` snapshot of the page it stopped on. While a
-  recipe's sensitive step is open, or after one whose page could not be
-  confirmed clear, nothing of the page is captured.
-- The tool opens no local file as a page. `go` refuses a `file:` URL, and a step that ends
-  with a `file:` page in any tab of Chrome fails: the page the driver drives is sent to
-  `about:blank`, any other such tab is closed, and the files that step wrote are removed.
-- Blank lines and lines that start with `#` are ignored.
-- A line that ends in `<<MARKER` opens a block that runs to a line holding
-  `MARKER`. The line carries only the command word. The block is the whole
-  argument (used for `run-code` and for long text).
-- Every command except `close` and `video-stop` opens Chrome if it is not open.
-- A target is a `snap` ref such as `e5`, else a CSS selector, else visible text
-  (case-insensitive). Zero matches, or several, is an error that lists the
-  candidates. So send `snap` first, then `click e12`.
-- A secret never rides in a script. Name it: `fill-secret e9 PASSWORD`. The
-  operator stores the value on the node's machine, with the origins it may be
-  typed on, and the reply shows `[secret:PASSWORD]` where the value would be. A
-  secret that is not stored fails the step. So does a field on an origin the
-  secret does not allow, and nothing is typed. The failure says what the
-  operator runs, or which origins are allowed.
-- A site recipe is a website's named commands. `recipe` lists them, `recipe <site>`
-  shows one with its verbs, `recipe <site> <verb> <arguments>` runs a verb, and
-  `recipe <site> check` runs its health check. A verb that needs a sign-in stops
-  with `needs a person: ...` when the seat is signed out. Listing and help open no
-  Chrome. The README, Site recipes, has the rest.
-- The wake is capped at 600 seconds. The reply body is cut at 4000 characters.
-  A session reply is not cut.
-- One script runs on a seat at a time. A wake, a session and the browser CLI
-  take the same seat lock for each script. A script that finds the seat busy
-  waits up to 60 seconds. Then the reply is
-  `<node>: busy: seat held by <who> since <when>. Nothing ran.` A session holds
-  the seat for one command at a time, so between two session lines a wake can
-  run. Check the URL.
+- The tool parses the complete script before it runs. It stops at the first
+  failed step. It attaches a `*-failure.txt` snapshot unless a sensitive step
+  prevents capture.
+- The tool refuses local `file:` pages. If a step ends with such a page, it
+  replaces the active page with `about:blank` and closes other local-file tabs.
+  It also removes the files that step created.
+- The tool ignores blank lines and lines that start with `#`.
+- A block header contains the command word and `<<MARKER`. The complete block
+  is that command's argument. Use it for long text or `run-code`.
+- Browser commands open Chrome as needed. `close` and `video-stop` do not.
+  Recipe listing and help do not open Chrome.
+- A target can be a snapshot reference such as `e5`, a CSS selector, or
+  visible text. Visible text is not case-sensitive. No match or multiple
+  matches cause an error. Use `snap` before a command such as `click e12`.
+- Use `fill-secret` to enter a stored secret. The field's origin must be on
+  the secret's allowed list. A missing secret or refused origin stops the
+  step before it types a value.
+- Use `recipe` to list site recipes. Use `recipe SITE` for help and
+  `recipe SITE VERB ARGUMENTS` to run a verb. `recipe SITE check` checks the
+  recipe. A required sign-in that is absent returns `needs a person`.
+- A wake has a 600-second limit. Its reply body has a 4000-character limit.
+  Local session replies have no such character limit.
+- Only one script can use a seat at a time. A busy request waits up to 60
+  seconds, then returns `busy` without running. A session releases the lock
+  after each command. Another request can change the page between commands.
 
-Example: a sign-in form, one message at a time.
+Example sign-in:
 
 ```bash
-tell garmin - <<'EOF'
+tell browser-seat - <<'EOF_SCRIPT'
 go https://site.example/login
 snap
-EOF
-# read the refs in snapshot.txt, then:
-tell garmin - <<'EOF'
-# The operator stored PASSWORD once, with `browser secret set`.
-fill e7 "me@example.com"
+EOF_SCRIPT
+```
+
+Read the snapshot references before the next script. Store `PASSWORD` for
+`https://site.example` on the node's machine first.
+
+```bash
+tell browser-seat - <<'EOF_SCRIPT'
+fill e7 "user@example.com"
 fill-secret e9 PASSWORD
 click e11
 wait-for-url /home 20
 shot
-EOF
+EOF_SCRIPT
 ```
 
 ### Commands
 
-| Command | Syntax | Notes |
+| Command | Syntax | Function |
 |---|---|---|
 | `open` | `open` | Starts Chrome if needed. Returns the URL. |
 | `close` | `close` | Saves state and quits Chrome. |
@@ -159,15 +191,15 @@ EOF
 | `fill-secret` | `fill-secret <label\|selector> <NAME>` | Types the stored secret `NAME` into the field, if the field's page is on an origin the secret allows. The reply names the secret and never shows its value. |
 | `select` | `select <label\|selector> <value>` | |
 | `press` | `press <key>` | `Enter`, `Tab`, `Escape`, and so on. |
-| `type` | `type <text>` | The rest of the line, verbatim. Refused, and nothing runs, when the text holds a stored secret. |
+| `type` | `type <text>` | The rest of the line, without changes. Refused, and nothing runs, when the text holds a stored secret. |
 | `check`, `uncheck`, `hover` | `<verb> <ref\|selector\|text>` | |
 | `text` | `text <selector>` | Inner text of the first match. |
-| `find` | `find <text>` | The rest of the line, verbatim. |
+| `find` | `find <text>` | The rest of the line, without changes. |
 | `scroll` | `scroll <dy>` | Pixels. |
 | `wait` | `wait <seconds>` | A number over 300 is read as milliseconds. At most 300 seconds. |
 | `wait-for` | `wait-for <selector> [seconds]` | Waits for a visible match. Default 10. |
 | `wait-for-url` | `wait-for-url <substring> [seconds]` | Default 10. |
-| `assert-text` | `assert-text <text>` | The rest of the line, verbatim. Fails if the text is not on the page. |
+| `assert-text` | `assert-text <text>` | The rest of the line, without changes. Fails if the text is not on the page. |
 | `assert-url` | `assert-url <substring>` | |
 | `back`, `forward`, `reload` | no arguments | Return the URL. |
 | `dialog-accept` | `dialog-accept [text]` | |
@@ -182,10 +214,10 @@ EOF
 | `video-start` | `video-start [slug]` | One recording at a time. A recipe's sensitive step does not open while a recording is on. |
 | `video-chapter` | `video-chapter <title>` | Needs a recording. |
 | `video-stop` | `video-stop` | Attaches the `.webm`. |
-| `eval` | `eval <js expression>` | Needs `ALLOW_EVAL=1`. Refused on a seat that holds secrets, whatever `ALLOW_EVAL` says. |
-| `run-code` | `run-code <<END` ... `END` | Playwright statements with `page` in scope. Needs `ALLOW_EVAL=1`. Refused on a seat that holds secrets, whatever `ALLOW_EVAL` says. |
-| `recipe` | `recipe [<site> [<verb> [<args>]]]` | A site recipe: no word lists the recipes, a site shows it, a verb runs it. `status` prints `in`, `out` or `unknown`. `check` runs the health check. |
-| `help` | `help` | The usage text. Also `/help`, `--help`, `/?`. The message must be that one line. Nothing else runs. |
+| `eval` | `eval <js expression>` | Needs `ALLOW_EVAL=1`. Refused on a seat that holds secrets, even with `ALLOW_EVAL=1`. |
+| `run-code` | `run-code <<END` ... `END` | Playwright statements with `page` in scope. Needs `ALLOW_EVAL=1`. Refused on a seat that holds secrets, even with `ALLOW_EVAL=1`. |
+| `recipe` | `recipe [<site> [<verb> [<args>]]]` | A site recipe: No site lists recipes. A site name shows help. A verb name runs that verb. `status` prints `in`, `out` or `unknown`. `check` runs the health check. |
+| `help` | `help` | Returns this usage text. Also `/help`, `--help`, `/?`. The message must be that one line. Nothing otherwise runs. |
 
 `upload` and `drop` paths are paths on the node's machine and must be
 absolute. A path inside the browser state directory, which holds every seat's
@@ -194,583 +226,391 @@ directory, so it cannot be uploaded from there.
 
 ### Reply
 
-The reply starts with `<node>: ok` or `<node>: failed: <reason>`. A blank line
-follows, then one line per command: two spaces on success, `! ` on failure,
-with the output indented under it.
+A reply starts with `<node>: ok` or `<node>: failed: <reason>`. Each command
+has a transcript line. Successful lines start with two spaces. Failed lines
+start with `! `. The output is indented under the command.
 
-```
-garmin: ok
+```text
+browser-seat: ok
 
   open
       https://example.com/
   snap
-      /home/you/.local/share/ar3/browser/garmin/artifacts/20261023T091500-snapshot.txt
+      /home/you/.local/share/ar3/browser/browser-seat/artifacts/20261023T091500-snapshot.txt
 ```
 
-If the seat is busy, the reply is one line and nothing ran:
-
-```
-garmin: busy: seat held by a8s wake from iris (pid 4242) since 2026-10-23 09:15:00 PDT. Nothing ran.
-```
+A busy reply identifies the lock holder and its start time. It ends with
+`Nothing ran.`
 
 ### Options
 
-Set with `a8s add ... --KEY=VALUE` or `a8s vars <node> set KEY VALUE`.
+Set an option with `a8s add ... --KEY=VALUE` or
+`a8s vars <node> set KEY VALUE`. Use `--var KEY=VALUE` before a local command
+for a change that applies to one run.
 
-| Var | Default | Meaning |
+| Variable | Default | Function |
 |---|---|---|
-| `ALLOW` | none (required) | Sender names permitted to drive the seat. A sender outside it gets no reply. |
-| `ALLOW_EVAL` | off | `1` permits `eval` and `run-code`, except on a seat that holds secrets, which refuses both. |
-| `CHROME` | found on `PATH` | The Chrome binary. |
-| `PORT` | Chrome picks a free one | A fixed Chrome debugging port. Unset, Chrome picks a free port and records it in the profile, so seats never collide. Set, the seat proves ownership through the process that holds the listening socket (`lsof`, or `ss` on Linux). It fails closed when another process holds the port, and when its own running Chrome recorded a different port. |
-| `TIMEOUT` | unset | Seconds with no script before Chrome closes. The profile keeps its logins, and the next script opens Chrome again. Unset, Chrome stays up between wakes until `a8s stop`. |
+| `ALLOW` | Required | Lists permitted sender names. Separate names with commas or spaces. Names are not case-sensitive. Other senders get no reply. |
+| `ALLOW_EVAL` | Off | Set to `1` to permit `eval` and `run-code`. A seat with stored secrets refuses both commands. |
+| `CHROME` | Found on `PATH` | Selects the Chrome executable. |
+| `TIMEOUT` | Unset | Sets the idle time in seconds before Chrome closes. The next script opens Chrome. Without this setting, Chrome stays open until a stop. |
 
-A wake attaches only to a Chrome that holds this seat's profile, on the port
-that profile recorded. A listener on the recorded port that is not that Chrome
-is never driven.
+```bash
+a8s vars browser-seat set TIMEOUT 900
+ar3 tool browser --node browser-seat --var TIMEOUT=900 idle
+```
+
+## Local commands
+
+Put `--node NAME` before the local verb to use a registered browser node.
+Use `--seat NAME` for an unregistered local seat. Do not combine them.
+
+```bash
+ar3 tool browser --help
+ar3 tool browser --node browser-seat status
+ar3 tool browser --seat scratch go https://example.com
+ar3 tool browser --seat scratch do script.txt --json
+ar3 tool browser --seat scratch do --help
+```
+
+| Local verb | Arguments | Function |
+|---|---|---|
+| `doctor` | None | Checks Chrome, Node, and Playwright CLI. |
+| `open` | None | Opens Chrome with the selected profile. |
+| `close` | None | Saves state and closes Chrome. |
+| `status` | None | Reports the browser connection and URL. |
+| `go` | `URL` | Opens a page. |
+| `snap` | None | Prints the accessibility snapshot. |
+| `console` | None | Prints the console log. |
+| `do` | `FILE` or `-`, `[--json]` | Runs a script from a file or stdin. `--json` prints structured output. |
+| `idle` | `[--timeout SECONDS]` | Uses configured `TIMEOUT`, or `--timeout SECONDS` to override it. Closes an idle browser without starting Chrome. |
+| `secret` | `set`, `list`, or `rm` | Manages local secrets. See Secrets. |
+
+Use `COMMAND --help` for that verb's options. Browser commands that use Chrome
+accept `--chrome PATH` after the verb. Put `--` before a script to use the
+message path explicitly. For example, `-- go URL` returns a message-style
+transcript; `go URL` uses the local browser command.
+
+To run an unregistered seat with a visible Linux window, set `DISPLAY` in the
+terminal's environment first. `--seat` does not load registered settings.
+Keep the same seat name to reuse its profile:
+
+```bash
+export DISPLAY=:0
+ar3 tool browser --seat scratch do - <<'EOF_SCRIPT'
+go https://example.com
+snap
+EOF_SCRIPT
+```
 
 ## State
 
-The Chrome profile, artifacts, downloads, scratch files and secret store live in
-`${XDG_DATA_HOME:-~/.local/share}/ar3/browser/<node>/`. That directory and its
-`scratch` directory are mode 0700: every run makes them so, and tightens ones
-made earlier. `state.json`, which `save` and `close` write, is mode 0600. The browser stays
-running between wakes. `a8s stop <node>` closes it. The stop has 30 seconds:
-the graceful close keeps to a shorter budget and then ends the process tree.
+The seat directory is
+`${XDG_DATA_HOME:-~/.local/share}/ar3/browser/<seat>/`. It contains the Chrome
+profile, artifacts, downloads, scratch files, and secret store. The seat and
+scratch directories have mode 0700. `state.json` has mode 0600. The tool sets
+these permissions on each run.
 
-With `TIMEOUT` set, Chrome also closes when no script has used the seat for that
-long. a8s runs `browser idle` for the node once the node has been quiet for
-`TIMEOUT` seconds, and the verb checks the seat itself:
+The daemon and your terminal must use the same `XDG_DATA_HOME`. Otherwise the
+same seat name selects different profiles and lock files. Use the same
+`A8S_HOME` to load the same registered node and private recipes.
 
-- It does nothing when no Chrome runs on the seat. It never starts one.
-- It leaves Chrome up when a script holds the seat, when a launch is in
-  progress, or when a script used the seat less than `TIMEOUT` seconds ago. The
-  next check comes `TIMEOUT` seconds later.
-- Otherwise it closes Chrome as `close` does, and prints how long the seat sat
-  idle.
+Chrome stays open between messages. `a8s stop <node>` closes it within 30
+seconds. The tool first attempts a normal close, then ends the process tree.
+A stop also invalidates operations that started before it. Their next command
+fails with `seat closed by a8s stop`. An operation that starts after the stop
+can open Chrome again.
 
-Only a script counts as use. A person who works in a headed window by hand,
-with no script running, does not keep Chrome open. Set `TIMEOUT` well above the
-longest pause between two scripts of one task: a Chrome that closes between them
-comes back on a blank page. An idle close is not a stop: it leaves the stop
-token alone, so a script that waited for the seat opens Chrome again and runs.
-The `last-active` file in the seat directory holds the time a script last held
-the seat, in seconds since the epoch.
+`TIMEOUT` closes Chrome after a period without scripts. Manual work in a
+visible window does not count as script activity. Set the timeout above the
+longest pause in your task. After an idle close, Chrome opens on a blank page.
+An idle check leaves Chrome open during a script or launch. It checks again
+after the configured interval. Unlike a stop, an idle close does not cancel
+scripts that wait for the seat.
 
-The `lock` file in the seat directory is the seat lock. While a script runs, it
-holds the pid, the kind and the start time of the holder. The OS frees the lock
-when the holder dies. `a8s stop` does not wait for the seat: it closes Chrome
-even when a session holds it. `a8s stop` ends the script that holds the seat:
-its next command fails with `seat closed by a8s stop`. Every path that opens Chrome checks
-the stop epoch, read when the operation began and before any wait for the seat.
-So an operation that began before the stop never opens Chrome after it, even
-when it was waiting for the seat. An operation started after the stop opens
-Chrome again. The `stop-epoch` file holds the token of the last stop.
-The `launch-lock` file is a short lock around a Chrome launch and around the
-stop. The stop waits at most 3 seconds for it, then closes anyway. The stop
-always fits its 30 seconds.
+The `lock` file identifies the script holder. The OS releases its lock if the
+holder exits. `last-active` records the last script activity time. `stop-epoch`
+records the stop token. `launch-lock` protects startup and stop; a stop waits
+at most 3 seconds for that lock.
 
-The a8s daemon and the terminal must use the same `XDG_DATA_HOME`. If they
-differ, they use different lock files and different profiles for the same node
-name.
+Second-user isolation is experimental. Native checks with two OS accounts
+remain to be run on Linux and macOS. Do not treat it as a verified security
+boundary.
 
-The tool also reads the a8s registry, in the home a8s resolves (`A8S_HOME`, else the
-XDG config home), to find the node its seat names and the root that node was
-registered with. A run whose `A8S_HOME` differs from the daemon's finds no node and
-loads the bundled recipes only.
+Chrome uses `--remote-debugging-pipe`. It opens no DevTools network port.
+The driver socket is in the private `browser/ipc/` directory. If that path is
+too long, the tool uses `ar3-browser-<uid>/<digest>` under `XDG_RUNTIME_DIR` or
+the system temporary directory. It refuses a directory owned by another user.
+The tool accepts a Chrome process only when it uses this profile and belongs
+to this seat's driver daemon.
 
 ## Platforms
 
-Linux and macOS only. Process discovery, which the attach check and the
-forced cleanup need, is not implemented on Windows, so a seat does not open
-there.
-
-## Try it by hand
-
-On the node's machine, see Usage: `ar3 tool browser --node <node>`.
-
-For a seat that is not a node, the tool has its own CLI. It uses the same
-profile, the same lock and the same Chrome:
-
-```bash
-python3 apps/tools/browser --seat scratch do - <<'EOF'
-go https://example.com
-snap
-EOF
-```
-
-The other subcommands are `open`, `close`, `status`, `snap`, `console`,
-`go <url>`, `idle --timeout <seconds>`, `secret set|list|rm` and `doctor`.
+The browser tool supports Linux and macOS. Windows lacks the required process
+discovery and verified driver-pipe access controls. The tool refuses to open
+a seat on Windows before it starts the driver or browser.
 
 ## Secrets
 
-A script can sign in to a site while its sender never holds the password. The
-operator stores the value on the node's machine, with the origins it may be typed
-on. The script names it, and the tool types it.
+Store a value on the node's machine. Give it a name and allowed origins.
+A script supplies the name to `fill-secret`; it does not receive the value.
 
 ```bash
-printf '%s' "$PASSWORD" | python3 apps/tools/browser secret set PASSWORD --origin https://app.example.com --seat garmin
-python3 apps/tools/browser secret set API_TOKEN --origin https://api.example.com --origin 'https://*.example.org' --seat garmin
-python3 apps/tools/browser secret list --seat garmin    # each name with its origins, never a value
-python3 apps/tools/browser secret rm API_TOKEN --seat garmin
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool browser --node browser-seat secret set API_TOKEN --origin https://api.example.com --origin 'https://*.example.org'
+ar3 tool browser --node browser-seat secret set API_TOKEN -
+ar3 tool browser --node browser-seat secret list
+ar3 tool browser --node browser-seat secret rm API_TOKEN
 ```
 
-The second command asks for the value at a hidden prompt. Then a script says
-`fill-secret e9 PASSWORD`. The target resolves as it does for `fill`. The
-transcript line shows `fill-secret e9 PASSWORD`, and the outcome shows
-`e9 <- [secret:PASSWORD]`.
+At a terminal, `set` uses a hidden prompt. With redirected stdin, it reads
+stdin. An optional `-` after the name makes this input source explicit. For
+example, a password manager can pipe its output to:
 
-- A name starts with a capital letter and holds `A-Z`, `0-9` and `_`, 64
-  characters at most. A value has at least 4 characters, because a shorter one
-  cannot be scrubbed safely, and no NUL character.
-- A secret needs at least one `--origin`. An origin is `scheme://host[:port]` with
-  `http` or `https` and no path. A leading `*.` in the host
-  (`https://*.example.org`) matches any subdomain and not the bare domain. A
-  wildcard needs at least two labels after the `*.`: `https://*.example.com` and
-  `https://*.co.uk` pass, and `https://*.com` is refused because it would match
-  every site under `.com`. `https://*.localhost` is the one exception. The
-  port is part of the origin, and the scheme's own port is the same as no port.
-  `secret set` refuses anything else and says why. A later `secret set` of the
-  same name replaces the value and the origins.
-- `fill-secret` asks the target field for the origin of its own document, right
-  before it types, so a field in a cross-origin iframe counts as the iframe's
-  origin and not as the page around it. Outside the list the step fails, types
-  nothing, and names the origin it saw and the origins allowed:
-  `fill-secret: secret PASSWORD may not be typed on origin https://evil.example; allowed origins: https://app.example.com`.
-  A frame with no origin of its own (`about:blank`, `srcdoc`, a sandboxed frame)
-  reads as `null` and is refused, even on an allowed page.
-- `secret set` reads the value from stdin when stdin is not a terminal, and drops
-  one trailing newline. At a terminal it asks with a prompt that does not echo.
-  No verb prints a value.
-- The store is `secrets.json` in the seat directory, mode 0600:
-  `{"version": 1, "secrets": {"NAME": {"value": "...", "origins": ["https://app.example.com"]}}}`.
-  The tool refuses a store that group or other users can read, and the message
-  gives the fix (`chmod 600 <path>`). A damaged store is an error that names the
-  file and does not print its content. While the store cannot be read, no script
-  runs on the seat, because the tool cannot scrub with a store it cannot read.
-- The store is out of reach of a script. Only the verbs above, run on the node's
-  machine, set, list or remove a secret, and a line such as `secret set ...` in a
-  script is an unknown command.
-- The tool opens no local file as a page. The page of another seat's store is a file, and the
-  scrub of this seat does not know that seat's secrets. A screenshot is never scrubbed.
-  Three layers hold the rule:
-  - The tool takes `PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS` out of the
-    environment of every call to `playwright-cli`. That switch makes the driver open
-    local files, and the driver takes it from the call that starts it. So the driver
-    the tool starts has none, whatever the node's environment says.
-  - `go` refuses every `file:` URL, and says that local files are not opened.
-  - A step that ends with a `file:` page in any tab fails, whatever brought the page
-    there. So does a recipe's call that navigates to one. Chrome's DevTools endpoint
-    gives the address of every tab, and the tool asks it after each step (a few
-    milliseconds, no call to the driver; when it does not answer, as for a port the owner
-    fixed, the tool asks the driver for the page it drives). The page the driver drives is
-    sent to `about:blank`, any other such tab is closed, the files the step wrote (its page
-    files and its attachments) are removed, and no text of the page leaves. A page that
-    cannot be sent away or closed takes Chrome with it.
-- `upload` and `drop` refuse a path that resolves inside the browser state directory
-  (`${XDG_DATA_HOME:-~/.local/share}/ar3/browser`, which holds every seat's home). A
-  symlink that leads in counts. They need no setting to read any file on the machine,
-  which is why they refuse the directory.
-- `eval` and `run-code` are off on a seat that holds a secret, whatever
-  `ALLOW_EVAL` says: they could read a field a secret was typed into, change what
-  they read before the scrub sees it, or open a URL of their own. The refusal says
-  so and names the fix: remove the secrets (`browser secret rm`) or use a seat
-  without them. The tool's own code is not the caller's and is not affected:
-  `fill-secret`, the session, `wait-for`, `download`, and any reviewed recipe that
-  uses the tool's Python API and not the verbs.
-- Keep a secret out of node vars. They sit in plain text in the a8s registry and
-  in shell history.
-- Use `fill-secret` for a secret, never `fill` or `type`. Those put their text in
-  the command line of `playwright-cli`, where `ps` shows it to every local user, so
-  the tool refuses them when their text holds a stored value (see the rule below).
+```bash
+ar3 tool browser --node browser-seat secret set PASSWORD - --origin https://app.example.com
+```
 
-The rule: a stored secret, and a hidden value (a one-time passcode that a recipe read
-from a page and hid with `page.hide`), never
+Never put a secret value in an argument or node variable. To manage an
+unregistered seat, use `--seat scratch` instead of `--node browser-seat`.
+Secret commands require an explicit seat selector. They do not start Chrome
+or require Playwright CLI. No message or script can call them.
 
-1. appears in the command line of any process, because `ps` shows every local user the
-   arguments of every process;
-2. reaches a caller, the sender of the script or the person at `ar3 tool`: not in a
-   step's output, a reply, an error, an attachment, a snapshot, console or network text,
-   a recipe's result or `result.json`. A value shows there as `[secret:NAME]`.
-   Screenshots, video and downloaded files are the exceptions, because the tool does not
-   scrub them;
-3. is readable by another OS user: the store is mode 0600, and it, the Chrome profile and
-   the scratch directory are in the seat's directory, which is mode 0700.
+### Names, values, and origins
 
-Keeping a value out of a command line. The tool looks at every argument before it starts
-`playwright-cli`. When one holds a stored or a hidden value, in any form the scrub knows,
-`playwright-cli` is not started and the step fails with `playwright-cli was not run: an
-argument of its command line held a value that must not be in one`. The message names no
-value, no secret and no argument. A value can come into an argument with the text of a
-script (`fill #user <value>`, `go https://site/<value>`), with the text of a recipe, or
-from the page. A page can make an id, a class or an address from a value it was given: a
-user name typed into a field becomes the id of the next button, and naming that button by
-its id would put the name in the command line. So the tool does not use a selector that
-holds a value. It names the element by its path of tag names and positions (`body >
-div:nth-of-type(2) > button`), which holds nothing the page wrote, or it fails with `no
-selector for that element is free of a value that must not be in a command line` and asks
-for a `snap` ref. What a script typed to name a target (`click Continue`, `text #message`,
-`assert-text some words`, `wait-for #go`) goes to the page in a private file, so it is in
-no command line. The selector that comes back is, and it holds no value. A short stored
-value, such as a four-digit PIN, refuses any text that holds it (`fill #amount 12345` for
-the PIN `1234`). What the tool wrote itself (its paths, ports, window sizes and its own
-code) is not looked at, so a value that is also a year or a word of a path stops none of the
-tool's own calls. A snapshot ref is not looked at where a verb takes the element it acts on
-(`click e1234`, `fill e1234 text`, `select e1234 one`, `hover`, `check`, `uncheck`, `drop`), because the
-number of a ref says nothing: a page of a thousand elements has an `e1234`, and a stored PIN
-of 1234 must not stop the click on it. The same text anywhere else is the caller's text, and
-it is refused when it holds a value: `type e482916` and `fill #user e482916` put the PIN
-482916 in a command line, so they are refused for it. The reply of a wake goes to `a8s tell`
-on stdin, so it is in no command line either.
+- A name starts with an uppercase letter. It contains only `A-Z`, `0-9`, and
+  `_`, with at most 64 characters.
+- A value must be UTF-8, have at least 4 characters, and contain no NUL. Its
+  maximum size is 64 KiB. Input removes one trailing newline.
+- A new name requires at least one `--origin`. To replace the value and keep
+  its origins, omit `--origin`. To replace the allowed list, supply new origins.
+- An origin has the form `http://host[:port]` or `https://host[:port]`, without
+  a path. A default port is equivalent to an omitted port.
+- `https://*.example.org` permits subdomains but not `example.org`. A wildcard
+  requires at least two labels after `*.`. `*.com` is refused. `*.localhost`
+  is the exception. The tool accepts `*.co.uk`; choose an appropriately narrow
+  host rather than a public suffix.
+- `fill-secret` checks the field's document origin immediately before typing.
+  For an iframe, this is the iframe origin. A `null` origin is refused,
+  including `about:blank`, `srcdoc`, and sandboxed frames.
 
-What the scrub knows. It finds a value one character at a time, so it finds it in any mix
-of the ways a page, a browser or Playwright writes it: as typed; with the percent escapes
-of a URL and `+` for a space, in either case of hex (a URL keeps `@` and `!` and escapes a
-space, and the part before `?` is not written as the part after); with the escapes of a
-JSON, JavaScript, YAML or Python string; with the escapes of CSS (`CSS.escape` escapes a
-digit at the start of an identifier and not in the middle, so the id `pw-2Fast4U\!` holds
-the value `2Fast4U!`); with the entities of markup; with a line feed as U+21B5 and a tab as
-U+21C6, which is how the preview of an element in the call log of Playwright shows them; and with
-its whitespace folded as a snapshot shows it. It also finds the start of a value, 4 characters or more, that a tool
-cut and ended with an ellipsis (`…` or three dots, with dots of the text after them, and a
-value of its own that ends or begins in dots), also when the cut is in the middle of the escape of
-a character: Playwright cuts the text of an element at 50 characters and the attributes of an
-element at 500, in the call log of an error.
+The transcript shows `fill-secret e9 PASSWORD`. Its result shows
+`e9 <- [secret:PASSWORD]`. `list` prints names and origins, never values.
+An invalid value stores nothing. Secret commands return 0 on success, 1 on
+refusal or storage failure, and 2 for invalid command-line syntax. An error
+does not repeat a value supplied as an argument.
 
-It finds a value under more than one layer of these, too. A page that prints
-`JSON.stringify({user: value})` in an element, and a snapshot that quotes the text of the
-element in the double quotes of YAML, show the value `Synthetic"User\A7492` as
-`Synthetic\\\"User\\\\A7492`, and a caller can decode that back. So the scrub undoes
-escapes as well. No escape touches a letter or a digit, so it looks for the longest runs of
-them in the value, and where they show in the right order, with an escape near them, it takes
-the text around them and undoes the escapes of a string (JSON, JavaScript, YAML, Python, with
-the folded lines of YAML that end with a backslash), the doubled apostrophe of a YAML string in
-single quotes, the escapes of CSS, of a URL (percent escapes, `%uXXXX` of JavaScript's `escape`,
-and `+` for a space) and of markup, one family after another, in any order, up to three times.
-For a value with a character from U+0080 to U+00FF, the bytes of a URL are read as ISO-8859-1 as well as
-UTF-8 (`%DF%A0` is one character to a reader of UTF-8 and the two characters that JavaScript's `escape`
-wrote), and for one with a control character from U+0080 to U+009F, a numeric reference to it is read
-as a browser reads it (`&#133;` is an ellipsis) and as the code that wrote it meant it (U+0085).
-A value that has a space, or a line break, or a character that CSS escapes with a hex number (which
-ends with a space), gets the lines of YAML too: a writer (PyYAML) breaks a long line of a plain
-string, or of one in single quotes, at a space and indents the next line, and a reader folds the
-break and the indent back into one space (and each empty line after the first break into a line
-break). A line break of a value is read with the spaces after it, because a block (`|`) indents
-each line. A string in single quotes that is folded and has apostrophes doubled is one layer, so it
-is one step. The pattern of the value
-then reads each result, so a value is found under four layers. What it replaces is the stretch
-of the text that the value was made into: the quotes and braces around it stay. A script can
-hide a value (`page.hide`) and have it found the same way. A value of letters and digits alone
-is the same text in every layer but one (`CSS.escape` writes a first digit as `\32 `), so one that
-begins with a letter is found as it is, and one that begins with a digit is looked for by its CSS form.
-A value that has a character over U+007F is looked for where a text has, for the first six of
-them that have the longest numbers, what any escape of the character holds: the hex digits of
-its code (`\u0418`, `&#x418;`, `\418 `, `%u0418`), the decimal ones (`&#1048;`), the first and the last byte of its UTF-8
-(`%D0%98`), or its name in markup (`&Icy;`), whatever the layers around them, in the order of the
-characters and not farther apart than they can be. A page of numbers and escapes with no such
-value in it makes no place, and costs next to nothing.
-The proof is a table made by code, in `apps/tools/tests/browser/test_layers.py`: 18 encoders (JSON
-and YAML strings with and without non-ASCII text escaped, in the styles of Playwright and of
-PyYAML, the lines that PyYAML folds in double quotes, in single quotes and plain, YAML in single
-quotes, URLs, JavaScript's `escape`, markup and CSS), every ordered composition of up to three of
-them over values with quotes, backslashes, spaces, controls, non-ASCII text and an emoji, and the
-scrub of each is exactly the text with the value made its marker. The writers of the lines are
-ports of the emitter of PyYAML 6.0.1, which a test compares with PyYAML where it is installed. A page that prints a long run of
-backslashes before the value does not hide it either: a window begins just after the last line
-end that is not escaped (within 1,024 characters), and where there is none it reads the first run
-of backslashes both ways. Two values that overlap in a text, or a value that overlaps itself, are one
-stretch. A download that a page names after a value is saved under a name that holds none, because
-the reply is sent with the path in a command line; an extension (a dot and up to eight letters or
-digits) is kept when the scrub of the name leaves it as it was.
+### Storage and access
 
-Files the browser and the driver write on their own. They are Chrome's profile and its
-storage; `state.json`, the export that `save` and `close` make of the cookies and the
-local storage of the sites; and the page files and the console log that `playwright-cli`
-keeps under `scratch/.playwright-cli/` (the sweep reads every file there). They are inside
-the same boundary as the store and the profile. They are in the 0700 directory, the driver
-runs with a umask that makes what it writes mode 0600, `state.json` is mode 0600, and no
-verb attaches, returns or uploads one: `save` replies `saved`, and `upload`, `drop` and a
-recipe's `artifact` refuse the directory. The driver's files are also scrubbed before any
-path can return one to a caller. Every script and every command of
-the CLI begins by scrubbing the files the driver has written since the last time it did,
-and a step scrubs the files it changed as it ends. A file that cannot be scrubbed is
-removed.
+`secrets.json` has mode 0600 in the private seat directory. Its format is:
 
-How the value reaches the page: `fill-secret` writes a small code file that holds
-the value and the secret's origins, mode 0600, in a directory of its own under the
-seat's scratch directory, and runs `playwright-cli --raw run-code --filename
-<file>`. The command line holds the path and not the value, so `ps` shows nothing
-to other users. `playwright-cli` sends its daemon the path and keeps no copy of the
-code, and `--raw` keeps the code out of its reply. The tool removes the file when
-the call returns.
+```json
+{"version":1,"secrets":{"NAME":{"value":"...","origins":["https://app.example.com"]}}}
+```
 
-Scrubbing: the tool reads the store once per script and replaces every stored
-value with `[secret:NAME]`, longest first. It does so in each step's output, in
-every error (see below), in the reply body, in the snapshot files that `snap` and a failed script attach, and in
-the `text`, `find`, `url`, `console` (inline and attached) and `requests` results. It
-also does so in the files `playwright-cli` writes for itself under the scratch
-directory: the page snapshot of a click holds the value of every field, and the daemon
-appends to its console log after a call has returned, so the next script
-begins by scrubbing them. The `snap`,
-`console`, `go` and `status` verbs of the CLI print through the same scrub. It replaces the
-value in each way listed under What the scrub knows, and a text is scrubbed before it is cut
-for a message, because a value that is cut in two is not found.
+The tool refuses a store that other users can read. Correct its mode with
+`chmod 600 PATH`. A damaged store stops scripts without printing its content.
+The tool cannot redact values until it can read the complete store.
 
-An error of the driver is not scrubbed and shown whole on a seat that holds a secret, or after a
-script hid a value. Playwright prints a preview of every element it names in the call log of an
-error, in the list of a strict-mode violation and in the line that says what stops a click, with the
-text of the element cut at 50 characters and its attributes at 500, and the address of the page cut
-at 200 in its lines about a navigation. A value that a page wrote under two layers of escapes (`JSON.stringify` of
-its own `JSON.stringify`) and that Playwright cut in two shows its start in such a preview, and the
-scrub finds a cut value in one layer and a whole value in several, and neither is this. Some errors
-name an element in their first line too (a selector that resolved to the wrong element). So the error is
-cut by structure, at the one place where the text of the driver comes in: no line of the driver stays,
-not even a short one. The caller sees the kind of the error, read from a fixed list and never copied, and
-a note: `TimeoutError: the driver's message is withheld on a seat that holds secrets; the failure
-snapshot is attached` (or `Error: ...`). The caller's own line is in the transcript, and the failure
-snapshot, which the scrub reads whole, is attached as before. The tool's own messages about output it did not expect (a result
-that is not JSON, a screenshot that wrote nothing) quote 200 characters of the text on a seat with no
-secret, and on a seat that holds one they say that the text is withheld. On a seat that holds no
-secret an error is whole, as the driver wrote it.
+The tool refuses `file:` pages. `upload` and `drop` refuse every path inside
+the browser state directory, including symlinks into it. A downloaded file
+inside that directory cannot be uploaded directly from there. These commands
+can read other files accessible to the node's OS user.
 
-Chrome does not offer to save a typed password, and does not run its breach check
-on it. Before each launch the tool sets two profile preferences to false:
-`credentials_enable_service`, the "Offer to save passwords" switch, and
-`profile.password_manager_leak_detection`, the "Warn you if passwords are exposed
-in a data breach" switch. Chrome keeps filling passwords it already holds. The
-settings take effect when Chrome next starts. If a person turns a switch on, the
-next launch turns it off again.
+`eval` and `run-code` are refused when the seat stores a secret. `ALLOW_EVAL`
+does not override this rule. Reviewed recipes use the tool's own API and can
+still run. Keep `ALLOW_EVAL` off on other seats of the same OS user: code on a
+seat without secrets could read another seat's files before the local-file
+page check runs.
 
-Limits:
+### Command-line and output protection
 
-- A screenshot and a video are pixels, and the tool does not scrub them. A text
-  field shows the secret in them. A password field shows dots.
-- A downloaded file is not scrubbed. Its name is: see What the scrub knows. A recipe's
-  `artifact` scrubs text; bytes that are not UTF-8 text (a NUL byte is none) and hold a value are
-  refused, also when the value is in them as ISO-8859-1, Windows-1252, UTF-16 or UTF-32 (UTF-16 and
-  UTF-32 for data of at most 16 MB; they are read from the first byte). A file in another charset (Windows-1251, Shift-JIS, GBK) with a
-  value of that script in it is not recognized, and neither is UTF-16 text that has no ASCII
-  character in it (it has no NUL byte, and is UTF-8 to the check).
-- The origin check and the fill are two calls to the browser, a few milliseconds
-  apart. A page that moved the field's frame to another origin in exactly that
-  window could have the value typed into the new document.
-- `playwright-cli` writes the page snapshot of a click or a `go` before the tool
-  scrubs it, and its daemon appends to its console log after a call has
-  returned. Until the step ends, or until the next script or CLI command begins, those
-  files hold the value typed into any field on the page and whatever the page logged
-  about it. The seat's directories are mode 0700, so only the node's OS user can open
-  them.
-- A site that keeps a value in its own storage keeps it in the seat's profile and in
-  `state.json`, readable by the OS user only. `save` and `close` write that copy. The tool
-  does not scrub it, because it holds the cookies that keep the seat signed in, and nothing
-  returns it.
-- A short stored value refuses any text of a script that holds it, so a four-digit PIN
-  refuses `fill #amount 12345`. A sender who may run scripts can also find a short value by
-  trying guesses: a line that holds it is refused, and the line is echoed with the value
-  scrubbed. Store values that cannot be guessed. The floor of 4 characters is the shortest
-  value the scrub can handle, not a safe length.
-- A value that a script hid is known to that script only. The driver's console and network
-  buffers outlive a script, so `console` and `requests` in a later script show what the
-  page logged, scrubbed with the stored secrets and not with the earlier script's hidden
-  value.
-- Chrome's DevTools port listens on the loopback and has no login. Any process on the
-  machine, of any user, that finds the port can drive the seat's Chrome as the node's OS
-  user: read a field or the cookies, or open the store as a page. The modes 0600 and 0700
-  keep other users out of the files, not out of the browser. Run a seat on a machine whose
-  local users you trust.
-- The eval guard looks at the seat's own store. On another seat of the same
-  machine that holds no secret, `ALLOW_EVAL` still lets `run-code` call
-  `page.goto("file:///...")` and return what it reads, in the same step, from any
-  file the OS user can read, including this seat's `secrets.json`. The step that ends
-  on a `file:` page fails, but code that goes back to another page before it returns
-  is not caught. Keep `ALLOW_EVAL` off on a machine that holds secrets.
-- A `playwright-cli` config file can also let the driver open local files, and so
-  can a driver started by hand with the switch. The check at the end of each step
-  covers both: a step that ends on a `file:` page fails. Such a file (`~/.playwright/cli.config.json`
-  of the node's OS user) can also move the driver's output out of `scratch/.playwright-cli`,
-  where the sweep looks. The tool removes the environment variables that do so; it cannot
-  remove a file.
-- A value under more than four layers of escapes is not found. A letter or a digit that is
-  written as an escape (`&#83;` or `%53` or `\u0053` for `S`) is not found either: no
-  encoder writes one on its own, and the scrub looks for the letters and digits of a value
-  to know where to look. A value that a tool cut and ended with an ellipsis is found in
-  one layer, not in more.
-- PyYAML's folded lines are read in three layers, not in four: the fourth is read by the pattern of
-  the value, which does not know them.
-- The undoing of layers costs time that grows with the text around the places where a value
-  can be. A place needs an escape near it (or a line end, for a value that a fold can be in), so a
-  text with none costs nothing; a value whose letters and digits come in runs of one or two
-  characters (`a!b@c#d$`) has a place nearly everywhere in a text that is full of escapes. How far
-  from its first run a value can reach is counted in the characters of the text it can take: one for
-  a letter or a digit, which no encoder escapes, and 512 for any other character (a key of a
-  thousand characters, most of them letters, reaches a few thousand characters of a text, not half
-  a million). A text that costs more than `secretstore.WORK_LIMIT` (48 million characters of
-  decoding, two or three seconds, counted for a pass over each text, a call for each match of a family
-  whether it stands for anything or not, and a search of each text; the small windows of a text are
-  decoded first) has the places it did not get to scrubbed whole: from the first run of letters and
-  digits of the value that is looked for to the farthest place in reach where its last run is, and with
-  what the other characters of the value can take around them. The first run that is looked for is the
-  one at the start of the value, or the first of three letters or more, and the last is the one at its
-  end, or the last of three letters or more; a third is the longest of the others. A value that begins
-  with a letter and ends with a letter or a digit has no more than that stretch, and the farthest copy of
-  its last run in reach ends it; one that begins with a character that is not a letter can take 512
-  characters for each such character before it, and one that ends with one, after it. Copies that are
-  close together in such a text are scrubbed as one stretch, and the text between them goes. A value with a character over
-  U+007F and no letter or digit of ASCII (text in another script) has its places where a text has
-  what an escape of its characters holds, as above; on a page in the same script that is
-  everywhere, and the cost is that of a text full of escapes. A value of punctuation only has no run
-  and no number to look for by: it is looked for in a window of its reach (512 characters for each
-  of its characters) on either side of each escape, joined up to 64 KB, and on a snapshot of 370 KB
-  that is all escapes, most of it is scrubbed whole.
-- A value that a tool cut is looked for in the window before each ellipsis: 520 characters for a
-  value of 43 characters or fewer (the tool cuts at 500, and the rest is for escapes), and 12
-  characters of text for each character of a longer value (a 600-character value is looked for in
-  7,200). A cut that shows more of a value than its window is not found. A value over 4,096
-  characters has a cut for each of its pieces, so a cut is found in any of them. A tool's ellipsis
-  costs a scan of the window for each value, and a run of dots is scanned once for all the places
-  the ellipsis can begin at, which are as many as the most dots in a row in a stored value. With
-  more than 64 ellipses in a text, the places where a value can begin are found in one pass for
-  each value, and a value whose start is nowhere in the text costs nothing for an ellipsis. Every
-  place in the window where a value can begin is tried, the farthest first, and none before the
-  ellipses that the value cannot hold: the text that a tool shows of a value has in it the ellipses
-  the value has and no others, so a cut value does not begin before the run of dots or the
-  ellipsis that comes that many runs before its own (and a value that begins with dots can begin in
-  the end of the run before). The search is bounded: `secretstore.CUT_WORK_LIMIT` is 1.5 million
-  steps, about a second and a half (a step is a character of the text walked, or a hundred
-  characters of a window looked at). A text that repeats the start of a value many times, or a value
-  that repeats itself, can spend it, and then the window before each ellipsis that is left is
-  scrubbed whole. A cut value is
-  looked for in the text as it is, so that a password cut after a user name that is a stored value
-  of its own is scrubbed as the password. A cut in the middle of a character over U+FFFF (a tool that
-  cuts by the length of a JavaScript string cuts an emoji in two) is found.
-- A value over 4,096 characters is found by its whole forms (JSON, YAML, CSS, URL, plus, markup)
-  and by patterns of pieces of it a character at a time, side by side, so that a text which has it
-  in the mix shows one marker for each piece. A value (or a tidied copy of it) over 16,384
-  characters has its whole forms and no more: a pattern of a piece costs a tenth of a second for
-  each thousand characters to make, and every `hide` makes them again.
-- A value that cannot be searched for in a text (the compile of its patterns raises) is refused by
-  `hide` with an error that names no part of it, and the scrubber is as it was. A value that a script
-  hides is at most 4,096 characters: it is a passcode or a token, and every hide makes the patterns
-  of all the values again.
-- A page that shows a changed copy of a value (masked, reformatted, hashed, in base64) shows
-  the copy. The scrub and the check of a command line know the value in the forms
-  above, not in a copy the page made, so a selector made of the copy can be in a
-  command line.
-- After a sensitive step whose cleanup could not confirm that the page is clear, nothing
-  of the page is captured for the rest of that script. The next script starts with
-  capture on. When Chrome could not be closed either, the failure names the fix, `browser
-  close --seat <seat>`: run it before the seat takes another script.
-- Any process that runs as the node's OS user can read `secrets.json`. The mode
-  keeps out other users.
+Stored secrets and values hidden by a recipe are checked before the tool
+starts Playwright CLI. If a caller-supplied argument contains such a value,
+the tool refuses the command without printing that argument. Use `fill-secret`
+instead of `fill` or `type` for a secret.
+
+Targets go to the browser through a private file. If the page returns a
+selector that contains a secret, the tool uses element tag names and
+positions instead. If it cannot make a safe selector, it asks for a snapshot
+reference. A target reference such as `e1234` is not secret text when used as
+a reference. The same text in a value argument is checked.
+
+The tool writes secret-fill code to a mode-0600 file under private scratch
+storage. Playwright CLI receives its path with `--raw run-code --filename`.
+It does not receive the value in its command line. The tool removes the file
+after the call. Routed replies also use stdin, not command-line arguments.
+
+The tool replaces protected values with `[secret:NAME]` in transcripts,
+errors, text output, URLs, snapshots, console and network logs, and recipe
+results. It redacts text before truncation. It also checks filenames and
+removes protected values from attachment names. A safe extension of up to
+eight letters or digits can remain.
+
+The driver creates its own snapshots and console files. The tool redacts
+changed files at the end of a step and scans driver files again before the
+next script or local command. It removes a file it cannot redact. These files
+remain in private directories while the scan is pending.
+
+On a seat with protected values, driver errors show a fixed error type and
+an explanation that the driver message is withheld. They do not repeat any
+driver error line. A permitted failure snapshot remains available after
+redaction. On a seat without protected values, the full driver error is shown.
+
+Chrome's password-save offer and password breach check are disabled before
+each launch. Existing saved-password autofill remains enabled. Manual changes
+to those two switches are replaced at the next launch.
+
+### Redaction forms and bounds
+
+The redactor recognizes these representations:
+
+| Representation | Coverage |
+|---|---|
+| Plain text | Complete values, with the longest values checked first. |
+| URL | Percent escapes, `+` for spaces, mixed-case hex, and JavaScript `%uXXXX`. |
+| String formats | JSON, JavaScript, YAML, and Python escapes. Includes YAML doubled apostrophes and folded lines. |
+| CSS | Escaped characters and identifiers, including a leading escaped digit. |
+| Markup | Named and numeric entities. |
+| Whitespace | Snapshot whitespace folding and Playwright line-feed/tab preview characters. |
+| Nested formats | Up to four layers. YAML line folding is recognized in the first three layers. |
+| Truncated text | A value prefix of at least four characters followed by an ellipsis, in one encoding layer. |
+
+URL decoding checks UTF-8 and ISO-8859-1 where needed. Numeric markup control
+references are checked both as browser mappings and as their original code
+points. Overlapping matches are redacted together. The test matrix is in
+`apps/tools/tests/browser/test_layers.py`.
+
+The nested-format search uses a 48-million-character work limit. If it
+reaches that limit, it redacts complete candidate regions instead of leaving
+them visible. Punctuation-only values can cause large regions to disappear.
+The truncated-value search has a 1.5-million-step work limit. On exhaustion,
+it redacts the remaining candidate windows before ellipses.
+
+Truncated-value windows span 520 characters for values up to 43 characters,
+and 12 characters per value character for longer values. A prefix outside
+that window can be missed. Values above 4096 characters are checked in pieces
+as well as complete forms. Values above 16384 characters use complete forms
+only. Hidden recipe values have a 4096-character limit. A value whose search
+patterns cannot be built is refused without revealing it.
+
+### Limits
+
+- Screenshots and videos are not redacted. A visible text field can show the
+  value. Do not capture a page that displays a secret.
+- Downloaded file contents are not redacted. Their filenames are checked.
+- A recipe's `artifact` redacts UTF-8 text. It refuses recognized binary data
+  that contains a protected value. Checks include ISO-8859-1 and Windows-1252.
+  UTF-16 and UTF-32 checks start at the first byte and cover files up to 16 MB.
+  Other encodings, such as Windows-1251, Shift-JIS, and GBK, can be missed.
+  UTF-16 with no ASCII characters can also be misidentified.
+- The origin check and fill are separate browser calls. A frame that changes
+  origin between them could receive the value at its new origin.
+- Driver files can contain values before the next redaction pass. Only the
+  node's OS user can read the private directories.
+- Chrome storage and `state.json` can retain values. The tool does not redact
+  them because they preserve sign-ins. No command returns or attaches them.
+- A short secret can block unrelated text that contains it. A sender can
+  also test guesses through these refusals. Four characters is a technical
+  minimum, not a recommended secret strength. Use values that resist guessing.
+- A recipe's hidden value exists only for that script. A later script cannot
+  redact that value from old console or network buffers unless it is stored.
+- A modified Playwright config can move driver output outside the scanned
+  scratch directory. The tool removes relevant environment overrides but
+  cannot remove the user's `~/.playwright/cli.config.json` file.
+- More than four encoding layers are not recognized. Encoded letters or
+  digits, such as `%53` for `S`, can evade detection. Truncated values under
+  multiple encoding layers can also be missed.
+- Masked, reformatted, hashed, or base64 copies are not recognized as the
+  original value. Such a copy can appear in output or a selector argument.
+- After uncertain sensitive-step cleanup, capture stays off for that script.
+  The next script enables capture again. If Chrome could not be closed,
+  run `ar3 tool browser --node browser-seat close` before another script.
+- Any process under the node's OS user can read the store. File modes restrict
+  other users, not processes with the same user identity.
 
 ## Site recipes
 
-A site recipe gives a website named commands, with this tool as the engine behind
-them. A person or an agent then uses the site as an API that runs in a signed-in
-browser:
+A recipe provides named commands for one site. It runs in the seat's browser
+profile. Use the explicit message separator before recipe commands:
 
 ```bash
-ar3 tool browser --node garmin -- recipe shop list --limit 3
-ar3 tool browser --node garmin -- recipe shop read weekly newsletter
+ar3 tool browser --node browser-seat -- recipe
+ar3 tool browser --node browser-seat -- recipe shop
+ar3 tool browser --node browser-seat -- recipe shop list --limit 3
 ```
 
-`recipe` is a line of the command language, so it works in a message to the node, by
-hand through `ar3 tool`, and in a longer script beside plain steps. A recipe run is
-part of the script that holds the seat. It takes the seat lock, ends when `a8s stop`
-runs, counts as use for `TIMEOUT`, and returns its transcript and files as any script
-does. The transcript shows the `recipe` line and, indented under it, each page call
-the recipe made, with every stored value replaced by `[secret:NAME]`.
+`shop` is an example recipe. The suite includes `givebacks`, alias `gb`.
+See [Recipe reference](recipes/README.md) for its settings and commands.
 
-| Line | What it does |
+| Script command | Function |
 |---|---|
-| `recipe` | One line per recipe: name, aliases and title, then the markers `[node]`, `[replaces bundled]` and `[broken: <error>]`. |
-| `recipe <site>`, `recipe <site> help` | Title, origins, node settings, secret names, and each verb with its kind, whether it needs sign-in, its usage and an example. `recipe <site> help <verb>` shows one verb. |
-| `recipe <site> <verb> [arguments]` | Runs the verb. A site goes by its name or an alias. |
-| `recipe <site> status` | Prints `in`, `out` or `unknown`. |
-| `recipe <site> check` | Runs the status probe, then each `read` verb that declares an example (never `login`), and prints `healthy` or `failing` for each. The step fails when one fails. |
+| `recipe` | Lists names, aliases, titles, and load status. Marks private, replacement, and broken recipes. |
+| `recipe SITE` or `recipe SITE help` | Shows origins, settings, secret names, verbs, and examples. |
+| `recipe SITE help VERB` | Shows one verb's help. |
+| `recipe SITE VERB [ARGUMENTS]` | Runs a verb by recipe name or alias. |
+| `recipe SITE status` | Returns `in`, `out`, or `unknown`. |
+| `recipe SITE check` | Runs the status probe and examples for read verbs. Does not run `login`. Reports each result. |
 
-Listing and help open no Chrome. Running a verb, `status` and `check` open it, as a plain step does.
+Listing and help do not open Chrome. Other recipe operations share the seat
+lock, stop checks, timeout activity, transcript, and attachments with scripts.
+Arguments are checked before browser work. To preserve quotes in a title,
+use stdin with a quoted shell heredoc.
 
-**Arguments** are words, split as for the other commands, and each verb's arguments are
-checked against its declaration: a bad one fails with the verb's usage. A verb may take
-the rest of the line as one argument, so `recipe shop read weekly newsletter` needs no
-quotes. `ar3 tool` joins its words with spaces, so the quotes you type are gone before
-the tool reads the line. Send a title with an apostrophe in it through `ar3 tool
-browser --node <node> -` and a heredoc, where the quotes stay.
+A recipe can return text, structured data, and files. Data appears as compact
+JSON, limited to 2000 characters, and as a complete `result.json` attachment.
+A routed reply has a 4000-character limit. Local output is complete.
 
-**Results.** A verb returns text, data, files or a mix. The text is the step's output.
-Data prints as compact JSON, cut at 2000 characters, and is attached whole as
-`result.json`. Files come back as attachments, as a `shot` does. A wake's reply is cut
-at 4000 characters, and `ar3 tool` prints it whole.
+An invalid argument returns usage. A missing sign-in or required manual
+step returns `needs a person: <reason>. <action>`. Other failures return the
+error and a failure snapshot. A sensitive step returns a fixed failure
+message without page contents or a snapshot. It must confirm that the browser
+no longer holds the sensitive value. If cleanup cannot confirm this, the
+tool closes Chrome before it replies.
 
-**Failures** are of four kinds, and each says what to do next:
+The sign-in probe returns `in`, `out`, or `unknown` without changing the site.
+A verb that requires sign-in runs only for `in`. A recipe can provide a
+`login` verb that uses stored secrets. Only an explicit request runs it.
 
-- Usage: an unknown recipe, verb or argument. The reply is the verb's usage.
-- Needs a person: the site is signed out, wants a code, or shows a consent page. The
-  reply reads `needs a person: <reason>. <how>` and names the seat to sign in on.
-- A step failed: the reply names the step and the error, and attaches the failure
-  snapshot, as for any script.
-- A sensitive step failed: a recipe that handles a value it must not show, such as a
-  one-time passcode read from a mail, keeps that part in a sensitive step. The reply
-  says `<recipe> <verb>: the <name> step failed` and nothing the page or the driver
-  said, and attaches no failure snapshot. The step ends with a check that the browser
-  holds nothing of the value. If the recipe cannot confirm that, the tool closes Chrome
-  before it replies, and the reply says so. The next script opens Chrome again.
+A recipe declares permitted origins. Direct page and HTTP requests check
+them before the request. Navigation caused by a click or server redirect is
+checked after navigation. In-page `fetch` does not follow redirects. A recipe's
+reviewed in-page code is not subject to these origin checks.
 
-`ar3 tool` exits 1 when the script failed or the seat was busy and nothing ran, and 0
-otherwise, so an alias works in a shell script. A wake exits 0 either way, because a8s
-dead-letters a wake that exits with another code.
+Bundled recipes live in `apps/tools/browser/recipes/`. Private recipes live
+in `recipes/` under the registered browser node's root. A symlink to another
+directory is allowed. The tool resolves that root from the seat name through
+the a8s registry. It never loads recipes from an arbitrary current directory.
+A node of another type does not supply browser recipes.
 
-**Sign-in.** The seat's signed-in profile is the credential. A recipe has a status probe
-that answers `in`, `out` or `unknown` and changes nothing on the site. The probe runs
-before each verb that needs sign-in. `out` or `unknown` stops the verb with `needs a
-person`, and the recipe never signs in on a guess. A recipe may have a `login` verb that
-types stored secrets with `fill-secret` (see Secrets). It runs without the probe, and
-only a message or an operator calls it.
+Without a matching browser registration, a seat loads bundled recipes only.
+The public CLI does not accept an arbitrary recipe-directory override. A private recipe replaces a bundled recipe with the
+same name. A broken file is listed without stopping other recipes. Files
+whose names start with `_` are ignored.
 
-**Origins.** A recipe lists the origins it may use, in the syntax of `browser secret
-set --origin`. Its page calls refuse a URL outside them before any request is made, and
-a page that a link or a redirect took outside them fails the verb. An in-page `fetch` follows no
-redirect: a redirect fails the call, because the browser would request the new address before the
-origins could be checked.
+Only the operator should write recipe files. Messages can run recipes but
+cannot install or change them. Every sender on `ALLOW` can run their read and
+write verbs. `ALLOW_EVAL` controls caller-supplied code; it does not disable
+reviewed recipe code.
 
-**Where recipes live.** The bundled recipes are in `apps/tools/browser/recipes/`. They
-are general drivers with no personal values, reviewed like any code. A node also loads
-the files in `recipes/` in its registered root, the directory `a8s add` was given. A
-symlink to another directory works. The tool finds the node in the a8s registry by the
-seat's name, and only when that node runs the `tool-browser` definition. The working
-directory and the environment decide nothing, so a recipe in the directory a run
-happens to stand in is never loaded, and neither is one in the root of a node of
-another kind. A seat that names no such node loads the bundled recipes only. `ar3 tool`
-with no `--node` drives a seat named `browser`, and `browser do` drives the seat it is
-given. `browser do` takes `--recipes DIR` to add a directory by hand. A node's recipe
-with a bundled recipe's name replaces it, and the listing says so. A file that fails to
-load, or whose `recipe` is missing or named differently from the file, is listed as
-`[broken: <error>]` and stops nothing else. A file whose name starts with `_` is not
-loaded as a recipe.
+Local script commands return 1 on failure or a busy seat, and 0 on success.
+Routed wakes return 0 even for script failures. Read the reply for the result.
 
-**Who may run them.** A recipe is code that acts with the seat's signed-in identity. So a
-message can only name a recipe. It can not install, change or send one. Give a browser
-node a directory of its own, and let only the operator write to its `recipes/`. Every
-sender on `ALLOW` may run the node's recipes, as it may run any script, and the help
-marks each `write` verb. `ALLOW_EVAL` gates code that a caller sends. A recipe's own
-in-page code is reviewed code: it needs no opt-in, and it is not checked against the
-origins.
+## Errors
 
-The bundled `givebacks` recipe, alias `gb`, reads an organization's GiveBacks newsletters: `login`,
-`list`, `open`, `pull` and `screenshot`. Its settings, its secrets and an alias for a shell are in
-[recipes/README.md](recipes/README.md#givebacks).
-
-[recipes/README.md](recipes/README.md) is the guide to writing a recipe.
+| Condition | Action |
+|---|---|
+| Missing browser requirement | Run `ar3 tool browser --node browser-seat doctor`. |
+| Browser opens without a window | On Linux, check `env.DISPLAY` and any required `env.XAUTHORITY`. |
+| Wrong profile or private recipes absent | Check the selected node, `A8S_HOME`, and `XDG_DATA_HOME`. |
+| Seat busy | Read the lock holder in the reply. Let that script finish before a new request. |
+| Missing or refused secret | Store its value locally and check its allowed origins. |
+| Target has several matches | Run `snap`. Use a specific reference from that snapshot. |
+| `seat closed by a8s stop` | Start a new script only when another browser operation is intended. |
 
 ## Trust
 
-The profile holds a signed-in session, and Chrome's DevTools port has no login (see the limits
-under Secrets): a seat belongs on a machine whose local users you trust.
-
-The profile holds a signed-in session. A sender on `ALLOW` acts as that person
-on every site the profile has open, and can have a stored secret typed into any
-field on an origin that secret allows. Allowlist few names. `eval` and `run-code`
-run any code in the page or the driver. They stay refused until `ALLOW_EVAL`
-is on, and on a seat that holds secrets they stay refused whatever it says. Leave
-`ALLOW_EVAL` off unless the work needs it.
+A sender on `ALLOW` acts as the account signed in to the profile. It can enter
+a stored secret into a field on any origin allowed for that secret. Keep the
+sender list and origin lists narrow. Leave `ALLOW_EVAL` off unless the task
+requires it. Use a separate OS user to restrict filesystem access.

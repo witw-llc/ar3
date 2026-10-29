@@ -55,9 +55,10 @@ def _do(seat, args, epoch):
 
     try:
         with _hold(seat, "browser do", "do"):
+            node_dirs = handler.node_recipe_dirs(seat) if os.environ.get("AR3_TOOL_PROG") else []
             run = commands.run_script(
                 seat, body, allow_eval=_allow_eval(), epoch=epoch,
-                recipes=recipe.Library(dirs=args.recipes),
+                recipes=recipe.Library(dirs=[*node_dirs, *args.recipes]),
             )
     except seatlock.SeatBusy as busy:
         return _busy(seat, busy, args.json)
@@ -80,21 +81,31 @@ def _positive_seconds(text):
     return value
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse quotes the argument it cannot use. Where the command line is a `secret` verb, that argument may be
+    the value, typed in place of `-`, so the error names no argument."""
+
+    def error(self, message):
+        if "secret" not in sys.argv[1:]:
+            super().error(message)
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: the secret arguments are not valid\n")
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        prog="browser",
+    parser = _Parser(
+        prog=os.environ.get("AR3_TOOL_PROG", "browser"),
         description="A persistent browser session addressable as an a8s seat.",
     )
     parser.add_argument("-s", "--seat", help="seat name (default: $AR3_BROWSER_SEAT or 'browser')")
     parser.add_argument("--chrome", help="Chrome binary (default: found on PATH)")
-    parser.add_argument("--port", help="CDP port (default: Chrome picks a free port and records it in the seat profile)")
     sub = parser.add_subparsers(dest="command")
     # The same options after the verb, as a8s's definition passes them there.
     # SUPPRESS keeps a subparser from overwriting a value given before the verb.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--seat", default=argparse.SUPPRESS)
+    common.add_argument("--seat", default=argparse.SUPPRESS,
+                        help=argparse.SUPPRESS if os.environ.get("AR3_TOOL_PROG") else None)
     common.add_argument("--chrome", default=argparse.SUPPRESS)
-    common.add_argument("--port", default=argparse.SUPPRESS)
 
     sub.add_parser("open", parents=[common], help="launch Chrome on this seat's profile and attach")
     sub.add_parser("close", parents=[common], help="save state and quit Chrome")
@@ -116,14 +127,20 @@ def main():
     )
     secret_sub = parser_secret.add_subparsers(dest="secret_command", required=True)
     seat_only = argparse.ArgumentParser(add_help=False)
-    seat_only.add_argument("--seat", default=argparse.SUPPRESS)
+    seat_only.add_argument("--seat", default=argparse.SUPPRESS,
+                           help=argparse.SUPPRESS if os.environ.get("AR3_TOOL_PROG") else None)
     parser_set = secret_sub.add_parser(
         "set", parents=[seat_only], help="store a secret; the value comes from stdin or a hidden prompt"
     )
     parser_set.add_argument("name", metavar="NAME")
     parser_set.add_argument(
-        "--origin", action="append", required=True, dest="origins", metavar="ORIGIN",
-        help="an origin the secret may be typed on, such as https://app.example.com; repeat for more",
+        "source", nargs="?", metavar="-",
+        help="read the value from stdin, as it does when stdin is not a terminal",
+    )
+    parser_set.add_argument(
+        "--origin", action="append", default=[], dest="origins", metavar="ORIGIN",
+        help="an origin the secret may be typed on, such as https://app.example.com; repeat for more. "
+        "A name that is already stored keeps its origins when none is given",
     )
     secret_sub.add_parser("list", parents=[seat_only], help="print each secret name with its origins")
     parser_rm = secret_sub.add_parser("rm", parents=[seat_only], help="remove a secret")
@@ -135,10 +152,12 @@ def main():
     parser_do = sub.add_parser("do", parents=[common], help="run a command script (file, or '-' for stdin)")
     parser_do.add_argument("script")
     parser_do.add_argument("--json", action="store_true", help="emit the run as JSON")
-    parser_do.add_argument(
-        "--recipes", action="append", default=[], metavar="DIR",
-        help="also load site recipes from DIR (repeatable); a recipe there replaces a bundled one of its name",
-    )
+    parser_do.set_defaults(recipes=[])
+    if not os.environ.get("AR3_TOOL_PROG"):
+        parser_do.add_argument(
+            "--recipes", action="append", default=[], metavar="DIR",
+            help="also load site recipes from DIR (repeatable); a recipe there replaces a bundled one of its name",
+        )
 
     parser_handle = sub.add_parser("handle", parents=[common], help="a8s wake entry point")
     parser_handle.add_argument("--from", dest="sender", required=True)
@@ -160,13 +179,10 @@ def main():
         parser.print_help()
         return 0
 
-    if args.command == "doctor":
-        return doctor.report()
-
     if args.chrome:
         os.environ["AR3_BROWSER_CHROME"] = args.chrome
-    if args.port:
-        os.environ["AR3_BROWSER_PORT"] = args.port
+    if args.command == "doctor":
+        return doctor.report()
     seat = _seat(args)
     if args.command == "secret":
         return _secret(seat, args)
@@ -345,13 +361,36 @@ def _drive(seat, args, epoch):
     return 0
 
 
+MAX_SECRET_BYTES = 65536
+
+
 def _secret_value(name):
     """The value from stdin when stdin is not a terminal (one trailing newline
-    stripped), else from a prompt that does not echo."""
+    stripped), else from a prompt that does not echo. A message about input that
+    cannot be used never quotes it."""
     if sys.stdin.isatty():
         return getpass.getpass(f"Value for {name}: ")
-    text = sys.stdin.read()
+    raw = sys.stdin.buffer.read(MAX_SECRET_BYTES + 1)
+    if len(raw) > MAX_SECRET_BYTES:
+        raise secretstore.SecretStoreError(f"a secret value is at most {MAX_SECRET_BYTES} bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise secretstore.SecretStoreError("a secret value must be UTF-8 text") from None
     return text[:-1] if text.endswith("\n") else text
+
+
+def _origins_to_set(seat, args):
+    """The origins a `secret set` binds: those given, else those a stored secret of the name already has."""
+    if args.origins:
+        return secretstore.check_origins(args.origins)
+    kept = secretstore.read(seat).get(args.name)
+    if kept is None:
+        raise secretstore.SecretStoreError(
+            f"secret {args.name} is new: say where it may be typed with --origin, "
+            f"for example: secret set {args.name} - --origin https://app.example.com"
+        )
+    return kept["origins"]
 
 
 def _secret(seat, args):
@@ -368,7 +407,11 @@ def _secret(seat, args):
             print(f"{seat}: removed {args.name}")
         else:
             secretstore.check_name(args.name)
-            origins = secretstore.check_origins(args.origins)
+            if args.source not in (None, "-"):
+                raise secretstore.SecretStoreError(
+                    "the value is never an argument: pipe it in and give - after the name"
+                )
+            origins = _origins_to_set(seat, args)
             secretstore.set_secret(seat, args.name, _secret_value(args.name), origins)
             print(f"{seat}: set {args.name}")
     except secretstore.SecretStoreError as exc:

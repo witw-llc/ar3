@@ -265,7 +265,7 @@ def _fill_secret(seat, args, run):
     if entry is None:
         raise plc.BrowserError(
             f"secret {name} is not set for seat {seat}; "
-            f"the operator sets it with `browser secret set {name} --origin ORIGIN --seat {seat}`"
+            f"the operator sets it with `ar3 tool browser --node {seat} secret set {name} - --origin ORIGIN`"
         )
     target = resolve.fill_target(seat, args[0])
     selector = f"aria-ref={target}" if resolve.REF_RE.match(target) else target
@@ -516,7 +516,7 @@ def _download(seat, args, run):
 
 EVAL_OFF_WITH_SECRETS = (
     "eval and run-code are off on a seat that holds secrets; they could read a field a secret "
-    "was typed into. Remove the secrets (browser secret rm) or use a seat without them."
+    "was typed into. Remove the secrets (ar3 tool browser --seat NAME secret rm SECRET) or use a seat without them."
 )
 EVAL_OFF_AFTER_HIDE = (
     "eval and run-code are off in a script after a recipe has hidden a value in it; they could read the "
@@ -800,8 +800,8 @@ def _discard_recording(seat):
 
 def _close_local_pages(seat):
     """Close each page of Chrome, other than the one the driver drives, that is a local file, through its
-    DevTools endpoint. Returns how many were closed, or None when one stayed open. A Chrome whose endpoint
-    does not answer has nothing to close here: the page the driver drives is the one that was looked at."""
+    own target list (`session.pages`). Returns how many were closed, or None when one stayed open. A Chrome whose list
+    cannot be read has nothing to close here: the page the driver drives is the one that was looked at."""
     found = session.pages(seat)
     if found is None:
         return 0
@@ -847,8 +847,8 @@ def leave_local_file(seat, run, verb):
 def refuse_a_local_page(seat, run, verb):
     """Fail the step when a page of Chrome is a local file. `go` opens none, and the driver is started without the
     switch that lets it, so this holds the case that a driver started some other way, or a page left from before,
-    brings one in. The addresses of all the pages come from Chrome's DevTools endpoint, which costs a few
-    milliseconds; when it does not answer, the driver is asked for the address of the page it drives, which costs
+    brings one in. The addresses of all the pages come from Chrome's own target list, which costs one driver call;
+    when it cannot be read, the driver is asked for the address of the page it drives, which costs
     a call. A page whose address cannot be read is left to the step."""
     found = session.pages(seat)
     if found is not None:

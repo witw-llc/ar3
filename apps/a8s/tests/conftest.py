@@ -261,3 +261,20 @@ def agents_root() -> Path:
 def fixtures_dir() -> Path:
     """Pytest-only fixtures (mock_cli.py, definition JSONs) under apps/a8s/tests/fixtures/."""
     return Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _no_os_startup_entries(monkeypatch, tmp_path_factory):
+    """No in-process test may read or write the host's real startup entries.
+    Tests of autostart itself install their own backend over this one."""
+    import autostart
+    from _memory_backend import STORE, MemoryBackend
+
+    STORE.clear()
+    MemoryBackend.fail_install = MemoryBackend.fail_remove = False
+    monkeypatch.setattr(autostart, "select_backend", lambda: MemoryBackend())
+    lock_root = tmp_path_factory.mktemp("account-locks")
+    monkeypatch.setattr(autostart, "account_lock_root", lambda: lock_root)
+    yield
+    STORE.clear()
+    MemoryBackend.fail_install = MemoryBackend.fail_remove = False

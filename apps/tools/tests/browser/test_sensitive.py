@@ -244,7 +244,7 @@ def test_a_chrome_that_will_not_close_is_said_and_capture_stays_off(browser):
             pass
     assert str(raised.value) == (
         "the passcode step failed. The page could not be confirmed clear, and Chrome could not be closed. "
-        "Close it with `browser close --seat seat`."
+        "Close it with `ar3 tool browser --seat seat close`."
     )
     assert run.sensitive == [] and run.uncleared == ["passcode"] and not run.capturing
 

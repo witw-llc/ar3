@@ -7,6 +7,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,27 +35,49 @@ def mqtt_broker(tmp_path):
     conf.write_text(
         f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
     )
-    proc = subprocess.Popen(
-        ["mosquitto", "-c", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
+    with _broker_process(conf, port):
+        yield port
+
+
+@contextmanager
+def _broker_process(conf: Path, port: int, *, timeout: float = 5.0) -> Iterator[None]:
+    with tempfile.TemporaryFile(mode="w+b") as errors:
+        proc = subprocess.Popen(
+            ["mosquitto", "-c", str(conf)],
+            stdout=subprocess.DEVNULL,
+            stderr=errors,
+        )
+        problem = ""
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                break
-        except OSError:
-            time.sleep(0.05)
-    else:
-        proc.terminate()
-        pytest.fail("mosquitto failed to start within 5s")
-    yield port
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                code = proc.poll()
+                if code is not None:
+                    problem = f"mosquitto exited with code {code} before listening"
+                    break
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        break
+                except OSError:
+                    time.sleep(0.05)
+            else:
+                problem = f"mosquitto failed to start within {timeout:g}s"
+            if not problem:
+                yield
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+        if problem:
+            errors.seek(0, os.SEEK_END)
+            size = errors.tell()
+            errors.seek(max(0, size - 8192))
+            detail = errors.read().decode("utf-8", errors="replace").strip()
+            pytest.fail(f"{problem}; stderr: {detail or '(empty)'}")
 
 
 def write_network_json(

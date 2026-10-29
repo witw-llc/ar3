@@ -19,11 +19,11 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 import pytest
 
+from browser import plc
 from site_fixture import Site
 
 pytestmark = pytest.mark.skipif(
@@ -70,12 +70,29 @@ def _cli(env, seat, *args, timeout=60):
     here = Path(env["XDG_DATA_HOME"]).parent / "by-hand"
     here.mkdir(exist_ok=True)
     return subprocess.run(
-        ["playwright-cli", f"-s={seat}", *args], env=env, capture_output=True, text=True, timeout=timeout, cwd=here,
+        ["playwright-cli", f"-s={plc.session_name(seat)}", *args], env={**env, plc.IPC_ENV: _ipc_dir(env)},
+        capture_output=True, text=True, timeout=timeout, cwd=here,
     )
 
 
+def _ipc_dir(env):
+    """The tool's socket directory for `env`, so a driver started by hand is the one the tool finds."""
+    saved = {name: os.environ.get(name) for name in ("XDG_DATA_HOME", "XDG_RUNTIME_DIR")}
+    try:
+        for name in saved:
+            if env.get(name) is not None:
+                os.environ[name] = env[name]
+        return plc.private_ipc_dir()
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _daemon_pids(seat):
-    done = subprocess.run(["pgrep", "-f", f"cliDaemon[.]js {seat}( |$)"], capture_output=True, text=True)
+    done = subprocess.run(["pgrep", "-f", f"cliDaemon[.]js {plc.session_name(seat)}( |$)"], capture_output=True, text=True)
     return done.stdout.split()
 
 
@@ -183,14 +200,14 @@ def test_a_driver_started_with_the_switch_some_other_way_shows_no_local_page_thr
     profile = home / "chrome"
     seen = []
     try:
-        # Open the seat through the tool, then replace its driver by one started by hand with the switch. The
-        # Chrome stays up when the driver goes: it is attached, not owned.
+        # Open the seat through the tool, then replace its driver by one started by hand with the switch, on the
+        # seat's own profile and launch config. Chrome lives as long as its driver (its pipe), so the hand-started
+        # driver launches it again.
         done, payload = _do(env, seat, "open\n")
         assert done.returncode == 0, payload
         assert _daemon_has_the_switch(seat) in (False, None)
         assert _cli(env, seat, "close").returncode == 0
-        port = (profile / "DevToolsActivePort").read_text().splitlines()[0]
-        attached = _cli(switched, seat, "attach", f"--cdp=http://127.0.0.1:{port}")
+        attached = _cli(switched, seat, "open", f"--config={home / 'launch.json'}")
         assert attached.returncode == 0, (attached.stdout, attached.stderr)
         assert _daemon_has_the_switch(seat) in (True, None), "the driver started by hand has the switch"
 
@@ -236,13 +253,6 @@ def test_a_driver_started_with_the_switch_some_other_way_shows_no_local_page_thr
         _gone(profile)
 
 
-def _devtools(port, path, method="GET"):
-    """One request to Chrome's DevTools endpoint on the loopback, with no proxy."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method), timeout=10) as answer:
-        return json.loads(answer.read().decode("utf-8")) if path.startswith("/json/new") or path == "/json" else None
-
-
 def test_a_local_page_in_another_tab_fails_the_step_and_the_tab_is_closed(tmp_path):
     """A tab opened by hand, or left from before, beside the page the driver drives: the endpoint lists it, and the
     step that finds it fails, sends the driven page away and closes the tab."""
@@ -256,12 +266,12 @@ def test_a_local_page_in_another_tab_fails_the_step_and_the_tab_is_closed(tmp_pa
     try:
         done, payload = _do(env, seat, f"go {site.base}/\nurl\n")
         assert done.returncode == 0, payload
-        port = (profile / "DevToolsActivePort").read_text().splitlines()[0]
-
-        opened = _devtools(port, f"/json/new?file://{protected}", method="PUT")
-        assert opened["type"] == "page" and opened["url"].startswith("file://")
-        pages = [target["url"] for target in _devtools(port, "/json") if target["type"] == "page"]
-        assert any(url.startswith("file://") for url in pages) and any(url.startswith("http://") for url in pages)
+        # A second tab on the local file, opened by hand through the seat's own driver.
+        opened = _cli(env, seat, "run-code",
+                      f"async (page) => {{ const p = await page.context().newPage(); await p.goto({json.dumps('file://' + str(protected))}); }}")
+        assert opened.returncode == 0, (opened.stdout, opened.stderr)
+        listed = _cli(env, seat, "tab-list").stdout
+        assert "file://" in listed and "http://" in listed, listed
 
         done, payload = _do(env, seat, "url\n")
         seen.append(done.stdout + done.stderr)
@@ -269,8 +279,8 @@ def test_a_local_page_in_another_tab_fails_the_step_and_the_tab_is_closed(tmp_pa
         assert payload["steps"][0]["error"] == (
             f"url: the page is a local file, and {LOCAL}. The page was sent to about:blank. 1 other local page was closed."
         )
-        pages = [target["url"] for target in _devtools(port, "/json") if target["type"] == "page"]
-        assert pages and not any(url.startswith("file:") for url in pages), pages
+        listed = _cli(env, seat, "tab-list").stdout
+        assert "file://" not in listed, listed
         for path in payload["files"]:
             assert MARKER.encode() not in Path(path).read_bytes()
 

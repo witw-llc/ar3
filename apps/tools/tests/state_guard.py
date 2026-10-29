@@ -242,12 +242,30 @@ def pytest_sessionfinish(session, exitstatus):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
+_RUNTIME = []
+
+
+def _short_runtime_dir():
+    """One short private directory for the whole run, removed when the run ends."""
+    if not _RUNTIME:
+        import atexit
+        import shutil
+        import tempfile
+        path = tempfile.mkdtemp(prefix="ar3rt-", dir="/tmp" if os.name == "posix" else None)
+        atexit.register(shutil.rmtree, path, True)
+        _RUNTIME.append(path)
+    return _RUNTIME[0]
+
+
 @pytest.fixture(autouse=True)
 def _state_in_tmp(request, tmp_path, monkeypatch):
     """Each test keeps its seats, sessions, vault and a8s files in directories of its own, and fails if it
     reached the real ones."""
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    # The data home above is too long for a socket, so the driver's socket directory falls back to one under
+    # the runtime directory (`plc.ipc_dir`): a short one of the run's own, not the session's.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", _short_runtime_dir())
     monkeypatch.setenv("A8S_HOME", str(tmp_path / "a8s-home"))
     GUARD.test = request.node.nodeid
     yield
@@ -277,22 +295,22 @@ def _no_real_chrome(request, monkeypatch):
     """Only a live test may start a real Chrome (AR3_TOOL_BROWSER_LIVE=1, the switch
     test_stop_live.py skips on). Any other test that reaches the Chrome launch fails
     and names itself, so a stub that misses a call site cannot leave a browser running.
-    A test that stubs `spawn` still runs the real `_launch_chrome` to check its argv."""
+    A test that stubs `plc.run` still runs the real `_launch_chrome` to check its config."""
     if os.environ.get("AR3_TOOL_BROWSER_LIVE") == "1":
         yield
         return
-    from browser import session
+    from browser import plc, session
 
-    launch, spawn, quiet = session._launch_chrome, session.spawn, session._spawn_quiet
+    launch, run = session._launch_chrome, plc.run
     reached = []
 
     def refuse(seat):
-        if session.spawn is not spawn or session._spawn_quiet is not quiet:
+        if plc.run is not run:
             return launch(seat)
         reached.append(
             f"{request.node.nodeid} reached the real Chrome spawn "
             "(browser.session._launch_chrome). Stub browser.session._start_chrome, "
-            "or stub browser.session.spawn to check the launch argv."
+            "or stub browser.plc.run to check the launch config."
         )
         pytest.fail(reached[-1])
 

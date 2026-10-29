@@ -1,0 +1,4 @@
+{"dir":"out","line":{"method":"turn/started","params":{"threadId":"parent-thread","turn":{"id":"parent-turn","status":"inProgress","items":[]}}}}
+{"dir":"out","line":{"method":"item/completed","params":{"threadId":"parent-thread","turnId":"parent-turn","item":{"type":"subAgentActivity","id":"spawn-item","kind":"started","agentThreadId":"child-thread"}}}}
+{"dir":"out","line":{"method":"turn/completed","params":{"threadId":"parent-thread","turn":{"id":"parent-turn","status":"completed","items":[]}}}}
+{"dir":"out","line":{"method":"item/completed","params":{"threadId":"parent-thread","turnId":"parent-turn","item":{"type":"subAgentActivity","id":"receipt-item","kind":"completed","agentThreadId":"child-thread"}}}}

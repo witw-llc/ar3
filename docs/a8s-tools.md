@@ -1,230 +1,236 @@
 ---
 name: "a8s-tools"
-description: "Tool nodes: a8s agents that run a program instead of a model. Bundled: tool-command-shell, tool-vault, tool-browser, tool-gemini-web."
+description: "Set up and use tool nodes for shell commands, encrypted files, Chrome, and Gemini."
 ---
 
 # a8s tool nodes
 
-A **tool node** is an a8s agent whose wake is a small program, not a model. a8s
-delivers a message, the tool does one thing, and it replies by message. A tool
-node needs no CLI, no model, and no key: it is a bundled definition plus a
-stdlib handler.
+A tool node runs a program when it receives a message. It returns the result
+as a message. The bundled tools are `command-shell`, `vault`, `browser`, and
+`gemini-web`. Each has a public command under `ar3 tool`.
 
-Tool definitions are named `tool-<verb>` and ship in `apps/a8s/definitions/`.
-Register one the same way as any node, giving the `tool-<verb>` definition by
-its bare name:
+## Register and configure a tool
 
-```bash
-a8s add mac-terminal ~/work tool-command-shell --ALLOW=operator,assistant
-```
-
-Each tool has its own README with the full command list, the reply shape, the
-vars, the state and the trust notes.
-
-## Drive a tool in real time
-
-### From the node's machine
-
-`ar3 tool <name> --node <node>` drives a tool node from one terminal. It reads
-the node's vars from the a8s registry, runs in the node's directory, and prints
-each reply. The person at the keyboard is the operator and passes the ACL.
+Use the bundled definition name `tool-NAME`:
 
 ```bash
-ar3 tool command-shell --node mac-terminal                  # a session
-ar3 tool command-shell --node mac-terminal -- uname -a      # one script
-ar3 tool command-shell --node mac-terminal - <<'EOF'       # one script from stdin
-uname -a
-EOF
+a8s add terminal ~/work tool-command-shell --ALLOW=operator,assistant
+a8s vars terminal set TIMEOUT 120
+a8s start terminal
 ```
 
-With no command, `ar3 tool` starts a session. Type one command per line. Each
-reply prints when the command is done. A failed command prints its reply and
-the session goes on. A line that ends in `<<MARKER` opens a block that runs to
-a line holding `MARKER`. Press Ctrl-D to end the session. A session reads from
-a pipe as well, with no prompt. `--var KEY=VALUE` overrides a node var for the
-run. `--attach PATH` adds a file to a one-script run. Attachments print as
-`artifact: <path>`.
+Registration creates the node settings. `a8s vars` changes a saved setting.
+`a8s start` starts message processing. Read the tool's README for prerequisites
+and its option defaults:
 
-A browser seat has one lock. `a8s stop` ends the script that holds the seat:
-its next command fails with `seat closed by a8s stop`. Every path that opens Chrome
-checks the stop, so a stop ends any operation that began before it. A new
-command after the stop opens Chrome again.
+| Tool | Function | Reference |
+|---|---|---|
+| `command-shell` | Runs shell commands as the node's OS user. | [Shell tool](../apps/tools/command_shell/README.md) |
+| `vault` | Stores encrypted files for authenticated senders. | [Vault tool](../apps/tools/vault/README.md) |
+| `browser` | Runs browser scripts in a saved Chrome profile. | [Browser tool](../apps/tools/browser/README.md) |
+| `gemini-web` | Sends prompts through a signed-in Gemini profile. | [Gemini tool](../apps/tools/gemini_web/README.md) |
 
-`tool-vault` has no `--node` and no session. Its messages are sealed. Use the
-vault client.
+## Use a local terminal
 
-### From another node
+Use `--node NAME` to load a registered node's settings and root directory.
+The registered definition must match the requested tool. Put wrapper options
+before the command:
 
-Open two terminals. In the first, inside the directory of your own node, watch
-for replies:
+```bash
+ar3 tool command-shell --node terminal -- "echo hello"
+ar3 tool command-shell --node terminal --var TIMEOUT=10 -- "echo hello"
+ar3 tool browser --node browser-seat status
+ar3 tool gemini-web --node gemini sessions
+ar3 tool vault --node vault fingerprint
+```
+
+`--var KEY=VALUE` overrides a setting for this run only. It is applied last.
+The local operator passes the network `ALLOW` check unless a final
+`--var ALLOW=...` prevents it.
+
+Without registration, use `--seat NAME` to select local tool state. Without
+either selector, the tool uses its default name and the current directory.
+`--seat` does not load registry settings. Do not combine the selectors.
+
+```bash
+ar3 tool command-shell -- "echo hello"
+ar3 tool browser --seat scratch status
+ar3 tool gemini-web --seat gemini-test --var BROWSER_SEAT=browser-seat -- "Hello"
+```
+
+### Local commands and messages
+
+| Tool | Local commands |
+|---|---|
+| `browser` | `doctor`, `open`, `close`, `status`, `go`, `snap`, `console`, `do`, `idle`, `secret` |
+| `gemini-web` | `sessions`, `forget` |
+| `vault` | `init`, `fingerprint`, `admin`, `voucher`, `seat`, `client` |
+| `command-shell` | Uses shell messages; set options with `a8s vars` or `--var`. |
+
+A local verb runs only from the command line. A message cannot run a local
+administrative verb. Put `--` before a message to select the message path
+explicitly. For example, `ar3 tool gemini-web --node gemini -- sessions` sends
+`sessions` as a prompt. Without `--`, it lists local conversation records.
+
+Use `ar3 tool NAME --help` to list the public commands and options. Use
+`ar3 tool NAME COMMAND --help` for one local command. Help does not start a
+browser, call Gemini, or perform a vault operation.
+
+The vault client runs in the sender's directory and environment. It refuses
+`--node` and `--seat`. Use `--to VAULT_NAME` to select its destination:
+
+```bash
+ar3 tool vault client --help
+ar3 tool vault client send /list --to vault
+```
+
+The client requires a verified pinned key, a connection, and authentication.
+Follow the vault README before the first file request.
+
+### Scripts and sessions
+
+For a message tool, supply a command to run one script. Supply `-` to read one
+script from stdin. Omit the command to start a session:
+
+```bash
+ar3 tool command-shell --node terminal
+ar3 tool browser --node browser-seat - <<'EOF_SCRIPT'
+go https://example.com
+snap
+EOF_SCRIPT
+```
+
+A session reads one command per line. A line ending in `<<MARKER` starts a
+block; a line containing only `MARKER` ends it. A failed command does not end
+the session. Press Ctrl-D to end input. Piped input uses the same format
+without prompts. The vault has no interactive message session.
+
+Use `--attach PATH` before a message or `-` to attach a file. Local results
+print in the terminal. Attachments appear as `artifact: <path>`.
+
+## Send from another node
+
+Open two terminals in your node's directory. Watch replies in the first:
 
 ```bash
 tells -f
 ```
 
-In the second, send the tool a message. Send multi-line scripts on stdin so the
-shell never touches them:
+Send a message from the second:
 
 ```bash
-tell mac-terminal - <<'EOF'
+tell terminal - <<'EOF_SCRIPT'
 uname -a
-EOF
+EOF_SCRIPT
 ```
 
-The reply arrives in the first terminal. Attachments land in your node's
-`.files/<msg-ulid>/`.
+Attachments arrive in `.files/<msg-ulid>/` under your node's directory.
+For shell, browser, and Gemini nodes, the sender must be on `ALLOW`.
 
-### Try a tool with no node
+## Message help
 
-`ar3 tool <name>` without `--node` runs the tool in the current directory with
-the vars you give by `--var`, with no registry:
+Send a single line containing `help`, `/help`, `--help`, or `/?`. Matching is
+not case-sensitive. The tool returns the `## Usage` section of its README.
+The reply identifies the tool, node, and README path.
 
 ```bash
-ar3 tool command-shell -- "echo hello"
-ar3 tool command-shell -- help
+tell terminal help
+ar3 tool browser --node browser-seat -- help
 ```
 
-## Ask a tool for help
+Help does not run a shell command, browser command, or Gemini request.
+`help me open a page` is an ordinary message. The ACL check occurs before help,
+so an unauthorized sender gets no reply. Vault help is plaintext and does not
+require authentication.
 
-Send `help` to any tool node. The message must be a single line that reads
-`help`, `/help`, `--help` or `/?`, in any case. The node answers with its usage
-text and runs nothing: no command, no browser step, no Gemini turn. The text is
-the `## Usage` section of the tool's README, read when help is called. It lists
-the commands and the vars that shape the tool. The reply names the node and the
-tool and ends with the path of the README.
+## Browser profiles, recipes, and secrets
+
+A browser node keeps its Chrome profile between messages. `a8s stop NODE`
+closes Chrome and cancels operations that started before the stop. A new
+operation can open it again. `TIMEOUT` closes an idle browser; a running
+script is not interrupted by this idle check.
+
+Store secrets through the local command, with a hidden prompt or stdin:
 
 ```bash
-tell mac-terminal help
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool browser --node browser-seat secret list
 ```
 
-`help me open a page` is not help. It goes to the tool as a command. A sender
-who is not on the node's `ALLOW` list gets no reply, to `help` as to anything
-else. `tool-vault` has no ACL, so every sender gets its help in plaintext.
+A script uses `fill-secret TARGET PASSWORD`. The field's origin must be
+allowed. Messages cannot change or list the store. Values are kept out of
+process arguments and redacted from text replies and snapshots. Screenshots,
+video, and downloaded contents are not redacted. Read the browser README's
+Secrets section for the complete limits.
 
-## The tools
+Recipes provide site-specific commands:
 
-### `tool-command-shell` - a command runner
+```bash
+ar3 tool browser --node browser-seat -- recipe
+ar3 tool browser --node browser-seat -- recipe gb list --limit 3
+```
 
-Run a shell command sent as a message, and reply with its output. A small SSH:
-each message is one command, in its own process, in the node's directory.
-Nothing persists between messages. Output that fits rides in the reply, and
-larger output is attached. Full reference:
-[apps/tools/command_shell/README.md](../apps/tools/command_shell/README.md).
+Only bundled code and recipes under the registered browser node's root are
+loaded by the public CLI. Messages cannot install code. See the
+[recipe reference](../apps/tools/browser/recipes/README.md) for configuration
+and development. The bundled `givebacks` recipe has the alias `gb`.
 
-### `tool-vault` - encrypted file storage
+## Gemini profile setup
 
-An encrypted file store for agents. `help`, `/public-key` and `/connect` travel
-in plaintext. Every other message is sealed to the vault's key, and every reply
-is sealed and signed. There is no ACL var: every sender is served under its own
-name and needs an operator-issued voucher. Full reference:
-[apps/tools/vault/README.md](../apps/tools/vault/README.md).
+Create a browser node first. Open `https://gemini.google.com` in its profile.
+Sign in manually in that Chrome window. Then register the Gemini node with
+`BROWSER_SEAT` set to the browser node's name. The Gemini node needs the same
+display, executable path, OS user, and data home. Follow the ordered setup in
+the [Gemini reference](../apps/tools/gemini_web/README.md#register).
 
-### `tool-browser` - a signed-in Chrome seat
+Each sender has a separate conversation under the same signed-in account.
+Use `sessions` to list local records. Use `forget SENDER` to start that
+sender's next prompt in a new conversation. These local commands do not need
+`BROWSER_SEAT` and do not call Gemini.
 
-A persistent Chrome that other agents drive by message. Each message is a
-script of browser commands, one per line. The reply is a transcript, with
-snapshots, screenshots, console logs, videos and downloads attached. The
-profile keeps its logins between messages. Chrome stays up between messages. Set
-the node's `TIMEOUT` var, in seconds, and Chrome closes once no script has used
-the seat for that long; the next script opens it again. A script that is
-running is never cut off. Full reference, with every command:
-[apps/tools/browser/README.md](../apps/tools/browser/README.md).
+## Access control
 
-A script can sign in without its sender holding the password. The operator
-stores the value on the node's machine, with the origins it may be typed on
-(`browser secret set NAME --origin https://app.example.com --seat <node>`), and
-the script names it (`fill-secret <target> NAME`). The tool types it only on
-those origins, never lets it into a command line (the driver is not started with it
-in one, and an element a page named from it is named by its position instead),
-replaces it with `[secret:NAME]` in replies, snapshots and console logs, and stops
-Chrome offering to save it or checking it for a breach. What the browser and the
-driver write on their own, such as the profile and `state.json`, stays in the seat's
-directory, mode 0700, and no verb returns it. A script cannot reach the store: the
-tool opens no local file as a page (`go` refuses every `file:` URL, and a step that
-ends with a `file:` page in any tab fails), `upload` and `drop` refuse the browser
-state directory, and `eval` and `run-code` are off on a seat that holds a secret. Screenshots and video are not
-scrubbed. The Secrets section of the README lists the limits.
+`command-shell`, `browser`, and `gemini-web` require `ALLOW` for routed
+messages. Separate sender names with commas or spaces. Names are not
+case-sensitive. If the variable is missing, a8s stops the wake before the
+tool runs. Read `a8s logs NODE` for the error. A sender outside the list gets
+no reply; the node logs the refusal.
 
-A seat can also run site recipes. A recipe gives a website named commands, so a
-person or an agent uses the site as an API that runs in a signed-in browser:
-`recipe shop list --limit 3` in a message to the node, or `ar3 tool browser --node
-garmin -- recipe shop read weekly newsletter` by hand. A recipe declares its
-verbs, the origins it may use and whether a verb needs a sign-in. The tool derives
-the help, the argument checks and a health check (`recipe shop check`) from that
-declaration, and a verb that needs a sign-in stops with `needs a person` when the
-seat is signed out. A recipe is reviewed code, kept in `apps/tools/browser/recipes/`
-or in `recipes/` in the root the node was registered with. The tool finds the node
-in the a8s registry by the seat's name, so a recipe in the directory a run stands in
-is never loaded. A message can name a recipe and can never install or change one. A
-recipe that handles a value it must not show, such as a one-time passcode, keeps it
-in a sensitive step: a failure there reports one line, attaches no snapshot, and
-closes Chrome when the recipe cannot confirm that the page holds nothing of the
-value. `ar3 tool` exits 1 when the script failed, so an alias
-works in a shell script, and a wake exits 0 for every script. The suite bundles
-`givebacks` (alias `gb`), which reads a GiveBacks organization's newsletters. The
-README lists the commands, and `apps/tools/browser/recipes/README.md` lists the
-bundled recipes and is the guide to writing a recipe.
+Local sender identity comes from filesystem ownership. Remote identity
+depends on the cluster secret. Permit only senders you trust with the node's
+capabilities. The vault uses sender-specific vouchers instead of `ALLOW`.
 
-### `tool-gemini-web` - Gemini through a browser seat
+## Write another tool node
 
-Gemini on the web, as an a8s seat. The tool types each message into Gemini in a
-signed-in browser seat and sends the answer back. Each sender has its own
-conversation. Files go in and generated images come back. The node's `TIMEOUT`
-var closes the browser seat's Chrome in the same way. Full reference:
-[apps/tools/gemini_web/README.md](../apps/tools/gemini_web/README.md).
+Put the tool under `apps/tools/`. Use `apps/tools/_runtime.py` to read wakes,
+check access, and send replies. Use `ar3.proc` for process control. A tool must
+not import an a8s module. Its integration points are the definition's wake
+arguments, the `a8s tell` CLI, and foundation interfaces such as `ar3.nodes`.
 
-## The ACL
+Resolve registered settings by the explicit node name. Do not infer identity
+from the current directory or `A8S_TURN_RECIPIENT`.
 
-The tools that run something for a sender (`tool-command-shell`, `tool-browser`,
-`tool-gemini-web`) take a required `ALLOW` var: the senders who may use the
-node, comma- or space-separated, case-insensitive. For a node registered
-without it, a8s aborts every wake before the tool runs and dead-letters the
-message (`a8s logs <node>` names the missing var). A sender who is not on the
-list gets no reply, and the refusal is logged on the node.
+Include these files and routes:
 
-`$SENDER` is the router's own stamp: filesystem ownership for a local send, the
-cluster secret across a remote. The ACL is exactly as strong as cluster
-membership. Allowlist only names you trust with what the tool can do.
+- A `tool-NAME.json` definition in `apps/a8s/definitions/`.
+- The handler and tests under `apps/tools/`.
+- Public `ar3 tool NAME` routes for every user operation and option.
+- A README with Needs, Register, Usage, State, Platforms, and Trust sections.
+- A link from this page to that README.
 
-The person at the node's machine who runs `ar3 tool --node` is the operator
-and passes the ACL. The ACL is for senders on the network.
+The README is the only source of message help:
 
-## Writing another tool node
+1. Use the exact heading `## Usage`. Include command syntax, reply format,
+   and a `### Options` table. The runtime reads up to the next `## ` heading.
+2. Check the ACL before help. Before parsing or executing a message, call
+   `rt.is_help(message)`.
+3. For help, send `rt.help_reply(tool, node, readme, suite_path)` through
+   `rt.send_reply`. Then return 0. Resolve `readme` beside the handler.
+4. Put dynamic data, such as a key fingerprint, in `rt.help_reply`'s `extra`
+   argument. Do not duplicate static usage in code.
+5. Return 0 from a routed wake. Report operation failures in its reply.
+   Local commands must use the appropriate failure exit code.
 
-Each tool is its own module or package under `apps/tools/`, sharing
-`apps/tools/_runtime.py` for the parts every tool node does the same: read the
-wake, enforce the ACL, and reply through `a8s tell`. Cross-platform process
-control is the foundation (`ar3.proc`). A tool never imports an a8s module. Its
-contract with a8s is the wake argv its `tool-<verb>.json` defines and the
-`a8s tell` CLI it replies through. A tool that must learn about its node, such
-as the directory the node was registered with, reads the a8s registry by the
-node's name through `ar3.nodes`. The name is the one the caller gives (a wake
-passes `$RECIPIENT`). The tool never takes a node from the working directory or
-from the wake's environment (`A8S_TURN_RECIPIENT`).
-
-Ship these with the tool:
-
-- The definition, in `apps/a8s/definitions/`.
-- The handler and its tests, under `apps/tools/`.
-- A `README.md` beside the handler, with the sections the other tools use:
-  Needs, Register, Usage, State, Platforms, Try it by hand, Trust.
-  The `## Usage` section is the tool's help text (see below). Link it from this page.
-
-The help contract:
-
-1. Write a `## Usage` section in the tool's README. It is the help text, and
-   there is no other copy. It holds what an agent needs to drive the tool: one
-   line on what it does, the real-time loop, the commands with their syntax
-   (a table), the reply shape, and the vars (`### Options`). The wrapper reads
-   from the line after the heading to the next `## ` heading. Keep the section
-   readable as plain text, because it is sent as a message body.
-2. In the handler, after the ACL check and before any parsing of the message,
-   call `rt.is_help(message)`. When it is true, send
-   `rt.help_reply(tool, node, readme, suite_path)` with `rt.send_reply` and
-   return 0. `readme` is `Path(__file__).resolve().parent / "README.md"`.
-   `suite_path` is the README path inside the suite. A refused sender never
-   reaches this line, so it gets no reply. A README with no `## Usage` section
-   gets a one-line reply that says so.
-3. Anything dynamic, such as a key fingerprint, goes in the `extra` argument of
-   `rt.help_reply`, not in the README.
-4. Every exit is 0. a8s dead-letters a wake that exits with any other code.
+Write instructions with short, active sentences. Use one action per step and
+one term per concept. Preserve exact command and option names. User operations
+must not require a Python module path or repository working directory.

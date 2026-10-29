@@ -49,6 +49,206 @@ def _rpc(line: str) -> dict:
     return json.loads(line)
 
 
+class TestCodexTurnIdentity:
+    def _ready(self, tmp_path):
+        session = resident_mod.CodexSession(["codex", "app-server"], tmp_path)
+        session.on_frame(_out("pingpong", lambda m: m.get("id") == 1))
+        answer = json.loads(json.dumps(_out("pingpong", lambda m: m.get("id") == 2)))
+        answer["result"]["approvalPolicy"] = "never"
+        answer["result"]["sandbox"] = {"type": "workspaceWrite"}
+        assert not session.on_frame(answer).fatal
+        assert session.handshake_done
+        return session
+
+    def _submit(self, session, text, turn_id):
+        (line,) = session.turn_lines(text)
+        request = _rpc(line)
+        session.on_frame({
+            "id": request["id"],
+            "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}},
+        })
+
+    def _event(self, session, method, turn_id):
+        return session.on_frame({
+            "method": method,
+            "params": {
+                "threadId": session.thread_id,
+                "turn": {"id": turn_id, "status": "completed" if method == "turn/completed"
+                         else "inProgress", "items": []},
+            },
+        })
+
+    def test_bound_completion_releases_the_next_submission(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._submit(session, "first", "local-turn")
+        assert session.turn_lines("second") == []
+        parsed = self._event(session, "turn/completed", "local-turn")
+        assert parsed.turn_completed
+        assert len(parsed.replies) == 1
+        assert _rpc(parsed.replies[0])["params"]["input"][0]["text"] == "second"
+
+    def test_unrelated_completion_does_not_release_held_submission(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._submit(session, "first", "local-turn")
+        assert session.turn_lines("second") == []
+        parsed = self._event(session, "turn/completed", "unrelated-turn")
+        assert not parsed.turn_completed
+        assert not parsed.replies
+        assert session.busy
+        parsed = self._event(session, "turn/completed", "local-turn")
+        assert parsed.turn_completed and len(parsed.replies) == 1
+
+    def test_duplicate_completion_does_not_retire_the_next_turn(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._submit(session, "first", "first-turn")
+        assert self._event(session, "turn/completed", "first-turn").turn_completed
+        self._submit(session, "second", "second-turn")
+        parsed = self._event(session, "turn/completed", "first-turn")
+        assert not parsed.turn_completed
+        assert session.busy
+        assert self._event(session, "turn/completed", "second-turn").turn_completed
+
+    def test_native_start_holds_local_input_until_native_completion(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._event(session, "turn/started", "native-turn")
+        assert session.turn_lines("local input") == []
+        parsed = self._event(session, "turn/completed", "native-turn")
+        assert not parsed.turn_completed
+        assert len(parsed.replies) == 1
+        assert _rpc(parsed.replies[0])["params"]["input"][0]["text"] == "local input"
+
+
+    def _start(self, session, text, token):
+        (line,) = session.turn_lines(text, token)
+        return _rpc(line)["id"]
+
+    def _respond(self, session, rid, turn_id):
+        return session.on_frame({
+            "id": rid,
+            "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}},
+        })
+
+    def test_response_and_start_notification_in_either_order_make_one_turn(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "a", 101)
+        self._event(session, "turn/started", "t1")
+        self._respond(session, rid, "t1")
+        assert session.active == {"t1": {101}}
+        parsed = self._event(session, "turn/completed", "t1")
+        assert parsed.settled == (101,) and not session.busy
+        other = self._ready(tmp_path)
+        rid = self._start(other, "a", 7)
+        self._respond(other, rid, "t2")
+        self._event(other, "turn/started", "t2")
+        assert other.active == {"t2": {7}}
+        assert self._event(other, "turn/completed", "t2").settled == (7,)
+
+    def test_terminal_before_response_settles_the_bound_token_once(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "first", 5)
+        assert session.turn_lines("second", 6) == []
+        early = self._event(session, "turn/completed", "fast-turn")
+        assert not early.turn_completed and not early.replies
+        parsed = self._respond(session, rid, "fast-turn")
+        assert parsed.settled == (5,) and parsed.turn_completed
+        assert _rpc(parsed.replies[0])["params"]["input"][0]["text"] == "second"
+        assert not self._event(session, "turn/completed", "fast-turn").settled
+
+    def test_unrelated_early_terminal_never_settles_another_token(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "first", 5)
+        self._event(session, "turn/completed", "stranger")
+        parsed = self._respond(session, rid, "mine")
+        assert parsed.settled == () and session.busy
+        assert self._event(session, "turn/completed", "mine").settled == (5,)
+
+    def test_a_snapshot_is_not_kept_once_no_request_is_outstanding(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "first", 5)
+        self._event(session, "turn/completed", "stranger")
+        self._respond(session, rid, "mine")
+        assert session.terminal["stranger"] is None
+
+    def test_merged_responses_share_one_terminal_and_settle_each_once(self, tmp_path):
+        session = self._ready(tmp_path)
+        first = self._start(session, "a", 11)
+        self._event(session, "turn/started", "native")
+        self._respond(session, first, "native")
+        second = _rpc(session._turn_start("b", 12))["id"]
+        self._respond(session, second, "native")
+        assert session.active == {"native": {11, 12}}
+        parsed = self._event(session, "turn/completed", "native")
+        assert parsed.settled == (11, 12)
+        assert not self._event(session, "turn/completed", "native").settled
+
+    def test_second_response_after_the_terminal_still_settles_once(self, tmp_path):
+        session = self._ready(tmp_path)
+        first = self._start(session, "a", 11)
+        second_line = session._turn_start("b", 12)
+        second = _rpc(second_line)["id"]
+        self._respond(session, first, "shared")
+        assert self._event(session, "turn/completed", "shared").settled == (11,)
+        parsed = self._respond(session, second, "shared")
+        assert parsed.settled == (12,) and parsed.turn_completed
+        assert not session.requests
+
+    def test_late_start_cannot_resurrect_a_finished_turn(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._submit_token(session, "first", 3, "done-turn")
+        assert self._event(session, "turn/completed", "done-turn").settled == (3,)
+        self._event(session, "turn/started", "done-turn")
+        assert not session.active and not session.native_work_active()
+
+    def _submit_token(self, session, text, token, turn_id):
+        self._respond(session, self._start(session, text, token), turn_id)
+
+    def test_native_work_blocks_local_input_and_reports_active(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._event(session, "turn/started", "native")
+        assert session.native_work_active()
+        assert session.turn_lines("x", 9) == []
+        parsed = self._event(session, "turn/completed", "native")
+        assert parsed.settled == () and not parsed.turn_completed
+        assert not session.native_work_active()
+
+    def test_rejected_submission_settles_only_its_token(self, tmp_path):
+        session = self._ready(tmp_path)
+        self._event(session, "turn/started", "native")
+        rid = _rpc(session._turn_start("a", 4))["id"]
+        parsed = session.on_frame({"id": rid, "error": {"code": -1, "message": "no"}})
+        assert parsed.settled == (4,) and parsed.turn_failed and parsed.turn_completed
+        assert not parsed.replies
+        assert "native" in session.active and session.native_work_active()
+
+    def test_a_response_without_a_turn_id_fails_only_its_token(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "a", 4)
+        parsed = session.on_frame({"id": rid, "result": {"turn": {}}})
+        assert parsed.settled == (4,) and parsed.turn_failed
+        assert not session.busy
+
+    def test_a_server_request_reusing_a_client_id_binds_nothing(self, tmp_path):
+        session = self._ready(tmp_path)
+        rid = self._start(session, "a", 4)
+        parsed = session.on_frame({
+            "id": rid, "method": "item/tool/call",
+            "params": {"turn": {"id": "spoof"}},
+        })
+        assert not parsed.settled and rid in session.requests and not session.active
+
+    def test_identity_saturation_fails_closed(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(resident_mod, "CODEX_IDENTITY_LIMIT", 2)
+        session = self._ready(tmp_path)
+        self._submit(session, "a", "t1")
+        assert not self._event(session, "turn/completed", "t1").fatal
+        self._submit(session, "b", "t2")
+        assert not self._event(session, "turn/completed", "t2").fatal
+        self._submit(session, "c", "t3")
+        assert self._event(session, "turn/completed", "t3").fatal
+        assert "t1" in session.terminal
+        assert not self._event(session, "turn/completed", "t1").settled
+
+
 class TestComposeCodexArgv:
     def test_restricted_template_becomes_app_server_with_config_keys(self):
         argv = resident_mod.compose_resident_argv(
@@ -148,6 +348,8 @@ class TestCodexSession:
         (first,) = sess.turn_lines("one")
         # Mid-turn: held, never a second turn/start the server would merge.
         assert sess.turn_lines("two") == []
+        turn_id = _out("pingpong", lambda m: m.get("method") == "turn/completed")["params"]["turn"]["id"]
+        sess.on_frame({"id": _rpc(first)["id"], "result": {"turn": {"id": turn_id}}})
         item = json.loads(json.dumps(_out("pingpong", lambda m: m.get("method") == "item/completed"
                                           and m["params"]["item"]["type"] == "agentMessage")))
         item["params"]["threadId"] = tid
@@ -252,8 +454,10 @@ class TestCodexSession:
         sess.on_frame(answer)
         done = json.loads(json.dumps(_out("stop", lambda m: m.get("method") == "turn/completed")))
         done["params"]["threadId"] = answer["result"]["thread"]["id"]
+        (line,) = sess.turn_lines("work", 1)
+        sess.on_frame({"id": _rpc(line)["id"], "result": {"turn": {"id": done["params"]["turn"]["id"]}}})
         parsed = sess.on_frame(done)
-        assert parsed.turn_completed
+        assert parsed.turn_completed and parsed.settled == (1,)
         assert parsed.error_text == "turn interrupted"
 
 
@@ -1113,3 +1317,170 @@ def test_dead_bridge_and_exited_codex_leave_no_child_after_recovery(
             os.killpg(bridge.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+def test_native_turn_keeps_the_bridge_open_and_unrelated_terminal_settles_nothing(
+    monkeypatch, tmp_path,
+):
+    """Through the real bridge: a stranger's terminal and a native turn that
+    outlives the quiet window neither settle the local origin nor let the
+    session close early."""
+    import threading
+
+    from ar3.wake_outcome import origin_from_env, take_failures
+
+    init = _out("pingpong", lambda m: m.get("id") == 1)
+    thread = TestCodexSession()._thread_answer()
+    thread_id = thread["result"]["thread"]["id"]
+    record = tmp_path / "events.jsonl"
+    fake = tmp_path / "native_turn.py"
+    fake.write_text(
+        "import json, sys, time, threading\n"
+        f"init, thread, tid = {init!r}, {thread!r}, {thread_id!r}\n"
+        f"record = {str(record)!r}\n"
+        "def note(event):\n"
+        "    with open(record, 'a', encoding='utf-8') as out:\n"
+        "        out.write(json.dumps({'event': event, 'at': time.monotonic()}) + '\\n')\n"
+        "def send(obj): print(json.dumps(obj), flush=True)\n"
+        "def event(method, turn_id, status):\n"
+        "    send({'method': method, 'params': {'threadId': tid, 'turn':\n"
+        "          {'id': turn_id, 'status': status, 'items': []}}})\n"
+        "def native_work():\n"
+        "    event('turn/started', 'native', 'inProgress')\n"
+        "    time.sleep(2.2)\n"
+        "    note('native-done')\n"
+        "    event('turn/completed', 'native', 'completed')\n"
+        "for line in sys.stdin:\n"
+        "    req = json.loads(line)\n"
+        "    method = req.get('method')\n"
+        "    if method == 'initialize': send(init)\n"
+        "    elif method == 'thread/start': send(thread)\n"
+        "    elif method == 'turn/start':\n"
+        "        threading.Thread(target=native_work, daemon=True).start()\n"
+        "        time.sleep(0.1)\n"
+        "        event('turn/completed', 'stranger', 'completed')\n"
+        "        send({'id': req['id'], 'result': {'turn': {'id': 'mine', 'status': 'inProgress', 'items': []}}})\n"
+        "        time.sleep(0.2)\n"
+        "        note('local-done')\n"
+        "        event('turn/completed', 'mine', 'completed')\n"
+        "note('eof')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(resident_mod, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(engine_run, "resolve_argv0", lambda argv: [sys.executable, str(fake)])
+    home = tmp_path / "resident"
+    (home / "inbox").mkdir(parents=True)
+    failure_dir = tmp_path / "failures"
+    origin = origin_from_env({
+        "A8S_TURN_RECIPIENT": "probe",
+        "A8S_TURN_ENVELOPES": json.dumps(["one.json"]),
+        "A8S_TURN_OUTCOME_DIR": str(failure_dir),
+    }, "probe")
+    resident_mod._enqueue_message(home, "one", origin)
+    stop = threading.Event()
+    code = resident_mod._run_session(home, {
+        "engine": "codex", "dir_path": str(tmp_path), "template": _template(),
+        "agent": "probe", "timeout": 1, "scaffold": False, "memory": "off",
+    }, stop, {})
+    events = {}
+    for line in record.read_text().splitlines():
+        entry = json.loads(line)
+        events[entry["event"]] = entry["at"]
+    assert events["native-done"] - events["local-done"] > 1.5
+    assert events["eof"] >= events["native-done"]
+    assert code == 0
+    assert list(take_failures(failure_dir, "probe")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fake engines are POSIX scripts")
+@pytest.mark.parametrize("native", [True, False], ids=["native-start", "control-no-native"])
+def test_reader_paused_before_a_native_start_cannot_lose_the_quiet_race(
+    monkeypatch, tmp_path, native,
+):
+    """The reader is held after it recorded the frame's activity and before
+    the session applies it, while the quiet clock runs out. The close
+    decision must wait for that frame: a native start keeps the session open
+    until the native turn ends. The control sends a benign frame at the same
+    point and closes at the quiet window."""
+    import threading
+    import time
+
+    init = _out("pingpong", lambda m: m.get("id") == 1)
+    thread = TestCodexSession()._thread_answer()
+    thread_id = thread["result"]["thread"]["id"]
+    record = tmp_path / "events.jsonl"
+    fake = tmp_path / "paused_native.py"
+    fake.write_text(
+        "import json, sys, time, threading\n"
+        f"init, thread, tid, native = {init!r}, {thread!r}, {thread_id!r}, {native!r}\n"
+        f"record = {str(record)!r}\n"
+        "def note(event):\n"
+        "    with open(record, 'a', encoding='utf-8') as out:\n"
+        "        out.write(json.dumps({'event': event, 'at': time.monotonic()}) + '\\n')\n"
+        "def send(obj): print(json.dumps(obj), flush=True)\n"
+        "def event(method, turn_id, status):\n"
+        "    send({'method': method, 'params': {'threadId': tid, 'turn':\n"
+        "          {'id': turn_id, 'status': status, 'items': []}}})\n"
+        "def later():\n"
+        "    time.sleep(0.1)\n"
+        "    if native:\n"
+        "        event('turn/started', 'native', 'inProgress')\n"
+        "        time.sleep(2.5)\n"
+        "        note('native-done')\n"
+        "        event('turn/completed', 'native', 'completed')\n"
+        "    else:\n"
+        "        send({'method': 'configWarning', 'params': {'summary': 'benign'}})\n"
+        "for line in sys.stdin:\n"
+        "    req = json.loads(line)\n"
+        "    method = req.get('method')\n"
+        "    if method == 'initialize': send(init)\n"
+        "    elif method == 'thread/start': send(thread)\n"
+        "    elif method == 'turn/start':\n"
+        "        send({'id': req['id'], 'result': {'turn': {'id': 'mine', 'status': 'inProgress', 'items': []}}})\n"
+        "        event('turn/completed', 'mine', 'completed')\n"
+        "        threading.Thread(target=later, daemon=True).start()\n"
+        "note('eof')\n",
+        encoding="utf-8",
+    )
+    paused, gate = threading.Event(), threading.Event()
+    seen = {}
+    on_frame = resident_mod.CodexSession.on_frame
+
+    def held_frame(session, frame):
+        method = frame.get("method")
+        if method in ("turn/started", "configWarning"):
+            seen["at_pause"] = time.monotonic()
+            paused.set()
+            assert gate.wait(10)
+        return on_frame(session, frame)
+
+    def release_after_the_window():
+        paused.wait(10)
+        time.sleep(1.4)
+        seen["released"] = time.monotonic()
+        gate.set()
+
+    monkeypatch.setattr(resident_mod.CodexSession, "on_frame", held_frame)
+    monkeypatch.setattr(resident_mod, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(engine_run, "resolve_argv0", lambda argv: [sys.executable, str(fake)])
+    threading.Thread(target=release_after_the_window, daemon=True).start()
+    home = tmp_path / "resident"
+    (home / "inbox").mkdir(parents=True)
+    resident_mod._enqueue_message(home, "one", None)
+    code = resident_mod._run_session(home, {
+        "engine": "codex", "dir_path": str(tmp_path), "template": _template(),
+        "agent": "probe", "timeout": 1, "scaffold": False, "memory": "off",
+    }, threading.Event(), {})
+    gate.set()
+    events = {}
+    for line in record.read_text().splitlines():
+        entry = json.loads(line)
+        events[entry["event"]] = entry["at"]
+    assert paused.is_set() and seen["released"] - seen["at_pause"] >= 1.3
+    if native:
+        assert "native-done" in events, "bridge closed while native work was starting"
+        assert events["eof"] >= events["native-done"]
+    else:
+        assert "native-done" not in events and "eof" in events
+    assert code == 0

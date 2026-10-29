@@ -10,6 +10,54 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.121
+
+### Added
+
+- Experimental: `a8s start --autostart` remembers per-user startup through Linux cron,
+  macOS LaunchAgents or Windows logon tasks. Explicit stop disarms startup;
+  plain start rearms a remembered preference. `a8s ls --autostart` shows state
+  and verifies the OS entry.
+- `ar3 tool browser --node NAME secret list|set|rm` manages the node's browser
+  secrets from a local shell. Pipe a value into `secret set NAME -`; new names
+  require an allowed origin, and later updates can keep their saved origins.
+- `r4t engine muse models` lists the installed Muse catalog without a model turn.
+- `a8s ls --local`, `--remote` and `--since` filter the remembered address book;
+  `a8s ls --help` and `a8s ps --help` describe their options.
+- The main README links to each tool's README.
+- `ar3 tool` exposes browser diagnostics and local commands, Gemini conversation
+  management, and vault administration and client commands. Tool help and setup
+  instructions use the public CLI. Tool documentation uses ASD-STE100 language.
+
+### Fixed
+
+- Explicit stop still shuts down the current handler when startup-state storage
+  cannot be read or written, and reports that queued or future startup may
+  remain enabled.
+- Muse model listing cleans up its owned POSIX process group even when the
+  catalog server exits before its helpers.
+- Detached `a8s start` and OS startup cannot replace an attached node. PID
+  claims and stale-file removal share one lock; stop also cancels a detached
+  start whose child has not attached yet. Public `a8s run` retains takeover.
+- Codex resident completions settle the routed work bound to their actual turn
+  IDs. Unrelated or duplicate completions cannot retire later input, and native
+  parent work prevents quiet shutdown.
+- Codex residents reconcile verified child completion notices in bounded turns
+  within the current session. Queued messages and native turns go first; stop
+  and failure prevent new attempts. Each notice gets at most one attempt.
+  Live result consumption remains unverified; reconciliation applies only to
+  Codex.
+- Resident protocol writes have a bounded, interruptible wait. Stop and fatal
+  errors can terminate an engine whose stdin pipe is full, without waiting for
+  buffered close or flush to finish. Failed writes are not retried.
+- Browser control uses a private debugging pipe instead of a loopback DevTools
+  port. Driver sockets stay in the OS user’s private directory; Windows browser
+  seats remain unsupported. Second-user isolation is experimental pending
+  native checks. The obsolete browser `--port`/`PORT` setting is removed.
+- Browser seats whose names differ in punctuation or case use distinct driver
+  sessions.
+- MQTT test broker startup failures retain diagnostics and reap failed children.
+
 ## 0.1.120
 
 ### Added

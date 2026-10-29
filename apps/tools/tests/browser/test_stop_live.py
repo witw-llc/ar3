@@ -15,6 +15,13 @@ pytestmark = pytest.mark.skipif(
 TOOL = Path(__file__).resolve().parents[2] / "browser"
 
 
+def _chrome_up(profile):
+    """True when the browser process of `profile` runs: it carries the profile flag and no `--type=`. With the pipe
+    transport Chrome writes no `DevToolsActivePort`, so the process is the sign it started."""
+    out = subprocess.run(["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
+    return any(" --type=" not in f" {line}" for line in out.stdout.splitlines())
+
+
 def _profile_processes(profile):
     out = subprocess.run(
         ["pgrep", "-af", "--", f"--user-data-dir={profile}"],
@@ -26,8 +33,8 @@ def _profile_processes(profile):
 def _wait_until_attached(holder, home, out, timeout=90):
     """Wait until the script holding the seat has launched Chrome and attached playwright-cli to it.
 
-    Chrome writes DevToolsActivePort as it starts, well before the attach has connected. A stop in that
-    gap kills Chrome under the attach, and the script's first step fails in the driver (a refused
+    Chrome's process is up before the driver has connected to it over the pipe. A stop in that
+    gap kills Chrome under the driver, and the script's first step fails in the driver (a refused
     connection, or a daemon that exits) and not with the stop. The script's first step is `snap`: the
     snapshot it writes is there only once the attach is done and the page has answered, so it is the
     readiness the test can see. The wait is bounded and says what it saw."""
@@ -67,7 +74,7 @@ def test_a_stop_during_a_script_leaves_no_chrome(tmp_path):
         # on, probes the window for the next step, and only then does `wait` begin. A stop that lands before
         # that ends the script at `wait`, which is right, but is not the case this test is for.
         time.sleep(3)
-        assert (profile / "DevToolsActivePort").exists()
+        assert _chrome_up(profile)
         assert holder.poll() is None
         closed = subprocess.run(
             tool + ["close", "--seat", seat], env=env,
@@ -231,7 +238,7 @@ def test_a_do_waiting_for_the_seat_when_the_stop_lands_leaves_no_chrome(tmp_path
     waiter = None
     try:
         deadline = time.monotonic() + 40
-        while not (profile / "DevToolsActivePort").exists() and time.monotonic() < deadline:
+        while not _chrome_up(profile) and time.monotonic() < deadline:
             time.sleep(0.2)
         waiter = subprocess.Popen(tool + ["--seat", seat, "do", str(second), "--json"], env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

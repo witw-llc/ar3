@@ -23,7 +23,6 @@ class LaunchReached(BaseException):
     (browser_seat, lambda: browser_seat.BrowserSeat("test-seat").run("url"), False),
     (plc, lambda: plc.run("test-seat", "snapshot"), False),
     (plc, plc.sessions, False),
-    (session, lambda: session._listening_endpoints(1234), False),
     (session, lambda: session._profile_pids("test-seat"), False),
     (session, lambda: session._main_pids("test-seat"), False),
     (session, lambda: session._daemon_pids("test-seat"), False),

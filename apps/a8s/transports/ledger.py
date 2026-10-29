@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from ar3.fsio import stat_or_none
 from core import MAX_SEEN_IDS
 
 # Cross-process ledger mutex. One atomic exclusive create names one winner,
@@ -95,10 +96,9 @@ class ConsumedLedger:
                 pass
             except OSError:
                 return False
-            try:
-                held_for = time.time() - path.stat().st_mtime
-            except OSError:
-                held_for = 0.0  # released between the two calls; go round again
+            info = stat_or_none(path)
+            # Released between the two calls; go round again.
+            held_for = 0.0 if info is None else time.time() - info.st_mtime
             if held_for > LEDGER_LOCK_STALE_SECONDS:
                 # The holder died mid-write. Re-stamp before taking over so two
                 # processes racing the same expiry do not both think they won.

@@ -97,7 +97,7 @@ class Vault:
 
     def load(self):
         if not os.path.exists(self.key_path):
-            raise VaultError(f"vault not initialised: run `python3 apps/tools/vault init` ({self.config})")
+            raise VaultError(f"vault not initialised: use `ar3 tool vault init` with the same --node, --seat or --dir option ({self.config})")
         with open(self.pub_path, "rb") as handle:
             self.pub_pem = handle.read()
         with open(self.pepper_path) as handle:

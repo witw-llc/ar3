@@ -16,6 +16,13 @@ pytestmark = pytest.mark.skipif(
 TOOL = Path(__file__).resolve().parents[2] / "browser"
 
 
+def _chrome_up(profile):
+    """True when the browser process of `profile` runs: it carries the profile flag and no `--type=`. With the pipe
+    transport Chrome writes no `DevToolsActivePort`, so the process is the sign it started."""
+    out = subprocess.run(["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
+    return any(" --type=" not in f" {line}" for line in out.stdout.splitlines())
+
+
 def _profile_processes(profile):
     out = subprocess.run(
         ["pgrep", "-af", "--", f"--user-data-dir={profile}"],
@@ -101,10 +108,10 @@ def test_idle_never_cuts_off_a_running_script(tmp_path):
     )
     try:
         deadline = time.monotonic() + 40
-        while not (profile / "DevToolsActivePort").exists() and time.monotonic() < deadline:
+        while not _chrome_up(profile) and time.monotonic() < deadline:
             assert runner.poll() is None, (tmp_path / "out").read_text()
             time.sleep(0.2)
-        assert (profile / "DevToolsActivePort").exists()
+        assert _chrome_up(profile)
         time.sleep(1.5)
         assert runner.poll() is None
 

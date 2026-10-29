@@ -946,7 +946,7 @@ def test_login_without_the_stored_secrets_names_the_fix(browser, monkeypatch):
     assert not result.ok
     assert result.error == (
         "secret GIVEBACKS_PASS is not set for seat seat; the operator sets it with "
-        "`browser secret set GIVEBACKS_PASS --origin ORIGIN --seat seat`"
+        "`ar3 tool browser --node seat secret set GIVEBACKS_PASS - --origin ORIGIN`"
     )
 
 
@@ -1436,7 +1436,7 @@ def test_a_chrome_that_will_not_close_is_said_and_nothing_is_captured_after(brow
     assert not result.ok
     assert result.error == (
         PASSCODE_FAILED + ". The page could not be confirmed clear, and Chrome could not be closed. "
-        "Close it with `browser close --seat seat`."
+        "Close it with `ar3 tool browser --seat seat close`."
     )
     assert browser.closed == 1
     assert failure_text(result) is None, "capture stays off until the page is known to be clear"

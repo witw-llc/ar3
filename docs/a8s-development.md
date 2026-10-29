@@ -11,6 +11,8 @@ accounting path. Completed turns stay completed if a later session step fails.
 
 ## Hard constraints when refactoring
 
+- **Keep bare ls unchanged.** Local registrations override remembered remote names case-insensitively. Local/remote and recency filters change only the view, never the address book. Read the persistent last-heard table, not retained transaction rows. Last-heard is not remote health; ps remains local process state. Both listing commands provide help and reject unknown options.
+
 - **a8s is best-effort messaging.** a8s is lightweight, best-effort messaging
   between agents, like UDP: each message is sent once with no delivery
   guarantee, and it may be picked up by several nodes or by none. Never add a
@@ -431,6 +433,81 @@ accounting path. Completed turns stay completed if a later session step fails.
   else.** Recovery closes the runner's end of the current wake's stdout and,
   if that process is still alive, terminates its process group — never a
   detached process (its own session) or anything outside the in-flight wake.
+- **Native autostart remains experimental until owner-run basic OS checks.**
+  Do not require disposable machines for this acceptance. The owner tests
+  startup after boot/login and removal of the owned startup entry on existing
+  Linux, macOS and Windows machines. Record results without claiming broader
+  native verification.
+- **Autostart restores a node at startup and adds no supervisor.** `--autostart`
+  keeps a per-node preference and arms one entry in the current user's native
+  startup facility: Linux cron `@reboot`, a macOS LaunchAgent (RunAtLoad, no
+  KeepAlive) at login, a Windows logon task with an interactive token and no
+  saved password. There is no crash restart and no pre-login start on macOS or
+  Windows. State lives in `<a8s home>/autostart.json` under `autostart.lock`;
+  an entry carries the epoch of its arming, and the claim at the pid file
+  refuses a startup whose epoch is no longer the armed one, so a queued event
+  never revives a stopped, removed or re-created node. `stop`, `kill` and
+  `exit` disarm (a stop also disarms unnamed siblings of a shared handler);
+  `restart` and `update` keep the arming; a plain `start` rearms a remembered
+  preference; `remove` deletes the owned entry or fails and keeps the node.
+  Entries are owned by account, config-home id and node, and never carry
+  credentials: proxy and CA settings sit in a mode-0600 file in the config home.
+  `ls --autostart` reports configuration, not node health.
+  If stopped-intent storage cannot be read, locked or written, `stop`, `kill` and
+  `exit` still attempt current handler shutdown and return failure. Report
+  that queued or future startup may remain enabled; never claim durable
+  stopped intent when its state is unreadable, malformed or cannot be saved.
+  Proxy and CA settings are saved per node, only when `--autostart` is given
+  explicitly (`start` or `add`) and only after the entry is written; a shell
+  without them leaves a node's saved values alone, and a rearm, `restart` or
+  `update` never recaptures. `ar3 update` stops with the internal
+  `stop --keep-autostart`, so the arming survives the update. The Windows
+  logon task names the account by SID taken from the OS (no SID, no task) and
+  runs `pythonw.exe` so no console opens; neither has been run on Windows.
+  `remove` purges autostart before its last steps, so a failure after that
+  point leaves a registered node with its preference cleared: it fails closed,
+  never leaves an entry that can start the node, and a repeated `remove`
+  finishes the job.
+- **A queued explicit start obeys later intent.** `start` returns before its
+  detached child attaches, so each start reserves a fresh manual claim token per
+  concrete node in `autostart.json`, passes it on the child's internal argv,
+  and the child's pid claim rechecks it under `autostart.lock`, spending it.
+  A later `start`, `stop`, `kill`, `exit` or `remove` replaces or clears the
+  token, with or without a pid file or an autostart preference, so a child that
+  was spawned and had not attached cannot start a node the operator stopped.
+  `restart` and `update` keep the preference and issue a new token; an
+  alias binds the token to each member; a removed and re-created node refuses
+  an old token. OS startup still uses the armed epoch, and public `run` takes
+  over with no token.
+- **`start` never takes over; `run` always does.** `start` on a running node
+  leaves its process alone, and the child it spawns claims the pid file
+  atomically with `--no-takeover`. `restart` is stop then start. Public `run`
+  takes over into the console. Startup entries use the no-takeover claim.
+  Native OS behavior has been exercised only through Linux cron fixtures; the
+  launchd and Task Scheduler backends are generated-file and fake-command
+  tested, and macOS and Windows runs remain to do.
+
+## Tool CLI and documentation
+
+Give every bundled tool a public `ar3 tool` entry point for its user and
+configuration options. Do not require source-relative Python commands in user
+instructions. Preserve registered-node variables and keep local administration
+separate from network messages. Write tool documentation in ASD-STE100 language.
+Keep each README's `## Usage` section as the single source for message help.
+
+## Browser control boundary
+
+Mark second-user isolation as experimental until basic native checks are
+recorded. Use an ordinary second OS account on the same machine to test the
+live browser connection. Windows browser startup remains unsupported; a
+refusal to launch is not proof of cross-user isolation.
+
+A browser seat uses a driver-owned debugging pipe, with no DevTools TCP fallback.
+Driver IPC lives in a verified private OS-user directory; an inherited socket
+path cannot redirect it. Hash the exact seat name for launch, discovery and
+cleanup. Read browser targets from nonce-bound structured driver responses,
+never from page titles or console output. Refuse Windows browser startup until
+its process ownership and IPC boundary are implemented and verified.
 
 ## Per-tool quirks
 

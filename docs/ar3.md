@@ -65,37 +65,84 @@ overrides: `A8S_HOME`, `R4T_HOME` (and `XDG_CONFIG_HOME`), `K7E_HOME`.
 
 ## `ar3 tool`
 
-`ar3 tool <name> [--node NAME] [--from NAME] [--var KEY=VALUE]... [--attach PATH]... [--] [command... | -]`
-drives a bundled tool node (`apps/a8s/definitions/tool-<name>.json`) on this
-machine. The argv comes from a8s's own expander, so it matches a wake.
+Use a bundled tool from the terminal:
 
-Three modes:
+```text
+ar3 tool NAME [--node NAME | --seat NAME] [--from NAME] [--var KEY=VALUE]... [--attach PATH]... [--] [command... | -]
+```
 
-- With a command, it runs one script and prints the reply.
-- With `-`, it reads one script from stdin.
-- With no command, it starts a session: one command per line, each reply
-  printed when it is done. A failed command does not end the session. A line
-  that ends in `<<MARKER` opens a block that runs to a line holding `MARKER`.
-  Ctrl-D ends the session. A pipe works as well, with no prompt.
+Tool names are `browser`, `gemini-web`, `command-shell`, and `vault`.
+Put wrapper options before the command. Use `ar3 tool NAME --help` for public
+commands and settings. Use `ar3 tool NAME COMMAND --help` for one local verb.
+Help performs no tool operation.
 
-`--node NAME` reads the node from the a8s registry. It takes the node's vars
-and its directory, and `$RECIPIENT` is the node's name. The environment is
-left as found, because the person at the keyboard is no wake. A tool that
-needs the node's own files, such as the `recipes/` directory of the browser
-tool, reads them from the registry by that name; the current directory and
-the environment decide nothing. The node must run
-`tool-<name>`. The person at the keyboard is the operator: `ALLOW` is the
-sender (`--from`, default `operator`), so the ACL passes. `--var` overrides
-last; `--var ALLOW=alice` makes a refusal. Without `--node`, the run uses the
-tool's name and the current directory, and only the vars you give. A missing
-required var stops the verb and names it, with the `a8s vars` command that sets
-it when `--node` is given. `tool-vault` takes no `--node` and no session.
+`--node NAME` loads a registered node's variables, environment settings, and
+root directory. Its definition must match the tool name. `--seat NAME` selects
+local state without loading registered settings. Do not combine them.
+Without either selector, the tool uses its default name and the current
+directory. `--var KEY=VALUE` overrides a setting for one run and is applied
+last. Saved configuration uses `a8s vars NODE set KEY VALUE`.
 
-Each `--attach` adds an `ATTACHED FILE:` line to the message; it needs a
-command or `-`. The reply prints instead of being sent, and attachments are
-copied to a temp directory named on stderr; each prints as `artifact: <path>`.
-The exit code is the tool's. It writes no a8s state. An unknown name lists the
-bundled tools.
+The local operator passes `ALLOW` by default. `--from NAME` selects the local
+message sender, otherwise `operator`. A final `--var ALLOW=...` can still
+refuse that sender. Network access rules remain unchanged.
+
+### Local commands
+
+| Tool | Local verbs |
+|---|---|
+| `browser` | `doctor`, `open`, `close`, `status`, `go`, `snap`, `console`, `do`, `idle`, `secret` |
+| `gemini-web` | `sessions`, `forget` |
+| `vault` | `init`, `fingerprint`, `admin`, `voucher`, `seat`, `client` |
+| `command-shell` | Uses shell messages. Configure it with `a8s vars` or `--var`. |
+
+```bash
+ar3 tool browser --node browser-seat doctor
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool gemini-web --node gemini sessions
+ar3 tool gemini-web --node gemini forget operator
+ar3 tool vault --node vault init
+ar3 tool vault client --help
+```
+
+Secret values come from a hidden prompt or stdin, never an argument. Secret
+commands require an explicit `--node` or `--seat`. They start no Chrome.
+
+The vault client runs from the sender's directory and environment. It rejects
+`--node` and `--seat`. Use `--to NAME` after the client action to select a vault.
+The browser's public `do` command loads bundled recipes and the registered
+node's private recipes. It does not accept arbitrary recipe directories.
+
+### Messages and sessions
+
+Put `--` before the message to bypass local verb selection. For example,
+`ar3 tool gemini-web --node gemini -- sessions` sends a Gemini prompt. Without
+`--`, `sessions` lists local conversation records.
+
+```bash
+ar3 tool command-shell --node terminal -- "echo hello"
+ar3 tool gemini-web --node gemini -- "Hello"
+ar3 tool browser --node browser-seat -- help
+ar3 tool browser --node browser-seat - <<'EOF_SCRIPT'
+go https://example.com
+snap
+EOF_SCRIPT
+```
+
+With a message, the tool runs once and prints the reply. With `-`, it reads
+one message from stdin. With no command, it starts a session. A session reads
+one command per line and continues after failures. End a line with
+`<<MARKER` to start a block. A line containing only `MARKER` ends that block.
+Press Ctrl-D to end the session. Piped input has no prompt. The vault has no
+interactive message session.
+
+`--attach PATH` adds a file to a message or stdin run. Local replies print in
+the terminal. Attachments are copied to a temporary directory named on stderr
+and listed as `artifact: <path>`. Local command exit codes report the tool's
+result. Routed wakes report their result in the reply.
+
+See [Tool nodes](a8s-tools.md) for registration, access control, profile setup,
+and links to each tool's complete reference.
 
 ## `ar3 doctor`
 

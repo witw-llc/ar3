@@ -1,15 +1,22 @@
 import json
+import re
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
 from browser import plc
 from browser import secretstore
 
+
+
+def _left(tmp_path):
+    """What a call left in `tmp_path`, apart from the guarded data home."""
+    return [name for name in os.listdir(tmp_path) if name != "xdg"]
 
 def test_result_section_stops_at_the_next_header():
     output = "### Result\nhello\n\n### Console\nnoise\n"
@@ -160,7 +167,7 @@ def test_fill_secret_hands_the_driver_a_file_and_the_value_is_in_no_argv(monkeyp
     seen = _spy_cli(monkeypatch)
     plc.fill_secret("seat", "#pw", VALUE, PARTS, str(tmp_path))
     (call,) = seen
-    assert call["cmd"][:4] == ["playwright-cli", "-s=seat", "--raw", "run-code"]
+    assert call["cmd"][:4] == ["playwright-cli", f"-s={plc.session_name('seat')}", "--raw", "run-code"]
     assert call["cmd"][4] == f"--filename={call['path']}"
     assert len(call["cmd"]) == 5
     assert VALUE not in "".join(call["cmd"])
@@ -202,7 +209,7 @@ def test_fill_secret_removes_its_file_whatever_the_driver_does(monkeypatch, tmp_
             plc.fill_secret("seat", "#pw", VALUE, PARTS, str(tmp_path))
     else:
         plc.fill_secret("seat", "#pw", VALUE, PARTS, str(tmp_path))
-    assert os.listdir(tmp_path) == []
+    assert _left(tmp_path) == []
     assert seen and not os.path.exists(seen[0]["path"])
 
 
@@ -392,7 +399,7 @@ def test_run_code_file_hands_the_driver_a_private_file_and_gives_back_its_output
     output = plc.run_code_file("seat", "async (page) => ({value: 1})", str(tmp_path))
     (call,) = seen
     assert output == '{"value":1}\n'
-    assert call["cmd"] == ["playwright-cli", "-s=seat", "--raw", "run-code", f"--filename={call['path']}"]
+    assert call["cmd"] == ["playwright-cli", f"-s={plc.session_name('seat')}", "--raw", "run-code", f"--filename={call['path']}"]
     assert call["text"] == "async (page) => ({value: 1})"
     assert os.path.basename(os.path.dirname(call["path"])).startswith(plc.CODE_DIR_PREFIX)
     assert os.path.basename(call["path"]) == "code.js"
@@ -405,7 +412,7 @@ def test_run_code_file_keeps_its_file_private_and_removes_it(monkeypatch, tmp_pa
     plc.run_code_file("seat", "async (page) => 1", str(tmp_path))
     (call,) = seen
     assert call["file_mode"] == 0o600 and call["dir_mode"] == 0o700
-    assert os.listdir(tmp_path) == []
+    assert _left(tmp_path) == []
 
 
 @pytest.mark.parametrize(
@@ -420,7 +427,7 @@ def test_run_code_file_removes_its_file_whatever_the_driver_does(monkeypatch, tm
     seen = _spy_cli(monkeypatch, result)
     with pytest.raises(plc.BrowserError):
         plc.run_code_file("seat", "async (page) => 1", str(tmp_path))
-    assert os.listdir(tmp_path) == [] and not os.path.exists(seen[0]["path"])
+    assert _left(tmp_path) == [] and not os.path.exists(seen[0]["path"])
 
 
 def test_run_code_file_passes_its_timeout_to_the_call(monkeypatch, tmp_path):
@@ -491,7 +498,55 @@ def test_a_variable_that_moves_or_adds_to_what_the_driver_writes_is_not_passed_o
     monkeypatch.setenv(name, "/somewhere")
     monkeypatch.setenv("KEPT", "yes")
     env = plc.cli_env()
-    assert name not in env and "KEPT" in env
+    assert env.get(name) != "/somewhere" and "KEPT" in env
+
+
+@pytest.fixture
+def short_root():
+    """A data home short enough that its `ipc` directory holds a socket path (`plc.IPC_DIR_MAX_BYTES`)."""
+    import tempfile
+    path = tempfile.mkdtemp(prefix="ar3t-", dir="/tmp" if os.name == "posix" else None)
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.mark.parametrize("name", ["PWTEST_SOCKETS_DIR", "pwtest_sockets_dir"])
+def test_the_daemon_socket_directory_is_the_browsers_own_whatever_the_caller_sets(monkeypatch, short_root, name):
+    monkeypatch.setenv("XDG_DATA_HOME", short_root)
+    monkeypatch.setenv(name, "/tmp/elsewhere")
+    env = plc.cli_env()
+    assert env[plc.IPC_ENV] == os.path.join(short_root, "ar3", "browser", "ipc")
+    assert [key for key in env if key.upper() == plc.IPC_ENV] == [plc.IPC_ENV]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX")
+def test_the_socket_directory_is_made_private_and_a_loose_one_is_tightened(monkeypatch, short_root):
+    monkeypatch.setenv("XDG_DATA_HOME", short_root)
+    path = plc.private_ipc_dir()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+    os.chmod(path, 0o777)
+    plc.private_ipc_dir()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name != "posix", reason="links and owners are POSIX here")
+def test_a_socket_directory_that_is_a_link_or_another_users_stops_the_driver(monkeypatch, tmp_path, short_root):
+    monkeypatch.setenv("XDG_DATA_HOME", short_root)
+    link = os.path.join(short_root, "ar3", "browser", "ipc")
+    os.makedirs(os.path.dirname(link))
+    (tmp_path / "target").mkdir(mode=0o700)
+    os.symlink(tmp_path / "target", link)
+    ran = []
+    monkeypatch.setattr(plc, "require", lambda: "playwright-cli")
+    monkeypatch.setattr(plc.subprocess, "run", lambda cmd, **kwargs: ran.append(cmd))
+    with pytest.raises(plc.BrowserError, match="socket directory"):
+        plc.run("seat", "snapshot")
+    os.unlink(link)
+    plc.private_ipc_dir()
+    monkeypatch.setattr(plc.os, "geteuid", lambda: os.getuid() + 1)
+    with pytest.raises(plc.BrowserError, match="socket directory"):
+        plc.run("seat", "snapshot")
+    assert ran == []
 
 
 @pytest.mark.parametrize("name", [
@@ -831,3 +886,69 @@ def test_the_message_about_odd_output_of_a_seat_is_closed_by_its_own_secrets_and
             with pytest.raises(plc.BrowserError) as held:
                 plc.evaluate("the-seat-that-holds-one", "1 + 1")
     assert plc.EXCERPT_WITHHELD in str(held.value) and "zzzz" not in str(held.value)
+
+
+def test_seats_the_driver_would_give_one_socket_get_different_sessions():
+    # playwright-cli turns every character outside letters, digits and `-` into `-` in the socket name.
+    seats = ["a_b", "a-b", "a.b", "A-B", "a b", "a--b", "a_b_", "a-b-"]
+    names = [plc.session_name(seat) for seat in seats]
+    assert len(set(names)) == len(seats)
+    assert len({name.lower() for name in names}) == len(seats)
+
+
+def test_a_session_name_is_stable_and_safe_for_a_socket():
+    assert plc.session_name("garmin") == plc.session_name("garmin")
+    for seat in ["garmin", "a_b", "UPPER.case", "x" * 300, "../..", "", "naïve"]:
+        name = plc.session_name(seat)
+        assert re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) and len(name) <= 40
+
+
+def test_is_open_asks_for_the_session_of_the_seat_not_of_a_lookalike(monkeypatch):
+    monkeypatch.setattr(plc, "sessions", lambda: [plc.session_name("a_b")])
+    assert plc.is_open("a_b")
+    assert not plc.is_open("a-b")
+    assert not plc.is_open("a.b")
+
+
+def test_a_state_root_too_long_for_a_socket_gets_a_short_private_directory(monkeypatch, tmp_path):
+    long_root = tmp_path / ("d" * 80)
+    monkeypatch.setenv("XDG_DATA_HOME", str(long_root))
+    run = tempfile.mkdtemp(prefix="r", dir="/tmp")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", run)
+    path = plc.ipc_dir()
+    assert os.path.dirname(path) == os.path.join(run, f"ar3-browser-{os.geteuid()}")
+    assert len(os.fsencode(path)) <= plc.IPC_DIR_MAX_BYTES
+    assert plc.private_ipc_dir() == path
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(os.path.dirname(path)).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+    monkeypatch.setenv("XDG_DATA_HOME", str(long_root) + "x")
+    assert plc.ipc_dir() != path
+    shutil.rmtree(run)
+
+
+def test_a_runtime_directory_too_long_too_falls_back_to_the_system_temp_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / ("d" * 80)))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / ("r" * 80)))
+    path = plc.ipc_dir()
+    assert path.startswith(tempfile.gettempdir()) and len(os.fsencode(path)) <= plc.IPC_DIR_MAX_BYTES
+
+
+@pytest.mark.skipif(os.name != "posix", reason="owners are POSIX here")
+def test_a_short_directory_another_user_made_first_stops_the_driver(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / ("d" * 80)))
+    run = tempfile.mkdtemp(prefix="r", dir="/tmp")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", run)
+    os.mkdir(os.path.join(run, f"ar3-browser-{os.geteuid()}"), 0o777)
+    real = os.lstat
+    def foreign(path, *a, **k):
+        info = real(path, *a, **k)
+        if os.path.basename(path).startswith("ar3-browser-"):
+            return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, os.geteuid() + 1, *info[5:]))
+        return info
+    monkeypatch.setattr(plc.os, "lstat", foreign)
+    try:
+        with pytest.raises(plc.BrowserError, match="socket directory"):
+            plc.private_ipc_dir()
+    finally:
+        shutil.rmtree(run)

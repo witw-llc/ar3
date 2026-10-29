@@ -99,7 +99,7 @@ class SensitiveFailure(plc.BrowserError):
         elif not confirmed:
             text += (
                 ". The page could not be confirmed clear, and Chrome could not be closed. "
-                f"Close it with `browser close --seat {seat}`."
+                f"Close it with `ar3 tool browser --seat {seat} close`."
             )
         super().__init__(text)
 

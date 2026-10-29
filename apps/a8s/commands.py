@@ -28,7 +28,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ar3.fsio import stat_or_none
 from ar3.proc import launch_options
+
+import autostart
 
 from core import (
     ENTRYPOINT,
@@ -89,7 +92,10 @@ from daemon import (
     _clear_detach_request,
     _clear_kill_request,
     _read_handler_pid,
+    _read_handler_pid_locked,
     _unlink_pid_files,
+    _unlink_pid_files_locked,
+    pid_lock,
     _dead_letter,
     _write_kill_request,
     attached_loop,
@@ -175,7 +181,7 @@ def cmd_add(args: list[str]) -> int:
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2:
         print(
-            "usage: a8s add <name> <dir> [<definition>] [--KEY value ...]",
+            "usage: a8s add <name> <dir> [<definition>] [--autostart] [--KEY value ...]",
             file=sys.stderr,
         )
         return 2
@@ -186,9 +192,14 @@ def cmd_add(args: list[str]) -> int:
     # is what lets `--KEY value` work here without swallowing the definition.
     first_flag = next((n for n, t in enumerate(rest) if t.startswith("--")), len(rest))
     positionals, var_tokens = rest[:first_flag], rest[first_flag:]
+    try:
+        var_tokens, autostart_mode, _, _ = autostart.split_lifecycle_flags(var_tokens)
+    except ValueError as e:
+        print(f"add: {e}", file=sys.stderr)
+        return 2
     if len(positionals) > 1:
         print(
-            "usage: a8s add <name> <dir> [<definition>] [--KEY value ...]",
+            "usage: a8s add <name> <dir> [<definition>] [--autostart] [--KEY value ...]",
             file=sys.stderr,
         )
         return 2
@@ -258,6 +269,15 @@ def cmd_add(args: list[str]) -> int:
         print("a8s: remembered this shell's PATH for every node's wakes")
     for k, v in sorted(initial_vars.items()):
         print(f"var: {k}={v}")
+    if autostart_mode == "on":
+        if _arm_autostart([name]):
+            print(
+                f"{name} is registered; only autostart failed. "
+                f"Retry with `a8s start {name} --autostart` once the cause is fixed.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"{name}: not started; `a8s start {name}` runs it now")
     return 0
 
 
@@ -353,6 +373,15 @@ def cmd_remove(args: list[str]) -> int:
         return 1
     name = match[0]
     reg = load_registry()
+    holder = _read_handler_pid(name)
+    if holder is not None:
+        print(f"{name} is running (PID {holder}); stop it first: `a8s stop {name}`", file=sys.stderr)
+        return 1
+    try:
+        autostart.purge(name)
+    except autostart.AutostartError as e:
+        print(f"remove: autostart entry not cleaned, {name} stays registered: {e}", file=sys.stderr)
+        return 1
     holder = _read_handler_pid(name)
     if holder is not None:
         print(f"{name} is running (PID {holder}); stop it first: `a8s stop {name}`", file=sys.stderr)
@@ -890,11 +919,10 @@ def _pid_uptime(name: str) -> str:
     """Coarse uptime from the pid file's mtime — a cheap stat, no bookkeeping.
     The pid file is written when a process claims the node, so its age tracks
     how long the node has been running under that handler."""
-    try:
-        mtime = pid_path(name).stat().st_mtime
-    except OSError:
+    info = stat_or_none(pid_path(name))
+    if info is None:
         return "?"
-    secs = max(0, int(time.time() - mtime))
+    secs = max(0, int(time.time() - info.st_mtime))
     if secs < 60:
         return f"{secs}s"
     mins = secs // 60
@@ -904,6 +932,26 @@ def _pid_uptime(name: str) -> str:
     if hours < 24:
         return f"{hours}h"
     return f"{hours // 24}d"
+
+
+def _ls_autostart(args: list[str]) -> int:
+    """`a8s ls --autostart` — each node's startup preference, whether it is
+    armed, the OS event, and what the OS entry actually holds. Says nothing
+    about whether the node is healthy."""
+    unknown = [a for a in args if a not in ("--autostart", "-q")]
+    if unknown:
+        print(f"ls: unknown option with --autostart: {unknown[0]}", file=sys.stderr)
+        return 2
+    names = sorted(load_registry(), key=str.lower)
+    rows = autostart.listing(names)
+    if "-q" in args:
+        print("\n".join(r[0] for r in rows))
+        return 0
+    if not rows:
+        print("(no nodes registered — use `a8s add <name> <dir>`)")
+        return 0
+    _print_table(["NAME", "AUTOSTART", "STATE", "EVENT", "ENTRY"], rows)
+    return 0
 
 
 def cmd_ls(args: list[str] | None = None) -> int:
@@ -923,8 +971,14 @@ def cmd_ls(args: list[str] | None = None) -> int:
     them the command answers "what runs here" while reading as "what can I
     reach", and an agent told to message a name it cannot find in `ls` goes
     looking for a fault instead of sending."""
-    args = args or []
-    quiet = "-q" in args
+    from listing import arguments
+
+    options = arguments("ls", args or [])
+    if isinstance(options, int):
+        return options
+    if options.autostart:
+        return _ls_autostart(["--autostart"] + (["-q"] if options.q else []))
+    quiet = options.q
     reg = load_registry()
     names = sorted(reg, key=str.lower)
     local = {name.lower() for name in names}
@@ -932,9 +986,17 @@ def cmd_ls(args: list[str] | None = None) -> int:
         ((name, ts) for name, ts in last_heard().items() if name.lower() not in local),
         key=lambda pair: pair[0].lower(),
     )
-    if not reg and not remotes:
+    if options.local:
+        remotes = []
+    if options.remote:
+        names = []
+    if options.cutoff is not None:
+        remotes = [(name, ts) for name, ts in remotes
+                   if (stamp := clock.to_local(ts)) is not None and stamp.timestamp() >= options.cutoff]
+    if not names and not remotes:
         if not quiet:
-            print("(no nodes registered — use `a8s add <name> <dir>`)")
+            print("(no matching nodes)" if options.local or options.remote or options.since
+                  else "(no nodes registered — use `a8s add <name> <dir>`)")
         return 0
 
     if quiet:
@@ -1363,6 +1425,21 @@ def cmd_run(args: list[str], interval: float) -> int:
     the specified duration without invoking. Default 1s when given without a
     value."""
     drain_seconds = 0.0
+    takeover = "--no-takeover" not in args
+    try:
+        args, manual_claim = autostart.pop_manual_claim(args)
+        args, mode, startup_epoch, startup_home = autostart.split_lifecycle_flags(
+            [a for a in args if a != "--no-takeover"]
+        )
+        if mode is not None:
+            raise ValueError("--autostart and --no-autostart belong to `a8s start`, not `run`")
+        if startup_home is not None and startup_epoch is None:
+            raise ValueError("--startup-home needs --startup")
+    except ValueError as e:
+        print(f"run: {e}", file=sys.stderr)
+        return 2
+    if startup_epoch is not None:
+        takeover = False
     filtered = []
     i = 0
     while i < len(args):
@@ -1383,10 +1460,15 @@ def cmd_run(args: list[str], interval: float) -> int:
     if len(filtered) != 1:
         print("usage: a8s run <name> [--drain <seconds>]", file=sys.stderr)
         return 2
+    if startup_epoch is not None:
+        autostart.enter_startup(startup_home, filtered[0])
     members = _expand_to_agents(filtered[0])
     if members is None:
         return 1
-    return attached_loop(members, interval, drain_seconds=drain_seconds)
+    return attached_loop(
+        members, interval, drain_seconds=drain_seconds,
+        takeover=takeover, startup_epoch=startup_epoch, manual_claim=manual_claim,
+    )
 
 
 def _each_name(names: list[str], act: Callable[[str], int]) -> int:
@@ -1399,17 +1481,66 @@ def _each_name(names: list[str], act: Callable[[str], int]) -> int:
 
 
 def cmd_start(args: list[str]) -> int:
-    """`a8s start <name> [<name> ...]` — spawn one detached background process
-    per name, in order. The child runs `a8s run <name>` and (if <name> is an
-    alias) handles every member in a single process. Prints each child's PID;
-    exits nonzero when any name failed to start."""
-    if not args:
-        print("usage: a8s start <name> [<name> ...]", file=sys.stderr)
+    """`a8s start <name> [<name> ...] [--autostart | --no-autostart]` — spawn
+    one detached background process per name, in order. The child runs
+    `a8s run <name>` and (if <name> is an alias) handles every member in a
+    single process. A name that is already running is left alone: no restart,
+    no takeover. Prints each child's PID; exits nonzero when any name failed
+    to start.
+
+    `--autostart` remembers the preference and arms the node's startup entry;
+    `--no-autostart` removes the entry and the preference. A plain start
+    re-arms a remembered preference. `--startup EPOCH --startup-home DIR` is
+    the OS entry's own invocation."""
+    try:
+        names, mode, epoch, home = autostart.split_lifecycle_flags(args)
+    except ValueError as e:
+        print(f"start: {e}", file=sys.stderr)
         return 2
-    return _each_name(args, _start_one)
+    if not names:
+        print("usage: a8s start <name> [<name> ...] [--autostart | --no-autostart]", file=sys.stderr)
+        return 2
+    if epoch is not None:
+        autostart.enter_startup(home)
+        mode = None
+    return _each_name(names, lambda name: _start_one(name, mode, epoch))
 
 
-def _start_one(name: str) -> int:
+def _arm_autostart(members: list[str]) -> bool:
+    """Arm the startup entries on the operator's explicit request, saving this
+    shell's proxy and CA settings; True when the OS refused any of them."""
+    try:
+        autostart.enable(members, capture_env=True)
+    except autostart.AutostartError as e:
+        print(f"autostart: not enabled: {e}", file=sys.stderr)
+        return True
+    backend = autostart.select_backend()
+    print(f"autostart: armed {', '.join(members)} for {backend.event}")
+    return False
+
+
+def _autostart_before_start(members: list[str], mode: str | None) -> int | None:
+    """Apply the lifecycle flag (or the remembered preference) ahead of a
+    start. Returns a nonzero code when an explicit flag must stop the start."""
+    if mode == "on":
+        return 1 if _arm_autostart(members) else None
+    if mode == "off":
+        try:
+            autostart.disable(members, forget_preference=True)
+        except autostart.AutostartError as e:
+            print(f"autostart: not disabled: {e}", file=sys.stderr)
+            return 1
+        print(f"autostart: off for {', '.join(members)}")
+        return None
+    try:
+        autostart.rearm_remembered(members)
+    except autostart.AutostartError as e:
+        print(f"autostart: not re-armed: {e}", file=sys.stderr)
+        return 0
+    return None
+
+
+def _start_one(name: str, mode: str | None = None, startup_epoch: str | None = None) -> int:
     # Validate (resolve_name raises if unknown / cycle).
     try:
         _, members = resolve_name(name)
@@ -1425,9 +1556,25 @@ def _start_one(name: str) -> int:
     if _refuse_bad_wake_shell(members) or _refuse_unresolved_mailboxes(members):
         return 1
     _warn_unresolvable_harnesses(members)
+    rc = 0
+    if startup_epoch is None:
+        flagged = _autostart_before_start(members, mode)
+        if flagged:
+            return flagged
+        rc = 1 if flagged == 0 else 0
+    held = {m: _read_handler_pid(m) for m in members}
+    if all(pid is not None for pid in held.values()):
+        for m, pid in held.items():
+            print(f"{m}: already running (PID {pid})")
+        return rc
     # NOTE: the child must launch the entrypoint script (a8s.py), NOT this
     # commands.py module. That's why core.ENTRYPOINT exists.
-    cmd = [sys.executable, str(ENTRYPOINT), "run", name]
+    cmd = [sys.executable, str(ENTRYPOINT), "run", "--no-takeover"]
+    if startup_epoch is not None:
+        cmd += ["--startup", startup_epoch, "--startup-home", str(autostart.home_dir())]
+    else:
+        cmd += ["--manual-claim", autostart.new_manual_claim(members)]
+    cmd.append(name)
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -1439,7 +1586,7 @@ def _start_one(name: str) -> int:
         print(f"started {members[0]} as PID {proc.pid}")
     else:
         print(f"started {name} (alias of {len(members)}) as PID {proc.pid}")
-    return 0
+    return rc
 
 
 _ENGINE_CHECK_TIMEOUT_SECONDS = 40
@@ -1689,12 +1836,16 @@ def _wait_handlers_stopped(
 
 def cmd_stop(args: list[str]) -> int:
     """`a8s stop <name> [<name> ...] [--force]` — stop each name in order, as
-    `_stop_one` does; exits nonzero when any of them failed."""
+    `_stop_one` does; exits nonzero when any of them failed. The internal
+    `--keep-autostart` (used by `ar3 update`) stops without touching the
+    startup entry or preference, like the stop inside a restart."""
     rest, force = _split_force_flag(args)
+    keep = "--keep-autostart" in rest
+    rest = [a for a in rest if a != "--keep-autostart"]
     if not rest:
         print("usage: a8s stop <name> [<name> ...] [--force]", file=sys.stderr)
         return 2
-    return _each_name(rest, lambda name: _stop_one(name, force))
+    return _each_name(rest, lambda name: _stop_one(name, force, disarm=not keep))
 
 
 def _hard_kill_targets(
@@ -1723,7 +1874,31 @@ def _hard_kill(targets: list[tuple[str, int]]) -> None:
             pass
 
 
-def _stop_one(name: str, force: bool) -> int:
+def _disarm(nodes: list[str], failures: list[str]) -> None:
+    """An explicit stop is the operator's persistent stop: disarm the startup
+    entries first, so no startup event races the signals that follow. It also
+    cancels any explicit start whose child has not attached yet."""
+    try:
+        autostart.invalidate_manual(nodes)
+    except autostart.AutostartError as e:
+        failures.append(str(e))
+        print(f"autostart: pending start not cancelled: {e}", file=sys.stderr)
+    try:
+        autostart.disable(nodes)
+    except autostart.AutostartError as e:
+        failures.append(str(e))
+        print(f"autostart: entry not removed: {e}", file=sys.stderr)
+
+
+def _stop_one(name: str, force: bool, disarm: bool = True) -> int:
+    """Stop `name`; with `disarm`, also its startup entries. An internal stop
+    (restart, update) keeps them."""
+    failures: list[str] = []
+    rc = _stop_handlers(name, force, disarm, failures)
+    return rc or (1 if failures else 0)
+
+
+def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) -> int:
     """SIGTERM the handler(s) of one name, then wait until they have actually
     detached.
 
@@ -1744,6 +1919,8 @@ def _stop_one(name: str, force: bool) -> int:
     members = _expand_to_agents(name)
     if members is None:
         return 1
+    if disarm:
+        _disarm(members, failures)
     seen_pids: dict[int, str] = {}
     not_running: list[str] = []
     for member in members:
@@ -1763,6 +1940,8 @@ def _stop_one(name: str, force: bool) -> int:
         for n in attached.get(pid, []):
             if n not in affected:
                 affected.append(n)
+    if disarm:
+        _disarm([n for n in affected if n not in members], failures)
     wakes: dict[str, tuple[int, int, list[str]]] = {}
     if force:
         for n in affected:
@@ -1835,9 +2014,10 @@ def _clear_dead_handler_files(name: str) -> None:
     """What a handler killed outright leaves behind: its pid files, its wake
     record and any request addressed to it. Leaves a node that is still held
     alone."""
-    if _read_handler_pid(name) is not None:
-        return
-    _unlink_pid_files(name)
+    with pid_lock(name):
+        if _read_handler_pid_locked(name) is not None:
+            return
+        _unlink_pid_files_locked(name)
     clear_wake_pid(name)
     _clear_kill_request(name)
     _clear_detach_request(name)
@@ -1863,7 +2043,7 @@ def _restart_one(name: str, force: bool) -> int:
     if members is None:
         return 1
     if any(_read_handler_pid(n) is not None for n in members):
-        rc = _stop_one(name, force)
+        rc = _stop_one(name, force, disarm=False)
         if rc != 0:
             return rc
     return _start_one(name)
@@ -1996,7 +2176,9 @@ def cmd_kill(args: list[str]) -> int:
     members = _expand_to_agents(args[0])
     if members is None:
         return 1
-    rc = 0
+    failures: list[str] = []
+    _disarm(members, failures)
+    rc = 1 if failures else 0
     for name in members:
         holder = _read_handler_pid(name)
         if holder is None:
@@ -2062,6 +2244,12 @@ def cmd_exit() -> int:
     detaches gracefully on its own. A handler gone within `STOP_KILL_WAIT_S`
     without running its stop hook gets it run here; a busy one still running
     then runs its own."""
+    failures: list[str] = []
+    try:
+        autostart.disarm_all()
+    except autostart.AutostartError as e:
+        failures.append(str(e))
+        print(f"autostart: entry not removed: {e}", file=sys.stderr)
     parts = participants_from_registry()
     signaled: dict[str, int] = {}
     for p in parts:
@@ -2077,11 +2265,11 @@ def cmd_exit() -> int:
             print(f"{p.name}: could not signal PID {pid}: {e}", file=sys.stderr)
     if not signaled:
         print("no agents running")
-        return 0
+        return 1 if failures else 0
     _wait_handlers_stopped(list(signaled), set(signaled.values()), STOP_KILL_WAIT_S)
     for name, pid in signaled.items():
         run_stop_hook_if_owed(name, pid)
-    return 0
+    return 1 if failures else 0
 
 
 def _node_status(name: str) -> str:
@@ -2136,8 +2324,12 @@ def cmd_ps(args: list[str] | None = None) -> int:
     DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
     itself last wrote a message, the one column that says it was responsive.
     `-q` prints just names, one per line."""
-    args = args or []
-    quiet = "-q" in args
+    from listing import arguments
+
+    options = arguments("ps", args or [])
+    if isinstance(options, int):
+        return options
+    quiet = options.q
     reg = load_registry()
     running: list[tuple[str, int, str, str]] = []
     for name in sorted(reg, key=str.lower):

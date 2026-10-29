@@ -951,7 +951,7 @@ def _pipeline(tmp_path, monkeypatch, nodes=(), binaries=None, fail=(),
             )
             return _Done(0, stdout="NAME   PID   UPTIME   ROOT\n" + rows)
         if argv[:2] == [a8s, "stop"]:
-            target = argv[2]
+            target = argv[-1]
             if target not in live:
                 return _Done(1)
             live.discard(target)
@@ -1238,9 +1238,9 @@ def test_update_stops_nodes_before_engines_and_restarts_them(tmp_path, monkeypat
     assert ar3.cmd_update(_update_args(all_engines=True)) == 0
     assert seen == [
         [a8s, "ps"],
-        [a8s, "stop", "N1"],
+        [a8s, "stop", "--keep-autostart", "N1"],
         [a8s, "ps"],
-        [a8s, "stop", "N2"],
+        [a8s, "stop", "--keep-autostart", "N2"],
         [a8s, "ps"],
         [binary, "update"],
         ["/bin/sh", str(root / "get.sh")],
@@ -1291,7 +1291,7 @@ def test_update_restarts_siblings_a_shared_handler_took_down(tmp_path, monkeypat
         shared={"worker-a": ("worker-b",)},
     )
     assert ar3.cmd_update(_update_args(all_engines=True)) == 0
-    assert [a8s, "stop", "worker-b"] not in seen
+    assert [a8s, "stop", "--keep-autostart", "worker-b"] not in seen
     assert [a8s, "start", "worker-a"] in seen
     assert [a8s, "start", "worker-b"] in seen
 
@@ -1308,7 +1308,7 @@ def test_update_interrupt_during_stop_still_restarts_stopped_nodes(
         monkeypatch,
         nodes=("N1", "N2"),
         binaries={"claude": binary},
-        interrupt=[(a8s_path, "stop", "N2")],
+        interrupt=[(a8s_path, "stop", "--keep-autostart", "N2")],
     )
     with pytest.raises(KeyboardInterrupt):
         ar3.cmd_update(_update_args(all_engines=True))
@@ -1329,7 +1329,7 @@ def test_update_interrupt_reconciles_a_node_the_stop_took_down(
         monkeypatch,
         nodes=("N1", "N2"),
         binaries={"claude": binary},
-        interrupt=[(a8s_path, "stop", "N2")],
+        interrupt=[(a8s_path, "stop", "--keep-autostart", "N2")],
         interrupt_drops=("N2",),
     )
     with pytest.raises(KeyboardInterrupt):

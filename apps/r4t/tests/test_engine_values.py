@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -114,10 +117,176 @@ class TestModels:
         fake_cli(monkeypatch, {("devin", "models", "list"): text})
         assert values.models("devin") == (["swe-2-high", "swe-2-max"], None)
 
-    @pytest.mark.parametrize("preset", ["codex", "copilot", "opencode", "muse"])
+    @pytest.mark.parametrize("preset", ["codex", "copilot", "opencode"])
     def test_a_list_less_engine_refuses_and_says_where_the_string_goes(self, preset):
         with pytest.raises(values.ValuesError, match=f"{preset} has no list verb; .*(passed through|checked by)"):
             values.models(preset)
+
+    def _fake_muse(self, tmp_path, monkeypatch, body):
+        script = tmp_path / "muse"
+        handshake = (
+            "import json, sys\n"
+            "assert json.loads(sys.stdin.readline())['method'] == 'initialize'\n"
+            "print(json.dumps({'id': 1, 'result': {}}), flush=True)\n"
+        )
+        script.write_text("#!/usr/bin/env python3\n" + handshake + body)
+        script.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+        monkeypatch.setenv("R4T_TEST_INHERIT", "kept")
+
+    MUSE_OK = (
+        "import json, os, sys\n"
+        "assert sys.argv[1:] == ['serve', '--disable-request-user-input']\n"
+        "for line in sys.stdin:\n"
+        "    m = json.loads(line)\n"
+        "    if m.get('method') == 'model/list':\n"
+        "        rows = [{'modelId': 'muse-a'}, {'modelId': os.environ['R4T_TEST_INHERIT']}, {'x': 1}]\n"
+        "        print('noise'); print(json.dumps({'id': 2, 'result': {'models': rows}}), flush=True)\n"
+    )
+
+    def test_muse_ids_come_from_msp_model_list_with_inherited_env(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, self.MUSE_OK)
+        assert values.models("muse") == (["muse-a", "kept"], None)
+
+    def test_muse_model_list_error_is_a_values_error(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, (
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    if 'model/list' in line:\n"
+            "        print(json.dumps({'id': 2, 'error': {'message': 'nope'}}), flush=True)\n"))
+        with pytest.raises(values.ValuesError, match="model/list failed"):
+            values.models("muse")
+
+    def test_muse_exit_before_answer_is_a_values_error(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, "import sys\nsys.exit(3)\n")
+        with pytest.raises(values.ValuesError, match="exited before answering|closed its input"):
+            values.models("muse")
+
+    def test_muse_empty_catalog_is_refused(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, (
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    if 'model/list' in line:\n"
+            "        print(json.dumps({'id': 2, 'result': {'models': []}}), flush=True)\n"))
+        with pytest.raises(values.ValuesError, match="listed no models"):
+            values.models("muse")
+
+    def test_muse_timeout_is_a_values_error(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, "import sys, time\nsys.stdin.read()\ntime.sleep(30)\n")
+        monkeypatch.setattr(values, "LIST_TIMEOUT_SECONDS", 1)
+        with pytest.raises(values.ValuesError, match="timed out"):
+            values.models("muse")
+
+    @pytest.mark.parametrize("result", [True, "bad", [1]])
+    def test_muse_malformed_catalog_is_a_values_error(self, tmp_path, monkeypatch, result):
+        self._fake_muse(tmp_path, monkeypatch, (
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    if 'model/list' in line:\n"
+            f"        print(json.dumps({{'id': 2, 'result': {result!r}}}), flush=True)\n"))
+        with pytest.raises(values.ValuesError, match="no models list"):
+            values.models("muse")
+
+    def test_muse_server_request_cannot_impersonate_catalog(self, tmp_path, monkeypatch):
+        collision = (
+            "        print(json.dumps({'id': 2, 'method': 'approval', "
+            "'result': {'models': [{'modelId': 'wrong'}]}}), flush=True)\n"
+        )
+        self._fake_muse(tmp_path, monkeypatch, self.MUSE_OK.replace("        rows =", collision + "        rows ="))
+        assert values.models("muse")[0] == ["muse-a", "kept"]
+
+    def test_muse_noisy_output_is_bounded(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, (
+            "import json, sys\n"
+            "for line in sys.stdin:\n"
+            "    if 'model/list' in line:\n"
+            "        while True: print('noise', flush=True)\n"))
+        monkeypatch.setattr(values, "LIST_TIMEOUT_SECONDS", 0.1)
+        with pytest.raises(values.ValuesError, match="timed out|response limit"):
+            values.models("muse")
+
+    MUSE_FORK = (
+        "import os, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import signal, time\\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\ntime.sleep(60)'])\n"
+        "open(os.environ['R4T_TEST_CHILD'], 'w', encoding='utf-8').write(str(child.pid))\n"
+    )
+
+    @staticmethod
+    def _gone(pid, seconds=3):
+        def state():
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    return f.read().rsplit(")", 1)[1].split()[0]
+            except OSError:
+                return None
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if state() in (None, "Z"):
+                return True
+            time.sleep(0.05)
+        return False
+
+    @pytest.mark.skipif(not os.path.isdir("/proc"), reason="reads /proc")
+    @pytest.mark.parametrize("ending", ["success", "early-exit", "timeout"])
+    def test_muse_child_that_outlives_the_leader_is_terminated(self, tmp_path, monkeypatch, ending):
+        pidfile = tmp_path / "child.pid"
+        monkeypatch.setenv("R4T_TEST_CHILD", str(pidfile))
+        tail = {
+            "success": "",
+            "early-exit": "sys.exit(3)\n",
+            "timeout": "sys.stdin.read()\ntime.sleep(30)\n",
+        }[ending]
+        body = self.MUSE_FORK + (
+            "import time\n" + self.MUSE_OK.split("\n", 1)[1] if ending == "success" else "import time\n" + tail
+        )
+        self._fake_muse(tmp_path, monkeypatch, body)
+        monkeypatch.setattr(values, "LIST_TIMEOUT_SECONDS", 1)
+        try:
+            if ending == "success":
+                assert values.models("muse") == (["muse-a", "kept"], None)
+            else:
+                with pytest.raises(values.ValuesError):
+                    values.models("muse")
+            child = int(pidfile.read_text())
+            assert self._gone(child), "forked helper survived the catalog read"
+        finally:
+            if pidfile.exists():
+                child = int(pidfile.read_text())
+                if not self._gone(child, seconds=0.1):
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_muse_launch_owns_a_group_on_posix_and_windows(self, monkeypatch):
+        seen = []
+
+        def popen(argv, **kwargs):
+            seen.append(kwargs)
+            raise OSError("stop here")
+
+        monkeypatch.setattr(values.subprocess, "Popen", popen)
+        real = values.launch_options
+        for windows in (False, True):
+            monkeypatch.setattr(values, "launch_options", lambda **kw: real(windows=windows, **kw))
+            with pytest.raises(values.ValuesError, match="could not run"):
+                values.models("muse")
+        assert seen[0].get("start_new_session") is True
+        assert seen[1]["creationflags"] == 0x08000000 | 0x00000200
+        assert "start_new_session" not in seen[1]
+
+    def test_muse_cleanup_goes_through_the_shared_group_termination(self, tmp_path, monkeypatch):
+        self._fake_muse(tmp_path, monkeypatch, self.MUSE_OK)
+        called = []
+        real = values.terminate_group
+        def cleanup(proc, **kwargs):
+            assert proc.returncode is None, "leader reaped before group ownership was released"
+            called.append(proc.pid)
+            return real(proc, **kwargs)
+        monkeypatch.setattr(values, "terminate_group", cleanup)
+        values.models("muse")
+        assert len(called) == 1
 
     def test_a_failing_cli_is_a_values_error_naming_it(self, monkeypatch):
         bad = subprocess.CompletedProcess(["agy", "models"], 3, stdout="", stderr="boom")
@@ -136,7 +305,7 @@ class TestVerbs:
         assert values.verbs("claude") == ["efforts", "models"]
         assert values.verbs("codex") == ["efforts"]
         assert values.verbs("cursor") == ["models"]
-        assert values.verbs("muse") == ["efforts"]
+        assert values.verbs("muse") == ["efforts", "models"]
 
 class TestCli:
     def test_efforts_print_one_per_line(self, capsys):

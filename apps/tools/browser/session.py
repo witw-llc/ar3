@@ -1,38 +1,36 @@
 """Seat-keyed browser session.
 
-One seat, one Chrome profile, one CDP port (chosen by Chrome, read from the profile), one playwright-cli session. Chrome
-is launched directly rather than by playwright so it carries no automation
-flags, and playwright-cli attaches afterwards over CDP. The profile directory
-is what makes a seat persistent: cookies survive a restart because Chrome
-stores them the way it does for a person.
+One seat, one Chrome profile, one playwright-cli session. playwright-cli
+launches the seat's Chrome with the seat's own flags and none of its defaults,
+and drives it over `--remote-debugging-pipe`: two inherited descriptors, so
+Chrome opens no DevTools port that another local user could reach. The profile
+directory is what makes a seat persistent: cookies survive a restart because
+Chrome stores them the way it does for a person.
 
 Derived from b3t's session layer (neilobremski/bin), generalised so the seat
 name selects the profile.
 """
-import http.client
 import json
 import math
 import os
 import platform
 import re
+import secrets
 import shutil
 import signal
-import socket
 import stat
 import subprocess
-import sys
 import threading
 import time
-import urllib.request
 from pathlib import Path
 
 from ar3.locking import file_lock
-from ar3.proc import launch_options, spawn
+from ar3.proc import launch_options
 
 from . import plc
 
-PORT_FILE = "DevToolsActivePort"
-CHROME_STARTUP_WAIT = 60  # x 0.2s
+# How long `open` may take to start Chrome and load its first page, under the launch lock.
+CHROME_START_SECONDS = 15
 # a8s kills a stop hook after 30 s (STOP_HOOK_SECONDS). The whole graceful part
 # of close_browser shares this one budget, and the forced teardown needs about
 # 5 s after it (SIGTERM wait), so the force step always runs before 30 s.
@@ -169,7 +167,7 @@ def last_activity(seat):
 
 def launch_lock(seat, blocking=True):
     """The launch lock: held by a launch decision (milliseconds, plus Chrome's
-    start, 12 s at most with the teardown of a failed start) and by the stop's
+    start, `CHROME_START_SECONDS` at most plus the teardown of a failed start) and by the stop's
     epoch-and-kill. It is separate from the seat lock; a stop never forces past it."""
     private_dir(seat_home(seat))
     return file_lock(Path(seat_home(seat)) / "launch-lock", blocking=blocking)
@@ -273,123 +271,6 @@ def clear_video_state(seat):
         pass
 
 
-def _port_override():
-    override = os.environ.get("AR3_BROWSER_PORT")
-    return int(override) if override else None
-
-
-def _port_file(seat):
-    return os.path.join(profile_dir(seat), PORT_FILE)
-
-
-def _recorded_port(seat):
-    """The port Chrome wrote into this seat's own profile, or None."""
-    try:
-        with open(_port_file(seat)) as handle:
-            return int(handle.readline().strip())
-    except (OSError, ValueError):
-        return None
-
-
-LOOPBACK_HOSTS = ("127.0.0.1", "::1")
-
-
-def _loopback_hosts(address):
-    """The loopback hosts a listener's local address serves: one of the two,
-    both for a wildcard, none for anything else."""
-    host = address.rsplit(":", 1)[0].strip("[]") if ":" in address else address
-    if host in ("*", "0.0.0.0", "::", ""):
-        return LOOPBACK_HOSTS
-    return (host,) if host in LOOPBACK_HOSTS else ()
-
-
-def _listening_endpoints(port):
-    """{host: {pid, ...}} for the processes holding a listening TCP socket on
-    `port` at each loopback host, from lsof (macOS, Linux) or ss (Linux). Empty
-    when neither tool answers: no proof, no owner. The host matters: when
-    127.0.0.1:port is taken Chrome falls back to [::1]:port, so two Chromes
-    share one port number and only the exact endpoint names the owner."""
-    endpoints = {}
-
-    def hold(address, pid):
-        for host in _loopback_hosts(address):
-            endpoints.setdefault(host, set()).add(pid)
-
-    if shutil.which("lsof"):
-        result = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pn"],
-            capture_output=True, text=True,
-            **launch_options(),
-        )
-        pid = None
-        for line in result.stdout.splitlines():
-            if line.startswith("p"):
-                pid = line[1:]
-            elif line.startswith("n") and pid and pid.isdigit():
-                hold(line[1:], pid)
-        return endpoints
-    if shutil.which("ss"):
-        result = subprocess.run(
-            ["ss", "-Hltnp", f"sport = :{port}"], capture_output=True, text=True,
-            **launch_options(),
-        )
-        for line in result.stdout.splitlines():
-            fields = line.split()
-            if len(fields) < 4:
-                continue
-            for pid in re.findall(r"pid=(\d+)", line):
-                hold(fields[3], pid)
-        return endpoints
-    return endpoints
-
-
-def _owned_hosts(seat, port):
-    """The loopback hosts where a process of this seat's profile holds the
-    listener on `port`, 127.0.0.1 first. Empty means not ours (or no proof)."""
-    ours = set(_profile_pids(seat))
-    if not ours:
-        return []
-    endpoints = _listening_endpoints(port)
-    return [host for host in LOOPBACK_HOSTS if endpoints.get(host, set()) & ours]
-
-
-def cdp_port(seat):
-    """The CDP port of this seat's own Chrome.
-
-    Chrome started with port 0 records the port it picked in its own profile
-    (DevToolsActivePort); that record is the port. An owner-set port
-    (AR3_BROWSER_PORT) is the launch port, never proof of ownership by itself:
-    Chrome writes no record for a fixed port, so the override counts only
-    when a process of this seat's profile holds a listener on it. A record
-    that differs from the override is a mismatch, and attaching to the
-    override would drive someone else's browser. No proof, no port: None."""
-    recorded = _recorded_port(seat)
-    override = _port_override()
-    if override and recorded and recorded != override:
-        raise plc.BrowserError(
-            f"seat {seat!r} runs Chrome on port {recorded}, not the requested "
-            f"{override}; close it first or drop --port"
-        )
-    if recorded:
-        return recorded
-    if override and _owned_hosts(seat, override):
-        return override
-    return None
-
-
-def _port_in_use(port):
-    """True when anything accepts a connection on the loopback port."""
-    for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
-        try:
-            with socket.socket(family, socket.SOCK_STREAM) as probe:
-                probe.settimeout(1)
-                if probe.connect_ex((host, port)) == 0:
-                    return True
-        except OSError:
-            continue
-    return False
-
-
 def chrome_path():
     explicit = os.environ.get("AR3_BROWSER_CHROME")
     if explicit:
@@ -403,39 +284,6 @@ def chrome_path():
     return None
 
 
-def cdp_base(seat):
-    """The CDP base URL of this seat's own Chrome, or None.
-
-    Ours means four facts together: a Chrome process of our profile runs, our
-    profile recorded a port (or the owner set one), a process of our profile
-    holds the listener at that exact loopback endpoint, and it answers. A
-    port that answers with no Chrome of ours behind it is another process;
-    so is the other address family's listener on the same port number.
-    """
-    if not _main_pids(seat):
-        return None
-    port = cdp_port(seat)
-    if not port:
-        return None
-    for host in _owned_hosts(seat, port):
-        base = f"http://{host}:{port}" if ":" not in host else f"http://[{host}]:{port}"
-        try:
-            urllib.request.urlopen(f"{base}/json/version", timeout=2)
-            return base
-        except OSError:
-            continue
-    return None
-
-
-def _wait_for_cdp(seat):
-    for _ in range(CHROME_STARTUP_WAIT):
-        base = cdp_base(seat)
-        if base:
-            return base
-        time.sleep(0.2)
-    return None
-
-
 def _profile_pattern(seat):
     """Regex for the seat's profile flag. The path is escaped and closed by a
     space or the end of the line, so a sibling seat whose name starts with this
@@ -444,7 +292,7 @@ def _profile_pattern(seat):
 
 
 def _profile_pids(seat):
-    """Chromes holding this seat's profile, whether or not CDP answers yet."""
+    """Chromes holding this seat's profile, whether or not the driver holds them."""
     if platform.system() == "Windows":
         return []
     result = subprocess.run(
@@ -484,7 +332,7 @@ def _daemon_pids(seat):
     if platform.system() == "Windows":
         return []
     result = subprocess.run(
-        ["pgrep", "-f", f"cliDaemon.js {re.escape(seat)}([[:space:]]|$)"],
+        ["pgrep", "-f", f"cliDaemon.js {re.escape(plc.session_name(seat))}([[:space:]]|$)"],
         capture_output=True, text=True,
         **launch_options(),
     )
@@ -520,27 +368,6 @@ def _headless():
     always headed. A headless seat can use a signed-in profile, but nobody can
     sign in through it."""
     return platform.system() == "Linux" and not os.environ.get("DISPLAY")
-
-
-def _spawn_quiet(argv, cwd):
-    """`ar3.proc.spawn` with stdout and stderr on the null device. The browser
-    must not hold a wake's pipes open, and `spawn` leaves them inherited, so
-    the two descriptors point at the null device for the length of the spawn."""
-    if os.name != "posix":
-        return spawn(argv, cwd=cwd)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    saved = (os.dup(1), os.dup(2))
-    null = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(null, 1)
-        os.dup2(null, 2)
-        return spawn(argv, cwd=cwd)
-    finally:
-        os.dup2(saved[0], 1)
-        os.dup2(saved[1], 2)
-        for fd in (null, *saved):
-            os.close(fd)
 
 
 # Chrome has no launch flag for either password setting; each is a profile preference.
@@ -595,25 +422,18 @@ def _set_password_preferences(seat):
     os.replace(aside, target)
 
 
-def _launch_chrome(seat):
-    """Start Chrome in its own session, so a wake killed at its time limit
-    leaves the signed-in browser running; only `close` ends it."""
-    binary = chrome_path()
-    if not binary:
-        raise plc.BrowserError("no Chrome found — set AR3_BROWSER_CHROME")
-    private_dir(seat_home(seat))
-    os.makedirs(profile_dir(seat), exist_ok=True)
-    _set_password_preferences(seat)
-    # A stale record must never be read as the new Chrome's port.
-    try:
-        os.remove(_port_file(seat))
-    except OSError:
-        pass
-    port = _port_override() or 0  # 0: Chrome picks a free port and records it
+def launch_config_path(seat):
+    return os.path.join(seat_home(seat), "launch.json")
+
+
+def _launch_args(seat):
+    """Chrome's whole command line after the binary. Playwright adds none of its defaults (`ignoreDefaultArgs`
+    is true), so the seat's Chrome carries the flags a person's would, plus the two Playwright needs: the
+    profile, and the pipe it drives Chrome over. With its defaults Playwright would also add `--no-sandbox`,
+    `--password-store=basic` (cookies encrypted under a fixed key) and `--enable-automation`."""
     argv = [
-        binary,
         f"--user-data-dir={profile_dir(seat)}",
-        f"--remote-debugging-port={port}",
+        "--remote-debugging-pipe",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-backgrounding-occluded-windows",
@@ -621,18 +441,87 @@ def _launch_chrome(seat):
     if _headless():
         argv.append("--headless=new")
     argv.append("about:blank")
-    _spawn_quiet(argv, cwd=seat_home(seat))
+    return argv
+
+
+def _write_launch_config(seat, binary):
+    """The playwright-cli config that launches this seat's Chrome, written 0600 in the seat's 0700 home. It holds
+    paths and flags, nothing of a caller or a page. `viewport: null` leaves the window its own size, as a
+    person's Chrome has it."""
+    config = {
+        "browser": {
+            "browserName": "chromium",
+            "userDataDir": profile_dir(seat),
+            "launchOptions": {
+                "executablePath": binary,
+                "headless": _headless(),
+                "chromiumSandbox": True,
+                "ignoreDefaultArgs": True,
+                "args": _launch_args(seat),
+            },
+            "contextOptions": {"viewport": None},
+        },
+    }
+    target = launch_config_path(seat)
+    aside = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+    descriptor = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(config, handle)
+    os.replace(aside, target)
+    return target
+
+
+def _parent_pid(pid):
+    try:
+        with open(f"/proc/{int(pid)}/stat", encoding="utf-8") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[1]
+    except (OSError, IndexError, ValueError):
+        result = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, **launch_options())
+        return result.stdout.strip()
+
+
+UNSUPPORTED_MESSAGE = "a browser seat opens on Linux and macOS only"
+
+
+def _refuse_unsupported():
+    """A seat opens on Linux and macOS only. On Windows the tool can find no process of the seat, and the driver
+    listens on a named pipe whose access the tool does not set, so nothing is started there."""
+    if platform.system() == "Windows":
+        raise plc.BrowserError(UNSUPPORTED_MESSAGE)
+
+
+def owned_by_driver(seat):
+    """True when exactly one browser process holds this seat's profile, and its parent is this seat's
+    playwright-cli daemon. The daemon holds the other end of Chrome's pipe; nothing else can drive it. Never true
+    on Windows, where no process of the seat can be found."""
+    if platform.system() == "Windows":
+        return False
+    main = _main_pids(seat)
+    return len(main) == 1 and _parent_pid(main[0]) in set(_daemon_pids(seat))
+
+
+def _launch_chrome(seat):
+    """Have playwright-cli launch the seat's Chrome. The daemon it starts runs in its own session, so a wake
+    killed at its time limit leaves the daemon, and the signed-in browser it holds, running; only `close`
+    ends them. Chrome lives as long as the daemon: its pipe closes with it."""
+    _refuse_unsupported()
+    binary = chrome_path()
+    if not binary:
+        raise plc.BrowserError("no Chrome found — set AR3_BROWSER_CHROME")
+    private_dir(seat_home(seat))
+    os.makedirs(profile_dir(seat), exist_ok=True)
+    _set_password_preferences(seat)
+    config = _write_launch_config(seat, binary)
+    plc.run(seat, "open", plc.Own(f"--config={config}"), timeout=CHROME_START_SECONDS)
 
 
 def _route_downloads_js(seat, directory=None):
-    """Page-less JS that points the attached Chrome's downloads at the seat
-    (or at `directory`, one of the seat's own).
+    """Page-less JS that points Chrome's downloads at the seat (or at `directory`, one of the seat's own).
 
-    The seat attaches to a Chrome it launched as a person would, so Playwright
-    manages no downloads and Chrome saves to its profile default. The
-    Browser.setDownloadBehavior override lasts only while the CDP session that
-    set it stays attached, so one session is kept on the driver's Browser object
-    for the life of the attach and reused on every call.
+    Playwright would save each download under a generated name in a temporary directory of its own. The
+    Browser.setDownloadBehavior override replaces that, keeps the file's own name, and lasts only while the CDP
+    session that set it stays attached, so one session is kept on the driver's Browser object for the life of
+    the daemon and reused on every call.
     """
     return plc.Own(
         "const br = page.context().browser();"
@@ -644,37 +533,34 @@ def _route_downloads_js(seat, directory=None):
 
 
 def _start_chrome(seat):
-    """Launch Chrome if none runs and wait for its CDP port. Returns the CDP
-    base to attach to, or None when the seat is already attached."""
+    """Launch Chrome through the driver when the seat has no session. True when this call launched it.
+
+    A Chrome that holds the profile with no session of the driver is no one's to drive (its pipe is gone), and
+    Chrome refuses a second instance on one profile, so it is ended first. A launch that does not leave exactly
+    the seat's own Chrome under the seat's own daemon is ended too."""
+    _refuse_unsupported()
     if plc.is_open(seat):
-        return None
-
-    base = cdp_base(seat)
-    if not base:
-        if not _profile_pids(seat):
-            override = _port_override()
-            if override and _port_in_use(override):
-                raise plc.BrowserError(
-                    f"port {override} is in use by a process that is not Chrome "
-                    f"for seat {seat!r}; free it or choose another --port"
-                )
-            _launch_chrome(seat)
-        base = _wait_for_cdp(seat)
-    if not base:
-        # A launch that never serves CDP would otherwise leave a browser
-        # nobody can drive — and an icon nobody can quit — running forever.
+        return False
+    if _profile_pids(seat):
         _terminate_profile(seat)
-        raise plc.BrowserError(f"Chrome for seat {seat!r} did not come up (no live CDP port in its profile)")
-    return base
-
-
-def _attach(seat, base):
     try:
-        plc.run(seat, "attach", plc.Own(f"--cdp={base}"), timeout=15)
+        _launch_chrome(seat)
     except plc.BrowserError:
         _terminate_profile(seat)
         raise
-    plc.run_code(seat, _route_downloads_js(seat), timeout=15)
+    if not owned_by_driver(seat):
+        _terminate_profile(seat)
+        raise plc.BrowserError(f"Chrome for seat {seat!r} did not come up under the seat's driver")
+    return True
+
+
+def _attach(seat):
+    """Route the new Chrome's downloads; its first call over the pipe."""
+    try:
+        plc.run_code(seat, _route_downloads_js(seat), timeout=15)
+    except plc.BrowserError:
+        _terminate_profile(seat)
+        raise
 
 
 def _salvage_recording(seat, timeout=30):
@@ -711,9 +597,8 @@ def close_browser(seat):
         graceful(5, lambda t: plc.run(seat, "dialog-dismiss", timeout=t))
         graceful(30, lambda t: save_state(seat, timeout=t))
         graceful(30, lambda t: _salvage_recording(seat, timeout=t))
-        # Browser.close over CDP quits exactly this Chrome instance with a
-        # clean exit (profile flushes, no crash flag). browser().close()
-        # only disconnects, and osascript "tell application ... to quit"
+        # Browser.close over the pipe quits exactly this Chrome instance with a
+        # clean exit (profile flushes, no crash flag). osascript "tell application ... to quit"
         # is unscoped — it can take down a person's own browser running
         # beside the seat's.
         graceful(15, lambda t: plc.run_code(
@@ -727,11 +612,6 @@ def close_browser(seat):
         graceful(30, lambda t: plc.run(seat, "close", timeout=t))
 
     _terminate_profile(seat)
-
-    for _ in range(20):
-        if not cdp_base(seat):
-            break
-        time.sleep(0.25)
 
 
 def _probe_js(seat):
@@ -816,15 +696,15 @@ def open_if_down(seat, epoch):
             raise plc.BrowserError(STOP_MESSAGE)
         if _before_spawn is not None:
             _before_spawn()
-        base = _start_chrome(seat)
+        launched = _start_chrome(seat)
         # Post-spawn barrier: a stop that gave up on the launch lock may have
         # bumped the epoch and scanned before this Chrome existed. Re-read it;
         # if it moved, end the Chrome we made.
         if epoch is not None and stop_epoch(seat) != epoch:
             _terminate_profile(seat)
             raise plc.BrowserError(STOP_MESSAGE)
-    if base:
-        _attach(seat, base)
+    if launched:
+        _attach(seat)
 
 
 _before_spawn = None  # test hook: called between the epoch check and the spawn
@@ -895,89 +775,70 @@ def current_url(seat):
     return plc.evaluate(seat, plc.Own("window.location.href"))
 
 
-CDP_ANSWER_SECONDS = 2
-_no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# A page's target id, as Chrome makes it.
+TARGET_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
 
 
-def _recorded_identity(seat):
-    """(port, browser path) from the `DevToolsActivePort` file that Chrome wrote in this seat's own profile: its
-    port, and the path of its browser endpoint (`/devtools/browser/<id>`). The path is the seat's Chrome's own
-    name for itself, and what answers on the port under another one is not that Chrome. It is no secret from a
-    process that can reach the port: the endpoint has no login (see the README, Trust). Either is empty when
-    the file does not say."""
+def _browser_call_code(nonce, body):
+    """The text of one async function that runs `body` with `s`, a CDP session on the browser itself, and
+    returns `{nonce, value}`. The nonce is fresh for each call and is in no page, so text a page puts in the
+    output (a title, a URL, a console line) cannot pass for the answer."""
+    return (
+        "async (page) => {\n"
+        "  const s = await page.context().browser().newBrowserCDPSession();\n"
+        "  try {\n"
+        f"{body}\n"
+        f"    return {{nonce: {json.dumps(nonce)}, value}};\n"
+        "  } finally { await s.detach(); }\n"
+        "}\n"
+    )
+
+
+def _browser_call(seat, body, timeout=15):
+    """The value `body` sets, read from the driver's structured answer (see `_browser_call_code`). None when
+    the seat has no session (the driver opens no browser for this call), the call fails, or the answer is
+    not exactly the one this call asked for."""
+    nonce = secrets.token_hex(16)
     try:
-        with open(_port_file(seat)) as handle:
-            lines = handle.read().splitlines()
-        return int(lines[0].strip()), (lines[1].strip() if len(lines) > 1 else "")
-    except (OSError, ValueError, IndexError):
-        return 0, ""
-
-
-def _cdp_get(base, path):
-    """The body of one request to the DevTools endpoint. Any failure to get one, a server that speaks something
-    other than HTTP included, is an OSError."""
-    try:
-        with _no_proxy.open(f"{base}{path}", timeout=CDP_ANSWER_SECONDS) as response:
-            return response.read().decode("utf-8")
-    except (http.client.HTTPException, UnicodeDecodeError) as exc:
-        raise OSError(f"the DevTools endpoint answered with something that is not a page list: {exc}") from None
-
-
-def _own_cdp_base(seat):
-    """The DevTools base URL of this seat's own Chrome, proven by the browser endpoint it answers with: its
-    path is the one Chrome wrote in the seat's profile. Costs one request. A record that does not check out
-    (nothing answers, or what answers is not that Chrome) gives None. Chrome writes no record for a port the
-    owner fixed; then the proof is the one the attach uses (`cdp_base`: a process of the seat's profile holds
-    the listener), which costs a little more."""
-    port, browser_path = _recorded_identity(seat)
-    if port and browser_path:
-        for host in ("127.0.0.1", "[::1]"):
-            base = f"http://{host}:{port}"
-            try:
-                answer = json.loads(_cdp_get(base, "/json/version"))
-            except (OSError, ValueError):
-                continue
-            if isinstance(answer, dict) and str(answer.get("webSocketDebuggerUrl", "")).endswith(browser_path):
-                return base
+        answer = plc.result_json(plc.run_code_file(seat, _browser_call_code(nonce, body), scratch_dir(seat), timeout=timeout))
+    except (plc.BrowserError, OSError):
         return None
-    if _port_override():
-        try:
-            return cdp_base(seat)
-        except plc.BrowserError:
-            return None
-    return None
+    if not isinstance(answer, dict) or set(answer) != {"nonce", "value"} or answer["nonce"] != nonce:
+        return None
+    return answer["value"]
 
 
 def pages(seat):
-    """[(id, url)] for every page (tab) that the seat's own Chrome has open, read from its DevTools endpoint:
-    two requests on the loopback, no playwright-cli call. None when the endpoint does not answer or is not
-    proven to be this seat's Chrome (see `_own_cdp_base`); the caller then asks the driver."""
-    base = _own_cdp_base(seat)
-    if base is None:
-        return None
-    try:
-        listing = json.loads(_cdp_get(base, "/json"))
-    except (OSError, ValueError):
-        return None
+    """[(id, url)] for every page (tab) that the seat's own Chrome has open, as Chrome's own target list gives
+    it over the driver's pipe: one driver call. The titles are not read. None when the seat has no session or
+    the answer is malformed (a page that is not an object, an id that is not a target id, a url that is not
+    text); the caller then asks the driver for the page it drives."""
+    listing = _browser_call(seat, (
+        "    const {targetInfos} = await s.send('Target.getTargets');\n"
+        "    const value = targetInfos.filter((t) => t.type === 'page').map((t) => ({id: t.targetId, url: t.url}));"
+    ))
     if not isinstance(listing, list):
         return None
-    return [
-        (str(target.get("id", "")), target["url"])
-        for target in listing
-        if isinstance(target, dict) and target.get("type") == "page" and isinstance(target.get("url"), str)
-    ]
+    found = []
+    for target in listing:
+        if not (isinstance(target, dict) and set(target) == {"id", "url"}):
+            return None
+        page_id, url = target["id"], target["url"]
+        if not (isinstance(page_id, str) and TARGET_ID.fullmatch(page_id) and isinstance(url, str)):
+            return None
+        found.append((page_id, url))
+    return found
 
 
 def close_page(seat, page_id):
     """Close one page by its id (`pages`). True when Chrome took the request."""
-    base = _own_cdp_base(seat)
-    if base is None or not re.fullmatch(r"[0-9A-Za-z-]+", page_id or ""):
+    if not TARGET_ID.fullmatch(page_id or ""):
         return False
-    try:
-        _cdp_get(base, f"/json/close/{page_id}")
-    except OSError:
-        return False
-    return True
+    closed = _browser_call(seat, (
+        f"    const request = JSON.parse({plc.literal({'targetId': page_id})});\n"
+        "    const value = (await s.send('Target.closeTarget', request)).success === true;"
+    ))
+    return closed is True
 
 
 def _sweep_mark_path(seat):
@@ -1018,9 +879,5 @@ def mark_swept(seat, stamp):
 
 def status(seat):
     if not plc.is_open(seat):
-        try:
-            port = cdp_port(seat) if _main_pids(seat) else None
-        except plc.BrowserError as exc:
-            return f"{seat}: not attached ({exc})"
-        return f"{seat}: not attached (cdp {port if port else 'none'})"
+        return f"{seat}: not attached (chrome {'running' if _main_pids(seat) else 'down'})"
     return f"{seat}: attached at {current_url(seat)}"

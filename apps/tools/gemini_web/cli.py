@@ -1,5 +1,6 @@
 """CLI for the gemini-web tool: serve a8s wakes, or drive one turn by hand."""
 import argparse
+import os
 import sys
 
 from . import handler
@@ -30,13 +31,14 @@ def _sessions(seat):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="gemini_web",
+        prog=os.environ.get("AR3_TOOL_PROG", "gemini_web"),
         description="Gemini Web as an a8s seat: a tell in, Gemini's answer back.",
     )
     sub = parser.add_subparsers(dest="command")
     # The same options after the verb, as a8s's definition passes them there.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--seat", default="gemini", help="a8s node name (default: gemini)")
+    common.add_argument("--seat", default="gemini",
+                        help=argparse.SUPPRESS if os.environ.get("AR3_TOOL_PROG") else "a8s node name (default: gemini)")
 
     def node_options(p, allow_required):
         p.add_argument("--browser-seat", required=True,

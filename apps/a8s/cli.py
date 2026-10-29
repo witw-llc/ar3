@@ -52,10 +52,10 @@ from commands import (
 
 
 COMMANDS: list[tuple[str, str, str]] = [
-    ("add",      "<name> <dir> [<def>] [--K v ...]", "Register a node (optional a8s vars)."),
+    ("add",      "<name> <dir> [<def>] [--autostart] [--K v ...]", "Register a node (optional a8s vars)."),
     ("remove",   "<name>",                    "Unregister a node and delete its mailbox."),
     ("rm",       "<name>",                    "Alias for remove."),
-    ("ls",       "[-q]",                      "List all registered nodes, running or not."),
+    ("ls",       "[-q] [--local|--remote] [--since CUTOFF] [--autostart]",                   "List all registered nodes, running or not."),
     ("discover", "<path>",                    "Scan a path for nodes and suggest `add` commands."),
     ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare name)."),
     ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.config/a8s/definitions)."),
@@ -67,7 +67,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("namespace", "[<prefix> [<agent>] [--opaque]]", "Bind an address prefix to one agent (`tell <prefix>:<sub> ...`); `--opaque` conceals member attribution outward."),
     ("unnamespace", "<prefix>",               "Remove a namespace binding."),
     ("namespaces", "",                        "List namespace prefixes and their bound agents."),
-    ("start",    "<name>...",                 "Run agents in the background, one process per name."),
+    ("start",    "<name>... [--autostart|--no-autostart]", "Run agents in the background, one process per name."),
     ("run",      "<name> [--drain <sec>]",     "Run an agent in the foreground."),
     ("step",     "<name>",                    "Run an agent for one pass and exit."),
     ("stop",     "<name>... [--force]",       "Stop nodes; wait until detached (finish current wake unless --force, which kills it)."),

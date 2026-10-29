@@ -121,7 +121,7 @@ def _stop_lands_before_the_spawn(monkeypatch):
     events = []
     monkeypatch.setattr(session.plc, "is_open", lambda s: False)
     monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
-    monkeypatch.setattr(session, "_attach", lambda s, b: events.append("attach"))
+    monkeypatch.setattr(session, "_attach", lambda s: events.append("attach"))
     monkeypatch.setattr(session, "_terminate_profile", lambda s: events.append("terminate"))
     monkeypatch.setattr(session, "_before_spawn", lambda: session.bump_stop_epoch("s"))
     return events
@@ -141,7 +141,7 @@ def test_a_cli_verb_that_begins_after_a_stop_opens_chrome(monkeypatch, capsys):
     session.bump_stop_epoch("s")
     monkeypatch.setattr(session.plc, "is_open", lambda s: bool(events))
     monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
-    monkeypatch.setattr(session, "_attach", lambda s, b: None)
+    monkeypatch.setattr(session, "_attach", lambda s: None)
     monkeypatch.setattr(session, "status", lambda s: "s: attached")
     assert _run(monkeypatch, "open", "--seat", "s") == 0
     assert events == ["spawn"]
@@ -277,7 +277,7 @@ def test_idle_does_not_close_while_a_launch_is_in_progress(monkeypatch, capsys):
 
 def test_idle_reports_a_close_that_failed(monkeypatch, capsys):
     def refuse(seat):
-        raise cli.plc.BrowserError("seat 's' runs Chrome on port 9, not the requested 8")
+        raise cli.plc.BrowserError("Chrome for seat 's' did not come up under the seat's driver")
 
     monkeypatch.setattr(session, "close_browser", refuse)
     _chrome_up(monkeypatch)
@@ -285,21 +285,17 @@ def test_idle_reports_a_close_that_failed(monkeypatch, capsys):
     assert _idle(monkeypatch) == 1
     out, err = capsys.readouterr()
     assert out == ""
-    assert err == "s: seat 's' runs Chrome on port 9, not the requested 8\n"
+    assert err == "s: Chrome for seat 's' did not come up under the seat's driver\n"
 
 
-def test_idle_hands_the_chrome_and_port_flags_to_the_close(monkeypatch):
+def test_idle_hands_the_chrome_flag_to_the_close(monkeypatch):
     monkeypatch.setenv("AR3_BROWSER_CHROME", "")
-    monkeypatch.setenv("AR3_BROWSER_PORT", "")
     seen = []
-    monkeypatch.setattr(
-        session, "close_browser",
-        lambda s: seen.append((os.environ["AR3_BROWSER_CHROME"], os.environ["AR3_BROWSER_PORT"])),
-    )
+    monkeypatch.setattr(session, "close_browser", lambda s: seen.append(os.environ["AR3_BROWSER_CHROME"]))
     _chrome_up(monkeypatch)
     _stamp("s", 500)
-    assert _idle(monkeypatch, "--chrome=/c/chrome", "--port=9333") == 0
-    assert seen == [("/c/chrome", "9333")]
+    assert _idle(monkeypatch, "--chrome=/c/chrome") == 0
+    assert seen == ["/c/chrome"]
 
 
 def test_idle_closes_from_the_scratch_dir_of_the_seat(monkeypatch, tmp_path):
@@ -396,6 +392,16 @@ class _Stdin(io.StringIO):
 
     def isatty(self):
         return self._tty
+
+    @property
+    def buffer(self):
+        outer = self
+
+        class Bytes:
+            def read(self, limit=-1):
+                return outer.read().encode()
+
+        return Bytes()
 
 
 def _stdin(monkeypatch, text, tty=False):
@@ -641,10 +647,8 @@ def test_secret_set_needs_an_origin_and_reads_no_value_without_one(monkeypatch, 
 
     monkeypatch.setattr(sys, "stdin", Boom(VALUE))
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": pytest.fail("prompted without an origin"))
-    with pytest.raises(SystemExit) as stop:
-        _secret(monkeypatch, "set", "PASSWORD", "--seat", "s")
-    assert stop.value.code == 2
-    assert "--origin" in capsys.readouterr().err
+    assert _secret(monkeypatch, "set", "PASSWORD", "--seat", "s") == 1
+    assert "--origin https://app.example.com" in capsys.readouterr().err
     assert not os.path.exists(secretstore.path("s"))
 
 
@@ -1045,3 +1049,49 @@ def test_the_hand_verbs_still_work_on_an_ordinary_page(monkeypatch, capsys):
     assert capsys.readouterr().out == "- generic: page at https://example.com/\n"
     assert _run(monkeypatch, "go", "https://example.com/next", "--seat", "s") == 0
     assert capsys.readouterr().out == "https://example.com/next\n"
+
+
+def test_secret_set_takes_a_dash_for_stdin_and_keeps_the_origins_of_a_stored_name(monkeypatch, capsys):
+    other = "https://b.example.org"
+    secretstore.set_secret("s", "PASSWORD", "old-value-1", [ORIGIN, other])
+    _stdin(monkeypatch, VALUE + "\n")
+    assert _secret(monkeypatch, "set", "PASSWORD", "-", "--seat", "s") == 0
+    assert secretstore.read("s") == {"PASSWORD": _entry(VALUE, (ORIGIN, other))}
+    assert VALUE not in _silent(capsys)
+
+
+def test_secret_set_with_an_origin_replaces_the_stored_ones(monkeypatch):
+    secretstore.set_secret("s", "PASSWORD", "old-value-1", [ORIGIN])
+    _stdin(monkeypatch, VALUE)
+    assert _secret(monkeypatch, "set", "PASSWORD", "-", "--origin", "https://b.example.org", "--seat", "s") == 0
+    assert secretstore.read("s") == {"PASSWORD": _entry(VALUE, ("https://b.example.org",))}
+
+
+def test_secret_set_refuses_a_value_given_as_an_argument_without_quoting_it(monkeypatch, capsys):
+    for argv in (
+        ("set", "PASSWORD", VALUE, "--origin", ORIGIN, "--seat", "s"),
+        ("set", "PASSWORD", "-", VALUE, "--origin", ORIGIN, "--seat", "s"),
+    ):
+        try:
+            code = _secret(monkeypatch, *argv)
+        except SystemExit as stop:
+            code = stop.code
+        assert code in (1, 2)
+        assert VALUE not in _silent(capsys)
+    assert not os.path.exists(secretstore.path("s"))
+
+
+def test_secret_set_refuses_input_that_is_not_utf8_without_quoting_it(monkeypatch, capsys):
+    class Raw(_Stdin):
+        @property
+        def buffer(self):
+            class Bytes:
+                def read(self, limit=-1):
+                    return b"abcd\xff" + VALUE.encode()
+
+            return Bytes()
+
+    monkeypatch.setattr(sys, "stdin", Raw(""))
+    assert _secret(monkeypatch, "set", "PASSWORD", "-", "--origin", ORIGIN, "--seat", "s") == 1
+    err = _silent(capsys)
+    assert "UTF-8" in err and VALUE not in err

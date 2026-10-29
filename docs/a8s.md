@@ -126,13 +126,13 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s add <name> <dir> [<def>] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`), and `--env.NAME=value` sets an environment variable for the node's wakes. |
-| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running. |
+| `a8s add <name> <dir> [<def>] [--autostart] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`), and `--env.NAME=value` sets an environment variable for the node's wakes. |
+| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running; also removes its owned startup entry. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
 | `a8s definitions` / `a8s defs` | Manage user-installed templates in `definitions/` under the a8s state root (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
 | `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv and the `outbox_dir` / `inbox_dir` / `files_dir` path fields (not OS env). Used-but-unset fails the wake and makes the node unresolved. Refuses a key that feeds a path field while a handler is attached; otherwise moves the old mailbox's contents to the new path. `set env.<NAME> <value>` is the other kind: an OS environment variable for the node's wakes (see [Wake environment](#wake-environment)). |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
-| `a8s ls [-q]`                  | List every name this node can reach. Registered nodes first, running or not: NAME, STATUS (`running (pid N)` / `stopped` / `unresolved: $KEY`), DEFINITION, ROOT, and bound namespaces. `running` means the pid is alive and is the same process that claimed the node: its start time is stamped beside the pid, so a number the OS reused after a reboot reads `stopped` (Linux and macOS; Windows checks the pid alone). Then names only ever heard over a remote, with DEFINITION `remote` and the local time each last reached you. `-q` prints just names, both kinds. |
+| `a8s ls [-q] [--local|--remote] [--since CUTOFF]`                  | List every name this node can reach. Registered nodes first, running or not: NAME, STATUS (`running (pid N)` / `stopped` / `unresolved: $KEY`), DEFINITION, ROOT, and bound namespaces. `running` means the pid is alive and is the same process that claimed the node: its start time is stamped beside the pid, so a number the OS reused after a reboot reads `stopped` (Linux and macOS; Windows checks the pid alone). Then names only ever heard over a remote, with DEFINITION `remote` and the local time each last reached you. `-q` prints just names, both kinds. |
 
 
 ### Aliases
@@ -208,8 +208,8 @@ any prefixes pointing at it.
 
 |                    |                                                                                                                                                                                                                                                                                     |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s start <name> [<name> ...]` | Spawn a detached background process to handle the agent (or every member of an alias, in one process). Several names start in order, one process each, with a line per name; the exit code is nonzero if any of them failed. Warns first if a node's harness cannot start in the environment its wakes will get, and names the command that fixes it (see [Wake environment](#wake-environment)).|
-| `a8s run <name>`   | Foreground attached loop. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
+| `a8s start <name> [<name> ...] [--autostart\|--no-autostart]` | Leaves an already attached node unchanged. Otherwise spawn a detached background process to handle the agent (or every member of an alias, in one process). Several names start in order, one process each, with a line per name; the exit code is nonzero if any of them failed. Warns first if a node's harness cannot start in the environment its wakes will get, and names the command that fixes it (see [Wake environment](#wake-environment)).|
+| `a8s run <name>`   | Foreground attached loop; explicitly takes over an attached node. Aliases produce one process with interleaved output. Ctrl+C: graceful detach. 2nd Ctrl+C: kill the wake subprocess group.                                                                                                                                 |
 | `a8s step <name>`  | Attach, do one route+drain pass, release. Heavyweight: detaches the current handler if any.                                                                                                                                                                                         |
 | `a8s stop <name> [<name> ...] [--force]` | SIGTERM the handler, then **wait** until it has detached. Several names stop in order; the exit code is nonzero if any of them failed. Idle stops immediately; a busy wake finishes first (like first Ctrl+C), however long it takes. The node routes its outbox once before it detaches, so mail written just before the stop is sent, not left for the next start. Trash and dead letters are untouched. `--force` / `-f` sends a second SIGTERM so the node kills the in-flight wake (like second Ctrl+C). A node that has not detached 8 seconds later cannot act on a signal, so `--force` kills the handler and its wake outright. A killed wake is a failed wake: its messages are dead letters, and the stop prints their ids. A handler serves every member of an alias started together, so `stop` on one member ends them all, and the stop names the members it did not receive; a killed wake of any of them is a dead letter the same way. |
 | `a8s restart <name> [<name> ...] [--force]` | `stop` (wait until detached) then `start`, name by name. `--force` is passed to stop. A name not running just starts. The exit code is nonzero if any name failed. |
@@ -222,14 +222,45 @@ A node told to stop by a signal writes the signal and the parent it found into i
 
 #### After a host restart
 
-Nothing re-attaches a node when its machine boots. The shutdown SIGTERMs the node, which routes its outbox once and detaches, so mail written before the signal is routed first. A node killed by SIGKILL or power loss — or by `a8s stop --force`, when the node cannot act on a signal — routes nothing: mail still in its outbox stays on disk and routes on the next start with no other step. To start the node at boot, have the machine run it — `a8s run` under a supervisor that owns the process, `a8s start` from a line that runs once:
+Native autostart is experimental. Basic boot/login and removal checks remain
+to be run on Linux, macOS and Windows.
 
-- **cron:** `@reboot /path/to/ar3/a8s start <name>`
-- **systemd (user):** a unit with `ExecStart=/path/to/ar3/a8s run <name>`, enabled with `systemctl --user enable`, plus `loginctl enable-linger` so it starts without a login
-- **launchd:** a LaunchAgent whose `ProgramArguments` are `/path/to/ar3/a8s`, `run`, `<name>`, with `RunAtLoad` set
+Use `--autostart` to restore a node after the current user's next boot or login:
 
-None of these starts from a login shell. The wake still gets the `PATH` a8s remembers from your terminal (see [Wake environment](#wake-environment)).
+```bash
+a8s start my-node --autostart
+a8s ls --autostart
+```
 
+`a8s add my-node /path/to/seat --autostart` registers and arms startup without
+starting the node now. Linux uses user cron `@reboot` and needs `crontab` plus a
+running cron daemon. macOS writes a LaunchAgent for the next GUI login. Windows
+writes a current-user logon task and requires `pythonw.exe` beside the Python
+interpreter, so the task opens no console. macOS and Windows require login;
+none of these entries restarts a crashed node.
+
+`stop`, `kill` and `exit` disarm startup and cancel a detached start that has
+not attached yet. The preference stays saved: plain `start` rearms it.
+`restart`, `a8s update` and `ar3 update` preserve startup intent.
+`start my-node --no-autostart` forgets the preference and removes the entry,
+while leaving an already running handler unchanged. `remove` checks and deletes
+the owned entry before unregistering the stopped node. An OS event queued before
+a stop cannot revive that stopped node.
+
+`ls --autostart` shows each local node's preference, armed state, startup event
+and actual OS entry. Missing, mismatched, stale and orphaned entries are named;
+this reports configuration, not node health. Combine it with `-q` or `--local`;
+`--remote` and `--since` do not apply to startup state.
+
+Explicit `--autostart` saves that node's proxy and CA environment settings in a
+private mode-0600 file in the a8s config home. Later shells without those settings
+leave the saved values alone. Rearm, restart and update do not recapture them.
+To replace saved values, run `start --autostart` with the new environment; to
+clear them, use `--no-autostart` first. Startup commands contain no proxy values.
+
+A machine shutdown preserves armed startup. Its SIGTERM lets the node route its
+outbox before detaching. Power loss or SIGKILL leaves mail on disk for the next
+start. Explicit stop is different: it records the user's intent to stay stopped.
 
 ### Messaging
 
@@ -275,6 +306,16 @@ Pre-v1 rename: `convo_max_limit` / `A8S_CONVO_MAX_LIMIT` were replaced by `convo
 | `a8s remote <name> s3://<bucket>/<prefix> [--<opt> <value> ...]` | Register or overwrite an **s3** remote — envelopes travel through a bucket, which is the answer for a machine that can reach HTTPS on 443 and nothing else. One place, like the folder form; the scheme picks between them. Every machine that holds a name gets its own copy of that name's mail, and mail leaves the bucket when `--retain-days` runs out, not when somebody reads it. The prefix is required and must be one nothing else in the bucket writes under, because that retention reap deletes under it — `a8s remote` and `a8s storage` each refuse a prefix the other already uses. Set a bucket lifecycle rule on the prefix with the same window; it is the durable backstop. `--poll-seconds` (10, floored at 1), `--retain-days` (3 days; `0` keeps forever), `--region`, `--profile`, `--endpoint-url`, `--timeout-s` (60). Registration stamps a `joined` ULID into the spec as the folder form does, and keeps it when only options change. Registration installs `boto3` through the `a8s-s3` group; credentials come from the standard chain (env, shared config, SSO, instance and container roles) and a8s never reads, stores or logs one. Attachments need their own service under a different prefix — `a8s storage <name> s3://<bucket>/a8s-files`. |
 | `a8s unremote <name>`                                          | Forget a remote. Running daemons keep using the prior config until restart. A folder or s3 remote's consumed-envelope ledger goes with it, and so does the `sync_folder` service `a8s remote` created for that folder — identified by the `paired` marker that registration wrote into it, so a same-name service you configured yourself stays put even when it points at the same folder.                                                                                                                                                                                                                                                                                                    |
 
+
+Use `a8s ls --help` and `a8s ps --help` for listing options. Bare `ls` keeps every local node and remembered remote. `--local` and `--remote` select one kind and cannot be combined. `--since` filters only remotes by last-heard time, including the cutoff; local registrations stay visible. It accepts durations (`30s`, `10m`, `24h`, `7d`, or seconds) and ISO dates/timestamps (`2026-10-27`, `2026-10-27T12:00:00Z`); a timestamp without an offset uses UTC. All filters work with `-q` and never remove address-book entries.
+
+```bash
+a8s ls --local -q
+a8s ls --remote --since 24h
+a8s ls --since 2026-10-27T12:00:00Z -q
+```
+
+Last-heard time is an observation, not remote health. `ps` reports only running local processes and accepts `-q` and `--help`; remote and recency filters belong to `ls`. Unknown options return an error.
 
 Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s ps`) reads local state and nothing else. `a8s ls` naming remote nodes is not an exception: it reports who has reached *you*, read out of this machine's own address book, and asks nothing of the far side. Every arrival updates one row per name (folded by case, spelled the way the newest arrival spelled it) in `transactions.sqlite3`, beside the event log but outside its `txlog_max_rows` retention, so a name last heard from weeks ago still lists: the book records arrival, not liveness. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
 
@@ -382,7 +423,7 @@ Each agent has a definition file: a JSON document describing how to invoke its C
 | `echo.json`     | Echo node — replies to the sender with the same message; attachments acknowledged by name. A reachability probe: one tell proves the whole path out and back. Bare name: `a8s add <name> <dir> echo`.                                               |
 | `tool-command-shell.json` | Tool node — runs a shell command sent as a message and replies with its output; a poor man's SSH. Required `ALLOW` var is the sender ACL (no ACL, no node). See [the command-shell README](../apps/tools/command_shell/README.md), and [docs/a8s-tools.md](a8s-tools.md) for tool nodes in general. Bare name: `a8s add <name> <dir> tool-command-shell --ALLOW=<names>`. |
 | `tool-vault.json` | Tool node - encrypted file storage for agents: sealed `/connect`, voucher auth, store/retrieve/list/delete. No ACL: every sender is served under its own name and needs an operator-issued voucher. Optional vars `VAULT_DIR`, `OPENSSL`. See [the vault README](../apps/tools/vault/README.md), and [docs/a8s-tools.md](a8s-tools.md) for tool nodes in general. Bare name: `a8s add <name> <dir> tool-vault`. |
-| `tool-browser.json` | Tool node - a persistent signed-in Chrome seat driven by command scripts: each tell is a script (open, go, snap, click, type, shot, close and more), and the reply carries the transcript plus snapshots and screenshots. Required `ALLOW`; optional vars `ALLOW_EVAL`, `CHROME`, `PORT`, `TIMEOUT`. Needs `npm install -g @playwright/cli`. See [the browser README](../apps/tools/browser/README.md), and [docs/a8s-tools.md](a8s-tools.md) for tool nodes in general. Bare name: `a8s add <name> <dir> tool-browser --ALLOW=<senders>`. |
+| `tool-browser.json` | Tool node - a persistent signed-in Chrome seat driven by command scripts: each tell is a script (open, go, snap, click, type, shot, close and more), and the reply carries the transcript plus snapshots and screenshots. Required `ALLOW`; optional vars `ALLOW_EVAL`, `CHROME`, `TIMEOUT`. Needs `npm install -g @playwright/cli`. See [the browser README](../apps/tools/browser/README.md), and [docs/a8s-tools.md](a8s-tools.md) for tool nodes in general. Bare name: `a8s add <name> <dir> tool-browser --ALLOW=<senders>`. |
 | `tool-gemini-web.json` | Tool node - Gemini on the web as a seat: each tell is typed into a signed-in browser seat, one conversation per sender, and the answer comes back as a tell. Required `ALLOW` and `BROWSER_SEAT`; optional vars `MODEL`, `TIMEOUT`. See [the gemini-web README](../apps/tools/gemini_web/README.md), and [docs/a8s-tools.md](a8s-tools.md) for tool nodes in general. Bare name: `a8s add <name> <dir> tool-gemini-web --ALLOW=<senders> --BROWSER_SEAT=<node>`. |
 | `default.json`  | Fallback — runs `dummy-cli` and prints "no real CLI configured"                                                                                                                                                                                    |
 

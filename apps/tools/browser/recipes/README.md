@@ -1,95 +1,96 @@
-# Writing a site recipe
+# Site recipes
 
-A site recipe gives a website named commands, with the browser tool as the engine
-behind them. One Python module describes one site: where its pages live, and each
-verb a person or an agent may run. Help, argument checks, the health check and the
-reply all come from that one description. How a recipe is called, listed and checked
-is in the [browser README](../README.md#site-recipes). This page is how to write one.
+A recipe provides named commands for one website. One Python module declares
+the site, its permitted origins, and its verbs. The browser tool uses that
+declaration for help, argument checks, health checks, and results.
+See the [browser reference](../README.md#site-recipes) to run recipes.
 
-A recipe is reviewed code that acts with the seat's signed-in identity. It lives in
-this directory (a general driver for a public site, with no personal value in it) or in
-the `recipes/` directory of a node (a private one). No message can install or change a
-recipe. A model never runs inside one: a recipe is deterministic, and when a site
-changes, the fix is a reviewed change to the recipe.
+A recipe is reviewed code. It acts as the account signed in to the browser
+profile. Messages can run it but cannot install or change it. Recipes do not
+run a model. A site change can require a reviewed code change.
 
 ## Bundled recipes
 
 | Recipe | Site | Verbs |
 |---|---|---|
-| `givebacks`, alias `gb` | GiveBacks, the newsletter CMS | `login`, `list`, `open`, `pull`, `screenshot` |
+| `givebacks`, alias `gb` | GiveBacks newsletter service | `login`, `list`, `open`, `pull`, `screenshot` |
 
 ### givebacks
 
-`recipe gb` reads an organization's newsletters from its GiveBacks site, with the seat's signed-in Chrome.
-All five verbs read: none changes a newsletter or anything else the site holds.
+Use `recipe gb` to read an organization's newsletters. The verbs do not change
+newsletter content. `login` can change the browser's sign-in state.
 
-| Verb | Arguments | What comes back |
+| Verb | Arguments | Result |
 |---|---|---|
-| `login` | | `Login successful.`, or `Already signed in.` when the profile is signed in. |
-| `list` | `[--limit 10]` | One line per draft (id, status, send date, subject) and the same rows as `result.json`. |
-| `open` | `--id ID` | The seat's Chrome is on the editor of that newsletter. |
-| `pull` | `--id ID [-o FILE]` | The design JSON, attached as `givebacks-design.json`. `-o` names the attachment by the last part of `FILE`, and nothing is written at `FILE`. |
-| `screenshot` | `--id ID [--dir DIR]` | A full-page picture of the newsletter, attached as `newsletter-preview.png`. `--dir` is accepted and ignored. |
+| `login` | None | `Login successful.` or `Already signed in.` |
+| `list` | `[--limit 10]` | Draft IDs, status, send dates, and subjects. Also attaches `result.json`. |
+| `open` | `--id ID` | Opens the newsletter editor. |
+| `pull` | `--id ID [-o FILE]` | Attaches design JSON. `-o` selects the attachment basename; it does not write to `FILE`. Default basename: `givebacks-design.json`. |
+| `screenshot` | `--id ID [--dir DIR]` | Attaches a full-page image as `newsletter-preview.png`. Accepts but ignores `--dir`. |
 
-Every attachment's name starts with a timestamp, such as `20261024T201500-givebacks-design.json`.
+Attachment names start with a timestamp. `list`, `open`, `pull`, and
+`screenshot` require sign-in. The status probe opens the message list. It
+returns `in` for that list, `out` for a sign-in or passcode page, and `unknown`
+for another page. `out` and `unknown` stop the verb for manual action.
+`recipe gb check` runs this probe and `list --limit 3`.
 
-`list`, `open`, `pull` and `screenshot` need a signed-in page. The status probe opens the site's message
-list and reads where the site sends it: the list is `in`, a sign-in or passcode page is `out`, any other
-page is `unknown`, and a verb stops for a person on `out` and `unknown`. `recipe gb check` runs the probe
-and `list --limit 3`.
-
-**Node settings.** Both are required by every verb, and a missing one fails the step and names it:
+Set both required node settings. Replace the example values:
 
 ```bash
-a8s vars <node> set env.GIVEBACKS_BASE https://yourgroup.givebacks.com
-a8s vars <node> set env.GIVEBACKS_CAUSE_ID <the organization's id in the GiveBacks API>
+a8s vars browser-seat set env.GIVEBACKS_BASE https://yourgroup.givebacks.com
+a8s vars browser-seat set env.GIVEBACKS_CAUSE_ID YOUR_CAUSE_ID
 ```
 
-`GIVEBACKS_BASE` is the address of the organization's site, with nothing after the host. It is the recipe's
-site origin. The recipe's other origins are the same for everyone: `https://api.givebacks.com`, and Outlook
-web (`https://outlook.office.com`, which sends the browser on to `https://outlook.cloud.microsoft`) for the
-passcode.
+`GIVEBACKS_BASE` contains the scheme and host without a path. Other permitted
+origins are `https://api.givebacks.com`, `https://outlook.office.com`, and
+`https://outlook.cloud.microsoft`.
 
-**Sign-in.** The seat's signed-in profile is the credential, and `login` is only for when it is not. It
-types the stored secrets into the form. A site that sends a one-time passcode gets it from the mail: the
-recipe opens Outlook web in a second tab (Outlook web must already be signed in on the same seat), reads the
-code from the first passcode message in the list, closes the tab, types the code into the six boxes without
-showing it, ticks "trust this browser" and submits. If Outlook web is signed out on the seat, or the mail holds
-no code, `login` stops with `needs a person` and says which. Store the two secrets on the node's machine, each for
-the site's origin:
+Store the sign-in values on the node's machine. Each command uses a hidden
+prompt:
 
 ```bash
-browser secret set GIVEBACKS_USER --origin https://yourgroup.givebacks.com --seat <node>
-browser secret set GIVEBACKS_PASS --origin https://yourgroup.givebacks.com --seat <node>
+ar3 tool browser --node browser-seat secret set GIVEBACKS_USER --origin https://yourgroup.givebacks.com
+ar3 tool browser --node browser-seat secret set GIVEBACKS_PASS --origin https://yourgroup.givebacks.com
 ```
 
-The code is not a stored secret, and it is in no output: not the transcript, an error, the result or a file.
-The recipe hides it the moment it reads it (`page.hide`) and types it with `page.fill_hidden`. All of it is one
-sensitive step (`page.sensitive`), opened before the Outlook tab is opened and closed after the code page is left.
-playwright-cli follows each click and key with a snapshot file of the page. During the sign-in those files hold
-the mail, and the digits one to a box, where no scrub can find them, so the step deletes them when it ends.
-While the step is open, nothing of the page is captured: a failure attaches no snapshot, and the error says only
-`givebacks login: the passcode step failed`. The step ends with a cleanup that looks at the browser: no tab the
-step opened is left (it closes each, at whatever address the mail ended), the sign-in tab is not on Outlook web,
-and it is not the code page, or its six boxes read empty. It loads the code page again, or empties its boxes,
-when digits are in them. If the cleanup cannot confirm that, the
-tool closes the seat's Chrome before it reports the failure, and the error says so. Signing in works again at
-the next script, because the profile keeps its state. Pixels are not scrubbed, so the step takes no screenshot and
-starts no video, and it does not open while a video is recording: `login` stops with a message that says to stop
-the video first.
+If the site requests a passcode, the recipe reads it through Outlook web in
+a separate tab. Sign in to Outlook in the same browser profile first. The
+recipe reads the first passcode message, closes that tab, enters the code,
+selects the trusted-browser option, and submits. A missing mail sign-in or
+passcode returns `needs a person`.
 
-**An alias for a shell.** `ar3 tool` reads a word that starts with `-` as its own option, so the alias needs
-`--` before the recipe:
+The passcode uses a sensitive step. The recipe hides it in memory and never
+returns it. Capture is disabled while that step is active. Driver snapshots
+created during the step are deleted. A failure returns
+`givebacks login: the passcode step failed` without page contents.
+
+Cleanup closes tabs opened by the step. It confirms that the sign-in tab is
+not an Outlook page and that any remaining passcode boxes are empty. If it
+cannot confirm this, the tool closes Chrome before it reports the failure.
+A video must be stopped before this sign-in step can run.
+
+Run the recipe:
 
 ```bash
-alias gb='ar3 tool browser --node <node> -- recipe gb'
+ar3 tool browser --node browser-seat -- recipe gb login
+ar3 tool browser --node browser-seat -- recipe gb list --limit 5
+```
+
+For repeated use in a POSIX shell, define an alias. Keep the `--` separator:
+
+```bash
+alias gb='ar3 tool browser --node browser-seat -- recipe gb'
 gb list --limit 5
-gb pull --id <id> -o design.json
+gb pull --id NEWSLETTER_ID -o design.json
 ```
 
-## A first recipe
+## Write a recipe
 
-`shop.py`, for a made-up shop at `https://shop.example.com`:
+Put general recipes in the bundled recipe directory. Put private recipes in
+`recipes/` under a registered browser node's root. Only the operator should
+write there. A recipe has the permissions of the browser's OS user.
+
+This example is `shop.py` for `https://shop.example.com`:
 
 ```python
 from browser.recipe import BrowserError, Opt, Recipe
@@ -136,166 +137,146 @@ recipe.steps(
 )
 ```
 
-Then `recipe shop` describes it, `recipe shop orders --limit 3` runs it, and `recipe shop
-check` runs the status probe and then `orders --limit 3` and `open --id 1`.
+`recipe shop` shows help. `recipe shop orders --limit 3` lists orders.
+`recipe shop check` runs the status probe and the declared read examples.
 
-## Declaring the site
+## Site declaration
 
 `Recipe(name, title, origins, aliases=(), env=(), secrets=())`
 
-| Field | Meaning |
+| Field | Requirements |
 |---|---|
-| `name` | Lower case letters, digits and `-`. It must equal the file name, `shop.py`. |
-| `title` | One line, shown in the listing. |
-| `origins` | The origins the recipe may open and fetch from, in the syntax of `browser secret set --origin`: `https://shop.example.com`, or `https://*.example.org` for any subdomain (not the bare domain). At least one. The scheme, host and port are all part of an origin. |
-| `aliases` | Other names for the site. A recipe name always beats an alias, and a node's alias beats a bundled one. |
-| `env` | The node settings the recipe reads, set with `a8s vars <node> set env.NAME value`. Upper case. |
-| `secrets` | The stored secrets the recipe types. Upper case. The operator stores each with `browser secret set NAME --origin ORIGIN --seat <node>`. |
+| `name` | Lowercase letters, digits, and `-`. Must match the filename without `.py`. |
+| `title` | One line for the recipe list. |
+| `origins` | At least one allowed origin. Uses the browser secret-origin syntax. A wildcard subdomain excludes the bare domain. |
+| `aliases` | Alternative names. Recipe names take precedence over aliases. Private aliases take precedence over bundled aliases. |
+| `env` | Uppercase setting names. Set with `a8s vars NODE set env.NAME VALUE`. |
+| `secrets` | Uppercase secret names. Store with `ar3 tool browser --node NODE secret set NAME --origin ORIGIN`. |
 
-The module must define `recipe`. A file that fails to import, defines no `recipe`, or
-names the recipe differently from the file is listed as broken and nothing else is
-affected. A file whose name starts with `_` is not loaded as a recipe. Keep a recipe's helper
-code in its own file. A recipe imports from `browser.recipe` only: `Recipe`, `Arg`, `Opt`, `Result`,
-`UsageError`, `NeedsPerson`, `BrowserError`.
+The module must define `recipe`. A failed import, missing declaration, or
+mismatched name marks the recipe as broken. Other recipes remain available.
+The loader ignores filenames that start with `_`. Keep helper code separate.
+Import the recipe API from `browser.recipe`: `Recipe`, `Arg`, `Opt`, `Result`,
+`UsageError`, `NeedsPerson`, and `BrowserError`.
 
 ## Verbs
 
-Each verb is declared once:
-
-| Keyword | Meaning |
+| Declaration field | Function |
 |---|---|
-| name | Lower case letters, digits and `-`. `help`, `check` and `status` are built in. |
-| `kind` | `"read"` or `"write"`. The help marks each, and `check` runs only the `read` verbs. Default `"read"`. |
-| `signin` | `True` when the verb needs a signed-in page. The runner runs the status probe first. Default `False`. |
-| `help` | What the verb does. The first lines of the help. |
-| `args` | A list of `Arg` and `Opt`. |
-| `example` | The arguments of a call that works, such as `"--limit 3"`. `check` runs it. It must fit `args`, or the recipe does not load. |
+| Name | Lowercase letters, digits, and `-`. `help`, `check`, and `status` are built in. |
+| `kind` | `"read"` by default, or `"write"`. Health checks run only read verbs. |
+| `signin` | Set `True` to require a successful sign-in probe. Default: `False`. |
+| `help` | Short description of the action. |
+| `args` | List of `Arg` and `Opt` declarations. |
+| `example` | Valid example arguments for the health check. Invalid examples prevent loading. |
 
-A verb is one of two kinds.
+A step verb uses a command-language template. Its result is the last step's
+output. A code verb uses a function decorated with `@recipe.verb`. Use a code
+verb for branches, loops, API calls, or tab operations.
 
-**A step verb** is a template of command-language lines, for a flow with no branches:
-`recipe.steps("open", ..., steps="go ...\nwait-for h1\ntext h1")`. Its result is the
-output of the last line.
+## Arguments and templates
 
-**A code verb** is a function that drives the page: `@recipe.verb("orders", ...)` over
-`def orders(page, args)`. It covers branches, loops, polling, reading page text, the
-vendor's own API through `fetch`, and tabs.
-
-## Arguments
-
-A verb's arguments are argparse's. `Arg` is a positional and `Opt` is an option, and both
-pass argparse's own keywords on: `type`, `default`, `required`, `help`, `nargs`,
-`choices`, `action`. A recipe can keep the exact flags of a command line it replaces:
+`Arg` declares a positional argument. `Opt` declares an option. Both accept
+argparse keywords such as `type`, `default`, `required`, `help`, `nargs`,
+`choices`, and `action`:
 
 ```python
 args=[Arg("id", type=int), Opt("-o", "--out", default="."), Opt("-v", "--verbose", action="store_true")]
 ```
 
-`Arg("title", rest=True)` takes the rest of the words, joined by single spaces, so a caller
-types `recipe shop read weekly newsletter` with no quotes. Abbreviated long options are
-refused. A wrong argument fails the step with argparse's message and the verb's usage line,
-and nothing touches the browser. Argument names are lower case letters, digits and `_`.
+`Arg("title", rest=True)` joins the remaining words with spaces. Argument
+names contain lowercase letters, digits, and `_`. Abbreviated long options
+are refused. Invalid arguments return usage before browser work.
 
-## Step verbs
+A step template can use `{name}` for an argument or declared setting.
+Use `{{` and `}}` for literal braces. Each substituted value remains one
+argument. Values that contain a newline, carriage return, or `<<` are refused.
+Commands such as `type` and `find` keep the remaining line as text.
 
-Placeholders are `{name}`, where `name` is an argument or a declared `env` name. `{{` and
-`}}` write a brace. Each value goes in as one value: it can not become a second word, a
-second line or a block, and a value that holds a newline, a carriage return or `<<` is
-refused. A verb of the command language that takes the rest of the line (`type`, `find`,
-`assert-text`) gets the value as typed.
+Do not put placeholders in `eval` or `run-code` steps. Pass values separately
+to `page.evaluate(js, *values)` in a code verb. Literal `eval` and `run-code`
+steps still require `ALLOW_EVAL` and a seat without secrets.
 
-`eval` and `run-code` take code, and a value never becomes code text. So a step line for
-either holds no placeholder, and a recipe that has one does not load. A recipe that needs a
-value in page code is a code verb that passes it to `page.evaluate(js, *values)`. A step line
-of `eval` or `run-code` with no placeholder keeps the `ALLOW_EVAL` rule and the refusal on a
-seat that holds secrets.
+Each step retains origin checks, stop checks, and redaction. A step can call
+another recipe, with at most one nested recipe call.
 
-Each line then runs as a command-language line does, with every check: the recipe's
-origins, the stop epoch and the scrub. A step can call another recipe (`recipe other verb`),
-one level deep.
+## Page API
 
-## The page
+A code verb receives a `Page`. Use this API to access the browser. Do not call
+Playwright CLI or subprocesses directly. Each page call checks the stop token,
+redacts its transcript, and applies the relevant origin checks.
 
-A code verb gets a `Page`. It never calls playwright-cli or a subprocess itself. Every call
-checks the stop epoch, adds a scrubbed line to the transcript, and checks the origins.
-
-| Method | Does |
+| Method | Function |
 |---|---|
-| `go(url)` | Opens `url`, which must be on the recipe's origins. |
-| `click(target)`, `fill(target, text)`, `press(key)`, `select(target, value)`, `check(target)`, `uncheck(target)`, `hover(target)` | As the verbs of the same name. A target is a snapshot ref, a CSS selector or visible text. The text of `fill`, `select` and `press` is in the command line of `playwright-cli`, and a text that holds a stored secret, or a value the recipe hid, is refused with `playwright-cli was not run: an argument of its command line held a value that must not be in one`: nothing runs. A target the page gave a name from a value (an id made of a user name) is named by its path of tag names and positions. |
-| `fill_secret(target, name)` | Types the stored secret `name`, which the recipe must declare. The secret's own origins still apply. |
-| `hide(name, value)`, `fill_hidden(target, text)`, `no_page_files()` | For a value the recipe reads from a page and holds only in memory, such as a one-time passcode. `hide` makes it a scrubbed value for the rest of the script, like a stored secret: `[secret:NAME]` replaces it in the transcript, errors, return values, the reply and snapshots, and in the files playwright-cli has already written. It is the value whole that is found. A value shorter than 4 characters can not be scrubbed and `hide` refuses it. `fill_hidden` types a value with it in no command line and the transcript naming the field only. A failure reports the first line of the driver's error, because the rest is a call log that prints the text. The field must be in a page on the recipe's origins. `no_page_files` is a context manager: `with page.no_page_files(): ...`. playwright-cli writes a snapshot file of the page after each click, key, check, hover and navigation, and a value typed into several boxes is in it one piece to a line. The files that block writes are deleted when it ends, with an error or without. |
-| `sensitive(name, cleanup)` | A context manager for the part of a verb that handles such a value: `with page.sensitive("passcode", cleanup): ...`. Open it before the first page that shows the value, and close it after the last. While it is open, nothing of the page is captured: a failure attaches no snapshot, and `snap`, `shot`, `console`, `video-start` and `screenshot` are refused. It does not open while a video is recording, because a recording keeps the pages of the step and nothing scrubs pixels. The page files its calls write, the cleanup's too, are deleted when it ends. When the block ends, with an error or without, the tool calls `cleanup()`, your own function. It makes the page hold nothing of the value (it closes the mail's tab, empties the boxes or leaves the page) and returns `True` only when it has looked and found that so. Any other answer, `None` too, and any error, mean the page is not confirmed clear, and the tool closes the seat's Chrome before it reports the failure. After a cleanup that did not confirm, capture stays off for the rest of the script, Chrome closed or not. Each call inside the step writes one line under the recipe's own, and that line shows the verb and its target and nothing that the page or the server answered (`click e30`, `fill e9`, `text #message`, `fetch GET https://...`, `tabs`), where outside the step it ends with `-> <what came back>`. A text given to the call after its target (`fill e9 <text>`) is left off. A `log(text)` line shows the text it is given, so give it none of the page's. The error that leaves a failed step is `<recipe> <verb>: the <name> step failed`, with a note when Chrome was closed, and holds nothing of the page or the driver, whose text may be the value. `NeedsPerson` and `UsageError` are the exception: you wrote their text, and they pass through when the cleanup confirms. |
-| `wait(seconds)`, `wait_for(selector, seconds=10)`, `wait_for_url(substring, seconds=10)` | Waits. A stop ends `wait` within a moment. |
-| `text(selector)`, `find(text)`, `url()`, `snapshot_text()` | Reads the page, as scrubbed text. |
-| `screenshot(name, full_page=False)`, `download(target, seconds=30)` | Make a file, attach it to the reply and return its path. `full_page=True` takes the whole scrollable page and not the part in view. |
-| `upload(target, path)`, `drop(target, *paths)` | Hand files to the page. |
-| `back()`, `forward()`, `reload()` | Move through the history. |
-| `evaluate(js, *values)`, `run_code(body, *values)` | The recipe's own code in the page. `js` is the source of a function, such as `(a, b) => a + b`. The values are its arguments, passed as JSON and never pasted into the code. `run_code` takes Playwright statements with `page` and `values` in scope. Both return JSON data. |
-| `fetch(url, method="GET", json=None, body=None, headers=None, timeout=60)` | One `fetch` in the page, with its cookies. `url` may be relative to the page. Follows no redirect: one fails the call. Returns a response with `status`, `ok`, `url`, `headers`, `text` and `json`. |
-| `http(url, method="GET", json=None, body=None, headers=None, timeout=30)` | Plain HTTP from this machine, for a public endpoint, with no cookies. |
-| `tabs()`, `new_tab(url)`, `select_tab(index)`, `close_tab(index=None)` | Tabs. `tabs()` returns the addresses of the open tabs in order, and never their titles. A list the tool can not read is an error, so "I could not tell" is never taken for "there is none". |
-| `local_storage_set(key, value)`, `resize(width, height)` | Page storage and window size. |
-| `artifact(name, data_or_path)` | Saves text, bytes or a `pathlib.Path` as a file of the reply. |
-| `log(text)` | A line in the transcript. |
-| `env(name)` | A declared node setting. An undeclared or unset name fails the step with a usage message that names it. |
-| `recipe(site, verb, *args)` | Runs another recipe's verb and returns its `Result`. One level deep. |
-| `command(verb, *args)` | Any verb of the command language by name, as a script line would run it. |
+| `go(url)` | Opens a URL on the declared origins. |
+| `click(target)`, `fill(target, text)`, `press(key)`, `select(target, value)`, `check(target)`, `uncheck(target)`, `hover(target)` | Runs the corresponding browser command. Targets can be snapshot references, CSS selectors, or visible text. |
+| `fill_secret(target, name)` | Types a declared stored secret. The secret's own origin restrictions also apply. |
+| `hide(name, value)` | Adds a protected value for this script. Redacts it as `[secret:NAME]`. Requires 4 to 4096 characters. |
+| `fill_hidden(target, text)` | Types a protected value without a command-line value or transcript value. Requires a field on a declared origin. |
+| `no_page_files()` | Deletes driver page files created inside its context, including on failure. |
+| `sensitive(name, cleanup)` | Disables capture while sensitive data is handled. Runs cleanup on exit. See Sensitive steps. |
+| `wait(seconds)`, `wait_for(selector, seconds=10)`, `wait_for_url(substring, seconds=10)` | Waits for time or a page condition. A stop interrupts the wait. |
+| `text(selector)`, `find(text)`, `url()`, `snapshot_text()` | Reads redacted page text or its URL. |
+| `screenshot(name, full_page=False)`, `download(target, seconds=30)` | Creates an attached file and returns its path. |
+| `upload(target, path)`, `drop(target, *paths)` | Supplies files to the page. Browser-state paths are refused. |
+| `back()`, `forward()`, `reload()` | Changes the page through browser history or reload. |
+| `evaluate(js, *values)` | Calls a JavaScript function with separate JSON arguments. Returns JSON data. |
+| `run_code(body, *values)` | Runs reviewed Playwright code with `page` and `values` in scope. |
+| `fetch(url, method="GET", json=None, body=None, headers=None, timeout=60)` | Uses browser cookies for one request. Refuses redirects. Returns `status`, `ok`, `url`, `headers`, `text`, and `json`. |
+| `http(url, method="GET", json=None, body=None, headers=None, timeout=30)` | Makes a request from this machine without browser cookies. Checks redirect origins before following them. |
+| `tabs()`, `new_tab(url)`, `select_tab(index)`, `close_tab(index=None)` | Reads or changes tabs. `tabs()` returns URLs in order, without titles. An unreadable list is an error. |
+| `local_storage_set(key, value)`, `resize(width, height)` | Sets page storage or window size. |
+| `artifact(name, data_or_path)` | Attaches text, bytes, or a `pathlib.Path`. Applies the artifact safety checks. |
+| `log(text)` | Adds a transcript line. Do not supply sensitive page text. |
+| `env(name)` | Reads a declared setting. Missing or undeclared settings return a usage error. |
+| `recipe(site, verb, *args)` | Calls another recipe with its own origins and sign-in probe. Returns its `Result`. One nested call is allowed. |
+| `command(verb, *args)` | Runs a browser command with its normal checks. |
 
-No method returns a secret value. What the page gives back passes the scrubber first, so a
-stored value shows as `[secret:NAME]`. A call that fails raises `BrowserError`, which a
-verb may catch to take another branch.
+No method returns a stored secret. Returned page text passes through redaction.
+A failed page call raises `BrowserError`. A recipe can catch it for a valid
+alternative path. Plain fill, select, and press arguments cannot contain
+protected values. Selectors derived from protected page text use element
+positions instead of that text.
 
 ## Origins
 
-`go`, `fetch`, `http` and `new_tab` refuse a URL outside the recipe's origins before any
-request is made. After a call that can navigate (`go`, `click`, `press`, `select`,
-`check`, `uncheck`, `back`, `forward`, `reload`, `download`, `upload`, `drop`, tab changes) the
-page's URL is checked, and a page outside the origins fails the verb.
+`go`, `fetch`, `http`, and `new_tab` check the destination before a request.
+After an action that can navigate, the tool also checks the resulting URL.
+A click or server redirect can reach a different site before this check.
+The check then fails the verb.
 
-A `fetch` follows no redirect. A redirect fails the call with a message, because the browser
-would request the new address before the recipe's origins could be checked. Fetch the address the
-redirect points to, or open the page with `go`. An `http` redirect is followed only to a URL on
-the origins, and each hop is checked before it is followed.
+Browser `fetch` refuses redirects. Open the destination explicitly or use
+`go` when navigation is intended. `http` checks each redirect before following
+it. Reviewed code in `evaluate` and `run_code` is not subject to these checks.
 
-A click or a `go` can not be stopped before the other site answers, so the check there comes
-after: the page that a link or a server redirect took the browser to fails the verb. The in-page
-code of `evaluate` and `run_code` is not checked: it is code you reviewed.
+A `file:` page fails regardless of the declared origins. The tool replaces it
+with `about:blank` and deletes files from the failed step. A recipe that catches
+this error receives a blank page.
 
-A page that is a local file (`file:`) fails the call whatever the origins say. The tool opens no local
-file as a page: it sends the page to `about:blank` and removes the files the step wrote before the failure reaches
-the recipe. A recipe that catches the error and goes on finds a blank page.
-
-Put in `origins` every host the recipe uses, including a vendor's API host that `fetch` or
-`http` calls, and keep the list as short as the site allows.
+Declare every required host, including API hosts. Keep the allowed list narrow.
 
 ## Results and errors
 
-A code verb returns `Result(text=None, data=None, files=())`, a `str` (text), or a `dict` or
-`list` (data).
+Return `Result(text=None, data=None, files=())`, a string, a dictionary, or a
+list. Text becomes the step output. Data without text prints as compact JSON,
+limited to 2000 characters. Complete data is attached as `result.json`.
+Attached files must come from page methods such as `screenshot`, `download`,
+or `artifact`.
 
-- The step's output is the text. With data and no text, the output is the data as compact JSON,
-  cut at 2000 characters.
-- The data is also attached whole as `result.json`.
-- `files` are attached. They must be files the page made (`screenshot`, `download`,
-  `artifact`), because those are inside the seat's artifacts directory.
-
-A verb ends in one of these ways, and each says what to do next:
-
-| Raised | The step fails with |
+| Error | Result |
 |---|---|
-| `UsageError("...")` | The message and the verb's usage. Use it for a bad argument the parser could not see, such as an unknown title. A missing `env` name raises it too. |
-| `NeedsPerson(reason, how)` | `needs a person: <reason>. <how>`. Use it for a code, a consent page, or anything only a person can do. |
-| `BrowserError` or any page call that fails | The error and the failure snapshot. |
-| Any other exception | `<recipe> <verb>: <ExceptionType>: <message>` and the failure snapshot. |
-| Any exception inside `page.sensitive` | `<recipe> <verb>: the <name> step failed`, with a note when Chrome was closed, and no failure snapshot after a cleanup that did not confirm. `NeedsPerson` and `UsageError` keep their text when the cleanup confirms. |
+| `UsageError(message)` | Shows the message and usage. Use for invalid values that argument parsing cannot detect. |
+| `NeedsPerson(reason, how)` | Shows `needs a person: <reason>. <how>`. Use for manual codes, consent, or sign-in. |
+| `BrowserError` | Shows the error and a permitted failure snapshot. |
+| Other exception | Shows the recipe, verb, exception type, and redacted message. Attaches a permitted failure snapshot. |
+| Sensitive-step exception | Shows a fixed step failure without page contents. See Sensitive steps. |
 
-Error text is scrubbed, and a stop that lands during a verb is reported as the stop.
+A stop during a verb is reported as a stop. All error output passes through
+redaction.
 
 ## Sign-in
 
-The seat's signed-in Chrome profile is the credential. Declare a status probe, and mark
-the verbs that need a sign-in with `signin=True`:
+Declare a status probe and mark dependent verbs with `signin=True`:
 
 ```python
 @recipe.status
@@ -304,60 +285,66 @@ def status(page):
     return "in" if page.url().endswith("/account") else "out"
 ```
 
-The probe returns `"in"`, `"out"` or `"unknown"` (anything else counts as unknown) and
-changes nothing on the site. The runner calls it before each verb that needs sign-in. For
-`out` or `unknown` the verb does not run: the step fails with `needs a person`, names the
-seat, and says to sign in by hand, or to run the recipe's `login` verb when it has one.
-The recipe never signs in on a guess, and `check` never calls `login`.
+The probe must not change the site. It returns `"in"`, `"out"`, or `"unknown"`.
+Other results count as unknown. A required probe runs before each verb.
+Only `in` permits that verb to run. Other results request manual sign-in or
+the recipe's explicit `login` verb. A `login` verb runs without the probe.
+Health checks never call `login`.
 
-A verb named `login` runs without the probe. It types stored secrets with `fill_secret`.
-A passcode a site sends by email belongs to another page. Do all of it inside
-`with page.sensitive("passcode", cleanup):`, opened before the first page that shows the code, and closed
-after the code page is left. Read the code there from `snapshot_text()` or `evaluate`, which return the text
-to the recipe and print none of it. Do not read it with `text` or `find`: their output goes into the
-transcript. Call `hide` at once and type it with `fill_hidden`. Close the tab you read it in before any step
-that can fail, so that a snapshot taken after the step is of the site and not of the mail.
+## Sensitive steps
 
-The cleanup is the part to write with care. It runs when the block ends, with an error or without, and its
-answer is the only thing that keeps Chrome open: return `True` after you have looked and found that no tab
-the step opened is left (`page.tabs()`) and that the code page, if it is still the page, shows all its boxes empty. Close a
-tab that is left, load the page again, or empty the boxes, and then look again. Let a call that fails raise: a
-cleanup that raises, or answers anything but `True`, makes the tool close the seat's Chrome. That is the safe
-end, and the next script opens Chrome again. Do not catch an error to make the cleanup answer `True`.
+Use `with page.sensitive("passcode", cleanup):` for a one-time code or another
+value read from a page. Open the context before the first sensitive page.
+Close it only after the last sensitive page has been cleared or closed.
 
-## Calling another recipe
+Read the value with `snapshot_text()` or `evaluate`. These return text to the
+recipe without printing it. Do not use `text` or `find` for this purpose.
+Call `hide` immediately. Type the value with `fill_hidden`.
 
-`page.recipe("other", "verb", "arg")` runs a verb of another recipe, with that recipe's origins
-and its own sign-in probe, and returns its `Result`. A recipe may call another one level
-deep, not more. A failure in the called verb comes back as a `BrowserError` with its message.
+During the context, capture commands are refused: `snap`, `shot`, `console`,
+`video-start`, and `screenshot`. An active video prevents entry to the context.
+The tool deletes driver page files created by the context and its cleanup.
+This includes split passcode fields that ordinary value redaction cannot find.
 
-## A fixture test
+Inside the context, transcript lines show only the operation and target.
+They omit page results and input text. `log` still prints its supplied text;
+do not pass sensitive text to it.
 
-A recipe ships with two kinds of test, in `apps/tools/tests/browser/`.
+The tool always calls `cleanup()`, on success or failure. Cleanup must inspect
+the browser and return `True` only after it confirms all sensitive data is
+cleared. Close extra tabs. Clear passcode fields or leave the page. Inspect
+the result again. Let a failed check raise an error; do not convert it to
+`True`.
 
-1. Unit tests on a fake browser. `fake_browser.py` stands in for playwright-cli and the session:
-   a test says where a `goto` lands, what a selector reads, and what a `fetch` returns, then
-   runs `recipe <site> <verb>` through `commands.run_script` and checks the output, the files
-   and the failure text. Test every verb, a signed-out run, and a page that leaves the origins.
-2. A live test on a fixture site. `site_fixture.py` serves pages from `fixtures/site/` on
-   `127.0.0.1` and a port of its own (a sign-in form, a list, an item page, a JSON endpoint, a
-   sign-out link and a link to a second origin). The live test, `test_recipe_live.py`, runs only
-   with `AR3_TOOL_BROWSER_LIVE=1` and drives a real headless Chrome in a temp XDG directory. It
-   stores the secrets with `browser secret set`, runs the recipe through `browser do` and
-   `ar3 tool`, and checks that no stored value is in any reply, file or directory but
-   `secrets.json`. The fixture recipe, `fixtures/node/recipes/fixture.py`, shows a recipe for a
-   site whose address is a node setting: it takes its one origin from `FIXTURE_BASE`.
+Any other return value, including `None`, or any cleanup exception closes
+Chrome. Capture stays disabled for the rest of that script. Failure output
+contains only `<recipe> <verb>: the <name> step failed`, plus any close note.
+`NeedsPerson` and `UsageError` retain their author-written messages only when
+cleanup confirms success. They must contain no sensitive page text.
 
-Use `example.com` and `127.0.0.1` in tests, docs and fixtures. A real name, account, address
-or page in a recipe or a test is a leak, because the repository mirrors publicly.
+## Tests and review
 
-## Before you ask for a review
+Put recipe tests in `apps/tools/tests/browser/`.
 
-- Every verb has `help`, and every read verb has an `example` that `check` can run.
-- A verb that changes the site is `kind="write"`.
-- `origins` holds only what the recipe needs. The status probe changes nothing.
-- No personal value is in the file: names, accounts, addresses and titles come in as arguments
-  or node settings.
-- A code verb uses the `Page` and nothing else to reach the browser. It never pastes a value
-  into code text: it passes values to `evaluate`, `run_code` and `fetch`.
-- The tests above pass, and `recipe <site> check` is healthy on a signed-in node.
+1. Use `fake_browser.py` for unit tests. Test every verb, signed-out behavior,
+   invalid arguments, returned files, and navigation outside allowed origins.
+2. Use `site_fixture.py` and `fixtures/site/` for a local live test. The fixture
+   serves sign-in, list, detail, API, sign-out, and cross-origin pages.
+3. Enable the live test with `AR3_TOOL_BROWSER_LIVE=1`. Use a temporary XDG
+   directory and headless Chrome. Check that replies and artifacts contain
+   no stored value. Only `secrets.json` may contain the fixture's secret.
+
+The fixture recipe in `fixtures/node/recipes/fixture.py` reads its origin from
+`FIXTURE_BASE`. Use `example.com` and `127.0.0.1` for examples and tests.
+Do not include personal accounts, addresses, or private site content.
+
+Before review, confirm these conditions:
+
+- Each verb has help. Each read verb has an example that `check` can run.
+- Every verb that changes site content uses `kind="write"`.
+- Origins include only required hosts. The status probe changes no site data.
+- Personal values come from arguments or node settings.
+- Browser access uses `Page`. Values are passed as arguments, never inserted
+  into executable source text.
+- Unit tests pass. A live fixture test passes when available.
+- The recipe health check passes on the intended signed-in profile.

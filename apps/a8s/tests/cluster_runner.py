@@ -7,6 +7,7 @@ from pathlib import Path
 
 _PKG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PKG))
+sys.path.insert(0, str(_PKG.parent.parent / "lib"))
 
 if __name__ == "__main__":
     home, agent, interval, drain = sys.argv[1:5]

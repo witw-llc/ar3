@@ -150,7 +150,7 @@ def test_the_name_of_the_seat_is_not_looked_at(monkeypatch):
     spawns = Spawns(monkeypatch)
     with plc.protecting("garmin-1234", guard(PIN="1234")):
         plc.run("garmin-1234", "snapshot")
-    assert spawns.argv == [["playwright-cli", "-s=garmin-1234", "snapshot"]]
+    assert spawns.argv == [["playwright-cli", f"-s={plc.session_name('garmin-1234')}", "snapshot"]]
 
 
 def test_the_protection_is_of_one_seat_and_ends_with_its_block(monkeypatch):
@@ -659,8 +659,8 @@ OWN_SITES = {
     ],
     "resolve.py": ['plc.run(seat, "eval", plc.Own("() => true"), ref, timeout=10)'],
     "session.py": [
+        'plc.run(seat, "open", plc.Own(f"--config={config}"), timeout=CHROME_START_SECONDS)',
         "return plc.Own(",
-        'plc.run(seat, "attach", plc.Own(f"--cdp={base}"), timeout=15)',
         "plc.Own(",
         "return plc.Own(_route_downloads_js(seat) + (",
         "plc.Own(",

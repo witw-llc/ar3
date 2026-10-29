@@ -44,17 +44,21 @@ import shlex
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time as _time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import autostart
 import core
 from ar3 import clock
-from ar3.fsio import atomic_write_text
+from ar3.fsio import atomic_write_text, stat_or_none
+from ar3.locking import file_lock
 from ar3.wake_outcome import (
     ENVELOPES_ENV, OUTCOME_DIR_ENV, RECIPIENT_ENV, outcome_dir, take_failures,
 )
@@ -1022,7 +1026,44 @@ def maybe_run_idle(p: Participant, *, async_wake: bool = False) -> bool:
 
 # ---------- per-agent attachment ----------
 
+@contextmanager
+def pid_lock(name: str):
+    """The one cross-process lock over a node's pid file and start token:
+    every validation, reap, claim, release and token write holds it. Not
+    reentrant: code already inside calls the `_locked` primitives."""
+    with file_lock(pid_path(name).with_name("pid.lock")):
+        yield
+
+
 def _read_handler_pid(name: str) -> int | None:
+    """Validate (and reap) under `pid_lock`, waiting for an in-flight claim.
+    A node with no directory has no claim to wait for. Where the lock file
+    cannot be opened (a read-only home), liveness alone answers and nothing is
+    reaped."""
+    if not pid_path(name).parent.is_dir():
+        return None
+    try:
+        lock = pid_lock(name)
+        lock.__enter__()
+    except OSError:
+        return _read_handler_pid_unlocked(name)
+    try:
+        return _read_handler_pid_locked(name)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _read_handler_pid_unlocked(name: str) -> int | None:
+    try:
+        pid = int(pid_path(name).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if pid > 0 and _pid_alive(pid) and not _pid_recycled(name, pid):
+        return pid
+    return None
+
+
+def _read_handler_pid_locked(name: str) -> int | None:
     """Return the live PID currently handling <name>, or None. Cleans up stale
     pid files. Treats empty / non-int / non-positive contents as stale (the
     O_CREAT|O_EXCL window allows a partial-write to leave an empty pid file
@@ -1041,11 +1082,11 @@ def _read_handler_pid(name: str) -> int | None:
         if pid <= 0:
             raise ValueError("non-positive pid")
     except (OSError, ValueError):
-        _unlink_pid_files(name)
+        _unlink_pid_files_locked(name)
         return None
     if _pid_alive(pid) and not _pid_recycled(name, pid):
         return pid
-    _unlink_pid_files(name)
+    _unlink_pid_files_locked(name)
     return None
 
 
@@ -1059,6 +1100,11 @@ def _pid_recycled(name: str, pid: int) -> bool:
 
 
 def _unlink_pid_files(name: str) -> None:
+    with pid_lock(name):
+        _unlink_pid_files_locked(name)
+
+
+def _unlink_pid_files_locked(name: str) -> None:
     for path in (pid_path(name), pid_start_path(name)):
         try:
             path.unlink()
@@ -1067,6 +1113,11 @@ def _unlink_pid_files(name: str) -> None:
 
 
 def _stamp_pid_start(name: str, pid: int) -> None:
+    with pid_lock(name):
+        _stamp_pid_start_locked(name, pid)
+
+
+def _stamp_pid_start_locked(name: str, pid: int) -> None:
     token = process_start_token(pid)
     if token is None:
         return
@@ -1083,11 +1134,26 @@ def _try_atomic_claim(name: str, pid: int) -> bool:
     `os.fsync` after the write makes the pid bytes durable before the fd
     closes — without it, a kernel-level crash window between create and write
     could leave readers parsing an empty file (which `_read_handler_pid` now
-    treats as stale and cleans up)."""
+    treats as stale and cleans up). Claim, start-token write and every reader
+    or reaper hold `pid_lock`, so no reader sees the file between create and
+    write and no stale reaper deletes a newer owner."""
     p = pid_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
+    with pid_lock(name):
+        if not _publish_claim(name, pid):
+            return False
+        _unlink_start_token(name)
+        _stamp_pid_start_locked(name, pid)
+        return True
+
+
+def _unlink_start_token(name: str) -> None:
+    pid_start_path(name).unlink(missing_ok=True)
+
+
+def _publish_claim(name: str, pid: int) -> bool:
     try:
-        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        fd = os.open(str(pid_path(name)), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError:
         return False
     try:
@@ -1103,6 +1169,8 @@ def _try_atomic_claim(name: str, pid: int) -> bool:
 # request between iterations, so an active subprocess delays response).
 DETACH_TIMEOUT_S = 60.0
 DETACH_POLL_S = 0.2
+CLAIM_RETRY_S = 3.0
+CLAIM_RETRY_POLL_S = 0.05
 
 
 def _write_detach_request(name: str, requester_pid: int) -> None:
@@ -1206,7 +1274,6 @@ def acquire(name: str) -> None:
     deadline: float | None = None
     while True:
         if _try_atomic_claim(name, me):
-            _stamp_pid_start(name, me)
             # If the pending request was OURS (we placed it earlier in this
             # call), clear it — it's been satisfied. Leave foreign requests
             # alone: those belong to whichever process placed them, and our
@@ -1234,6 +1301,34 @@ def acquire(name: str) -> None:
                 f"try `a8s kill {name}`"
             )
         _time.sleep(DETACH_POLL_S)
+
+
+def claim_without_takeover(name: str, epoch: str | None = None, manual: str | None = None) -> str:
+    """Attach this process as the handler of <name> only if nobody holds it.
+
+    Returns `claimed`, `held` (a live handler exists and is left alone: no
+    detach request, no wait), `refused` (a startup or manual claim whose token
+    is no longer current) or `stuck` (a stale pid file that cannot be removed
+    kept the claim from settling within CLAIM_RETRY_S). The epoch check and
+    the pid-file claim happen under one lock, so a stop that disarms first is
+    never overtaken; the retry is bounded because that lock is the whole
+    home's."""
+    me = os.getpid()
+    with autostart.claim_context(name, epoch, manual) as allowed:
+        if not allowed:
+            return "refused"
+        deadline = _time.monotonic() + CLAIM_RETRY_S
+        while True:
+            if _try_atomic_claim(name, me):
+                if _read_detach_request(name) == me:
+                    _clear_detach_request(name)
+                return "claimed"
+            existing = _read_handler_pid(name)
+            if existing is not None:
+                return "claimed" if existing == me else "held"
+            if _time.monotonic() >= deadline:
+                return "stuck"
+            _time.sleep(CLAIM_RETRY_POLL_S)
 
 
 STOP_HOOK_SECONDS = 30.0
@@ -1461,9 +1556,9 @@ def release(name: str) -> None:
     p = pid_path(name)
     try:
         if p.is_file():
-            pid = int(p.read_text().strip())
-            if pid == os.getpid():
-                _unlink_pid_files(name)
+            with pid_lock(name):
+                if int(p.read_text().strip()) == os.getpid():
+                    _unlink_pid_files_locked(name)
     except (OSError, ValueError):
         pass
     _clear_detach_request(name)
@@ -1519,12 +1614,10 @@ def _oldest_inbox_age(names: list[str]) -> float | None:
         except OSError:
             continue
         for f in entries:
-            try:
-                if not f.is_file():
-                    continue
-                mtime = f.stat().st_mtime
-            except OSError:
+            info = stat_or_none(f)
+            if info is None or not stat.S_ISREG(info.st_mode):
                 continue
+            mtime = info.st_mtime
             if oldest_mtime is None or mtime < oldest_mtime:
                 oldest_mtime = mtime
     if oldest_mtime is None:
@@ -1860,7 +1953,16 @@ def _route_outboxes_once_more(
         out_agent(label, f"[a8s] {label}: final outbox pass failed: {e}")
 
 
-def attached_loop(names: list[str], interval: float, *, single_pass: bool = False, drain_seconds: float = 0) -> int:
+def attached_loop(
+    names: list[str],
+    interval: float,
+    *,
+    single_pass: bool = False,
+    drain_seconds: float = 0,
+    takeover: bool = True,
+    startup_epoch: str | None = None,
+    manual_claim: str | None = None,
+) -> int:
     """Body of `a8s run` / `a8s start` / `a8s step`. ONE process handles every
     name in `names`; multi-agent handlers share a PID across each member's
     pid file.
@@ -1892,25 +1994,65 @@ def attached_loop(names: list[str], interval: float, *, single_pass: bool = Fals
     # Acquire each pid file. If any fails (holder didn't honor the
     # detach-request in time), release whatever we got.
     acquired: list[str] = []
-    try:
-        for name in names:
-            acquire(name)
-            acquired.append(name)
-    except TimeoutError as e:
-        print(str(e), file=sys.stderr)
-        for n in acquired:
-            release(n)
-        return 1
+    held_signals = None
+    if takeover:
+        try:
+            for name in names:
+                acquire(name)
+                acquired.append(name)
+        except TimeoutError as e:
+            print(str(e), file=sys.stderr)
+            for n in acquired:
+                release(n)
+            return 1
+    else:
+        # A stop that reads the published pid must find a handler that can
+        # act on its signal: hold SIGTERM/SIGINT pending until the handlers
+        # below are installed.
+        if hasattr(signal, "pthread_sigmask"):
+            held_signals = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+        try:
+            for name in names:
+                outcome = claim_without_takeover(name, startup_epoch, manual_claim)
+                if outcome == "claimed":
+                    acquired.append(name)
+                elif outcome == "held":
+                    print(f"[a8s] {name}: already running (PID {_read_handler_pid(name)}); left alone", file=sys.stderr)
+                elif outcome == "stuck":
+                    print(f"[a8s] {name}: a stale pid file cannot be removed; not started", file=sys.stderr)
+                elif startup_epoch is not None:
+                    print(f"[a8s] {name}: autostart is not armed for this startup; not started", file=sys.stderr)
+                else:
+                    print(f"[a8s] {name}: a newer stop, kill, exit, remove or start cancelled this start; not started", file=sys.stderr)
+        except BaseException:
+            for n in acquired:
+                release(n)
+            if held_signals is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, held_signals)
+            raise
+        if not acquired:
+            if held_signals is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, held_signals)
+            return 0
+        names = acquired
 
     label = names[0] if len(names) == 1 else f"[{', '.join(names)}]"
-    handler = _make_signal_handler(label, names)
-    prev_sigterm = signal.signal(signal.SIGTERM, handler)
-    prev_sigint = signal.signal(signal.SIGINT, handler)
-    prev_sigusr1 = (
-        signal.signal(signal.SIGUSR1, _on_kill_signal)
-        if hasattr(signal, "SIGUSR1")
-        else None
-    )
+    try:
+        handler = _make_signal_handler(label, names)
+        prev_sigterm = signal.signal(signal.SIGTERM, handler)
+        prev_sigint = signal.signal(signal.SIGINT, handler)
+        prev_sigusr1 = (
+            signal.signal(signal.SIGUSR1, _on_kill_signal)
+            if hasattr(signal, "SIGUSR1")
+            else None
+        )
+    except BaseException:
+        for n in acquired:
+            release(n)
+        raise
+    finally:
+        if held_signals is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, held_signals)
 
     pid = os.getpid()
     for n in names:

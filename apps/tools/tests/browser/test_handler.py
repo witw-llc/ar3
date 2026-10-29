@@ -283,7 +283,7 @@ def _waiter_with_stub_chrome(monkeypatch):
     events = []
     monkeypatch.setattr(session.plc, "is_open", lambda s: False)
     monkeypatch.setattr(session, "_start_chrome", lambda s: events.append("spawn") or "base")
-    monkeypatch.setattr(session, "_attach", lambda s, b: None)
+    monkeypatch.setattr(session, "_attach", lambda s: None)
     monkeypatch.setattr(session, "_window_of_page", lambda s: {"window": 1, "visible": "visible"})
     monkeypatch.setenv("AR3_BROWSER_SEAT_WAIT", "30")
     return events

@@ -57,6 +57,37 @@
 - **Bound the Codex handshake with one 20-second clock.** Initialization and
   verified thread creation must both finish before held prompts are released.
   Do not reset the clock between phases; timeout settles each held origin once.
+- **Bound every resident protocol write, including reader replies.** Serialize
+  complete batches through one writer slot. Share a five-second deadline across
+  slot admission, write and flush; stop or fatal state interrupts the caller.
+  A failed or interrupted write permanently fails the writer and is never
+  retried. Cancellation delivery and settlement share at most 1.5 seconds.
+  On abrupt shutdown terminate the engine before buffered stdin close or writer
+  joins. Bound close and join waits; normal EOF close has one second before
+  forfeiting the engine's EOF grace. Preserve each engine's normal quiet grace.
+- **Bind Codex routed origins to returned turn identities.** Carry submission tokens
+  through held input and request IDs; settle only the tokens bound to a native
+  terminal. Preserve terminal-before-response snapshots, merged responses and
+  duplicate/stale protection. Native turns block quiet close without owning a
+  local origin. Apply frames under the same scheduler condition as closing,
+  with condition-before-session lock order. Bound replay memory and fail closed
+  instead of forgetting identities. Unverified child activity does not authorize
+  automatic continuation. Verified receipts may authorize reconciliation as
+  below; result consumption remains a separate acceptance claim.
+- **Bound Codex child-result reconciliation to verified receipts.** A completed
+  parent `subAgentActivity(kind=started)` establishes child ownership. A later
+  completed activity for that owned child can request reconciliation within the
+  same authorized session. Deduplicate opaque item identities and retain their
+  associations; fail closed on conflicting identities or capacity exhaustion.
+  Coalesce at most 32 pending receipts per turn into at most 32 continuation
+  attempts per session,
+  with one attempt per receipt and no retry after rejection or failed write.
+  Stop, fatal state, closing, native turns and real inbound work take precedence.
+  Serialize admission under enqueue lock, scheduler condition, then session lock.
+  Bind the submitted token to the actual returned turn, including native merges.
+  A native turn or successful continuation does not prove result consumption.
+  Ask the parent to inspect results and continue only unfinished authorized work;
+  never infer success from completion or add a generic output or idle trigger.
 - **Recover a dead bridge group only with recorded ownership evidence.** Under
   the enqueue lock, require matching state and pid-file identities and a captured
   start token before clearing or replacing state. A live leader must match its

@@ -96,10 +96,11 @@ def _handle(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="vault", description=__doc__)
+    parser = argparse.ArgumentParser(prog=os.environ.get("AR3_TOOL_PROG", "vault"), description=__doc__)
     sub = parser.add_subparsers(dest="command")
     where = argparse.ArgumentParser(add_help=False)
-    where.add_argument("--node", default="vault", help="the vault node's name (default vault)")
+    where.add_argument("--node", default="vault",
+                       help=argparse.SUPPRESS if os.environ.get("AR3_TOOL_PROG") else "the vault node's name (default vault)")
     where.add_argument("--dir", default=None, help="state root (default $VAULT_DIR, else ${XDG_DATA_HOME:-~/.local/share}/ar3/vault/<node>)")
     sub.add_parser("init", parents=[where], help="create the vault keypair and pepper")
     sub.add_parser("fingerprint", parents=[where], help="print the vault key fingerprint")

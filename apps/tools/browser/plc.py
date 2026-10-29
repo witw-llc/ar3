@@ -5,10 +5,12 @@ sections, its habit of reporting failure while exiting 0, and the argument
 shapes that differ from what the verb names suggest.
 """
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -248,24 +250,96 @@ def js_string(value):
     )
 
 
+# The variable that names the directory of the daemon's socket. Unset, the driver puts it under
+# `<tmp>/pw-<hash of the user name>`, a name any local user can work out and make first.
+IPC_ENV = "PWTEST_SOCKETS_DIR"
+
+
+# The driver refuses a socket path longer than 103 bytes, and puts its sockets one level below the directory
+# (`browser/<16 hex>.sock` at the shortest), so a directory longer than this stops every daemon from starting.
+IPC_DIR_MAX_BYTES = 73
+
+
+def ipc_dir():
+    """Where the seat daemons' sockets live: a directory of this user's, 0700. A socket there is a daemon's whole
+    command surface (the CLI's, and the browser server's), so no other OS user may reach it. Not caller-set:
+    `cli_env` drops any inherited value and names this one.
+
+    It is `ipc` in the browser state root. When that path is too long for a socket, it is a directory named by a
+    digest of that path, in this user's `ar3-browser-<uid>` under `$XDG_RUNTIME_DIR`, or under the system temp
+    directory when there is none or it is too long too. `private_ipc_dir` refuses either when it is not this user's."""
+    home = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "ar3", "browser", "ipc")
+    if len(os.fsencode(home)) <= IPC_DIR_MAX_BYTES:
+        return home
+    uid = os.geteuid() if hasattr(os, "geteuid") else 0
+    digest = hashlib.sha256(os.fsencode(home)).hexdigest()[:12]
+    for base in (os.environ.get("XDG_RUNTIME_DIR"), tempfile.gettempdir()):
+        if base:
+            path = os.path.join(base, f"ar3-browser-{uid}", digest)
+            if len(os.fsencode(path)) <= IPC_DIR_MAX_BYTES:
+                return path
+    return path
+
+
+def _private_level(path):
+    """Make `path` a 0700 directory of this user's, or raise BrowserError: a link, a file or another user's
+    directory is not one the daemon's socket may land in."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or (os.name == "posix" and info.st_uid != os.geteuid()):
+        raise BrowserError("the driver's socket directory is not a directory of this user's; nothing was run")
+    if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
+def private_ipc_dir():
+    """`ipc_dir`, made 0700 when missing and tightened when looser. Raises BrowserError, having run nothing, when it,
+    or the per-user directory a short one sits in, is a link, not a directory, or another user's."""
+    path = ipc_dir()
+    parent = os.path.dirname(path)
+    if os.path.basename(parent).startswith("ar3-browser-"):
+        _private_level(parent)
+    else:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _private_level(path)
+    return path
+
+
 def cli_env():
     """The environment of every playwright-cli call, and so of the daemon that a call starts: this
     process's, without the switch that lets the driver open local files, and without the variables that move or
     add to what the driver writes (`DRIVER_OUTPUT_ENV`). The tool opens no local file, and the files of the driver are
-    where the sweep looks, so a node whose environment sets any of them does not change that for the seat's driver."""
-    return {
+    where the sweep looks, so a node whose environment sets any of them does not change that for the seat's driver.
+    The socket directory is always `ipc_dir`, whatever the caller's environment says (on Windows the driver uses a
+    named pipe, and the variable only changes the pipe's name)."""
+    env = {
         name: value for name, value in os.environ.items()
         if name.upper() != FILE_ACCESS_ENV and not DRIVER_OUTPUT_ENV.fullmatch(name)
     }
+    env[IPC_ENV] = ipc_dir()
+    return env
 
 
 def _driver_options():
     """The options of every run of the driver: its environment, and a umask that keeps what it writes, and what the
     daemon it starts writes, to the node's OS user (mode 0600 for a file, 0700 for a directory)."""
+    private_ipc_dir()
     options = {"env": cli_env()}
     if os.name == "posix":
         options["umask"] = DRIVER_UMASK
     return options
+
+
+def session_name(seat):
+    """The playwright-cli session of `seat`. The driver turns every character outside letters, digits and `-` in a
+    session name into `-` when it names the daemon's socket, so `a_b`, `a.b` and `a-b` would share one socket, and
+    on a case-insensitive file system so would `Work` and `work`. The name is a lowercase slug of the seat, to read
+    in `playwright-cli list`, and a digest of the exact seat, to tell seats apart."""
+    slug = re.sub(r"[^a-z0-9]+", "-", seat.lower()).strip("-")[:24].strip("-") or "seat"
+    return f"{slug}-{hashlib.sha256(seat.encode('utf-8', 'surrogatepass')).hexdigest()[:12]}"
 
 
 def run(seat, *args, timeout=30):
@@ -275,7 +349,7 @@ def run(seat, *args, timeout=30):
     is not enough to call a step successful.
     """
     check_command(seat, args)
-    cmd = [require(), f"-s={seat}", *args]
+    cmd = [require(), f"-s={session_name(seat)}", *args]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **_driver_options(), **launch_options())
     except subprocess.TimeoutExpired:
@@ -352,7 +426,7 @@ def sessions():
 
 
 def is_open(seat):
-    return seat in sessions()
+    return session_name(seat) in sessions()
 
 
 def evaluate(seat, expression, timeout=30):

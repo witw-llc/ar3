@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ar3.fsio import stat_or_none
 from ar3.proc import launch_options
 try:
     from ar3.clock import (
@@ -3094,10 +3095,8 @@ def _mission_mtime(ctx: DispatchContext) -> float:
     counts exactly as editing the old file did."""
     from runbook import mission_source
 
-    try:
-        return mission_source(ctx.root).stat().st_mtime
-    except OSError:
-        return 0.0
+    info = stat_or_none(mission_source(ctx.root))
+    return 0.0 if info is None else info.st_mtime
 
 
 def _mission_review(

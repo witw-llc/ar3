@@ -18,6 +18,8 @@ def _stub_browser(monkeypatch, tmp_path, **overrides):
     monkeypatch.setattr(commands.session, "current_url", lambda seat: "https://example.com/")
     monkeypatch.setattr(commands.session, "snapshot", lambda seat: "- button 'Sign in'")
     monkeypatch.setattr(plc, "run", lambda *a, **k: "### Result\nok\n")
+    # No Chrome stands behind the stub, so its page list cannot be read (`session.pages`).
+    monkeypatch.setattr(commands.session, "pages", lambda seat: None)
     for name, value in overrides.items():
         monkeypatch.setattr(commands.session, name, value)
 
@@ -805,6 +807,9 @@ class FakeCli:
             path = filenames[0]
             with open(path, encoding="utf-8") as handle:
                 text = handle.read()
+            if "Target.getTargets" in text or "Target.closeTarget" in text:
+                # `session.pages` asking Chrome for its targets: this fake has no Chrome behind it.
+                return _Completed(1, "", "The browser 'seat' is not open, please run open first")
             if "structuralPath" in text:
                 # The page-side pass that turns a target into a selector. Its function and its argument are in
                 # this file, so neither is in the command line.
@@ -874,7 +879,7 @@ def test_the_value_is_in_no_argv_of_any_subprocess(monkeypatch, tmp_path):
     assert run.ok, run.error
     assert cli.calls and VALUE not in cli.argv_text()
     (fill,) = [cmd for cmd in cli.calls if f"--filename={cli.code[0]['path']}" in cmd]
-    assert fill[1] == "-s=seat"
+    assert fill[1] == f"-s={plc.session_name('seat')}"
     assert "--raw" in fill
     assert [a for a in fill if a.startswith("--filename=")] == [f"--filename={cli.code[0]['path']}"]
     # The target of the fill and of the text is in a private file too, so it is in no command line either.
@@ -928,7 +933,7 @@ def test_an_unknown_secret_fails_before_any_page_work(monkeypatch, tmp_path):
     assert not run.ok
     assert run.error == (
         "secret NOPE is not set for seat seat; "
-        "the operator sets it with `browser secret set NOPE --origin ORIGIN --seat seat`"
+        "the operator sets it with `ar3 tool browser --node seat secret set NOPE - --origin ORIGIN`"
     )
     assert [step["command"] for step in run.steps] == ["fill-secret #pw NOPE"]
     assert cli.calls == []
@@ -947,7 +952,7 @@ def test_an_unknown_secret_on_a_seat_with_no_store_names_the_seat_and_the_fix(mo
     run = commands.run_script("garmin", "fill-secret #pw PASSWORD")
     assert run.error == (
         "secret PASSWORD is not set for seat garmin; "
-        "the operator sets it with `browser secret set PASSWORD --origin ORIGIN --seat garmin`"
+        "the operator sets it with `ar3 tool browser --node garmin secret set PASSWORD - --origin ORIGIN`"
     )
 
 
@@ -1609,7 +1614,7 @@ def test_a_run_that_stops_on_an_unreadable_store_still_closes_the_seat_directori
 
 GUARD = (
     "eval and run-code are off on a seat that holds secrets; they could read a field a secret was "
-    "typed into. Remove the secrets (browser secret rm) or use a seat without them."
+    "typed into. Remove the secrets (ar3 tool browser --seat NAME secret rm SECRET) or use a seat without them."
 )
 CALLER_CODE = [
     "eval document.getElementById('pw').value",
@@ -1640,7 +1645,7 @@ def test_the_refusal_names_the_reason_and_the_fix(monkeypatch, tmp_path):
     _with_secret(monkeypatch, tmp_path)
     run = commands.run_script("seat", "eval 1 + 1", allow_eval=True)
     assert "could read a field a secret was typed into" in run.error
-    assert "browser secret rm" in run.error and "a seat without them" in run.error
+    assert "ar3 tool browser --seat NAME secret rm SECRET" in run.error and "a seat without them" in run.error
     assert run.error == commands.EVAL_OFF_WITH_SECRETS
 
 

@@ -57,7 +57,7 @@ from core import (
     unique_path,
 )
 from network import AMBIGUOUS, SENT, seen_id_append
-from ar3.fsio import atomic_write_text
+from ar3.fsio import atomic_write_text, stat_or_none
 from registry import load_namespaces, resolve_name, opaque_prefixes
 from services import StorageError, StorageService
 from services.attachment_errors import ATTACHMENT_UNAVAILABLE
@@ -1059,10 +1059,9 @@ def newest_inbox_mtime(p: Participant) -> datetime | None:
     every tick and must not die of a race it can simply ignore."""
     mtimes = []
     for f in _inbox_json_files(p):
-        try:
-            mtimes.append(f.stat().st_mtime)
-        except OSError:
-            continue
+        info = stat_or_none(f)
+        if info is not None:
+            mtimes.append(info.st_mtime)
     if not mtimes:
         return None
     return datetime.fromtimestamp(max(mtimes), tz=timezone.utc)
