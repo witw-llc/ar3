@@ -15,6 +15,7 @@ from pathlib import Path
 from ar3.proc import launch_options
 
 from engines.acp import ParsedFrame, rpc
+from engines.held_input import submission_text
 from engines.muse import _uuid7
 from engines.run import RunError
 from rig import MCP_SERVER_NAME, _mcp_command, _mcp_server_env
@@ -150,7 +151,7 @@ class MuseSession:
 
     def _release(self):
         if self.ready and not self.busy and self.held and not self.cancel_sent:
-            return (self._prompt(self.held.popleft()),)
+            return (self._prompt(submission_text(self.held.popleft())),)
         return ()
 
     def turn_lines(self, text):

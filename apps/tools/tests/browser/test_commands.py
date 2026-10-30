@@ -20,6 +20,9 @@ def _stub_browser(monkeypatch, tmp_path, **overrides):
     monkeypatch.setattr(plc, "run", lambda *a, **k: "### Result\nok\n")
     # No Chrome stands behind the stub, so its page list cannot be read (`session.pages`).
     monkeypatch.setattr(commands.session, "pages", lambda seat: None)
+    monkeypatch.setattr(commands.session, "tabs", lambda seat: [
+        {"id": "A", "url": commands.session.current_url(seat), "selected": True},
+    ])
     for name, value in overrides.items():
         monkeypatch.setattr(commands.session, name, value)
 
@@ -259,7 +262,7 @@ def test_an_unbalanced_quote_is_a_parse_error_not_a_crash(monkeypatch, tmp_path)
 
 def test_shot_attaches_the_screenshot(monkeypatch, tmp_path):
     _stub_browser(monkeypatch, tmp_path)
-    monkeypatch.setattr(plc, "screenshot", lambda seat, path, timeout=60: _touch(path))
+    monkeypatch.setattr(commands.session, "indexed_screenshot", lambda seat, page_id, path: _touch(path))
     run = commands.run_script("seat", "shot")
     assert run.ok
     assert run.files and run.files[0].endswith("-screen.png")
@@ -810,6 +813,13 @@ class FakeCli:
             if "Target.getTargets" in text or "Target.closeTarget" in text:
                 # `session.pages` asking Chrome for its targets: this fake has no Chrome behind it.
                 return _Completed(1, "", "The browser 'seat' is not open, please run open first")
+            if "await page.screenshot(" in text:
+                self.code.append({"text": text, "path": path})
+                target = json.loads(re.search(r'page.screenshot\(\{path: (".*")\}\)', text).group(1))
+                with open(target, "wb") as handle:
+                    handle.write(b"\x89PNG fake")
+                nonce = json.loads(re.search(r'return \{nonce: ("[0-9a-f]+"), value\}', text).group(1))
+                return _Completed(0, json.dumps({"nonce": nonce, "value": True}))
             if "structuralPath" in text:
                 # The page-side pass that turns a target into a selector. Its function and its argument are in
                 # this file, so neither is in the command line.
@@ -1256,12 +1266,12 @@ def test_a_screenshot_is_left_as_the_pixels_it_is(monkeypatch, tmp_path):
     _with_secret(monkeypatch, tmp_path)
     pixels = b"\x89PNG\r\n\x1a\n" + VALUE.encode() + b"\xff\x00"
 
-    def shoot(seat, path, timeout=60):
+    def shoot(seat, page_id, path):
         with open(path, "wb") as handle:
             handle.write(pixels)
         return path
 
-    monkeypatch.setattr(plc, "screenshot", shoot)
+    monkeypatch.setattr(commands.session, "indexed_screenshot", shoot)
     run = commands.run_script("seat", "shot")
     (path,) = run.files
     with open(path, "rb") as handle:

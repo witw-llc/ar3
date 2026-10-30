@@ -50,6 +50,9 @@ argv handed to the CLI's own `--help`, never a turn — and the fuel column is
 `r4t rig fuel`'s reading asked with no model pinned. A quota surface that
 cannot answer costs the row its number and nothing else.
 
+`rig detect` and `rig fuel` omit plan labels containing `@` from text and JSON
+reports. An explicit `engine <id> quota` request retains the vendor's plan label.
+
 Three grades:
 
 | Grade | Means |

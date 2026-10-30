@@ -285,3 +285,73 @@ class TestBucketing:
         assert bucket_dir.is_dir()
         files = list(bucket_dir.glob("K7E-*.md"))
         assert len(files) == 1
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_plain_reindex_preserves_pending_embedding_backlog(dead_embeddings, monkeypatch, repair):
+    import hygiene
+    ids = [engine.store_entry(title, title + " content", tags=["testing"]) for title in ("Alpha", "Beta")]
+    conn = engine._connect()
+    conn.execute("UPDATE pending_embeddings SET queued_at = '2001-01-01'")
+    conn.commit()
+    before = conn.execute("SELECT node_id, queued_at FROM pending_embeddings ORDER BY node_id").fetchall()
+    assert {row[0] for row in before} == set(ids)
+    if repair:
+        conn.execute("UPDATE nodes SET status = 'superseded' WHERE id = ?", (ids[0],))
+        conn.commit()
+    conn.close()
+    monkeypatch.setattr(engine, "embed_text", lambda *a, **kw: pytest.fail("plain repair must not call an embedder"))
+    if repair:
+        hygiene.run_audit(fix=True)
+        assert hygiene.index_disagreement() is None
+    else:
+        engine.reindex()
+    conn = engine._connect()
+    assert conn.execute("SELECT node_id, queued_at FROM pending_embeddings ORDER BY node_id").fetchall() == before
+    conn.close()
+
+
+def test_supersede_accepts_a_frontmatter_fence_at_eof(store):
+    import hygiene
+    old = engine.store_entry("Old", "", tags=["testing"])
+    new = engine.store_entry("New", "Replacement", tags=["testing"])
+    path = engine._node_path(old)
+    text = path.read_text()
+    path.write_text(text[:text.index("\n---", 4) + 4])
+    assert engine._parse_frontmatter(path.read_text())["status"] == "active"
+    assert engine.supersede(old, new)
+    meta = engine._parse_frontmatter(path.read_text())
+    assert meta["status"] == "superseded"
+    assert meta["superseded_by"] == new
+    assert meta["superseded_at"]
+    hygiene.run_audit(fix=True)
+    conn = engine._connect()
+    assert conn.execute("SELECT status, superseded_by FROM nodes WHERE id = ?", (old,)).fetchone() == ("superseded", new)
+    conn.close()
+
+
+def test_plain_reindex_prunes_only_ineligible_pending_entries(dead_embeddings, monkeypatch):
+    keep, removed, retired, archived = [engine.store_entry(title, title + " content")
+                                        for title in ("Keep", "Removed", "Retired", "Archived")]
+    engine._node_path(removed).unlink()
+    engine.supersede(retired, keep)
+    path = engine._node_path(archived)
+    path.write_text(engine._set_frontmatter_key(path.read_text(), "kind", "idea"))
+    monkeypatch.setenv("K7E_EMBEDDINGS", "off")
+    engine.reindex()
+    conn = engine._connect()
+    assert conn.execute("SELECT node_id FROM pending_embeddings").fetchall() == [(keep,)]
+    conn.close()
+
+
+def test_supersede_refuses_invalid_frontmatter_without_changing_index(store):
+    old = engine.store_entry("Old", "Original")
+    new = engine.store_entry("New", "Replacement")
+    path = engine._node_path(old)
+    path.write_text("No frontmatter")
+    with pytest.raises(ValueError, match="frontmatter"):
+        engine.supersede(old, new)
+    assert path.read_text() == "No frontmatter"
+    conn = engine._connect()
+    assert conn.execute("SELECT status FROM nodes WHERE id = ?", (old,)).fetchone() == ("active",)
+    conn.close()

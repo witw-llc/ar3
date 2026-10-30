@@ -43,6 +43,7 @@ from ar3.ulid import new as new_ulid
 from ar3.wake_outcome import origin_from_env, report_failure, valid_origin
 
 from engines.acp import AcpSession, ParsedFrame, acp_mcp_servers
+from engines.held_input import QueuedText, submission_text
 from engines import devin_resident
 from engines.muse_resident import MuseSession, compose_muse_argv
 from engines.run import (
@@ -679,9 +680,10 @@ def codex_opening(cwd: str, *, ephemeral: bool = False) -> list[str]:
 
 
 class _Held(str):
-    """Held turn text that carries its submission token."""
+    """Held turn text that carries its submission token and queued parts."""
 
     token: int
+    parts: tuple = ()
 
 
 # Most turn identities one session remembers. Past it the session ends:
@@ -843,7 +845,7 @@ class CodexSession:
         self.handshake_done = self.initialized and self.thread_id is not None
         if self.handshake_done and not self.busy and self.held:
             held = self.held.popleft()
-            return (self._turn_start(str(held), held.token),)
+            return (self._turn_start(submission_text(held), held.token),)
         return ()
 
     def turn_lines(self, text: str, token: int | None = None) -> list[str]:
@@ -854,6 +856,7 @@ class CodexSession:
             if self._expire_handshake() or not self.handshake_done or self.busy:
                 held = _Held(text)
                 held.token = token
+                held.parts = getattr(text, "parts", ())
                 self.held.append(held)
                 return []
             return [self._turn_start(text, token)]
@@ -2506,7 +2509,7 @@ def _run_session(
                 origins = _item_origins(batch, home, agent)
                 if origins:
                     session_origin = origins[-1]
-                combined = "\n\n".join(item["message"] for item in batch)
+                combined = QueuedText.from_items(batch)
                 if not booted:
                     booted = True
                     if scaffold:

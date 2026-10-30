@@ -123,8 +123,14 @@ def test_require_without_a_terminal_names_the_install_command(monkeypatch):
     monkeypatch.setattr(plc, "_asked", False)
     monkeypatch.setattr(plc.shutil, "which", lambda name: None)
     monkeypatch.setattr(plc, "_offer_install", lambda: False)
-    with pytest.raises(plc.BrowserError, match="npm install -g @playwright/cli"):
+    with pytest.raises(plc.BrowserError, match=r"npm install -g @playwright/cli@\d+\.\d+\.\d+"):
         plc.require()
+
+
+def test_the_install_command_is_the_pinned_one():
+    from ar3.playwright_cli import INSTALL_COMMAND, PLAYWRIGHT_CLI_VERSION
+    assert plc.INSTALL_CMD == list(INSTALL_COMMAND)
+    assert plc.INSTALL_CMD[-1] == f"@playwright/cli@{PLAYWRIGHT_CLI_VERSION}"
 
 
 class _Completed:
@@ -952,3 +958,31 @@ def test_a_short_directory_another_user_made_first_stops_the_driver(monkeypatch,
             plc.private_ipc_dir()
     finally:
         shutil.rmtree(run)
+
+
+def test_the_browser_doctor_notes_a_playwright_cli_that_is_not_the_pinned_one(monkeypatch, capsys):
+    from browser import doctor
+    from ar3.playwright_cli import PLAYWRIGHT_CLI_VERSION
+
+    class Done:
+        returncode = 0
+        stdout = "9.9.9\n"
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/bin/playwright-cli")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: Done)
+    monkeypatch.setattr(doctor.session, "chrome_path", lambda: "/bin/chrome")
+    monkeypatch.setattr(doctor.os.path, "exists", lambda path: True)
+    assert doctor.report() == 0
+    out = capsys.readouterr().out
+    assert "9.9.9" in out and PLAYWRIGHT_CLI_VERSION in out and "@playwright/cli@" in out
+    Done.stdout = PLAYWRIGHT_CLI_VERSION + "\n"
+    assert doctor.report() == 0
+    assert "  note " not in capsys.readouterr().out
+
+
+def test_the_docs_state_the_pinned_install_command():
+    from pathlib import Path
+    from ar3.playwright_cli import PLAYWRIGHT_CLI_PACKAGE
+    repo = Path(__file__).resolve().parents[4]
+    for page in ("apps/tools/browser/README.md", "docs/a8s.md"):
+        assert f"npm install -g {PLAYWRIGHT_CLI_PACKAGE}" in (repo / page).read_text(encoding="utf-8"), page

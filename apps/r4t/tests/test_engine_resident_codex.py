@@ -87,6 +87,22 @@ class TestCodexTurnIdentity:
         assert len(parsed.replies) == 1
         assert _rpc(parsed.replies[0])["params"]["input"][0]["text"] == "second"
 
+    def test_long_held_submission_is_redated_and_noted(self, tmp_path, monkeypatch):
+        from engines import held_input
+
+        session = self._ready(tmp_path)
+        self._submit(session, "first", "local-turn")
+        order = "[t] alice tells bob (4 seconds ago): ship"
+        text = held_input.QueuedText.from_items([{"message": order, "queued_at": 0.0}])
+        assert session.turn_lines(text) == []
+        monkeypatch.setattr(held_input, "_now", lambda: 5 * 60.0)
+        parsed = self._event(session, "turn/completed", "local-turn")
+        (line,) = parsed.replies
+        sent = _rpc(line)["params"]["input"][0]["text"]
+        assert sent.startswith("[This input was held 5 minutes")
+        assert sent.endswith("[t] alice tells bob (5 minutes ago): ship")
+        assert not session.held
+
     def test_unrelated_completion_does_not_release_held_submission(self, tmp_path):
         session = self._ready(tmp_path)
         self._submit(session, "first", "local-turn")

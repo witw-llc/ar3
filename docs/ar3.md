@@ -156,16 +156,21 @@ configures anything.
   reached it says so rather than claiming you are current.
 - **Harnesses** — `claude`, `agent` (Cursor), `codex`, `copilot`, `opencode`,
   `agy`, `ollama`: on PATH, and does a version probe actually answer?
-- **Services** — the ollama server (reachable? which models are pulled?) and
-  docker (binary present *and* daemon reachable — they fail differently).
+- **Services** — the ollama server (reachable? which models are pulled?),
+  docker (binary present *and* daemon reachable — they fail differently), and
+  `a8s secrets`: a password that a8s stores for a remote or storage entry but
+  does not use, because an earlier release stored it or it belongs to another
+  destination. The row names each entry and the command that stores it again.
+  It never shows a password.
 - **Tooling** — git present with `user.name` and `user.email` configured, `openssl` on PATH (the vault tool node needs it), and
   `utf-8 output`: on Windows, whether this child runs in UTF-8 mode or carries
   a `PYTHONIOENCODING`, and what its stdout encoding actually is — a cp1252
   console is what makes the suite's arrows and em dashes crash a command that
   was only printing. On macOS and Linux the line reads *not applicable*.
 
-Exit code is 0 when the core prerequisites hold (git configured, and at least
-one agent harness answering), 1 otherwise — so it can gate a setup script.
+Exit code is 0 when the core prerequisites hold (git configured, at least
+one agent harness answering, and no unused a8s password), 1 otherwise — so it
+can gate a setup script.
 
 ## `AR3_PYTHON`
 

@@ -121,10 +121,10 @@ class FileSyncService(StorageService):
             return False
         try:
             src = self._local_path_for_key(key)
-        except ValueError:
-            return False
+        except ValueError as e:
+            raise StorageError(f"file_sync: {e}") from e
         if not src.is_file():
-            return False
+            raise StorageError(f"file_sync: file not available for {url}")
         safe_dest, err = bundle_file_path(dest.parent, dest.name)
         if safe_dest is None:
             raise StorageError(f"file_sync: {err}")

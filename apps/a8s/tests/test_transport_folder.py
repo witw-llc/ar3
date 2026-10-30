@@ -86,6 +86,211 @@ class TestPublish:
             t.stop()
         assert seen == []
 
+    @pytest.mark.parametrize("compact", [False, True])
+    def test_poll_between_publish_rename_and_ledger_cannot_echo(
+        self, fake_home, folder, monkeypatch, compact
+    ):
+        import transports.folder as folder_mod
+        import transports.ledger as ledger_mod
+
+        if compact:
+            monkeypatch.setattr(ledger_mod, "MAX_SEEN_IDS", 0)
+        t = _transport(folder)
+        seen = []
+        t._on_message = seen.append
+        msg_id = new_ulid()
+        real_replace = folder_mod.replace_with_retry
+        gaps = []
+
+        def rename_then_poll(src, dest):
+            real_replace(src, dest)
+            gaps.append(msg_id not in t._ledger)
+            t._poll_once()
+
+        monkeypatch.setattr(folder_mod, "replace_with_retry", rename_then_poll)
+        t.publish(_envelope(msg_id))
+        assert gaps == [True], "the forced poll must precede ledger.record"
+        assert seen == []
+        assert msg_id in t._ledger
+        assert msg_id in folder_ledger_path("box").read_text().splitlines()
+        t._poll_once()
+        assert seen == []
+
+    def test_failed_publish_clears_guard_and_can_be_attempted_again(
+        self, fake_home, folder, monkeypatch
+    ):
+        import transports.folder as folder_mod
+
+        t = _transport(folder)
+        msg_id = new_ulid()
+        seen = []
+        t._on_message = seen.append
+        real_replace = folder_mod.replace_with_retry
+
+        def fail(src, dest):
+            raise OSError("rename refused")
+
+        monkeypatch.setattr(folder_mod, "replace_with_retry", fail)
+        with pytest.raises(TransportError, match="rename refused"):
+            t.publish(_envelope(msg_id))
+        assert not t._publishing
+        assert msg_id not in t._ledger
+        assert list(folder.iterdir()) == []
+
+        def rename_then_poll(src, dest):
+            real_replace(src, dest)
+            t._poll_once()
+
+        monkeypatch.setattr(folder_mod, "replace_with_retry", rename_then_poll)
+        t.publish(_envelope(msg_id))
+        assert not t._publishing
+        assert seen == []
+        assert msg_id in t._ledger
+
+    def test_failed_write_does_not_hide_a_later_incoming_copy(
+        self, fake_home, folder, monkeypatch
+    ):
+        t = _transport(folder)
+        msg_id = new_ulid()
+        real_write = Path.write_bytes
+
+        def fail(path, data):
+            if path.name == f".{msg_id}.json.part":
+                raise OSError("write refused")
+            return real_write(path, data)
+
+        monkeypatch.setattr(Path, "write_bytes", fail)
+        with pytest.raises(TransportError, match="write refused"):
+            t.publish(_envelope(msg_id))
+        assert not t._publishing
+        seen = []
+        t._on_message = seen.append
+        raw = _envelope(msg_id)
+        (folder / f"{msg_id}.json").write_bytes(raw)
+        t._poll_once()
+        assert seen == [raw]
+
+    def test_failing_duplicate_keeps_the_other_publish_guard(
+        self, fake_home, folder, monkeypatch
+    ):
+        import threading
+        import transports.folder as folder_mod
+
+        t = _transport(folder)
+        msg_id = new_ulid()
+        entered, release = threading.Event(), threading.Event()
+        real_record = t._ledger.record
+        errors = []
+        seen = []
+        t._on_message = seen.append
+
+        def paused_record(*ids):
+            entered.set()
+            assert release.wait(5)
+            real_record(*ids)
+
+        def publish():
+            try:
+                t.publish(_envelope(msg_id))
+            except BaseException as exc:
+                errors.append(exc)
+
+        monkeypatch.setattr(t._ledger, "record", paused_record)
+        writer = threading.Thread(target=publish)
+        writer.start()
+        try:
+            assert entered.wait(5)
+
+            def fail(src, dest):
+                raise OSError("duplicate rename refused")
+
+            monkeypatch.setattr(folder_mod, "replace_with_retry", fail)
+            with pytest.raises(TransportError, match="duplicate rename refused"):
+                t.publish(_envelope(msg_id))
+            t._poll_once()
+            assert seen == []
+            assert t._publishing == {msg_id: 1}
+        finally:
+            release.set()
+            writer.join(5)
+        assert not writer.is_alive()
+        assert not errors
+        assert not t._publishing
+        t._poll_once()
+        assert seen == []
+
+    @pytest.mark.parametrize("finish_publication", [False, True])
+    def test_poll_rechecks_publication_after_reading(
+        self, fake_home, folder, monkeypatch, finish_publication
+    ):
+        import threading
+
+        t = _transport(folder)
+        msg_id = new_ulid()
+        raw = _envelope(msg_id)
+        path = folder / f"{msg_id}.json"
+        path.write_bytes(raw)
+        entered, release = threading.Event(), threading.Event()
+        real_read = Path.read_bytes
+        real_record = t._ledger.record
+        errors, seen = [], []
+        t._on_message = seen.append
+
+        def paused_record(*ids):
+            if threading.current_thread() is writer:
+                entered.set()
+                assert release.wait(5)
+            real_record(*ids)
+
+        def publish():
+            try:
+                t.publish(raw)
+            except BaseException as exc:
+                errors.append(exc)
+
+        writer = threading.Thread(target=publish)
+
+        def read_then_publish(source):
+            data = real_read(source)
+            if source == path:
+                writer.start()
+                assert entered.wait(5)
+                if finish_publication:
+                    release.set()
+                    writer.join(5)
+                    assert not writer.is_alive()
+            return data
+
+        monkeypatch.setattr(t._ledger, "record", paused_record)
+        monkeypatch.setattr(Path, "read_bytes", read_then_publish)
+        try:
+            t._poll_once()
+            assert seen == []
+        finally:
+            release.set()
+            writer.join(5)
+        assert not writer.is_alive()
+        assert not errors
+        assert not t._publishing
+
+    def test_incoming_callback_can_publish_without_guard_deadlock(
+        self, fake_home, folder
+    ):
+        t = _transport(folder)
+        incoming, reply = new_ulid(), new_ulid()
+        (folder / f"{incoming}.json").write_bytes(_envelope(incoming))
+        seen = []
+
+        def callback(raw):
+            seen.append(raw)
+            t.publish(_envelope(reply))
+
+        t._on_message = callback
+        t._poll_once()
+        t._poll_once()
+        assert seen == [_envelope(incoming)]
+        assert not t._publishing
+
     def test_prefix_puts_envelopes_under_a_subfolder(self, fake_home, folder):
         t = _transport(folder, prefix="mail")
         msg_id = new_ulid()

@@ -564,18 +564,20 @@ def _attempt_download_file(
     otherwise repeat the same warning into the agent's log."""
     delivered = False
     for url in urls:
+        claimed = False
         for service in services:
             try:
                 if service.retrieve(url, dest):
                     delivered = True
                     break
             except StorageError as e:
+                claimed = True
                 if announce:
                     out_agent(
                         recipient.name,
                         f"WARN storage {service.id} download failed for {filename!r}: {e}",
                     )
-        if not delivered:
+        if not delivered and not claimed:
             try:
                 from services.http_get import http_get_url_to_path
 
@@ -853,6 +855,7 @@ def _process_pending(
                     recipients.append(rp)
             if recipients:
                 staged: list[tuple[Participant, Path, Path]] = []
+                routed_envelopes: dict[str, dict] = {}
                 try:
                     for recipient in recipients:
                         ensure_mailboxes(recipient)
@@ -860,6 +863,7 @@ def _process_pending(
                         if final.is_file():
                             continue
                         routed_msg = _build_routed_message(msg, sender, recipient)
+                        routed_envelopes[recipient.name] = routed_msg
                         staging = inbox_tmp_dir(recipient.name) / f.name
                         with staging.open("w", encoding="utf-8") as out_f:
                             json.dump(routed_msg, out_f, indent=2)
@@ -904,11 +908,19 @@ def _process_pending(
                         routed += len(committed)
                         import convo
 
-                        delivered_names = [
-                            r.name for r in recipients
-                            if (inbox_dir(r.name) / f.name).is_file()
-                        ]
-                        convo.record(msg, recipients=delivered_names)
+                        for recipient in committed:
+                            delivered = routed_envelopes[recipient.name]
+                            files = list(delivered.get("files") or [])
+                            present = {entry.get("filename") for entry in files}
+                            for entry in msg.get("files") or []:
+                                filename = entry.get("filename")
+                                if filename and filename not in present:
+                                    files.append({
+                                        "filename": filename,
+                                        "error": "ATTACHMENT_UNAVAILABLE",
+                                        "detail": "not delivered to this recipient",
+                                    })
+                            convo.record({**delivered, "files": files}, recipients=[recipient.name])
             else:
                 # An alias whose only member is the sender, or the sender
                 # addressing itself: nothing to deliver here.
@@ -935,6 +947,8 @@ def _process_pending(
                 if blocked:
                     remote_failures = {rid: blocked for rid in configured_remote_ids}
                 else:
+                    if msg_id:
+                        seen_id_append(msg_id)
                     outcomes = publish_remotes(publish_msg, sender.name, down)
                     for rid, (outcome, detail) in outcomes.items():
                         if outcome == SENT:
@@ -966,7 +980,7 @@ def _process_pending(
             if took_remotes:
                 import convo
 
-                convo.record(msg, recipients=[recipient_name])
+                convo.record(msg, recipients=[recipient_name], delivered=False)
             if local_failure:
                 txlog.log("DROPPED", msg_id=msg_id, sender=sender.name, recipient=recipient_name, files=msg_files or None, detail=f"local delivery failed: {local_failure}")
             for rid, reason in remote_failures.items():

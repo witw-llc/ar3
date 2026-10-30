@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from engines import held_input
 from engines import muse_resident as muse
 from engines import resident
 from engines.run import RunError, _build_argv_template
@@ -971,3 +972,74 @@ def test_first_started_event_must_match_prior_admission_ack(tmp_path):
     parsed = session.on_frame(notify("turn/started", commandId=command, turnId="turn-b"))
     assert parsed.fatal and not session.turn_started and session.turn_id == "turn-a"
     assert not decisions(session.on_frame(native_tell("turn-b")))
+
+
+# A held order as a8s renders it at wake: absolute stamp, age measured then.
+ORDER = "[2026-10-29 10:42 PDT] alice tells bob (4 seconds ago): ship the build"
+QUEUED_AT = 1_000_000.0
+
+
+def queued(message, at=QUEUED_AT):
+    return held_input.QueuedText.from_items([{"message": message, "queued_at": at}])
+
+
+def submitted(parsed):
+    return [json.loads(line)["params"]["input"][0]["text"] for line in parsed.replies]
+
+
+def finish(session, start, text=""):
+    command = start["params"]["commandId"]
+    session.on_frame(reply(start["id"], {"commandId": command, "status": "accepted",
+        "disposition": "started", "startedNewTurn": True, "turnId": command}))
+    session.on_frame(notify("turn/started", turnId=command, commandId=command))
+    return session.on_frame(notify("turn/completed", turnId=command, terminal="completed"))
+
+
+def test_long_held_input_is_redated_and_noted_at_release(tmp_path, monkeypatch):
+    session, _ = ready(tmp_path)
+    _, tid = accepted(session)
+    assert session.turn_lines(queued(ORDER)) == []
+    monkeypatch.setattr(held_input, "_now", lambda: QUEUED_AT + 46 * 60)
+    parsed = session.on_frame(notify("turn/completed", turnId=tid, terminal="completed"))
+    assert submitted(parsed) == [
+        "[This input was held 46 minutes while an earlier turn ran. It may already "
+        "appear in conversation history you read; check before you act on it twice.]\n"
+        "[2026-10-29 10:42 PDT] alice tells bob (46 minutes ago): ship the build"
+    ]
+
+
+def test_briefly_held_input_is_redated_without_a_note(tmp_path, monkeypatch):
+    session, _ = ready(tmp_path)
+    _, tid = accepted(session)
+    session.turn_lines(queued(ORDER))
+    monkeypatch.setattr(held_input, "_now", lambda: QUEUED_AT + 30)
+    parsed = session.on_frame(notify("turn/completed", turnId=tid, terminal="completed"))
+    assert submitted(parsed) == [
+        "[2026-10-29 10:42 PDT] alice tells bob (34 seconds ago): ship the build"
+    ]
+
+
+def test_input_submitted_at_once_keeps_its_header_and_gets_no_note(tmp_path, monkeypatch):
+    session, _ = ready(tmp_path)
+    monkeypatch.setattr(held_input, "_now", lambda: QUEUED_AT + 46 * 60)
+    (line,) = session.turn_lines(queued(ORDER))
+    assert json.loads(line)["params"]["input"][0]["text"] == ORDER
+
+
+def test_each_held_input_is_submitted_exactly_once(tmp_path, monkeypatch):
+    session, _ = ready(tmp_path)
+    _, tid = accepted(session)
+    second = ORDER.replace("ship the build", "tag the release")
+    session.turn_lines(queued(ORDER))
+    session.turn_lines(queued(second, QUEUED_AT + 1))
+    monkeypatch.setattr(held_input, "_now", lambda: QUEUED_AT + 40 * 60)
+    first_release = session.on_frame(notify("turn/completed", turnId=tid, terminal="completed"))
+    (text,) = submitted(first_release)
+    assert text.endswith("(40 minutes ago): ship the build")
+    assert list(session.held) == [second]
+    second_release = finish(session, json.loads(first_release.replies[0]))
+    (text,) = submitted(second_release)
+    assert text.startswith("[This input was held 39 minutes")
+    assert text.endswith("(40 minutes ago): tag the release")
+    assert not session.held
+    assert not finish(session, json.loads(second_release.replies[0])).replies

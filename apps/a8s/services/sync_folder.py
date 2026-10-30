@@ -35,8 +35,11 @@ answers False and the receiver's poll loop tries again.
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 import shutil
+import stat
 import time
 import urllib.parse
 from pathlib import Path
@@ -44,10 +47,11 @@ from typing import Any
 
 from services import StorageError, StorageService, resolve_prefix
 from services.attachment_path import bundle_file_path
-from ar3.fsio import replace_with_retry, stat_or_none
+from ar3.fsio import atomic_write_text, replace_with_retry, stat_or_none
+from ar3.locking import file_lock
 from ar3.ulid import new as new_ulid, parse as parse_ulid
 
-_KNOWN_OPTS: set[str] = {"prefix", "retain_days"}
+_KNOWN_OPTS: set[str] = {"prefix", "retain_days", "peer_stale_seconds"}
 
 MARKER_SCHEME = "a8s+sync"
 MANIFEST_NAME = "manifest.json"
@@ -58,6 +62,9 @@ _ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 # weekend outage. Delivered mail is already archived per-machine in
 # conversations.sqlite3, so the folder itself is a wire, not an archive.
 DEFAULT_RETAIN_DAYS = 3
+DEFAULT_PEER_STALE_SECONDS = 86400
+PEER_DIRECTORY = ".a8s-peers"
+MAX_PEER_RECORDS = 1024
 
 # Service instances can be short-lived — rebuilt on every `load_services()`
 # call whose config stamp changed, or fresh per CLI invocation — so the
@@ -67,6 +74,18 @@ DEFAULT_RETAIN_DAYS = 3
 # process pays one directory pass on first use, which is the accepted cost.
 SWEEP_INTERVAL_SECONDS = 3600
 _LAST_SWEEP: dict[tuple[str, int], float] = {}
+
+
+def _read_metadata(path: Path, limit: int) -> str:
+    # A synced name may be a symlink, directory or FIFO. Nonblocking open plus
+    # fstat checks the object actually opened, not an earlier path lookup.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, encoding="utf-8") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise OSError("sync-folder metadata must be a small regular file")
+        return stream.read(limit)
 
 
 def _looks_like_a_local_path(url: str) -> bool:
@@ -123,6 +142,13 @@ class SyncFolderService(StorageService):
         self._root = root
         self._prefix = resolve_prefix(opts, default="")
         self._retain_days = self._resolve_retain_days(name, opts)
+        raw_stale = opts.get("peer_stale_seconds", DEFAULT_PEER_STALE_SECONDS)
+        try:
+            self._peer_stale_seconds = int(str(raw_stale).strip())
+        except ValueError:
+            raise ValueError(f"storage {name!r}: peer_stale_seconds must be a positive whole number")
+        if self._peer_stale_seconds <= 0:
+            raise ValueError(f"storage {name!r}: peer_stale_seconds must be a positive whole number")
 
     @staticmethod
     def _resolve_retain_days(name: str, opts: dict) -> int:
@@ -148,6 +174,101 @@ class SyncFolderService(StorageService):
     def _bundle_dir(self, msg_id: str) -> Path:
         base = self._root / self._prefix if self._prefix else self._root
         return base / msg_id
+
+    @staticmethod
+    def _writer_id() -> str:
+        """One opaque identity per local config home, never a host/account name.
+
+        A foundation lock serializes creators and atomic replacement publishes
+        a complete identity. A damaged identity is an unavailable observation,
+        never a replacement that mistakes this home's older writes for a peer's.
+        """
+        from core import resolve_a8s_home
+
+        path = resolve_a8s_home() / "sync-folder-writer-id"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(31):
+            try:
+                writer = _read_metadata(path, 128).strip()
+                break
+            except FileNotFoundError:
+                try:
+                    with file_lock(path.with_suffix(".lock"), blocking=False):
+                        try:
+                            writer = _read_metadata(path, 128).strip()
+                        except FileNotFoundError:
+                            writer = new_ulid()
+                            atomic_write_text(path, writer + "\n", fsync=True, mode=0o600)
+                    break
+                except BlockingIOError:
+                    if attempt == 30:
+                        raise StorageError("local sync-folder writer identity is busy")
+                    time.sleep(0.02)
+        if not _ULID_RE.fullmatch(writer):
+            raise StorageError("local sync-folder writer identity is unreadable or incomplete")
+        return writer
+
+    def _record_activity(self) -> str:
+        writer = self._writer_id()
+        base = self._root / self._prefix if self._prefix else self._root
+        peers = base / PEER_DIRECTORY
+        if peers.is_symlink():
+            raise StorageError("sync-folder peer directory must not be a symlink")
+        atomic_write_text(
+            peers / f"{writer}.json",
+            json.dumps({"version": 1, "writer": writer, "written_at": time.time()}),
+        )
+        return writer
+
+    def _note_activity(self) -> None:
+        # Diagnostic metadata must not turn a successful attachment copy into
+        # a failed transfer. Health retries the observation and reports errors.
+        try:
+            self._record_activity()
+        except (OSError, UnicodeError, StorageError):
+            pass
+
+    def health_observation(self) -> tuple[bool, str]:
+        try:
+            own = self._record_activity()
+            base = self._root / self._prefix if self._prefix else self._root
+            now = time.time()
+            newest = None
+            with os.scandir(base / PEER_DIRECTORY) as scan:
+                paths = []
+                for number, entry in enumerate(scan):
+                    if number >= MAX_PEER_RECORDS:
+                        return False, "peer observation limit exceeded; replication unverified"
+                    paths.append(Path(entry.path))
+            for path in paths:
+                if path.suffix != ".json" or path.stem == own or not _ULID_RE.fullmatch(path.stem):
+                    continue
+                if path.is_symlink():
+                    continue
+                try:
+                    record = json.loads(_read_metadata(path, 4096))
+                    if (not isinstance(record, dict) or type(record.get("version")) is not int
+                            or record["version"] != 1 or record.get("writer") != path.stem):
+                        continue
+                    stamp = record.get("written_at")
+                    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+                        continue
+                    if not math.isfinite(stamp) or not 0 < stamp <= now:
+                        continue
+                    newest = max(newest or stamp, stamp)
+                except (OSError, UnicodeError, ValueError, OverflowError, RecursionError):
+                    continue
+        except (OSError, UnicodeError, StorageError) as exc:
+            return False, f"peer activity unavailable: {exc}; replication unverified"
+        if newest is None:
+            return False, "no peer write observed; replication unverified"
+        age = max(0, int(now - newest))
+        fresh = now - newest <= self._peer_stale_seconds
+        state = "fresh" if fresh else "stale"
+        return fresh, (
+            f"newest peer write {age}s ago ({state}; limit {self._peer_stale_seconds}s); "
+            "not an end-to-end delivery check"
+        )
 
     def _manifest_path(self, msg_id: str) -> Path:
         return self._bundle_dir(msg_id) / MANIFEST_NAME
@@ -195,6 +316,7 @@ class SyncFolderService(StorageService):
         entries = self._read_manifest(msg_id)
         entries[filename] = {"bytes": size}
         self._write_manifest(msg_id, entries)
+        self._note_activity()
         self._sweep()
         return marker_for(msg_id, filename)
 
@@ -239,6 +361,7 @@ class SyncFolderService(StorageService):
             # A placeholder that could not materialize reads as a failure here
             # rather than as absence, so the operator hears about it.
             raise StorageError(f"sync folder read failed for {url}: {e}") from e
+        self._note_activity()
         return True
 
     def delete(self, url: str) -> bool:

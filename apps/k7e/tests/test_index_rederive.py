@@ -161,6 +161,8 @@ def quiet_environment(monkeypatch):
 
 @pytest.mark.parametrize("verb", sorted(VERBS))
 def test_first_verb_on_an_old_index_rebuilds_and_matches_a_current_store(verb, tmp_path, monkeypatch, capsys):
+    # Independently built stores must describe the same instant for exact output parity.
+    monkeypatch.setenv("K7E_NOW", "2026-01-01T12:00:00Z")
     old = build_store(tmp_path / "old", monkeypatch, old=True, ahead=0)
     current = build_store(tmp_path / "current", monkeypatch, old=False)
     assert "kind" not in columns(old, "nodes")

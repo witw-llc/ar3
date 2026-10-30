@@ -202,6 +202,30 @@ def _need(args, count, usage):
         raise plc.BrowserError(f"usage: {usage}")
 
 
+def _tab_index(args, verb):
+    usage = "shot [N]" if verb == "shot" else "tab N"
+    if len(args) != 1 or not re.fullmatch(r"[0-9]+", args[0]) or len(args[0]) > 9:
+        raise plc.BrowserError(f"usage: {usage} — N is a zero-based tab index")
+    return int(args[0])
+
+
+def _select_tab(seat, index, run, verb):
+    listing = session.tabs(seat)
+    if index >= len(listing):
+        raise plc.BrowserError(f"{verb}: tab {index} is out of range (0..{len(listing) - 1}); run tabs")
+    if any(is_local_file(tab["url"]) for tab in listing):
+        raise leave_local_file(seat, run, verb)
+    target = listing[index]
+    plc.run(seat, "tab-select", plc.Own(str(index)))
+    after = session.tabs(seat)
+    if any(is_local_file(tab["url"]) for tab in after):
+        raise leave_local_file(seat, run, verb)
+    selected = next(tab for tab in after if tab["selected"])
+    if selected["id"] != target["id"]:
+        raise plc.BrowserError(f"{verb}: tabs changed during selection; run tabs again")
+    return selected
+
+
 # What a URL parser drops from the head of a URL: the C0 controls and the space.
 URL_BLANKS = "".join(chr(code) for code in range(0x21))
 
@@ -573,6 +597,16 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         return "saved"
     if verb == "url":
         return session.current_url(seat)
+    if verb == "tabs":
+        if args:
+            raise plc.BrowserError("usage: tabs")
+        listing = session.tabs(seat)
+        return "\n".join(
+            f"{index}{' *' if tab['selected'] else ''}: {tab['url']}"
+            for index, tab in enumerate(listing)
+        )
+    if verb == "tab":
+        return _select_tab(seat, _tab_index(args, verb), run, verb)["url"]
     if verb == "go":
         return _go(seat, args)
     if verb == "click":
@@ -648,7 +682,14 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
     if verb == "snap":
         return _write_snapshot(seat, run)
     if verb == "shot":
-        path = plc.screenshot(seat, artifact(seat, "screen.png"))
+        if args:
+            selected = _select_tab(seat, _tab_index(args, verb), run, verb)
+        else:
+            listing = session.tabs(seat)
+            if any(is_local_file(tab["url"]) for tab in listing):
+                raise leave_local_file(seat, run, verb)
+            selected = next(tab for tab in listing if tab["selected"])
+        path = session.indexed_screenshot(seat, selected["id"], artifact(seat, "screen.png"))
         run.attach(path)
         return path
     if verb == "upload":

@@ -514,3 +514,90 @@ class TestWakeSpawnFlags:
         kw = self._stop_hook_kwargs(monkeypatch, tmp_path, True)
         assert kw["creationflags"] == 0x08000000
         assert "start_new_session" not in kw
+
+
+class TestWakeClaim:
+    """The `wake-pid` record names a wake's envelopes before the wake has a
+    pid, so a handler stopped between the move out of the inbox and the
+    record still has its mail settled."""
+
+    def test_the_claim_names_the_unit_before_the_spawn(self, fake_home, tmp_path, monkeypatch):
+        seen = []
+
+        def popen(cmd, **kwargs):
+            seen.append(json.loads(core.wake_pid_path("A").read_text()))
+            raise FileNotFoundError(cmd[0])
+
+        monkeypatch.setattr(daemon_mod.subprocess, "Popen", popen)
+        unit = [tmp_path / "02B.json", tmp_path / "01A.json"]
+        assert not daemon_mod._start_wake_subprocess("A", ["x"], tmp_path, unit=unit)
+        assert seen == [{"pid": 0, "start": "", "unit": ["01A.json", "02B.json"]}]
+
+    def test_a_spawn_that_fails_leaves_no_claim(self, fake_home, tmp_path, monkeypatch):
+        def popen(cmd, **kwargs):
+            raise PermissionError(cmd[0])
+
+        monkeypatch.setattr(daemon_mod.subprocess, "Popen", popen)
+        assert not daemon_mod._start_wake_subprocess(
+            "A", ["x"], tmp_path, unit=[tmp_path / "01A.json"]
+        )
+        assert not core.wake_pid_path("A").exists()
+
+    def test_the_pid_record_replaces_the_whole_claim_at_once(self, fake_home, monkeypatch):
+        # A handler frozen or killed while the claim becomes the pid record
+        # must leave a record that still names the mail: the claim stays
+        # whole on disk until the full pid record replaces it.
+        import ar3.fsio as fsio
+
+        core.write_wake_claim("A", ["01A.json"])
+        claim = core.wake_pid_path("A").read_text()
+        seen = []
+        real = fsio.os.replace
+
+        def replace(src, dst):
+            if Path(dst) == core.wake_pid_path("A"):
+                seen.append(core.wake_pid_path("A").read_text())
+            real(src, dst)
+
+        monkeypatch.setattr(fsio.os, "replace", replace)
+        core.write_wake_pid("A", os.getpid(), ["01A.json"])
+        assert seen == [claim]
+        assert core.read_wake_pid("A") == (os.getpid(), ["01A.json"])
+
+    def test_a_writer_killed_before_the_publish_leaves_the_claim(self, fake_home, monkeypatch):
+        import ar3.fsio as fsio
+
+        core.write_wake_claim("A", ["01A.json"])
+
+        def replace(src, dst):
+            raise OSError("killed before the publish")
+
+        monkeypatch.setattr(fsio.os, "replace", replace)
+        core.write_wake_pid("A", os.getpid(), ["01A.json"])
+        assert core.read_wake_unit("A") == ["01A.json"]
+        assert [p.name for p in core.wake_pid_path("A").parent.iterdir()
+                if p.name.startswith(".wake-pid.")] == []
+
+    def test_a_claim_reads_as_no_wake_but_names_its_unit(self, fake_home, tmp_path):
+        core.write_wake_claim("A", ["01A.json"])
+        assert core.read_wake_pid("A") is None
+        assert core.read_wake_unit("A") == ["01A.json"]
+
+    def test_no_record_reads_as_none_and_a_corrupt_one_as_empty(self, fake_home):
+        assert core.read_wake_unit("A") is None
+        core.wake_pid_path("A").parent.mkdir(parents=True, exist_ok=True)
+        core.wake_pid_path("A").write_text("not json")
+        assert core.read_wake_unit("A") == []
+
+    def test_the_spawn_replaces_the_claim_with_the_pid(self, fake_home, tmp_path):
+        started = daemon_mod._start_wake_subprocess(
+            "A", [sys.executable, "-c", "import time; time.sleep(30)"], tmp_path,
+            unit=[tmp_path / "01A.json"],
+        )
+        try:
+            assert started
+            pid, unit = core.read_wake_pid("A")
+            assert pid == daemon_mod._CURRENT_WAKE_PROC.pid and unit == ["01A.json"]
+        finally:
+            daemon_mod._kill_wake_subprocess_group()
+            daemon_mod._clear_wake_state(None)

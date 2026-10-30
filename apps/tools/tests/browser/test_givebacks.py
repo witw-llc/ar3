@@ -1585,7 +1585,7 @@ def test_a_wrong_code_ends_with_the_boxes_empty_and_chrome_stays(browser, monkey
 def test_a_login_that_works_asks_the_browser_whether_it_is_clear_and_leaves_chrome_alone(browser, coded):
     result = run("recipe gb login")
     assert result.ok, result.error
-    assert browser.closed == 0 and "tab-list" in browser.verbs()
+    assert browser.closed == 0 and "tabs" in browser.verbs()
     assert result.capturing and result.sensitive == [] and result.uncleared == []
 
 

@@ -2049,8 +2049,8 @@ class TestStorageDownload:
         for name in ("B", "C"):
             got = convo.load_agent_entries(name, limit=10)
             assert got, f"{name} has no conversation entry"
-        # One row cannot hold both truths, and it resolves toward the loss.
-        assert convo.load_entries()[0].get("files_unavailable")
+        assert not convo.load_agent_entries("B", limit=1)[0].get("files_unavailable")
+        assert convo.load_agent_entries("C", limit=1)[0]["files_unavailable"]
 
     def test_a_deferred_failure_reaches_a_row_an_earlier_success_wrote(
         self, fake_home, tmp_path
@@ -2079,7 +2079,8 @@ class TestStorageDownload:
 
         assert len(convo.load_entries()) == 1
         assert convo.load_agent_entries("C", limit=10), "deferred recipient lost"
-        entry = convo.load_entries()[0]
+        entry = convo.load_agent_entries("C", limit=1)[0]
+        assert not convo.load_agent_entries("B", limit=1)[0].get("files_unavailable")
         lost = entry.get("files_unavailable")
         assert lost and lost[0]["filename"] == "doc.txt"
         # The index and the entry must agree. Attaching the name to
@@ -2336,67 +2337,6 @@ class TestStorageDownload:
         body = json.loads(next(inbox_dir("B").iterdir()).read_text())
         assert body["files"][0]["error"] == "ATTACHMENT_UNAVAILABLE"
         assert "not a basename" in body["files"][0]["detail"]
-
-
-class TestWorstAttachmentOutcome:
-    """`_worst_attachment_outcome` — the archive keeps one row per message id,
-    so a fan-out whose recipients disagree about a file must resolve to a
-    single view. It resolves toward the loss: a lost file described as
-    delivered sends a reader after something that was never written, while the
-    reverse only sends them to check a file they already hold."""
-
-    def test_no_attachments_passes_the_envelope_through(self):
-        from network import _worst_attachment_outcome
-
-        assert _worst_attachment_outcome([{"content": "hi"}])["content"] == "hi"
-
-    def test_a_loss_outranks_a_success_in_either_order(self):
-        from network import _worst_attachment_outcome
-
-        ok = {"files": [{"filename": "doc.txt", "path": "/x/doc.txt"}]}
-        lost = {"files": [{"filename": "doc.txt", "error": "ATTACHMENT_UNAVAILABLE"}]}
-        assert _worst_attachment_outcome([ok, lost])["files"][0].get("error")
-        assert _worst_attachment_outcome([lost, ok])["files"][0].get("error")
-
-    def test_copies_pair_by_filename_not_position(self):
-        """`_download_files_to_recipient` appends each success as it lands and
-        every failure afterwards, so the orders diverge exactly when the
-        outcomes do — the only case this function is ever called for. Pairing
-        by index overwrote a delivered file with another recipient's lost one,
-        erasing a name from the archive and duplicating another."""
-        from network import _worst_attachment_outcome
-
-        # B got both. C's a.txt failed, so its b.txt success sorts ahead of it.
-        b_got = {"files": [{"filename": "a.txt"}, {"filename": "b.txt"}]}
-        c_got = {"files": [
-            {"filename": "b.txt"},
-            {"filename": "a.txt", "error": "ATTACHMENT_UNAVAILABLE"},
-        ]}
-        files = _worst_attachment_outcome([b_got, c_got])["files"]
-        by_name = {e["filename"]: e for e in files}
-        assert sorted(by_name) == ["a.txt", "b.txt"], "a filename was lost"
-        assert len(files) == 2, "a filename was duplicated"
-        assert by_name["a.txt"].get("error")
-        assert not by_name["b.txt"].get("error"), "a delivered file reported lost"
-
-    def test_a_loss_only_one_recipient_saw_still_lands(self):
-        from network import _worst_attachment_outcome
-
-        files = _worst_attachment_outcome([
-            {"files": [{"filename": "a.txt"}]},
-            {"files": [{"filename": "b.txt", "error": "E"}]},
-        ])["files"]
-        by_name = {e["filename"]: e for e in files}
-        assert by_name["b.txt"].get("error")
-        assert not by_name["a.txt"].get("error")
-
-    def test_the_caller_envelopes_are_left_alone(self):
-        # These are the envelopes already written to each recipient's inbox.
-        from network import _worst_attachment_outcome
-
-        ok = {"files": [{"filename": "doc.txt"}]}
-        _worst_attachment_outcome([ok, {"files": [{"filename": "doc.txt", "error": "E"}]}])
-        assert "error" not in ok["files"][0]
 
 
 class TestRemoteThatFailedToStart:

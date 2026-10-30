@@ -1601,6 +1601,15 @@ def test_the_breaks_of_yaml_1_1_and_a_carriage_return_are_line_breaks_with_the_i
     assert scrubber_for(lines).scrub("k: |\r  line1\r  line2 x-7492\rnext: 1") == f"k: |\r  {MARKER}next: 1"
 
 
+def _assert_noop_entity_budget():
+    layer = _Layer.whole("&a" * 1000, 0)
+    limit = len(layer.text) + secretstore.TOKEN_COST * 500
+    budget = secretstore._Budget(limit)
+    assert list(_decodings(layer, False, (ENTITY,), budget)) == []
+    assert budget.out, "no-op entity matches must exhaust the token budget"
+    assert budget.left == limit, "a decoding that exceeds the budget is refused whole"
+
+
 def test_every_match_of_a_family_is_charged_to_the_budget_whether_or_not_it_stood_for_anything():
     """`&a` is the start of a name of markup, and is none: the call to find that out is work (the third review: a text of 6.8 MB
     that is all such matches took 14 seconds, and the limit was never reached)."""
@@ -1615,14 +1624,56 @@ def test_every_match_of_a_family_is_charged_to_the_budget_whether_or_not_it_stoo
     assert quotes.decoded(QUOTE_LEFT, False, spent) is not None and spent[0] == len(quotes.text) + secretstore.TOKEN_COST * 201
     budget = secretstore._Budget(len(layer.text) + secretstore.TOKEN_COST * 500)
     assert list(_decodings(layer, False, secretstore._DECODERS, budget)) == [] and budget.out
+    _assert_noop_entity_budget()
+
+
+def test_noop_entity_budget_contract_rejects_uncharged_matches(monkeypatch):
+    real = _Layer.decoded
+
+    def uncharged(self, decoder, shifted=False, spent=None):
+        made = real(self, decoder, shifted, spent)
+        if decoder == ENTITY and made is None and spent is not None:
+            spent[0] = len(self.text)
+        return made
+
+    _assert_noop_entity_budget()
+    monkeypatch.setattr(_Layer, "decoded", uncharged)
+    with pytest.raises(AssertionError, match="no-op entity matches must exhaust the token budget"):
+        _assert_noop_entity_budget()
+
+
+def test_large_noop_entities_exhaust_the_work_budget_and_fail_closed(monkeypatch):
+    budgets = []
+
+    class AuditedBudget(secretstore._Budget):
+        def __init__(self, limit):
+            super().__init__(limit)
+            self.initial, self.accepted, self.refused = limit, 0, 0
+            budgets.append(self)
+
+        def take(self, cost):
+            accepted = super().take(cost)
+            if accepted:
+                self.accepted += cost
+            else:
+                self.refused += 1
+            return accepted
+
+    def exhausted():
+        assert budgets and all(budget.initial == secretstore.WORK_LIMIT for budget in budgets)
+        assert 0 < sum(budget.accepted for budget in budgets) <= secretstore.WORK_LIMIT
+        assert sum(budget.refused for budget in budgets) > 0, "the real work budget must be exhausted"
+        assert all(budget.left >= 0 for budget in budgets)
+        budgets.clear()
+
+    monkeypatch.setattr(secretstore, "_Budget", AuditedBudget)
     scrubber = scrubber_for('Synthetic"User\\A7492')
     text = ("&a" * 200 + " Synthetic User A7492 \\n ") * 8000
-    started = time.perf_counter()
     out = scrubber.scrub(text)
-    taken = time.perf_counter() - started
-    assert taken < 6.0, taken
-    fail_closed = scrubber.holds(text)
-    assert len(out) < len(text) and fail_closed, "the part past the limit is scrubbed whole"
+    exhausted()
+    assert len(out) < len(text) and MARKER in out, "the part past the limit is scrubbed whole"
+    assert scrubber.holds(text), "a value in a window past the limit cannot be declared absent"
+    exhausted()
 
 
 def test_the_indent_of_the_line_after_a_value_that_ends_with_a_line_break_stays():

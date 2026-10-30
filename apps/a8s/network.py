@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -242,18 +243,116 @@ def merge_spec_secrets(section: str, name: str, spec: dict, secrets: dict | None
     merged = dict(spec)
     if secrets is None:
         secrets = load_secrets_config()
-    stored = (secrets.get(section) or {}).get(name)
-    if isinstance(stored, dict) and any(k in SECRET_SPEC_KEYS for k in stored):
-        if stored.get(SECRET_BINDING_KEY) == spec_binding(spec):
-            for key, value in stored.items():
-                if key in SECRET_SPEC_KEYS:
-                    merged[key] = value
-        else:
-            out_err(
-                f"WARN: the stored secret for {_SECTION_NOUN[section]} {name!r} does not "
-                "match its destination and is not used; enter it again"
-            )
+    usable = stored_secret_usable(section, name, spec, secrets)
+    if usable:
+        for key, value in secrets[section][name].items():
+            if key in SECRET_SPEC_KEYS:
+                merged[key] = value
+    elif usable is False:
+        out_err(
+            f"WARN: the stored secret for {_SECTION_NOUN[section]} {name!r} does not "
+            "match its destination and is not used; enter it again"
+        )
     return merged
+
+
+def stored_secret_usable(section: str, name: str, spec: dict, secrets: dict) -> bool | None:
+    """Whether the secret stored for ``name`` applies to ``spec``.
+
+    None: no secret is stored. True: one is stored and bound to ``spec``'s
+    destination. False: one is stored but has no binding or another one, so a
+    reader drops it. Pure: reads only its arguments. The one rule for the
+    binding check, shared by the reader and the diagnostics."""
+    section_map = secrets.get(section) if isinstance(secrets, dict) else None
+    stored = section_map.get(name) if isinstance(section_map, dict) else None
+    if not isinstance(stored, dict) or not any(k in SECRET_SPEC_KEYS for k in stored):
+        return None
+    return stored.get(SECRET_BINDING_KEY) == spec_binding(spec)
+
+
+def unusable_secret_entries(network: dict, secrets: dict) -> list[tuple[str, str, dict]]:
+    """Every remote and storage entry whose stored secret a reader drops.
+
+    ``network`` and ``secrets`` are parsed network.json and secrets.json. Each
+    item is ``(section, name, spec)``, with ``spec`` the network.json entry: it
+    holds no secret, so a caller can print a fix command from it. Pure, so
+    `a8s ps`, `a8s ls` and `ar3 doctor` can ask without a log line or a write.
+    A remote in this list runs without its password (#322)."""
+    found: list[tuple[str, str, dict]] = []
+    for section in ("remotes", "services"):
+        entries = network.get(section) if isinstance(network, dict) else None
+        if not isinstance(entries, dict):
+            continue
+        for name, spec in entries.items():
+            if isinstance(spec, dict) and stored_secret_usable(section, name, spec, secrets) is False:
+                found.append((section, name, spec))
+    return found
+
+
+def _fix_option_words(spec: dict, consumed: set[str]) -> list[str]:
+    words: list[str] = []
+    for key, value in spec.items():
+        if key in consumed or key in SECRET_SPEC_KEYS:
+            continue
+        words += [f"--{str(key).replace('_', '-')}", shlex.quote(str(value))]
+    return words
+
+
+def secret_fix_command(section: str, name: str, spec: dict) -> str:
+    """The command that stores the secret again for ``name``, bound to its
+    current destination. It repeats every non-secret option, because a
+    rewrite replaces the whole entry. The password is a placeholder."""
+    if section == "remotes":
+        kind = spec.get("transport")
+        if kind == "folder":
+            place = [shlex.quote(str(spec.get("path", "<folder>")))]
+            consumed = {"transport", "path", "joined"}
+        elif kind == "s3":
+            place = [shlex.quote(f"s3://{spec.get('bucket', '<bucket>')}/{spec.get('prefix', '<prefix>')}")]
+            consumed = {"transport", "bucket", "prefix", "joined"}
+        else:
+            place = [shlex.quote(str(spec.get("broker", "<broker>"))),
+                     shlex.quote(str(spec.get("topic", "<topic>")))]
+            consumed = {"transport", "broker", "topic"}
+        verb = "remote"
+    else:
+        place = [shlex.quote(str(spec.get("url", "<url>")))]
+        consumed = {"service", "url", PAIRED_KEY}
+        verb = "storage"
+    words = ["a8s", verb, shlex.quote(name), *place, *_fix_option_words(spec, consumed)]
+    return " ".join(words + ["--pass", "<password>"])
+
+
+def secret_warning_lines(entries: list[tuple[str, str, dict]]) -> list[str]:
+    """Operator text for `a8s ps` / `a8s ls`. Empty when nothing is wrong. Names
+    each entry and its fix; never a secret value."""
+    if not entries:
+        return []
+    lines = ["", "warning: a stored password is not used. It was stored by an older release "
+             "or for another destination."]
+    for section, name, spec in entries:
+        lines.append(f"  {_SECTION_NOUN[section]} {name}: {secret_fix_command(section, name, spec)}")
+    if any(section == "remotes" for section, _name, _spec in entries):
+        lines.append("Enter each password again with the command shown. Then restart the nodes "
+                     "(a8s restart <name>...): a node reads its remotes only at start.")
+    else:
+        lines.append("Enter each password again with the command shown.")
+    return lines
+
+
+def secret_start_lines(entries: list[tuple[str, str, dict]], node: str) -> list[str]:
+    """The lines a node writes to its agent log at start, one per entry whose
+    stored password it will not use, so `a8s logs <node>` shows the fault and
+    its fix. Never a secret value or a digest."""
+    lines = []
+    for section, name, spec in entries:
+        noun = _SECTION_NOUN[section]
+        line = (f"WARN: {noun} {name}: the stored password is not used, so this node runs "
+                f"it with no password. Fix: {secret_fix_command(section, name, spec)}")
+        if section == "remotes":
+            line += f", then a8s restart {node}"
+        lines.append(line)
+    return lines
 
 
 def put_spec_secrets(
@@ -870,15 +969,8 @@ def _deliver_envelope(
     if delivered_names:
         import convo
 
-        # The archive must see what the recipients actually got. A failed
-        # download rewrites its own file entries with `error`/`detail`, and
-        # recording `msg` here would file a lost attachment under the same
-        # line a delivered one produces. One call, because one message id is
-        # one row: splitting it dropped every group after the first.
-        convo.record(
-            _worst_attachment_outcome(delivered_envelopes),
-            recipients=delivered_names,
-        )
+        for name, delivered in zip(delivered_names, delivered_envelopes):
+            convo.record(delivered, recipients=[name])
     if delivered_names and publish_control is not None:
         _publish_delivery_receipt(msg, delivered_names, publish_control, remote_id)
 
@@ -962,50 +1054,6 @@ def _attachments_missing(msg: dict, source: dict | None = None) -> bool:
         e.get("error") and (fetchable is None or e.get("filename") in fetchable)
         for e in (msg.get("files") or [])
     )
-
-
-def _worst_attachment_outcome(envelopes: list[dict]) -> dict:
-    """One envelope reporting the least fortunate copy of each file.
-
-    The download runs per recipient, so an alias fan-out can end with one
-    recipient holding bytes and another holding an error. The archive keeps
-    one row per message id and cannot hold both truths, so the row reports a
-    file as lost when any recipient's copy was lost. That direction is chosen
-    deliberately: a lost file described as delivered sends a reader hunting
-    for something that was never written, which is the whole of #222, while
-    the reverse only sends them to check a file they already have.
-
-    Copies pair by filename, never by position. `_download_files_to_recipient`
-    appends each success as it lands and every failure afterwards, so two
-    recipients list the same files in different orders precisely when their
-    outcomes differ — which is the only case this function is called to
-    resolve. Pairing by index there overwrites one recipient's delivered file
-    with another's lost one, dropping a name out of the archive entirely.
-
-    Per-recipient outcomes are the real model and are #225.
-    """
-    base = dict(envelopes[0])
-    files = [dict(e) if isinstance(e, dict) else e for e in (base.get("files") or [])]
-    at = {
-        e["filename"]: i
-        for i, e in enumerate(files)
-        if isinstance(e, dict) and e.get("filename")
-    }
-    for env in envelopes[1:]:
-        for other in env.get("files") or []:
-            if not isinstance(other, dict) or not other.get("error"):
-                continue
-            name = other.get("filename")
-            if not name:
-                continue
-            i = at.get(name)
-            if i is None:
-                at[name] = len(files)
-                files.append(dict(other))
-            elif isinstance(files[i], dict) and not files[i].get("error"):
-                files[i] = dict(other)
-    base["files"] = files
-    return base
 
 
 def _write_to_inbox(

@@ -712,6 +712,57 @@ class TestAttachedLoopLifecycle:
         assert not pid_path("MOCK").is_file()
 
 
+class TestAttachedLoopUnusedSecret:
+    """#322: a node that starts with a stored password it will not use says so
+    in the agent log, which is what `a8s logs <name>` reads, with the fix."""
+
+    SECRET = "OLD-SECRET-322"
+    SPEC = {"transport": "mqtt", "broker": "mqtt://x", "topic": "t", "user": "alice"}
+
+    def _configure(self, monkeypatch, bind):
+        import daemon
+        from network import save_network_config, save_secrets_config
+
+        save_network_config({"remotes": {"hub": self.SPEC}, "services": {}})
+        stored = {"pass": self.SECRET}
+        if bind is not None:
+            stored["bind"] = bind
+        save_secrets_config({"remotes": {"hub": stored}, "services": {}})
+        # The line is the subject, not a broker: no transport is built.
+        monkeypatch.setattr(daemon, "load_remotes", lambda **_kw: [])
+
+    def test_an_unbound_password_is_named_in_the_agent_log(self, mock_agent, monkeypatch, capsys):
+        from commands import cmd_logs
+
+        self._configure(monkeypatch, bind=None)
+        assert attached_loop(["MOCK"], 0.1, single_pass=True) == 0
+        log = _read_log("MOCK")
+        assert ("[a8s] MOCK: WARN: remote hub: the stored password is not used, so this node "
+                "runs it with no password. Fix: a8s remote hub mqtt://x t --user alice "
+                "--pass <password>, then a8s restart MOCK") in log
+        capsys.readouterr()
+        assert cmd_logs(["MOCK"]) == 0
+        shown = capsys.readouterr()
+        assert "remote hub: the stored password is not used" in shown.out
+        assert self.SECRET not in log + shown.out + shown.err
+
+    def test_a_password_bound_elsewhere_hides_its_digest(self, mock_agent, monkeypatch):
+        self._configure(monkeypatch, bind="c" * 64)
+        assert attached_loop(["MOCK"], 0.1, single_pass=True) == 0
+        log = _read_log("MOCK")
+        assert "remote hub: the stored password is not used" in log
+        assert self.SECRET not in log and "c" * 64 not in log
+
+    def test_a_bound_password_adds_no_line(self, mock_agent, monkeypatch):
+        from network import spec_binding
+
+        self._configure(monkeypatch, bind=spec_binding(self.SPEC))
+        assert attached_loop(["MOCK"], 0.1, single_pass=True) == 0
+        log = _read_log("MOCK")
+        assert "attached (PID" in log
+        assert "stored password" not in log and self.SECRET not in log
+
+
 class TestAttachedLoopWithoutSigusr1:
     """Windows has no SIGUSR1. attached_loop must not crash registering or
     restoring a handler for a signal that doesn't exist on the platform —

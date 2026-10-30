@@ -45,11 +45,13 @@ from commands import (
     _warn_unresolvable_harnesses,
     parse_option_tokens,
 )
-from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, user_definitions_dir
+from core import Participant, TELL_OUTBOX_DIR_ENV, agent_dir, agent_log_path, dead_letters_dir, files_dir, kill_request_path, outbox_bundle_dir, outbox_dir, pid_path, stop_request_path, trash_dir, user_definitions_dir, wake_pid_path, write_wake_pid
+from daemon import _write_stop_request as _real_write_stop_request
 from mailbox import ensure_mailboxes
 from network import load_network_config, merge_spec_secrets, save_network_config
 from registry import load_aliases, load_namespaces, load_registry, save_aliases, save_namespaces, save_registry
 from definitions import resolve_definition_arg
+import txlog
 
 
 @pytest.fixture
@@ -526,7 +528,9 @@ class TestCmdKillPerAgent:
     verify the file mechanics + that the SIGUSR1 was directed at the
     holder pid."""
 
+    @pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="SIGUSR1 nudge is the POSIX contract")
     def test_writes_kill_request_and_signals_holder(self, fake_home, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
         d = tmp_path / "x"; d.mkdir()
         save_registry({"claude": {"root": str(d)}})
         # Pre-attach claude to a foreign live pid.
@@ -553,7 +557,9 @@ class TestCmdKillPerAgent:
         out = capsys.readouterr().out
         assert "kill request" in out
 
+    @pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="SIGUSR1 nudge is the POSIX contract")
     def test_escalates_to_sigterm_on_unresponsive_holder(self, fake_home, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
         d = tmp_path / "x"; d.mkdir()
         save_registry({"claude": {"root": str(d)}})
         pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
@@ -586,40 +592,172 @@ class TestCmdKillPerAgent:
         out = capsys.readouterr().out
         assert "not running" in out
 
+    @pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
     def test_windows_without_sigusr1_skips_signal_and_falls_back_to_poll(
-        self, fake_home, tmp_path, monkeypatch, capsys
+        self, fake_home, tmp_path, monkeypatch, capsys, windows
     ):
         """Windows has no SIGUSR1. cmd_kill must not try to send it — the
         kill-request file it already wrote is the whole mechanism there, so
-        it should fall straight through to the poll-then-SIGTERM-escalation
-        path instead of crashing with AttributeError."""
-        d = tmp_path / "x"; d.mkdir()
-        save_registry({"claude": {"root": str(d)}})
-        pid_path("claude").parent.mkdir(parents=True, exist_ok=True)
-        pid_path("claude").write_text(str(os.getppid()))
+        it should fall straight through to the poll-then-escalation path
+        instead of crashing with AttributeError. The escalation is SIGTERM on
+        POSIX. On Windows it is a stop request, and a holder that does not
+        take it is killed outright with its wake, whose mail is dead letters."""
+        holder = self._held(tmp_path, monkeypatch, windows, ["claude"])
+        requests = []
+        monkeypatch.setattr(
+            "commands._write_stop_request",
+            lambda name, requester, force: requests.append((name, force)) or _real_write_stop_request(name, requester, force),
+        )
+
+        rc = cmd_kill(["claude"])
+        assert rc == 1
+        out, err = capsys.readouterr()
+        assert "did not honor kill" in err
+        assert not kill_request_path("claude").is_file()
+        if windows:
+            # No signal at all: os.kill is TerminateProcess there.
+            assert self.signaled == []
+            assert requests == [("claude", False)]
+            assert "did not take the stop request" in err
+            assert self.killed == [("tree", self.wakes["claude"]), ("pid", holder)]
+            assert not stop_request_path("claude").is_file()
+            self._assert_settled("claude", out)
+        else:
+            # Only the SIGTERM escalation was sent — no attempt at SIGUSR1.
+            assert self.signaled == [(holder, signal.SIGTERM)]
+            assert requests == [] and self.killed == []
+            assert not (dead_letters_dir("claude") / "01CLAUDE.json").exists()
+
+    def test_windows_kill_spares_a_holder_that_takes_the_stop_request(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        # The holder took the stop request (deleted the file) and is busy with
+        # its wake: `a8s kill` waits and gives up, it does not kill outright.
+        self._held(tmp_path, monkeypatch, True, ["claude"])
+        monkeypatch.setattr(
+            "commands._write_stop_request",
+            lambda name, requester, force: stop_request_path(name).unlink(missing_ok=True),
+        )
+        monkeypatch.setattr("commands.STOP_KILL_WAIT_S", 0.1)
+
+        assert cmd_kill(["claude"]) == 1
+        assert self.signaled == [] and self.killed == []
+        assert "did not take the stop request" not in capsys.readouterr().err
+        assert pid_path("claude").is_file()
+        assert not (dead_letters_dir("claude") / "01CLAUDE.json").exists()
+        assert self.hooks == []
+
+    def test_windows_kill_honored_in_time_releases_only_that_agent(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        # One holder serves alpha and beta. It honors the kill request for
+        # alpha: alpha is released, beta keeps its holder and its wake, and
+        # nothing escalates.
+        self._held(tmp_path, monkeypatch, True, ["alpha", "beta"])
+        monkeypatch.setattr(
+            "commands._write_kill_request", lambda name, requester: pid_path(name).unlink()
+        )
+        monkeypatch.setattr(
+            "commands._write_stop_request", lambda *a: pytest.fail("no escalation")
+        )
+        monkeypatch.setattr("commands.STOP_HOOK_SECONDS", 0)
+
+        assert cmd_kill(["alpha"]) == 0
+        assert self.signaled == [] and self.killed == []
+        assert not pid_path("alpha").is_file()
+        assert pid_path("beta").is_file()
+        assert wake_pid_path("beta").is_file()
+        assert not (dead_letters_dir("beta") / "01BETA.json").exists()
+        assert "did not honor kill" not in capsys.readouterr().err
+
+    def test_windows_kill_of_an_unheard_holder_settles_every_node_it_held(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        # One holder serves alpha and beta and hears neither request. Killing
+        # it ends both wakes, so each node's mail is dead letters, its pid
+        # files go, and its stop hook runs, as `a8s stop` settles `affected`.
+        holder = self._held(tmp_path, monkeypatch, True, ["alpha", "beta"])
+
+        assert cmd_kill(["alpha"]) == 1
+        out = capsys.readouterr().out
+        assert self.signaled == []
+        assert sorted(self.killed) == sorted([
+            ("tree", self.wakes["alpha"]), ("tree", self.wakes["beta"]), ("pid", holder),
+        ])
+        assert self.killed[-1] == ("pid", holder)
+        for n in ("alpha", "beta"):
+            self._assert_settled(n, out)
+        assert sorted(self.hooks) == ["alpha", "beta"]
+
+    def _assert_settled(self, name: str, out: str) -> None:
+        msg = f"01{name.upper()}"
+        assert (dead_letters_dir(name) / f"{msg}.json").is_file()
+        assert not pid_path(name).exists()
+        assert not wake_pid_path(name).exists()
+        assert not stop_request_path(name).exists()
+        events = txlog.read_events(msg)
+        assert [e["event"] for e in events] == ["DROPPED"]
+        assert "killed by `a8s kill`" in events[0]["detail"]
+        assert f"{name}: the killed wake's 1 message(s) are dead letters: {msg}" in out
+
+    def _held(self, tmp_path, monkeypatch, windows: bool, names: list[str]) -> int:
+        """`names` held by one live pid that honors no request and no signal,
+        each with a wake in flight that carries one message. The kill seams
+        are recorded, never run: the holder is the runner's parent."""
+        monkeypatch.setattr("commands.IS_WINDOWS", windows)
+        holder = os.getppid()
+        save_registry({n: {"root": str(tmp_path / n)} for n in names})
+        self.wakes = {}
+        for i, n in enumerate(names):
+            (tmp_path / n).mkdir()
+            pid_path(n).parent.mkdir(parents=True, exist_ok=True)
+            pid_path(n).write_text(str(holder))
+            trash_dir(n).mkdir(parents=True, exist_ok=True)
+            (trash_dir(n) / f"01{n.upper()}.json").write_text("{}")
+            self.wakes[n] = 4_000_000 + i
+            write_wake_pid(n, self.wakes[n], [f"01{n.upper()}.json"])
 
         monkeypatch.delattr(signal, "SIGUSR1", raising=False)
         monkeypatch.setattr("commands.KILL_TIMEOUT_S", 0.2)
         monkeypatch.setattr("commands.KILL_POLL_S", 0.05)
+        monkeypatch.setattr("commands.STOP_FORCE_GRACE_S", 0.2)
+        monkeypatch.setattr("commands.STOP_KILL_WAIT_S", 0.5)
+        monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
 
-        signaled = []
+        self.signaled, self.killed, self.hooks = [], [], []
+        dead = set()
+
         def fake_kill(pid, sig):
             if sig == 0:
                 return  # liveness probe (_pid_alive) — not a real signal
-            signaled.append((pid, sig))
-        monkeypatch.setattr("commands.os.kill", fake_kill)
-        monkeypatch.setattr("daemon.os.kill", fake_kill)
-        monkeypatch.setattr("core.os.kill", fake_kill)
+            self.signaled.append((pid, sig))
 
-        rc = cmd_kill(["claude"])
-        assert rc == 1
-        # Only the SIGTERM escalation was sent — no attempt at SIGUSR1.
-        assert signaled == [(os.getppid(), signal.SIGTERM)]
-        assert not kill_request_path("claude").is_file()
-        assert "did not honor kill" in capsys.readouterr().err
+        def fake_hard_kill(targets):
+            for kind, pid in targets:
+                self.killed.append((kind, pid))
+                dead.add(pid)
+
+        alive = lambda pid: pid not in dead
+        for mod in ("commands", "daemon", "core"):
+            monkeypatch.setattr(f"{mod}.os.kill", fake_kill)
+            monkeypatch.setattr(f"{mod}._pid_alive", alive)
+        monkeypatch.setattr("core.process_start_token", lambda pid: None)
+        monkeypatch.setattr("commands._hard_kill", fake_hard_kill)
+        monkeypatch.setattr("commands._child_pids", lambda pid: [])
+        monkeypatch.setattr("commands._suspend_process", lambda pid: True)
+        monkeypatch.setattr("commands._resume_process", lambda pid: None)
+        monkeypatch.setattr("daemon.run_stop_hook", self.hooks.append)
+        return holder
 
 
 class TestCmdStopAndRestart:
+    @pytest.fixture(autouse=True)
+    def _posix_stop(self, monkeypatch):
+        # These pin the SIGTERM contract. On Windows `os.kill` is
+        # `TerminateProcess`, so the stop writes a request file instead; that
+        # contract is tested in test_node_status.py and test_windows_stop.py.
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
+
     def test_stop_waits_until_pid_gone(self, fake_home, tmp_path, monkeypatch, capsys):
         d = tmp_path / "x"; d.mkdir()
         save_registry({"claude": {"root": str(d)}})
@@ -1532,6 +1670,20 @@ class TestMailboxPathVars:
         assert str(old) in out
 
 
+def _fake_program(directory: Path, name: str) -> Path:
+    """A program `name` that a PATH lookup finds in `directory`: a `#!`
+    script on POSIX, and on Windows a `.cmd`, since the lookup there only
+    matches a name with a PATHEXT extension."""
+    if os.name == "nt":
+        exe = directory / f"{name}.cmd"
+        exe.write_text("@exit /b 0\r\n")
+    else:
+        exe = directory / name
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(0o755)
+    return exe
+
+
 class TestHarnessWarningAtStart:
     """`a8s start` hands its own environment to the handler, which hands it to
     every wake. So a node's PATH is whatever the shell that started it happened
@@ -1637,9 +1789,7 @@ class TestHarnessWarningAtStart:
         # so a node fixed by the knob stops nagging.
         harness_dir = tmp_path / "bin"
         harness_dir.mkdir()
-        exe = harness_dir / "a8s-probe-harness"
-        exe.write_text("#!/bin/sh\n")
-        exe.chmod(0o755)
+        _fake_program(harness_dir, "a8s-probe-harness")
         path = tmp_path / "probe-definition.json"
         path.write_text(json.dumps({
             "invoke": ["a8s-probe-harness", "-p", "$MESSAGE"],
@@ -1655,9 +1805,7 @@ class TestHarnessWarningAtStart:
     ):
         harness_dir = tmp_path / "bin"
         harness_dir.mkdir()
-        exe = harness_dir / "a8s-probe-harness"
-        exe.write_text("#!/bin/sh\n")
-        exe.chmod(0o755)
+        _fake_program(harness_dir, "a8s-probe-harness")
         self._register(agent_root, tmp_path, ["a8s-probe-harness", "-p", "$MESSAGE"])
         capsys.readouterr()
         _warn_unresolvable_harnesses(["probe"])
@@ -1747,9 +1895,7 @@ class TestEngineHarnessWarning:
     ):
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        fake_codex = bin_dir / "codex"
-        fake_codex.write_text("#!/bin/sh\nexit 0\n")
-        fake_codex.chmod(0o755)
+        _fake_program(bin_dir, "codex")
         self._register(agent_root, tmp_path, bin_dir)
         capsys.readouterr()
         _warn_unresolvable_harnesses(["probe"])
@@ -1819,6 +1965,9 @@ class TestWakeShellAtStart:
         assert cmd_start(["probe"]) == 1
         assert "login" in capsys.readouterr().err
 
+    @pytest.mark.skipif(
+        os.name == "nt", reason="wake_shell \"login\" is refused on Windows by design (test_windows_refuses_the_start)"
+    )
     def test_posix_starts_normally(
         self, fake_home, agent_root, tmp_path, capsys, monkeypatch
     ):
@@ -1842,10 +1991,12 @@ class TestWakePathCapture:
     ):
         from settings import get_setting
 
-        operator = self._dirs(agent_root, "operator")
-        monkeypatch.setenv("PATH", f"{operator}:/usr/bin:/a8s/no/such/dir")
+        operator, system = self._dirs(agent_root, "operator"), self._dirs(agent_root, "system")
+        missing = str(agent_root.parent / "no-such-dir")
+        sep = os.pathsep
+        monkeypatch.setenv("PATH", f"{operator}{sep}{system}{sep}{missing}")
         assert cmd_add(["alpha", str(agent_root)]) == 0
-        assert get_setting("wake_path") == f"{operator}:/usr/bin"
+        assert get_setting("wake_path") == f"{operator}{sep}{system}"
 
     def test_a_later_add_away_from_a_terminal_changes_nothing(
         self, fake_home, agent_root, monkeypatch
@@ -1892,10 +2043,11 @@ class TestWakePathLearning:
         from settings import get_setting, set_setting
 
         old, new = self._dir(tmp_path, "old"), self._dir(tmp_path, "new")
-        set_setting("wake_path", f"{old}:/usr/bin")
-        monkeypatch.setenv("PATH", f"{new}:{old}:/usr/bin")
+        system, sep = self._dir(tmp_path, "system"), os.pathsep
+        set_setting("wake_path", f"{old}{sep}{system}")
+        monkeypatch.setenv("PATH", f"{new}{sep}{old}{sep}{system}")
         dispatch("restart", ["nobody"], 1.0)
-        assert get_setting("wake_path") == f"{new}:{old}:/usr/bin"
+        assert get_setting("wake_path") == f"{new}{sep}{old}{sep}{system}"
         assert f"a8s: wakes now also search {new}" in capsys.readouterr().out
 
     def test_a_directory_the_operator_wrote_is_never_removed(
@@ -1968,10 +2120,11 @@ class TestWakePathLearning:
         (sessions / "123_456").symlink_to(alias)
         assert durable_path(f"{sessions}/123_456/bin:/usr/bin") == f"{alias}/bin:/usr/bin"
 
-    def test_a_directory_that_does_not_exist_is_not_remembered(self, fake_home):
+    def test_a_directory_that_does_not_exist_is_not_remembered(self, fake_home, tmp_path):
         from settings import durable_path
 
-        assert durable_path("/a8s/no/such/dir:/usr/bin::~/not/expanded") == "/usr/bin"
+        real, missing, sep = self._dir(tmp_path, "real"), str(tmp_path / "no-such-dir"), os.pathsep
+        assert durable_path(f"{missing}{sep}{real}{sep}{sep}~/not/expanded") == real
 
 
 class TestParseOptionTokens:
@@ -2158,8 +2311,10 @@ class TestCmdRemote:
         assert net["user"] == "alice"
         secrets = load_secrets_config()["remotes"]["hub"]
         assert secrets["pass"] == "TOPSECRET"
-        mode = secrets_config_path().stat().st_mode & 0o777
-        assert mode == 0o600
+        if os.name == "posix":
+            # Windows has no POSIX mode bits; the file's ACL is the user's.
+            mode = secrets_config_path().stat().st_mode & 0o777
+            assert mode == 0o600
 
     def test_pass_optional_and_preserved_on_rewrite(self, fake_home):
         from network import load_secrets_config
@@ -2242,6 +2397,122 @@ class TestCmdRemote:
 
         cmd_remote(["hub", "mqtt://x", "t", "--pass", "AGAIN"])
         assert load_secrets_config()["remotes"]["hub"]["pass"] == "AGAIN"
+
+
+class TestUnusedSecretFooter:
+    """#322: a password stored before 0.1.102 has no binding, so a reader drops
+    it and the remote runs with no password. `a8s ps` and `a8s ls` say so in a
+    footer with the command that fixes it, and never print the password."""
+
+    SECRET = "OLD-SECRET-322"
+
+    def _unbind(self, section, name, digest=None):
+        from network import SECRET_BINDING_KEY, load_secrets_config, save_secrets_config
+
+        secrets = load_secrets_config()
+        if digest is None:
+            del secrets[section][name][SECRET_BINDING_KEY]
+        else:
+            secrets[section][name][SECRET_BINDING_KEY] = digest
+        save_secrets_config(secrets)
+
+    def _listings(self, capsys):
+        capsys.readouterr()
+        assert cmd_ls([]) == 0
+        ls = capsys.readouterr()
+        assert cmd_ps([]) == 0
+        ps = capsys.readouterr()
+        return ls, ps
+
+    def test_an_unbound_remote_password_gets_a_footer_with_the_fix(self, fake_home, capsys):
+        from network import secrets_config_path
+
+        assert cmd_remote(["hub", "mqtt://x", "t", "--user", "alice", "--pass", self.SECRET]) == 0
+        self._unbind("remotes", "hub")
+        before = secrets_config_path().read_bytes()
+        ls, ps = self._listings(capsys)
+        fix = "remote hub: a8s remote hub mqtt://x t --user alice --pass <password>"
+        for captured in (ls, ps):
+            assert "warning: a stored password is not used" in captured.out
+            assert fix in captured.out
+            assert "a8s restart <name>..." in captured.out
+            assert self.SECRET not in captured.out + captured.err
+        # Diagnostic only: the listing neither rewrites nor deletes the secret.
+        assert secrets_config_path().read_bytes() == before
+
+    def test_a_password_bound_elsewhere_is_named_and_its_digest_is_not(self, fake_home, capsys):
+        from network import load_secrets_config
+
+        args = ["box", "webdav://dav.example/p", "--base-url", "https://dav.example/p"]
+        assert cmd_storage([*args, "--user", "u", "--password", self.SECRET]) == 0
+        real = load_secrets_config()["services"]["box"]["bind"]
+        self._unbind("services", "box", digest="f" * 64)
+        ls, ps = self._listings(capsys)
+        for captured in (ls, ps):
+            text = captured.out + captured.err
+            assert ("storage box: a8s storage box webdav://dav.example/p "
+                    "--base-url https://dav.example/p --user u --pass <password>") in captured.out
+            # A storage-only problem needs no restart: services reload on change.
+            assert "a8s restart" not in captured.out
+            for hidden in (self.SECRET, real, "f" * 64):
+                assert hidden not in text
+
+    def test_a_bound_password_prints_no_footer(self, fake_home, capsys):
+        assert cmd_remote(["hub", "mqtt://x", "t", "--pass", self.SECRET]) == 0
+        ls, ps = self._listings(capsys)
+        for captured in (ls, ps):
+            assert "warning" not in captured.out + captured.err
+            assert self.SECRET not in captured.out + captured.err
+
+    def test_quiet_listings_stay_names_only(self, fake_home, capsys):
+        assert cmd_remote(["hub", "mqtt://x", "t", "--pass", self.SECRET]) == 0
+        self._unbind("remotes", "hub")
+        capsys.readouterr()
+        assert cmd_ls(["-q"]) == 0
+        assert cmd_ps(["-q"]) == 0
+        assert "warning" not in capsys.readouterr().out
+
+    def test_the_printed_command_clears_the_footer(self, fake_home, capsys):
+        # The contract is the fix line, not the footer: run it as printed.
+        import shlex
+
+        from network import merge_remote_secrets
+
+        assert cmd_remote(["hub", "mqtts://h:8883", "a8s/team", "--user", "a b",
+                           "--keepalive", "30", "--pass", self.SECRET]) == 0
+        self._unbind("remotes", "hub")
+        capsys.readouterr()
+        cmd_ls([])
+        line = next(l for l in capsys.readouterr().out.splitlines() if "remote hub:" in l)
+        words = shlex.split(line.split("remote hub: ", 1)[1].replace("<password>", "NEW"))
+        assert words[:2] == ["a8s", "remote"]
+        before = load_network_config()["remotes"]["hub"]
+        assert cmd_remote(words[2:]) == 0
+        assert load_network_config()["remotes"]["hub"] == before
+        assert merge_remote_secrets("hub", before)["pass"] == "NEW"
+        capsys.readouterr()
+        cmd_ls([])
+        assert "warning" not in capsys.readouterr().out
+
+    def test_the_helper_is_pure_and_shares_the_reader_rule(self, fake_home):
+        from network import spec_binding, stored_secret_usable, unusable_secret_entries
+
+        spec = {"transport": "mqtt", "broker": "mqtt://x", "topic": "t"}
+        network = {"remotes": {"a": spec, "b": spec, "c": spec, "d": spec}, "services": {}}
+        secrets = {"remotes": {
+            "a": {"pass": "p"},
+            "b": {"pass": "p", "bind": "0" * 64},
+            "c": {"pass": "p", "bind": spec_binding(spec)},
+            "d": {"bind": "0" * 64},
+        }}
+        assert [n for _s, n, _p in unusable_secret_entries(network, secrets)] == ["a", "b"]
+        assert stored_secret_usable("remotes", "c", spec, secrets) is True
+        assert stored_secret_usable("remotes", "d", spec, secrets) is None
+        assert unusable_secret_entries({}, {}) == []
+        assert unusable_secret_entries({"remotes": "junk"}, {"remotes": []}) == []
+        # Same answer as the reader: an unusable secret is the one it drops.
+        assert "pass" not in merge_spec_secrets("remotes", "a", spec, secrets)
+        assert merge_spec_secrets("remotes", "c", spec, secrets)["pass"] == "p"
 
 
 def _ulid_at(prefix: str) -> str:
@@ -3182,9 +3453,9 @@ class TestCmdStorage:
             assert kind in captured.out
         assert "--base-url" in captured.out
 
-    def test_set_accepts_dashed_option_names(self, fake_home):
+    def test_set_accepts_dashed_option_names(self, fake_home, tmp_path):
         rc = cmd_storage([
-            "drive", "file:///tmp/drive-sync",
+            "drive", (tmp_path / "drive-sync").as_uri(),
             "--base-url", "https://cdn.example/a8s",
         ])
         assert rc == 0

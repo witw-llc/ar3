@@ -16,9 +16,10 @@ import sys
 import tempfile
 import threading
 
+from ar3.playwright_cli import INSTALL_COMMAND
 from ar3.proc import launch_options
 
-INSTALL_CMD = ["npm", "install", "-g", "@playwright/cli"]
+INSTALL_CMD = list(INSTALL_COMMAND)
 _asked = False
 
 # `fill_secret` makes a private directory with this prefix in the seat's scratch dir, and

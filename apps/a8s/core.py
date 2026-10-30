@@ -44,6 +44,7 @@ except ImportError:
         return f"{app} unknown (ar3, python {platform.python_version()})"
 
 from ar3 import envseam  # noqa: E402
+from ar3.fsio import atomic_write_text  # noqa: E402
 from ar3.home import app_home  # noqa: E402
 from ar3.proc import pid_alive as ar3_pid_alive  # noqa: E402
 from ar3.proc import process_start_token  # noqa: E402,F401
@@ -193,6 +194,16 @@ def detach_request_path(name: str) -> Path:
     return agent_dir(name) / "detach-request"
 
 
+def stop_request_path(name: str) -> Path:
+    """Per-agent stop-request file, `<requester pid> <level>`: how `a8s stop`
+    reaches a handler on Windows, where `os.kill` is `TerminateProcess` and no
+    handler runs. Level 1 is the first SIGTERM (detach after the current
+    wake), level 2 the force (the second SIGTERM: kill the wake's tree). The
+    handler acts on it as it would on that many signals and deletes it, and
+    the deletion is the stop's proof that the handler took it."""
+    return agent_dir(name) / "stop-request"
+
+
 def kill_request_path(name: str) -> Path:
     """Per-agent kill-request file. `a8s kill <name>` writes its pid here
     and, on POSIX, SIGUSR1s the holder as a latency optimisation (Windows
@@ -322,23 +333,33 @@ def read_last_wake(name: str) -> bool | None:
 
 def wake_pid_path(name: str) -> Path:
     """Per-agent record of the wake subprocess in flight: JSON `{"pid": N,
-    "start": "<process start token>", "unit": [<trash filenames>]}`. Written when a wake spawns and removed
-    when it settles. A handler that dies hard leaves it behind, which is why a
-    reader checks that the pid is alive and is the same process before it
-    trusts it."""
+    "start": "<process start token>", "unit": [<trash filenames>]}`. A claim
+    (pid 0) is written just before the wake spawns, naming the envelopes it
+    consumed, and the spawn replaces it atomically with the pid record. The
+    envelopes leave the inbox earlier, while the command is built, and a
+    handler killed in that window leaves no record that names them. The
+    record is removed when the wake settles. A handler that dies
+    hard leaves it behind, which is why a reader checks that the pid is alive
+    and is the same process before it trusts it."""
     return agent_dir(name) / "wake-pid"
 
 
+def write_wake_claim(name: str, unit: list[str] | None = None) -> None:
+    """Record the envelopes a wake is about to consume, before it has a pid."""
+    _write_wake_record(name, 0, "", unit)
+
+
 def write_wake_pid(name: str, pid: int, unit: list[str] | None = None) -> None:
-    body = json.dumps({
-        "pid": pid,
-        "start": process_start_token(pid) or "",
-        "unit": sorted(unit or []),
-    })
+    _write_wake_record(name, pid, process_start_token(pid) or "", unit)
+
+
+def _write_wake_record(name: str, pid: int, start: str, unit: list[str] | None) -> None:
+    """Replace the record atomically: a handler killed while the spawn turns
+    the claim into the pid record leaves one whole record, never an empty
+    one that names no mail."""
+    body = json.dumps({"pid": pid, "start": start, "unit": sorted(unit or [])})
     try:
-        p = wake_pid_path(name)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(body, encoding="utf-8")
+        atomic_write_text(wake_pid_path(name), body)
     except OSError:
         pass
 
@@ -348,6 +369,23 @@ def clear_wake_pid(name: str) -> None:
         wake_pid_path(name).unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def read_wake_unit(name: str) -> list[str] | None:
+    """The envelope filenames the wake record names, whether or not its
+    process is alive; None when there is no record. A wake that did not settle
+    leaves its record, so a record is proof of an unsettled wake and says
+    nothing about its processes."""
+    try:
+        data = json.loads(wake_pid_path(name).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return []
+    try:
+        return [str(f) for f in data.get("unit") or []]
+    except (AttributeError, TypeError):
+        return []
 
 
 def read_wake_pid(name: str) -> tuple[int, list[str]] | None:

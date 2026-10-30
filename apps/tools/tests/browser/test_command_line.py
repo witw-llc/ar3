@@ -528,7 +528,7 @@ def test_a_short_value_that_is_in_the_paths_and_numbers_of_the_tool_does_not_sto
         "snap\nshot\nsave\nvideo-start clip\nwait-for #pw 3\ntext #pw\nfill-secret #pw PASSWORD\nclick e5\nurl",
     )
     assert run.ok, run.error
-    assert any(cmd[2] == "screenshot" for cmd in cli.calls)
+    assert any("await page.screenshot(" in call["text"] for call in cli.code)
     assert any(cmd[2] == "state-save" for cmd in cli.calls)
     assert any(cmd[2] == "video-start" for cmd in cli.calls)
 
@@ -642,6 +642,7 @@ def test_the_cli_commands_that_print_a_page_start_the_driver_with_no_value_in_it
 # this list is where it is made: add the line and say in the commit why the text is the tool's alone.
 OWN_SITES = {
     "commands.py": [
+        'plc.run(seat, "tab-select", plc.Own(str(index)))',
         'plc.run(seat, "video-start", plc.Own(path), plc.Own("--size"), plc.Own("1280x1024"))',
         'argv += [plc.Own("--path"), path]',
         'plc.run(seat, "goto", plc.Own("about:blank"), timeout=30)',
@@ -948,3 +949,16 @@ def test_the_closest_match_hint_is_scrubbed_though_python_writes_it_with_escapes
     assert not run.ok and "closest:" in run.error
     hint = run.error.split("closest:", 1)[1]
     assert hint.strip() == "'[secret:LINK]'", run.error
+
+
+def test_validated_tab_index_is_control_data_even_when_it_matches_a_short_secret(monkeypatch, tmp_path):
+    cli = _cli(monkeypatch, tmp_path)
+    secretstore.set_secret("seat", "PIN", "1000", [ORIGIN])
+    listings = iter([
+        [{"id": f"T{index}", "url": ORIGIN, "selected": index == selected} for index in range(1001)]
+        for selected in (0, 1000)
+    ])
+    monkeypatch.setattr(session, "tabs", lambda seat: next(listings))
+    result = commands.run_script("seat", "tab 1000")
+    assert result.ok, result.error
+    assert _calls(cli, "tab-select") == [["tab-select", "1000"]]

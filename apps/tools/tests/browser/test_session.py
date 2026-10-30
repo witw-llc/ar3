@@ -153,6 +153,7 @@ def _pipe_launch(monkeypatch, tmp_path, owned=True, profile=()):
     monkeypatch.setattr(session, "owned_by_driver", lambda seat: owned)
     steps = []
     monkeypatch.setattr(session, "_terminate_profile", lambda seat: steps.append("terminate"))
+    monkeypatch.setattr(session, "check_launch_argv", lambda seat: [])
     return steps
 
 
@@ -224,10 +225,93 @@ def test_the_launch_config_is_the_seats_own_flags_over_the_pipe_and_private(monk
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-backgrounding-occluded-windows",
+        "--test-type=webdriver",
         "--headless=new",
         "about:blank",
     ]
     assert not any(arg.startswith("--remote-debugging-port") for arg in options["args"])
+
+
+def test_the_bar_off_flag_is_in_the_seats_args_and_why():
+    """playwright-cli adds `--disable-blink-features=AutomationControlled` to every Chromium launch whose args hold
+    no argument with `--disable-blink-features` in it, whatever `ignoreDefaultArgs` says. Chrome shows its "unsupported
+    command-line flag" bar for that flag with ANY value (the empty value too). The flag has to stay, because without it `navigator.webdriver` is true over the
+    pipe. `--test-type=webdriver` is the switch that keeps Chrome from showing the bar. If this fails, the bar is back
+    on every seat."""
+    args = session._launch_args("seat")
+    assert session.BAR_OFF_FLAG == "--test-type=webdriver"
+    assert session.BAR_OFF_FLAG in args
+    assert session.PLAYWRIGHT_ADDED_FLAGS == ("--disable-blink-features=AutomationControlled",)
+    assert not any("--disable-blink-features" in arg for arg in args)
+    assert args[-1] == "about:blank"
+
+
+def test_the_argv_a_real_launch_produces_has_no_unasked_flag(monkeypatch):
+    """The command line Chrome gets is ours, then playwright-cli's one addition. Nothing else may be in it."""
+    monkeypatch.setattr(session.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    argv = session._launch_args("seat") + list(session.PLAYWRIGHT_ADDED_FLAGS)
+    assert session.unasked_flags("seat", argv) == []
+
+
+def test_flags_nobody_asked_for_are_named(monkeypatch):
+    monkeypatch.setattr(session.platform, "system", lambda: "Linux")
+    argv = session._launch_args("seat") + list(session.PLAYWRIGHT_ADDED_FLAGS)
+    extra = ["--enable-automation", "--no-sandbox", "--password-store=basic", "--disable-blink-features=Other"]
+    assert session.unasked_flags("seat", argv + extra) == extra
+    lost_guard = [a for a in argv if a != session.BAR_OFF_FLAG]
+    assert session.unasked_flags("seat", lost_guard) == []
+    assert session.unasked_flags("seat", ["--user-data-dir=/elsewhere"]) == []
+
+
+def _checked(monkeypatch, pids, argv):
+    monkeypatch.setattr(session.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(session, "_main_pids", lambda seat: pids)
+    monkeypatch.setattr(session, "_process_argv", lambda pid: argv)
+
+
+def test_a_launch_with_an_unasked_flag_writes_one_line_and_goes_on(monkeypatch, capsys):
+    chrome = ["/usr/bin/chrome"] + session._launch_args("seat") + ["--disable-blink-features=AutomationControlled"]
+    _checked(monkeypatch, ["7"], chrome + ["--enable-automation", "--no-sandbox"])
+    assert session.check_launch_argv("seat") == ["--enable-automation", "--no-sandbox"]
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert "seat: Chrome started with a flag the seat did not ask for: --enable-automation --no-sandbox" in err
+
+
+def test_a_clean_launch_says_nothing(monkeypatch, capsys):
+    chrome = ["/usr/bin/chrome"] + session._launch_args("seat") + ["--disable-blink-features=AutomationControlled"]
+    _checked(monkeypatch, ["7"], chrome)
+    assert session.check_launch_argv("seat") == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_launch_check_never_raises_and_skips_what_it_cannot_read(monkeypatch, capsys):
+    _checked(monkeypatch, [], None)
+    assert session.check_launch_argv("seat") == []
+    _checked(monkeypatch, ["7", "8"], ["chrome", "--enable-automation"])
+    assert session.check_launch_argv("seat") == []
+    _checked(monkeypatch, ["7"], None)
+    assert session.check_launch_argv("seat") == []
+    def broken(pid):
+        raise RuntimeError("proc table gone")
+    monkeypatch.setattr(session, "_process_argv", broken)
+    assert session.check_launch_argv("seat") == []
+    monkeypatch.setattr(session.platform, "system", lambda: "Windows")
+    assert session.check_launch_argv("seat") == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_unasked_flag_does_not_stop_the_launch(monkeypatch, tmp_path, capsys):
+    real = session.check_launch_argv
+    steps = _pipe_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr(session, "check_launch_argv", real)
+    _checked(monkeypatch, ["7"], ["chrome", "--enable-automation"])
+    monkeypatch.setattr(session.plc, "run", lambda *a, **k: "")
+    monkeypatch.setattr(session.plc, "run_code", lambda *a, **k: steps.append("route"))
+    session.open_if_down("seat", None)
+    assert steps == ["route"]
+    assert "--enable-automation" in capsys.readouterr().err
 
 
 def test_the_driver_owns_the_seat_only_with_one_browser_process_under_its_daemon(monkeypatch):

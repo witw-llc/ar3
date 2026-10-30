@@ -20,6 +20,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -426,22 +427,82 @@ def launch_config_path(seat):
     return os.path.join(seat_home(seat), "launch.json")
 
 
+# playwright-cli adds this flag to every Chromium launch whose arguments do not already hold one that
+# contains `--disable-blink-features`, and `ignoreDefaultArgs` does not stop it. The value it adds,
+# `AutomationControlled`, is what keeps `navigator.webdriver` false over the debugging pipe, so the seat
+# keeps it. Chrome shows its "unsupported command-line flag" bar for the flag with any value, and
+# `--test-type` is the switch that turns that bar off (ChromeDriver passes it for the same reason).
+BAR_OFF_FLAG = "--test-type=webdriver"
+PLAYWRIGHT_ADDED_FLAGS = ("--disable-blink-features=AutomationControlled",)
+
+
 def _launch_args(seat):
     """Chrome's whole command line after the binary. Playwright adds none of its defaults (`ignoreDefaultArgs`
     is true), so the seat's Chrome carries the flags a person's would, plus the two Playwright needs: the
-    profile, and the pipe it drives Chrome over. With its defaults Playwright would also add `--no-sandbox`,
-    `--password-store=basic` (cookies encrypted under a fixed key) and `--enable-automation`."""
+    profile and the pipe it drives Chrome over. `BAR_OFF_FLAG` keeps Chrome from warning about the one flag
+    playwright-cli adds on its own (`PLAYWRIGHT_ADDED_FLAGS`). With its defaults Playwright would also add
+    `--no-sandbox`, `--password-store=basic` (cookies encrypted under a fixed key) and `--enable-automation`."""
     argv = [
         f"--user-data-dir={profile_dir(seat)}",
         "--remote-debugging-pipe",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-backgrounding-occluded-windows",
+        BAR_OFF_FLAG,
     ]
     if _headless():
         argv.append("--headless=new")
     argv.append("about:blank")
     return argv
+
+
+def _flag_name(argument):
+    return argument.split("=", 1)[0]
+
+
+def unasked_flags(seat, argv):
+    """The flags in a Chrome's command line (`argv`, the binary left out) that neither `_launch_args` nor
+    playwright-cli's one known addition (with its value) accounts for, as they appear. Words that are not flags (the start page)
+    are not looked at."""
+    asked = {_flag_name(a) for a in _launch_args(seat) if a.startswith("--")}
+    return [a for a in argv if a.startswith("--") and _flag_name(a) not in asked and a not in PLAYWRIGHT_ADDED_FLAGS]
+
+
+def _process_argv(pid):
+    """The command line of process `pid`, split into arguments, or None when it cannot be read. Linux reads the
+    exact argument list; elsewhere `ps` gives one line, split on spaces."""
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as handle:
+            return [a.decode("utf-8", "replace") for a in handle.read().split(b"\0") if a]
+    except (OSError, ValueError):
+        pass
+    try:
+        result = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True, **launch_options())
+    except OSError:
+        return None
+    return result.stdout.split() or None
+
+
+def check_launch_argv(seat):
+    """After a launch, compare the seat's real Chrome command line with what `_launch_args` asked for, and
+    write one line to stderr (the node's agent log) if a flag nobody asked for is in it. Chrome, or an update of
+    playwright-cli, can add flags that trigger bars or show the browser as automated. It never raises and never
+    ends the Chrome. Returns the unasked flags, [] when there are none or the line cannot be read."""
+    if platform.system() == "Windows":
+        return []
+    try:
+        main = _main_pids(seat)
+        argv = _process_argv(main[0]) if len(main) == 1 else None
+        found = unasked_flags(seat, argv[1:]) if argv else []
+    except Exception:
+        return []
+    if found:
+        print(
+            f"{seat}: Chrome started with a flag the seat did not ask for: {' '.join(found)}. "
+            "Check the installed playwright-cli version with `ar3 doctor`.",
+            file=sys.stderr,
+        )
+    return found
 
 
 def _write_launch_config(seat, binary):
@@ -551,6 +612,7 @@ def _start_chrome(seat):
     if not owned_by_driver(seat):
         _terminate_profile(seat)
         raise plc.BrowserError(f"Chrome for seat {seat!r} did not come up under the seat's driver")
+    check_launch_argv(seat)
     return True
 
 
@@ -794,18 +856,114 @@ def _browser_call_code(nonce, body):
     )
 
 
-def _browser_call(seat, body, timeout=15):
+def _browser_call(seat, body, timeout=15, strict=False):
     """The value `body` sets, read from the driver's structured answer (see `_browser_call_code`). None when
     the seat has no session (the driver opens no browser for this call), the call fails, or the answer is
-    not exactly the one this call asked for."""
+    not exactly the one this call asked for. Strict callers receive a fixed error instead of None."""
     nonce = secrets.token_hex(16)
     try:
         answer = plc.result_json(plc.run_code_file(seat, _browser_call_code(nonce, body), scratch_dir(seat), timeout=timeout))
     except (plc.BrowserError, OSError):
+        if strict:
+            raise plc.BrowserError("tabs: could not read the browser's structured response") from None
         return None
     if not isinstance(answer, dict) or set(answer) != {"nonce", "value"} or answer["nonce"] != nonce:
+        if strict:
+            raise plc.BrowserError("tabs: invalid structured browser response")
         return None
     return answer["value"]
+
+
+def tabs(seat):
+    """Tabs in driver order, with stable target identities and the driver's selected page.
+
+    Both the driver and Playwright's context append pages on creation and remove them on closure.
+    Target.getTargets order is unrelated to the driver's zero-based indices.
+    """
+    listing = _browser_call(seat, (
+        "    const value = [];\n"
+        "    for (const tab of page.context().pages()) {\n"
+        "      const channel = await page.context().newCDPSession(tab);\n"
+        "      try {\n"
+        "        const {targetInfo} = await channel.send('Target.getTargetInfo');\n"
+        "        value.push({id: targetInfo.targetId, url: tab.url(), selected: tab === page});\n"
+        "      } finally { await channel.detach(); }\n"
+        "    }"
+    ), strict=True)
+    if not isinstance(listing, list) or not listing:
+        raise plc.BrowserError("tabs: invalid structured tab list")
+    ids = set()
+    for tab in listing:
+        if not (
+            isinstance(tab, dict) and set(tab) == {"id", "url", "selected"}
+            and isinstance(tab["id"], str) and TARGET_ID.fullmatch(tab["id"])
+            and isinstance(tab["url"], str) and type(tab["selected"]) is bool
+            and tab["id"] not in ids
+        ):
+            raise plc.BrowserError("tabs: invalid structured tab list")
+        ids.add(tab["id"])
+    if sum(tab["selected"] for tab in listing) != 1:
+        raise plc.BrowserError("tabs: invalid selected tab")
+    return listing
+
+
+def indexed_screenshot(seat, page_id, path):
+    """Capture the verified selected target, refusing local-file navigation during the capture.
+
+    The file is provisional until the driver confirms both identity and safe navigation. A refused or
+    interrupted capture removes it; the command's usual post-step cleanup still runs afterwards.
+    """
+    body = (
+        "    const context = page.context();\n"
+        "    const local = (url) => {\n"
+        "      let head = url;\n"
+        "      while (true) {\n"
+        "        head = head.replace(/^[\\x00-\\x20]+/, '').slice(0, 128).replace(/[\\t\\n\\r]/g, '').toLowerCase();\n"
+        "        if (!head.startsWith('view-source:') && !head.startsWith('filesystem:')) return head.startsWith('file:');\n"
+        "        head = head.slice(head.indexOf(':') + 1);\n"
+        "      }\n"
+        "    };\n"
+        "    let unsafe = false;\n"
+        "    const watched = new Set();\n"
+        "    const navigated = (frame) => { if (local(frame.url())) unsafe = true; };\n"
+        "    const watch = (tab) => {\n"
+        "      watched.add(tab);\n"
+        "      if (local(tab.url())) unsafe = true;\n"
+        "      tab.on('framenavigated', navigated);\n"
+        "    };\n"
+        "    context.on('page', watch);\n"
+        "    context.pages().forEach(watch);\n"
+        "    let value = false;\n"
+        "    try {\n"
+        "      const channel = await context.newCDPSession(page);\n"
+        "      let id;\n"
+        "      try { id = (await channel.send('Target.getTargetInfo')).targetInfo.targetId; }\n"
+        "      finally { await channel.detach(); }\n"
+        f"      if (id === {json.dumps(page_id)} && !unsafe) {{\n"
+        "        await page.bringToFront();\n"
+        "        if (!unsafe) {\n"
+        f"          await page.screenshot({{path: {json.dumps(path)}}});\n"
+        "          value = !unsafe && !page.isClosed() && !context.pages().some((tab) => local(tab.url()));\n"
+        "        }\n"
+        "      }\n"
+        "    } finally {\n"
+        "      context.off('page', watch);\n"
+        "      for (const tab of watched) tab.off('framenavigated', navigated);\n"
+        "    }"
+    )
+    confirmed = False
+    try:
+        confirmed = _browser_call(seat, body, timeout=60, strict=True) is True
+        if not confirmed or not os.path.isfile(path):
+            confirmed = False
+            raise plc.BrowserError("shot: tab changed or capture was refused; run tabs again")
+        return path
+    finally:
+        if not confirmed:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
 
 def pages(seat):

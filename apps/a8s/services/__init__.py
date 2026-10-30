@@ -21,6 +21,9 @@ Contract:
   service (so the caller falls through to the next configured service).
   Returns True after writing the bytes to `dest`. Raises `StorageError`
   on a real download failure (the URL was ours but the server refused).
+  A claimed URL never falls back to a generic GET after failure; another
+  configured service may still supply its bytes. Missing owned HTTP objects
+  raise StorageError too, so their viewer pages cannot pass as attachments.
 """
 from __future__ import annotations
 
@@ -101,3 +104,11 @@ class StorageService(ABC):
         that cannot delete is not broken — `tempfile_org` expires on its own —
         so the default is a quiet False rather than an error."""
         return False
+
+    def health_observation(self) -> tuple[bool, str] | None:
+        """Extra evidence after a successful probe, or None for ordinary stores.
+
+        The boolean says whether this observation is fresh enough. It is not
+        an attachment receipt or a promise about a remote machine.
+        """
+        return None

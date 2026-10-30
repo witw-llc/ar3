@@ -124,6 +124,7 @@ class TestMarker:
             # A traversal dressed up as a filename.
             f"a8s+sync:{MSG}/..%2F..%2Fetc%2Fpasswd",
         ],
+        ids=["foreign-scheme", "invalid-ulid", "missing-slash", "empty-filename", "traversal"],
     )
     def test_foreign_or_malformed_urls_are_not_ours(self, url):
         assert parse_marker(url) is None

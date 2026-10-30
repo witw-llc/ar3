@@ -15,6 +15,8 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from engines.held_input import submission_text
+
 
 ACP_PROTOCOL_VERSION = 1
 HANDSHAKE_DEADLINE_SECONDS = 20.0
@@ -209,7 +211,7 @@ class AcpSession:
 
     def _release(self) -> tuple[str, ...]:
         if self.ready and not self.busy and self.held:
-            return (self._prompt(self.held.popleft()),)
+            return (self._prompt(submission_text(self.held.popleft())),)
         return ()
 
     def _fail(self, text: str) -> ParsedFrame:

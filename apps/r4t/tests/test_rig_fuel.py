@@ -449,3 +449,18 @@ class TestCli:
         )
         assert fuel_cli(config) == 0
         assert "fuel 1.00" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_fuel_omits_identifier_plan_but_quota_keeps_it(answers, tmp_path, capsys, as_json):
+    payload = copy.deepcopy(CLAUDE_PAYLOAD)
+    payload["plan"] = "synthetic-account@example.invalid"
+    answers(payload=payload)
+    config = write_rigs(tmp_path, claude_rig())
+    assert fuel_cli(config, *(["--json"] if as_json else [])) == 0
+    output = capsys.readouterr().out
+    assert payload["plan"] not in output
+    if as_json:
+        assert json.loads(output)["plan"] is None
+    assert engines.quota("claude")["plan"] == payload["plan"]
+    assert payload["plan"] in engines.format_text(engines.quota("claude"))

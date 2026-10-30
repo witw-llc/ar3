@@ -13,7 +13,7 @@ import pytest
 import txlog
 from commands import (
     _hard_kill,
-    _hard_kill_targets,
+    _wake_kill_target,
     cmd_ps,
     cmd_restart,
     cmd_stop,
@@ -189,10 +189,21 @@ class TestPsActivity:
         assert _row(out, "beta")[5] == "default"
 
 
-@pytest.fixture
-def stoppable(fake_home, tmp_path, monkeypatch):
-    """A node whose handler detaches on the first SIGTERM, with a dead letter
-    in trash."""
+def _take_stop_request(name, requester, force):
+    """A Windows handler that hears its stop request: it deletes the request
+    file and detaches, which here means its pid file goes."""
+    pid_path(name).unlink(missing_ok=True)
+
+
+@pytest.fixture(params=["posix", "windows"])
+def stoppable(request, fake_home, tmp_path, monkeypatch):
+    """A node whose handler detaches on the first stop, with a dead letter in
+    trash. On POSIX the stop is a SIGTERM; on Windows it is a stop-request
+    file, because `os.kill` there is `TerminateProcess`. Both branches run on
+    every platform, and a handler that never answers fails in seconds, not in
+    the 600 s a stop waits for a real wake."""
+    windows = request.param == "windows"
+    monkeypatch.setattr("commands.IS_WINDOWS", windows)
     root = tmp_path / "root"
     root.mkdir()
     save_registry({"alpha": {"root": str(root)}})
@@ -207,14 +218,20 @@ def stoppable(fake_home, tmp_path, monkeypatch):
             if not pid_path("alpha").is_file():
                 raise ProcessLookupError()
             return
+        if windows:
+            pytest.fail("os.kill is TerminateProcess on Windows; the stop writes a request")
         pid_path("alpha").unlink(missing_ok=True)
 
     for mod in ("commands", "daemon", "core"):
         monkeypatch.setattr(f"{mod}.os.kill", fake_kill)
+    if windows:
+        monkeypatch.setattr("commands._write_stop_request", _take_stop_request)
     gone = lambda pid: pid_path("alpha").is_file()
     for mod in ("commands", "daemon", "core"):
         monkeypatch.setattr(f"{mod}._pid_alive", gone)
     monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
+    monkeypatch.setattr("commands.STOP_WAIT_S", 5.0)
+    monkeypatch.setattr("commands.STOP_FORCE_GRACE_S", 1.0)
     return "alpha"
 
 
@@ -243,16 +260,41 @@ class TestStopLeavesDeadLettersDead:
         assert not (inbox_dir(stoppable) / "dead.json").exists()
 
 
+class TestClearDeadHandlerFiles:
+    def test_a_stale_wake_record_temp_file_is_removed(self, fake_home):
+        from commands import _clear_dead_handler_files
+        from core import agent_dir, read_wake_unit
+
+        d = agent_dir("alpha")
+        d.mkdir(parents=True, exist_ok=True)
+        stale = d / ".wake-pid.01STALE.tmp"
+        stale.write_text("{}")
+        other = d / ".other.01STALE.tmp"
+        other.write_text("{}")
+        write_wake_pid("alpha", os.getpid(), ["01A.json"])
+
+        _clear_dead_handler_files("alpha")
+
+        assert not stale.exists()
+        assert other.exists()  # only the wake record's temp files go
+        assert not wake_pid_path("alpha").exists()
+        assert read_wake_unit("alpha") is None
+
+
 class TestForceEscalation:
-    def test_posix_kills_the_wake_group_then_the_handler(self):
-        assert _hard_kill_targets(True, 10, 20) == [("group", 20), ("pid", 10)]
+    def test_posix_kills_the_wake_group(self):
+        assert _wake_kill_target(True, 20) == ("group", 20)
 
-    def test_windows_ends_the_wake_process_then_the_handler(self):
-        assert _hard_kill_targets(False, 10, 20) == [("pid", 20), ("pid", 10)]
+    def test_windows_ends_the_wake_tree(self):
+        assert _wake_kill_target(False, 20) == ("tree", 20)
 
-    def test_no_wake_means_only_the_handler(self):
-        assert _hard_kill_targets(True, 10, None) == [("pid", 10)]
-        assert _hard_kill_targets(False, 10, None) == [("pid", 10)]
+    def test_a_tree_target_is_the_foundation_group_kill(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr("commands.terminate_group", lambda pid: sent.append(("tree", pid)))
+        monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append(("kill", pid, sig)))
+        _hard_kill([("tree", 20), ("pid", 10)])
+        sig = getattr(signal, "SIGKILL", signal.SIGTERM)
+        assert sent == [("tree", 20), ("kill", 10, sig)]
 
     def test_a_group_target_signals_the_group(self, monkeypatch):
         sent = []
@@ -269,9 +311,11 @@ class TestForceEscalation:
         monkeypatch.setattr(os, "kill", gone)
         _hard_kill([("pid", 10)])
 
+    @pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
     def test_a_handler_that_never_detaches_is_killed_and_its_mail_dead_lettered(
-        self, fake_home, tmp_path, monkeypatch, capsys
+        self, fake_home, tmp_path, monkeypatch, capsys, windows
     ):
+        monkeypatch.setattr("commands.IS_WINDOWS", windows)
         root = tmp_path / "root"
         root.mkdir()
         save_registry({"alpha": {"root": str(root)}})
@@ -293,12 +337,18 @@ class TestForceEscalation:
         monkeypatch.setattr("commands._pid_alive", lambda pid: pid_path("alpha").is_file())
         monkeypatch.setattr("daemon._pid_alive", lambda pid: pid_path("alpha").is_file())
         monkeypatch.setattr("commands._hard_kill", fake_hard_kill)
+        monkeypatch.setattr("commands._child_pids", lambda pid: [])
+        # Never freeze or resume a real process: the handler here is the
+        # runner's parent, and a Windows freeze would suspend it for real.
+        monkeypatch.setattr("commands._suspend_process", lambda pid: False)
+        monkeypatch.setattr("commands._resume_process", lambda pid: None)
         monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
         monkeypatch.setattr("commands.STOP_FORCE_GRACE_S", 0.1)
 
         assert cmd_stop(["alpha", "--force"]) == 0
-        assert ("pid", os.getppid()) in killed
-        assert any(k in ("group", "pid") and pid == os.getpid() for k, pid in killed)
+        # The wake dies as a group on POSIX and as a process tree on Windows.
+        assert killed == [_wake_kill_target(not windows, os.getpid()), ("pid", os.getppid())]
+        assert killed[0][0] == ("tree" if windows else "group")
         assert (trash_dir("alpha") / "01KILLED.json").is_file()
         assert not (inbox_dir("alpha") / "01KILLED.json").exists()
         assert (dead_letters_dir("alpha") / "01KILLED.json").is_file()
@@ -311,6 +361,50 @@ class TestForceEscalation:
         assert "alpha: the killed wake's 1 message(s) are dead letters: 01KILLED" in out.out
 
     def test_a_plain_stop_never_kills(self, fake_home, tmp_path, monkeypatch, capsys):
+        # POSIX: a SIGTERM the handler is slow to answer is waited for, never
+        # turned into a kill. A busy wake can take as long as it likes.
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
+        self._busy_handler(tmp_path, monkeypatch)
+        assert cmd_stop(["alpha"]) == 1
+
+    def test_a_plain_stop_never_kills_a_windows_handler_that_took_the_request(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        # Windows: the handler took the request (deleted the file) and is busy
+        # with its wake. The stop waits and gives up; it does not kill.
+        from core import stop_request_path
+
+        monkeypatch.setattr("commands.IS_WINDOWS", True)
+        self._busy_handler(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "commands._write_stop_request",
+            lambda name, requester, force: stop_request_path(name).unlink(missing_ok=True),
+        )
+        assert cmd_stop(["alpha"]) == 1
+        assert "still running" in capsys.readouterr().err
+
+    def test_a_plain_stop_kills_a_windows_handler_that_cannot_hear_the_request(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        # Windows only, by design: a handler from before the stop request
+        # existed never takes it, so it is killed with its wake once
+        # STOP_FORCE_GRACE_S passes. See the `a8s stop` row in docs/a8s.md.
+        monkeypatch.setattr("commands.IS_WINDOWS", True)
+        self._busy_handler(tmp_path, monkeypatch)
+        killed = []
+
+        def kill_outright(handlers, wakes, members, affected, reason):
+            killed.append((sorted(handlers.values()), reason))
+            pid_path("alpha").unlink(missing_ok=True)
+            return True
+
+        monkeypatch.setattr("commands._kill_outright", kill_outright)
+        monkeypatch.setattr("commands.STOP_FORCE_GRACE_S", 0.1)
+        assert cmd_stop(["alpha"]) == 0
+        assert killed == [(["alpha"], "`a8s stop`")]
+        assert "did not take the stop request" in capsys.readouterr().err
+
+    def _busy_handler(self, tmp_path, monkeypatch):
         root = tmp_path / "root"
         root.mkdir()
         save_registry({"alpha": {"root": str(root)}})
@@ -319,14 +413,14 @@ class TestForceEscalation:
         deaf = lambda pid, sig: None
         for mod in ("commands", "daemon", "core"):
             monkeypatch.setattr(f"{mod}.os.kill", deaf)
-        monkeypatch.setattr("commands._pid_alive", lambda pid: True)
-        monkeypatch.setattr("daemon._pid_alive", lambda pid: True)
+        monkeypatch.setattr("commands._pid_alive", lambda pid: pid_path("alpha").is_file())
+        monkeypatch.setattr("daemon._pid_alive", lambda pid: pid_path("alpha").is_file())
         monkeypatch.setattr(
             "commands._hard_kill", lambda targets: pytest.fail("plain stop must not kill")
         )
+        monkeypatch.setattr("commands._suspend_process", lambda pid: pytest.fail("no freeze"))
         monkeypatch.setattr("commands.STOP_POLL_S", 0.01)
         monkeypatch.setattr("commands.STOP_WAIT_S", 0.1)
-        assert cmd_stop(["alpha"]) == 1
 
 
 class TestStatusProbe:

@@ -73,6 +73,7 @@ from core import (
     detach_request_path,
     inbox_dir,
     kill_request_path,
+    stop_request_path,
     log_agent_unlocked,
     out_agent,
     pid_path,
@@ -91,6 +92,7 @@ from core import (
     write_last_wake,
     trash_dir,
     unique_path,
+    write_wake_claim,
     write_wake_pid,
 )
 from definitions import (
@@ -127,11 +129,15 @@ from mailbox import (
 )
 from network import (
     configured_remote_ids as remote_ids_in_config,
+    load_network_config,
     load_remotes,
+    load_secrets_config,
     load_services,
     make_publish_remotes,
+    secret_start_lines,
     start_remotes,
     stop_remotes,
+    unusable_secret_entries,
 )
 from registry import RegistryUnreadable, participants_from_registry, unresolved_mailboxes
 import convo
@@ -432,7 +438,9 @@ def _start_wake_subprocess(
     """Start a wake subprocess. Returns True iff the process was spawned.
 
     `unit` is the envelopes the wake consumed. They go into the agent's
-    `wake-pid` record so a handler killed outright can mark them dead letters.
+    `wake-pid` record, as a claim before the spawn and with the pid after it,
+    so a handler killed outright at any point between can mark them dead
+    letters.
 
     `on_complete` fires from `_clear_wake_state` with the subprocess exit code
     once the wake finishes. It does NOT fire when the spawn itself fails —
@@ -443,6 +451,7 @@ def _start_wake_subprocess(
     if _wake_in_flight():
         return False
     _sweep_stuck_wake_readers()
+    write_wake_claim(name, [f.name for f in unit or []])
     proc_env = os.environ.copy()
     if env:
         proc_env.update(env)
@@ -463,12 +472,14 @@ def _start_wake_subprocess(
     except FileNotFoundError:
         ts = clock.time_stamp()
         out_agent(name, f"{name}> [{ts}] command not found: {cmd[0]}")
+        clear_wake_pid(name)
         return False
     except OSError as e:
         # A program that exists but cannot run (mode 0600, a wrong binary
         # format) fails the spawn the same way: the caller settles it once.
         ts = clock.time_stamp()
         out_agent(name, f"{name}> [{ts}] cannot start {cmd[0]}: {e}")
+        clear_wake_pid(name)
         return False
     stdout_queue: "queue.Queue[str | object]" = queue.Queue()
     stdout_thread = threading.Thread(
@@ -1256,6 +1267,43 @@ def _clear_kill_request(name: str) -> None:
         pass
 
 
+STOP_REQUEST_POLL_S = 0.2
+
+
+def _write_stop_request(name: str, requester_pid: int, force: bool) -> None:
+    p = stop_request_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(p, f"{requester_pid} {2 if force else 1}")
+
+
+def _read_stop_request(name: str) -> tuple[int, int] | None:
+    """`(requester pid, level)`, with the parse-and-reap discipline of
+    `_read_detach_request`: malformed contents and a dead requester are
+    removed and read as no request."""
+    p = stop_request_path(name)
+    if not p.is_file():
+        return None
+    try:
+        pid_text, level_text = p.read_text().split()
+        pid, level = int(pid_text), int(level_text)
+        if pid <= 0 or level not in (1, 2):
+            raise ValueError("bad stop request")
+    except (OSError, ValueError):
+        _clear_stop_request(name)
+        return None
+    if _pid_alive(pid):
+        return pid, level
+    _clear_stop_request(name)
+    return None
+
+
+def _clear_stop_request(name: str) -> None:
+    try:
+        stop_request_path(name).unlink()
+    except OSError:
+        pass
+
+
 def acquire(name: str) -> None:
     """Attach this process as the handler of <name>.
 
@@ -1578,8 +1626,8 @@ def _kill_wake_subprocess_group() -> None:
     """SIGTERM-then-SIGKILL the current wake's subprocess group. Targets the
     whole process tree on POSIX so the LLM CLI dies along with our wake
     wrapper; on Windows, where there is no process group to target,
-    `ar3.proc.terminate_group` falls back to a plain SIGTERM of the wake
-    process itself. Delegated to the foundation rather than reimplemented
+    `ar3.proc.terminate_group` ends the wake's process tree with
+    `taskkill /T /F`. Delegated to the foundation rather than reimplemented
     here — `os.getpgid`/`os.killpg` don't exist on `nt`, and this helper now
     runs from the iteration-top kill-request branch on every platform, not
     only from the POSIX-only SIGUSR1 handler."""
@@ -1812,11 +1860,13 @@ def _describe_stop_signal(signum: int) -> str:
 
 
 def _make_signal_handler(label: str, names: list[str]):
-    def handle(signum, _frame):
+    """The SIGTERM/SIGINT handler. `cause` names a stop that came by request
+    file instead of by signal (`_stop_request_listener`)."""
+    def handle(signum, _frame, cause: str | None = None):
         global _SIGNAL_COUNT, _STOP_CAUSE
         _SIGNAL_COUNT += 1
         if _SIGNAL_COUNT == 1:
-            _STOP_CAUSE = _describe_stop_signal(signum)
+            _STOP_CAUSE = cause or _describe_stop_signal(signum)
             line = f"received {_STOP_CAUSE}; detaching after current wake"
             sys.stderr.write(f"[a8s] {label}: {line}\n")
             sys.stderr.flush()
@@ -1827,12 +1877,34 @@ def _make_signal_handler(label: str, names: list[str]):
             if _STOP_EVENT is not None:
                 _STOP_EVENT.set()
         else:
+            what = "second signal" if cause is None else "force stop request"
             sys.stderr.write(
-                f"[a8s] {label}: second signal — killing wake subprocess group\n"
+                f"[a8s] {label}: {what} — killing wake subprocess group\n"
             )
             sys.stderr.flush()
             _kill_wake_subprocess_group()
     return handle
+
+
+def _stop_request_listener(names: list[str], handle, done: threading.Event) -> None:
+    """Windows' stand-in for the SIGTERM handler: `a8s stop` there writes a
+    stop request instead of a signal, because `os.kill` is `TerminateProcess`
+    and would end this process without its wake. Each request is taken as
+    that many signals, and deleting the file tells the stop it was taken. It
+    polls from its own thread so a loop iteration held in a network call still
+    takes the request at once, as a signal handler would. A name this process
+    released and nobody claimed since is still answered: the stop is aimed
+    at this process."""
+    me = os.getpid()
+    while not done.wait(STOP_REQUEST_POLL_S):
+        for name in list(names):
+            request = _read_stop_request(name)
+            if request is None or _read_handler_pid(name) not in (None, me):
+                continue
+            requester, level = request
+            _clear_stop_request(name)
+            while _SIGNAL_COUNT < level:
+                handle(signal.SIGTERM, None, cause=f"stop request from PID {requester}")
 
 
 def _on_kill_signal(_signum, _frame):
@@ -1953,6 +2025,20 @@ def _route_outboxes_once_more(
         out_agent(label, f"[a8s] {label}: final outbox pass failed: {e}")
 
 
+def _log_unused_secrets(names: list[str]) -> None:
+    """At attach, name each remote or storage entry whose stored password this
+    node will not use, in every attached agent's log: that is the file
+    `a8s logs <name>` reads, and the supervisor log line alone went unseen
+    (#322). A diagnostic never blocks a start."""
+    try:
+        entries = unusable_secret_entries(load_network_config(), load_secrets_config())
+    except Exception:
+        return
+    for n in names:
+        for line in secret_start_lines(entries, n):
+            out_agent(n, f"[a8s] {n}: {line}")
+
+
 def attached_loop(
     names: list[str],
     interval: float,
@@ -1977,7 +2063,8 @@ def attached_loop(
 
     On 1st signal: detach all currently-handled agents (graceful — finish the
     in-flight wake first). On 2nd signal: SIGTERM-then-SIGKILL the wake
-    subprocess group. The whole-process detach is the path for explicit
+    subprocess group. On Windows a stop-request file stands in for the
+    signals (`_stop_request_listener`). The whole-process detach is the path for explicit
     `a8s stop` / `a8s kill`; per-agent take-over for `a8s start`/`run`/`step`
     against an already-attached agent goes through the detach-request file
     instead, leaving siblings handled — no orphans."""
@@ -2054,9 +2141,21 @@ def attached_loop(
         if held_signals is not None:
             signal.pthread_sigmask(signal.SIG_SETMASK, held_signals)
 
+    # Started with the signal handlers, before the remotes connect, so a stop
+    # that lands during a slow start is taken as a signal would be.
+    stop_listener_done = threading.Event()
+    stop_listener: threading.Thread | None = None
+    if IS_WINDOWS:
+        stop_listener = threading.Thread(
+            target=_stop_request_listener, args=(names, handler, stop_listener_done),
+            daemon=True,
+        )
+        stop_listener.start()
+
     pid = os.getpid()
     for n in names:
         out_agent(n, f"[a8s] {n}: attached (PID {pid}{', shared' if len(names) > 1 else ''})")
+    _log_unused_secrets(names)
 
     # Load configured remotes and start one subscriber loop per
     # remote. The receive callback always asks the registry for the current
@@ -2316,6 +2415,9 @@ def attached_loop(
                 release(n)
                 run_stop_hook(n)
                 out_agent(n, f"[a8s] {n}: detached")
+        stop_listener_done.set()
+        if stop_listener is not None:
+            stop_listener.join(timeout=1.0)
         signal.signal(signal.SIGTERM, prev_sigterm)
         signal.signal(signal.SIGINT, prev_sigint)
         if hasattr(signal, "SIGUSR1"):

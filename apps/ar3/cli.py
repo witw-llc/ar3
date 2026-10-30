@@ -53,6 +53,7 @@ except ImportError:
 from ar3 import deps as ar3_deps  # noqa: E402
 from ar3 import nodes  # noqa: E402
 from ar3.home import app_home  # noqa: E402
+from ar3.playwright_cli import INSTALL_COMMAND as PLAYWRIGHT_INSTALL, version_note  # noqa: E402
 from ar3.proc import pid_alive, process_start_token  # noqa: E402
 from typing import Callable, Optional
 
@@ -305,6 +306,8 @@ TOOLING = "Tooling"
 class Probe:
     ok: bool
     detail: str
+    #: A fix that depends on what the probe found. None uses the check's hint.
+    hint: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -407,6 +410,10 @@ def _playwright_cli_probe() -> Probe:
     path = shutil.which("playwright-cli")
     if path is None:
         return Probe(False, "not on PATH")
+    code, out = _run([path, "--version"], 5.0)
+    note = version_note(out) if code == 0 else None
+    if code == 0 and note:
+        return Probe(False, note, " ".join(PLAYWRIGHT_INSTALL))
     return Probe(True, path)
 
 
@@ -446,6 +453,53 @@ def _utf8_probe() -> Probe:
     )
 
 
+def _load_a8s_network():
+    """a8s's own network module, loaded by path like `_load_definitions`, so
+    the binding rule for a stored secret has one home. Importing it writes
+    nothing; it imports its a8s siblings flat, so the a8s directory rides
+    sys.path for the load only. Resolved beside this file, not through
+    REPO_ROOT: the app layout under `apps/` is fixed."""
+    import importlib.util
+
+    a8s_dir = Path(__file__).resolve().parent.parent / "a8s"
+    spec = importlib.util.spec_from_file_location("ar3_a8s_network", a8s_dir / "network.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(a8s_dir))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        try:
+            sys.path.remove(str(a8s_dir))
+        except ValueError:
+            pass
+    return module
+
+
+def _a8s_secrets_probe() -> Probe:
+    """Whether every password a8s stores for a remote or storage entry is one
+    a reader uses (#322). A password stored before 0.1.102 has no binding to
+    its destination, and a node then runs that remote with no password and
+    says so only in its supervisor log. Reads the two files without creating
+    the a8s home; prints entry names and the fix, never a secret."""
+    home = a8s_home()
+    network = _read_json(home / "network.json")
+    if network is None:
+        return Probe(True, "no remotes or storage configured")
+    secrets = _read_json(home / "secrets.json") or {}
+    try:
+        net = _load_a8s_network()
+        bad = net.unusable_secret_entries(network, secrets)
+    except Exception as e:  # a probe reports, it never takes doctor down
+        return Probe(False, f"could not check: {type(e).__name__}")
+    if not bad:
+        return Probe(True, "every stored password is used")
+    names = ", ".join(f"{net._SECTION_NOUN[section]} {name}" for section, name, _spec in bad)
+    fixes = "; ".join(net.secret_fix_command(section, name, spec) for section, name, spec in bad)
+    if any(section == "remotes" for section, _name, _spec in bad):
+        fixes += "; then a8s restart <name>..."
+    return Probe(False, f"stored password not used: {names}", fixes)
+
+
 CHECKS: tuple[Check, ...] = (
     Check("claude", HARNESS, _version_probe("claude"), "install Claude Code"),
     Check("agent", HARNESS, _version_probe("agent"), "install the Cursor agent CLI"),
@@ -458,6 +512,13 @@ CHECKS: tuple[Check, ...] = (
     Check("ollama", HARNESS, _version_probe("ollama"), "install ollama"),
     Check("ollama serve", SERVICES, _ollama_probe, "ollama serve, then ollama pull <model>"),
     Check("docker", SERVICES, _docker_probe, "start Docker Desktop or the docker daemon"),
+    Check(
+        "a8s secrets",
+        SERVICES,
+        _a8s_secrets_probe,
+        "a8s remote <name> <broker> <topic> --pass <password>",
+        core=True,
+    ),
     Check("git", TOOLING, _git_probe, "git config --global user.name / user.email", core=True),
     Check("openssl", TOOLING, _openssl_probe, "install OpenSSL (the vault tool node needs it)"),
     Check("chrome", TOOLING, _chrome_probe, "install Google Chrome (the browser tool node needs it)"),
@@ -466,7 +527,7 @@ CHECKS: tuple[Check, ...] = (
         "playwright-cli",
         TOOLING,
         _playwright_cli_probe,
-        "npm install -g @playwright/cli (the browser tool node needs it)",
+        f"{' '.join(PLAYWRIGHT_INSTALL)} (the browser tool node needs it)",
     ),
     Check(
         "utf-8 output",
@@ -483,7 +544,7 @@ def doctor_results(checks: tuple[Check, ...]) -> list[tuple[Check, Probe]]:
 
 def doctor_rows(results: list[tuple[Check, Probe]], group: str) -> list[Row]:
     return [
-        (probe.ok, check.name, probe.detail, None if probe.ok else check.hint)
+        (probe.ok, check.name, probe.detail, None if probe.ok else (probe.hint or check.hint))
         for check, probe in results if check.group == group
     ]
 

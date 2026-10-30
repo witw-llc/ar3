@@ -37,7 +37,8 @@ accounting path. Completed turns stay completed if a later session step fails.
   runs on the handler's final release and on a kill request, outside the wake
   slot. It names the hook process in the `stop-hook` mark right after it
   starts the hook, and marks it done after. The CLI clears the mark before it signals.
-  For a handler that ended outright (`os.kill` on Windows, `stop --force`) it
+  For a handler that ended outright (`stop --force`, or a Windows handler that
+  did not take its stop request) it
   waits for a named hook still running, and runs the hook itself only when
   the handler left no mark. A new path that ends a node does the same. A takeover by another
   handler is not a stop and runs no hook.
@@ -166,6 +167,14 @@ accounting path. Completed turns stay completed if a later session step fails.
   as absent — `retrieve` returns False and the receive wait keeps polling —
   never as a failure. This is what defends against a mid-sync file and against
   a OneDrive Files On-Demand placeholder.
+- **Sync-folder health separates local access from peer evidence.** Label the
+  probe as a local round-trip. Observe timestamped, opaque per-home activity
+  records, exclude this home's writes, and warn when peer evidence is absent
+  or older than `peer_stale_seconds` (default 86400). A fresh peer write is not
+  end-to-end delivery proof. Invalid or future records never count; file mtime
+  is not the freshness clock. Activity recording is best effort and cannot
+  fail an otherwise successful attachment copy. Do not add a background
+  scheduler or put host/account names in the shared metadata.
 - **`store` takes an optional `msg_id`.** `a8s health` has no envelope, so a
   service that needs one mints its own rather than growing a second code path.
 - **`rclone` shells out; both calls are synchronous.** `copyto` then `link`, so
@@ -302,14 +311,61 @@ accounting path. Completed turns stay completed if a later session step fails.
   signal handler, so do not lengthen the wait in place of the kill. The wake's
   pid comes from the agent's `wake-pid` record, written when the wake spawns and
   removed when it settles; a reader checks the pid's start token before it
-  signals, because a record outlives a handler killed outright. Kill the wake
-  first (its group on POSIX; the process on Windows, which has no group), then
-  the handler. Never `killpg` the handler: `a8s run` in a terminal shares its
-  group with the shell. After a kill, clear the pid files and any request files,
-  dead-letter the wake's envelopes when its `wake-pid` record shows it never
-  settled (nothing else will), and write a `RUN_STOP` row, so the node starts
-  again at once. Either way the stop prints the ids of the killed wake's dead
-  letters.
+  signals, because a record outlives a handler killed outright. A claim (pid 0)
+  precedes the pid: the handler writes the record with the wake's envelopes
+  just before it spawns the wake, and the spawn replaces it atomically
+  (`atomic_write_text`), so a kill during the replace leaves one whole record.
+  The envelopes leave the inbox earlier, while `wake_once` builds the command
+  and environment; a handler killed in that window leaves no record that names
+  them. That window predates the claim.
+
+  **Killing.** Freeze the handler first (`SIGSTOP`, confirmed by the stopped
+  state in `/proc` or `ps` within about a second; `NtSuspendProcess` returning
+  status 0 on Windows). A frozen handler starts no wake and keeps every pipe
+  open, so the wake's leader is still alive when its record is read. Kill that
+  wake (its group on POSIX; its process tree on Windows, which has no group),
+  then every direct child of the frozen handler the record did not name, with
+  its descendants (the stop hook the handler started is spared: the stop waits
+  for it), then the handler. Take each child's start token when it is
+  listed and check it again before every kill: a pid is never killed on its
+  parent link alone. A child that leads its own group takes the group;
+  another POSIX child shares the handler's group, so it is frozen, its
+  descendants are listed the same way, and each dies alone; Windows ends the
+  child's tree. A handler that cannot be frozen, or whose freeze is not
+  confirmed, is reported on stderr and torn down in a bounded order: the
+  wake its record names, the handler, then whatever wake its record names
+  after that. Every exit leaves no handler stopped: it is killed, or resumed
+  (`SIGCONT`, `NtResumeProcess`) when the stop fails first. Killing the handler
+  before the wake loses a wake that writes to the handler's pipe: it exits on
+  the broken pipe, its record reads as no wake, and its children live on.
+
+  **The limit.** A wake leader can exit on its own between the stop's lookup
+  and its kill, and before the freeze. Its record then names a pid that is
+  gone, and the stop kills no pid it cannot prove it owns, so the leader's
+  children run on. Freezing the handler does not prevent this; it only stops
+  the handler's own death from causing it.
+
+  **Settling is separate from killing.** A `wake-pid` record that outlives the
+  handler proves the wake never settled, whether or not the stop found its
+  processes. The stop dead-letters the envelopes the record names (a claim
+  names them even when the wake has no pid), and a departed leader never
+  means the mail was settled or the processes ended. A child started by a
+  handler from before the claim has no unit, and nothing names its mail.
+
+  Never `killpg` the handler: `a8s run` in a terminal shares its group with
+  the shell. After a kill, clear the pid files and any request files, and
+  write a `RUN_STOP` row, so the node starts again at once. Either way the
+  stop prints the ids of the killed wake's dead letters.
+- **On Windows a stop is a request file, never `os.kill`.** `os.kill` there is
+  `TerminateProcess`: the handler ends with no chance to end its wake, which
+  keeps running in its own process group with its mail never settled.
+  `a8s stop`, `restart`, `exit` and the `kill` fallback write `stop-request`
+  (`<requester pid> <level>`: 1 is the first SIGTERM, 2 the force) and the
+  handler's listener thread takes it as that many signals and deletes it. The
+  deletion is the stop's proof the handler heard it. A handler that has not
+  taken it `STOP_FORCE_GRACE_S` later cannot act on one, so even a plain stop
+  kills it outright, as `--force` does: frozen, then its wake's tree, then
+  its other children, then the handler. POSIX keeps signals.
 - **A detach routes the outbox once.** `attached_loop`'s `finally:` runs one
   `route_outboxes` pass over the agents whose pid file still names this
   process, before `stop_remotes`. Reuse the loop's own routing call; write no
@@ -317,7 +373,9 @@ accounting path. Completed turns stay completed if a later session step fails.
   holds the detach. `a8s step` and `--drain` add no final pass, and an agent
   released to a take-over or a kill is left to its new holder. `tell` stays
   non-blocking: the final pass lives in the stop, not in the sender.
-- **Local routing claims the ULID in the `seen` table** to prevent MQTT round-trip dupes.
+- **Local routing claims the ULID in the `seen` table before remote publication**
+  to prevent synchronous or later broker echoes. Match the exact message ID,
+  never a sender name or namespace that another machine can legitimately use.
 - **Wake environment is declared and learned, not only inherited from the start shell.**
   Without a knob a node's `PATH` is whatever shell ran `a8s start`, forever —
   fine from an interactive login shell, wrong from `ssh host -- 'a8s start x'`,
@@ -374,13 +432,16 @@ accounting path. Completed turns stay completed if a later session step fails.
   is refused without a receipt, with an `EXPIRED` row only when the recipient
   is an agent this node holds, so the memory always outlasts what any wire
   can replay. Never put receipts and messages under one count budget.
-- **One cross-process mutex idiom remains: the consumed ledger's sidecar.**
+- **One stale-breaking cross-process mutex idiom remains: the consumed ledger's sidecar.**
   `transports/ledger.py` takes `<ledger>.lock` with one `O_CREAT | O_EXCL` and
   breaks a holder dead longer than `LEDGER_LOCK_STALE_SECONDS` by its mtime.
   Appends never wait for it; only compaction does, and compaction may give up.
   The receive winner is not a lock: it is the seen table's `INSERT OR IGNORE`,
-  which SQLite makes atomic across processes. Do not add a claim file, a
-  second lock shape, or a takeover.
+  which SQLite makes atomic across processes. Do not add a receive claim file,
+  a second stale-breaking lock shape, or a takeover. Process-liveness claims
+  and the foundation's OS advisory locks are separate contracts. Sync-folder
+  writer identity creation reuses `ar3.locking.file_lock` with bounded contention
+  and publishes its complete value with `atomic_write_text`.
 - **`settings.json` is the stable operator config.** `a8s config set` persists
   machine-wide keys; `a8s config` (no args) catalogs every knob including
   definition, registry, and network fields. Env vars apply only when a key
@@ -389,6 +450,13 @@ accounting path. Completed turns stay completed if a later session step fails.
   message (alias fan-out is one row). Inserts do not prune. `a8s update`
   retains `convo_max_rows` (default 50000) during housekeeping. Queried by
   `a8s convo <agent>` — not per-agent storage; `--limit` only controls display.
+- **Attachment outcomes belong to actual recipients.** Keep one message row
+  with immutable first-committed outcomes keyed by canonical recipient in its
+  JSON entry. Record each actual local or remote routed envelope. Project only
+  the requested recipient's outcome on reads. A remote publication is not a
+  receipt; absent evidence, including legacy rows, renders explicitly unrecorded.
+  Preserve historical data; do not migrate or delete the archive. Row insertion
+  order and sequence-cursor semantics remain unchanged.
 - **`transactions.sqlite3` holds routing breadcrumbs, not bodies.** Several rows
   per message, written concurrently by the router, wake handlers, and receive
   loops. `txlog.log` never raises; `a8s trace <ULID>` and `a8s transactions`
@@ -508,6 +576,16 @@ path cannot redirect it. Hash the exact seat name for launch, discovery and
 cleanup. Read browser targets from nonce-bound structured driver responses,
 never from page titles or console output. Refuse Windows browser startup until
 its process ownership and IPC boundary are implemented and verified.
+
+### Browser tab commands
+
+Expose existing tabs through `tabs`, select one through `tab N`, and capture
+one through `shot [N]`. Use zero-based indices, matching the driver and recipe
+API. Keep selection after an indexed screenshot. Reject invalid or excess
+arguments instead of ignoring them. Read tab identities from structured
+driver results; page titles and console output must not control selection.
+Keep local-file refusal, secret scrubbing and sensitive-step capture guards
+in force before capturing the selected page.
 
 ## Per-tool quirks
 

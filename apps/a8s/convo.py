@@ -157,7 +157,9 @@ output:
                  markdown view -- pairs with --since: record the newest ulid, ask
                  --since <it> next time. files_unavailable carries one
                  {{filename, error, detail}} object per attachment the transfer could
-                 not deliver, so a lost file is never read as a delivered one.
+                 not deliver for this recipient. files_outcome_unrecorded lists
+                 files whose recipient outcome was not recorded (including legacy
+                 archive rows and publish-only records).
 
 examples:
   a8s convo my-desktop -f --limit 10 --glow
@@ -177,12 +179,15 @@ def json_row(entry: dict[str, Any], seq: int | None = None) -> dict[str, Any]:
     `files` names every attachment the message declared, delivered or not, so
     a consumer reading it alone reads a lost file as an arrived one — the
     confusion `files_unavailable` exists to prevent (see `entry_from_message`).
-    The key is always present, empty list and all, so its absence never has to
-    be told apart from a clean transfer. `seq` is the archive's delivery
-    order and is absent for a message that has no archive row yet."""
+    The key is always present. `files_outcome_unrecorded` names attachments
+    with no recorded recipient outcome; an empty unavailable list alone is
+    not evidence of delivery. `seq` is the archive's insertion order and is
+    absent for a message that has no archive row yet."""
     row: dict[str, Any] = {"ulid": entry.get("id", "")}
     if seq is not None:
         row["seq"] = seq
+    if entry.get("files_outcome_unrecorded"):
+        row["files_outcome_unrecorded"] = entry["files_outcome_unrecorded"]
     row.update({
         "from": entry.get("from", ""),
         "to": entry.get("to", ""),
@@ -420,12 +425,25 @@ def load_entries() -> list[dict[str, Any]]:
     return entries
 
 
-def _rows_to_entries(rows: list[tuple[int, str]]) -> list[tuple[int, dict[str, Any]]]:
+def _recipient_entry(entry: dict[str, Any], agent: str) -> dict[str, Any]:
+    projected = dict(entry)
+    outcomes = projected.pop("attachment_outcomes", {})
+    projected.pop("files_unavailable", None)
+    key = _name_key(agent)
+    if key in outcomes:
+        if outcomes[key]:
+            projected["files_unavailable"] = outcomes[key]
+    elif projected.get("files"):
+        projected["files_outcome_unrecorded"] = list(projected["files"])
+    return projected
+
+
+def _rows_to_entries(rows: list[tuple[int, str]], agent: str) -> list[tuple[int, dict[str, Any]]]:
     entries: list[tuple[int, dict[str, Any]]] = []
     for seq, raw in rows:
         entry = _decode_entry(raw)
         if entry is not None:
-            entries.append((int(seq), entry))
+            entries.append((int(seq), _recipient_entry(entry, agent)))
     return entries
 
 
@@ -484,7 +502,7 @@ def _latest_agent_entries(
             stamp = parse_stamp(entry.get("date") or "")
             if stamp is None or stamp < date_floor:
                 continue
-        found.append((int(seq), entry))
+        found.append((int(seq), _recipient_entry(entry, agent)))
         if limit is not None and len(found) >= limit:
             break
     if not forward:
@@ -638,22 +656,7 @@ def load_agent_records(
 
 
 def _merge_into_stored(stored_json: str, entry: dict[str, Any]) -> str | None:
-    """Fold a later delivery into the stored row, or None when it adds nothing.
-
-    One message id is one row, but each recipient downloads separately and a
-    recipient whose attachments needed the fetch wait records long after an
-    immediate one. Two things from that later write must reach the row:
-
-    `recipients`, because the row is the record of who the message was
-    delivered or sent to.
-    Attaching the name to `message_agents` alone makes the index and the entry
-    disagree — the lookup finds the row for a name the row does not list, so
-    `involves_agent` denies what the query just asserted, and the rendered row
-    names only whoever happened to be written first.
-
-    `files_unavailable`, because leaving the first writer's clean view in place
-    is how a lost file keeps being described as a delivered one.
-    """
+    """Add recipients and their first committed outcomes without rewriting history."""
     stored = _decode_entry(stored_json)
     if stored is None:
         return None
@@ -670,16 +673,13 @@ def _merge_into_stored(stored_json: str, entry: dict[str, Any]) -> str | None:
     if changed:
         stored["recipients"] = known_to
 
-    known_lost = stored.get("files_unavailable") or []
-    seen_lost = {(e.get("filename"), e.get("detail")) for e in known_lost}
-    added = [
-        e
-        for e in (entry.get("files_unavailable") or [])
-        if (e.get("filename"), e.get("detail")) not in seen_lost
-    ]
-    if added:
-        stored["files_unavailable"] = known_lost + added
-        changed = True
+    outcomes = stored.get("attachment_outcomes") or {}
+    for key, outcome in (entry.get("attachment_outcomes") or {}).items():
+        if key not in outcomes:
+            outcomes[key] = outcome
+            changed = True
+    if outcomes:
+        stored["attachment_outcomes"] = outcomes
 
     return json.dumps(stored, ensure_ascii=False) if changed else None
 
@@ -715,16 +715,21 @@ def _insert_entry(entry: dict[str, Any], msg_id: str | None) -> None:
         )
 
 
-def record(msg: dict[str, Any], *, recipients: list[str]) -> None:
+def record(msg: dict[str, Any], *, recipients: list[str], delivered: bool = True) -> None:
     """Append one logical message once it is delivered (local inbox, remote
     receive) or sent (a remote took the publish). `recipients` lists local
     deliverees for routed/RECEIVED_REMOTE rows, or the logical `to` name a
-    message was sent to for an outbound remote publish. Retention is applied
+    message was sent to for an outbound remote publish (`delivered=False`).
+    Only an actual local recipient gets an attachment outcome. Retention is applied
     by `a8s update`, never here.
     """
     if not recipients:
         return
     entry = entry_from_message(msg, recipients=recipients)
+    entry["attachment_outcomes"] = {
+        _name_key(name): list(entry.get("files_unavailable") or [])
+        for name in recipients if delivered and _name_key(name)
+    }
     msg_id = entry.get("id") or None
     try:
         sqlite_store.retry_busy(lambda: _insert_entry(entry, msg_id))
@@ -785,6 +790,7 @@ def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
     window. Only an entry that arrived carrying an error is reported lost.
     """
     names = [str(name).strip() for name in (entry.get("files") or []) if str(name).strip()]
+    unrecorded = set(entry.get("files_outcome_unrecorded") or [])
     lost = {
         str(e.get("filename") or "").strip(): str(e.get("detail") or "").strip()
         for e in (entry.get("files_unavailable") or [])
@@ -802,6 +808,9 @@ def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
             bundle_root = inbound_bundle_dir(participant.files_path(), msg_id)
     lines: list[str] = []
     for name in names:
+        if name in unrecorded:
+            lines.append(f"- ATTACHMENT OUTCOME UNRECORDED: {name}")
+            continue
         if name in lost:
             detail = lost[name]
             lines.append(
@@ -965,7 +974,7 @@ def follow_conversation(
                     file=sys.stderr,
                     flush=True,
                 )
-            for _, entry in _rows_to_entries(rows):
+            for _, entry in _rows_to_entries(rows, agent):
                 if not sent_by(entry, keys):
                     continue
                 print_entries(

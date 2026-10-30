@@ -70,7 +70,9 @@ learned the grammar of all of them, including the ones that do not exist yet.
 - **One subprocess launch policy**, `ar3.proc.launch_options`, used by all production Python consumers. Background console applications launch without a window on Windows; intentional interactive launches explicitly inherit the console. Process-group intent is explicit. The flag contract follows [Microsoft process creation flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags). Do not set Windows creation flags in consumers or combine hidden launches with `DETACHED_PROCESS`. Each caller keeps its I/O, environment and teardown contract. Test fixtures and archived experiments may launch raw processes to reproduce platform behavior.
 - **One spawn/kill escalation policy**, `ar3.proc`, used everywhere: `SIGTERM`,
   a grace period, then `SIGKILL`, applied to the **process group** rather than
-  the process.
+  the process. Windows has no group and no signal a windowless process can
+  catch, so there the policy ends the **process tree** at once with
+  `taskkill /T /F`.
 - **One timeout convention**, with `124` as its exit code.
 - No app writes its own kill sequence.
 - **One pid-file liveness rule**: a pid file is live when `pid_alive` holds
@@ -100,6 +102,15 @@ learned the grammar of all of them, including the ones that do not exist yet.
   every merge to `main`; the minor bumps, build reset to 0, when the owner
   closes a phase; the major bumps at the 1.0 hand-off.
 - **A merge to `main` is the release.** There is no second switch.
+- **Certify the exact PR tip before merge.** Run the complete suite through an
+  explicitly requested verification action, not on every push. Require recorded
+  passing evidence for that exact commit in the lightweight PR precheck; fail
+  quickly when evidence is absent, failed, or belongs to another tip. Release
+  publishes the verified build without repeating the full suite.
+- **Target seven minutes, with a ten-minute ceiling.** Record certification and
+  publication elapsed times separately. Preserve complete suite coverage when
+  parallelizing and retain exact collection and execution evidence. Claim the
+  timing target only after hosted measurements establish it.
 - **Changelog discipline**: user-visible changes land under `Unreleased` in the
   same PR.
 - **Pre-v1: no migration code.** The schema changes and the user re-derives.

@@ -399,3 +399,48 @@ def test_windows_batch_launchers_refuse_multiline_memory(isolated):
     launcher.write_text("@echo off\r\necho truncated\r\n")
     with pytest.raises(OSError, match="native engine executable"):
         memory.spawn([str(launcher), "header\nimportant payload"], isolated, 10, None)
+
+
+@pytest.mark.parametrize("attempts", [memory.JOB_ATTEMPTS, memory.JOB_ATTEMPTS + 1])
+def test_worker_quarantines_a_job_capped_before_start(isolated, monkeypatch, attempts):
+    head, tail = sorted([turn(isolated), turn(isolated)], key=lambda t: t.stamp)
+    head.finish("Interrupted capture.", 0)
+    tail.finish("Useful capture.", 0)
+    queue = head.home / "queue"
+    job = queue / f"{head.stamp}.json"
+    marker = json.loads(job.read_text())
+    marker["attempts"] = attempts
+    job.write_text(json.dumps(marker))
+    ran, compiled = [], []
+    monkeypatch.setattr(memory, "_run_job", lambda home, capture, timeout: ran.append(capture.name))
+    monkeypatch.setattr(memory, "_run_compile", lambda home, capture, timeout: compiled.append(capture.name))
+    monkeypatch.setattr(knowledge, "_run_k7e", lambda *a, **kw: None)
+    assert memory.worker(head.home) == 0
+    assert ran == compiled == [f"{tail.stamp}.json"]
+    assert json.loads((queue / "failed" / job.name).read_text()) == marker
+    assert not list(queue.glob("*.json"))
+    assert (head.home / "turns" / job.name).exists()
+
+
+def test_repeated_abrupt_worker_death_stops_at_the_attempt_cap(isolated):
+    t = turn(isolated)
+    t.finish("Interrupted capture.", 0)
+    script = "\n".join([
+        "import os, sys",
+        f"sys.path[:0] = {[str(Path(memory.__file__).parent), str(Path(memory.__file__).parents[2] / 'lib')]!r}",
+        "from pathlib import Path",
+        "import engine_memory as memory",
+        "memory._run_job = lambda *args: os._exit(23)",
+        "memory.knowledge._run_k7e = lambda *args, **kwargs: None",
+        "memory.kick = lambda home: None",
+        f"sys.exit(memory.worker(Path({str(t.home)!r})))",
+    ])
+    job = t.home / "queue" / f"{t.stamp}.json"
+    for attempt in range(1, memory.JOB_ATTEMPTS + 1):
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 23, result.stderr
+        assert json.loads(job.read_text())["attempts"] == attempt
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert not job.exists()
+    assert json.loads((job.parent / "failed" / job.name).read_text())["attempts"] == memory.JOB_ATTEMPTS

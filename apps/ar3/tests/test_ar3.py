@@ -349,6 +349,73 @@ def test_doctor_exits_zero_when_everything_core_is_green(monkeypatch, capsys):
     assert "core prerequisites satisfied  (2/2 probes green)" in capsys.readouterr().out
 
 
+# ---------- the a8s secrets row (#322) ----------
+
+_SECRET = "OLD-SECRET-322"
+_HUB = {"transport": "mqtt", "broker": "mqtt://x", "topic": "t", "user": "alice"}
+
+
+def _a8s_config(home, secrets):
+    (home / "network.json").write_text(json.dumps({"remotes": {"hub": _HUB}, "services": {}}))
+    (home / "secrets.json").write_text(json.dumps({"remotes": {"hub": secrets}}))
+
+
+def _secrets_check():
+    return next(check for check in ar3.CHECKS if check.name == "a8s secrets")
+
+
+def test_the_a8s_secrets_row_is_a_core_services_check():
+    check = _secrets_check()
+    assert check.group == ar3.SERVICES and check.core
+
+
+def test_an_unbound_a8s_password_fails_doctor_with_the_fix(homes, monkeypatch, capsys):
+    _a8s_config(homes["a8s"], {"pass": _SECRET})
+    before = (homes["a8s"] / "secrets.json").read_bytes()
+    probe = ar3._a8s_secrets_probe()
+    assert probe.ok is False
+    assert probe.detail == "stored password not used: remote hub"
+    assert probe.hint == (
+        "a8s remote hub mqtt://x t --user alice --pass <password>; then a8s restart <name>..."
+    )
+    monkeypatch.setattr(ar3, "CHECKS", (_fake("b", ar3.HARNESS, True), _secrets_check()))
+    monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
+    assert ar3.cmd_doctor(None) == 1
+    out = capsys.readouterr().out
+    assert "✗ a8s secrets" in out
+    assert "(try: a8s remote hub mqtt://x t --user alice --pass <password>" in out
+    assert "core prerequisites missing: a8s secrets" in out
+    assert _SECRET not in out
+    assert (homes["a8s"] / "secrets.json").read_bytes() == before
+
+
+def test_a_password_bound_elsewhere_hides_both_value_and_digest(homes):
+    _a8s_config(homes["a8s"], {"pass": _SECRET, "bind": "e" * 64})
+    probe = ar3._a8s_secrets_probe()
+    assert probe.ok is False
+    for hidden in (_SECRET, "e" * 64):
+        assert hidden not in probe.detail + probe.hint
+
+
+def test_a_bound_a8s_password_passes_doctor(homes, monkeypatch, capsys):
+    bind = ar3._load_a8s_network().spec_binding(_HUB)
+    _a8s_config(homes["a8s"], {"pass": _SECRET, "bind": bind})
+    assert ar3._a8s_secrets_probe() == ar3.Probe(True, "every stored password is used")
+    monkeypatch.setattr(ar3, "CHECKS", (_fake("b", ar3.HARNESS, True), _secrets_check()))
+    monkeypatch.setattr(ar3, "update_note", lambda: "pinned")
+    assert ar3.cmd_doctor(None) == 0
+    out = capsys.readouterr().out
+    assert "✓ a8s secrets" in out
+    assert _SECRET not in out and bind not in out
+
+
+def test_the_a8s_secrets_probe_creates_nothing(tmp_path, monkeypatch):
+    home = tmp_path / "no-a8s-yet"
+    monkeypatch.setenv("A8S_HOME", str(home))
+    assert ar3._a8s_secrets_probe().ok is True
+    assert not home.exists()
+
+
 # ---------- probes never hang, never fix ----------
 
 def test_version_probe_misses_when_the_binary_is_absent(monkeypatch):
@@ -1710,3 +1777,20 @@ def test_browser_tool_probes_are_optional_doctor_checks():
 
 def test_openssl_is_a_doctor_check():
     assert "openssl" in {check.name for check in ar3.CHECKS}
+
+
+def test_playwright_cli_doctor_row_shows_a_version_that_is_not_the_pinned_one(monkeypatch):
+    from ar3 import playwright_cli
+    monkeypatch.setattr(ar3.shutil, "which", lambda name: "/bin/playwright-cli")
+    monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (0, "9.9.9\n"))
+    probe = ar3._playwright_cli_probe()
+    assert not probe.ok
+    assert "9.9.9" in probe.detail and playwright_cli.PLAYWRIGHT_CLI_VERSION in probe.detail
+    assert probe.hint == " ".join(playwright_cli.INSTALL_COMMAND)
+    monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (0, playwright_cli.PLAYWRIGHT_CLI_VERSION + "\n"))
+    assert ar3._playwright_cli_probe() == ar3.Probe(True, "/bin/playwright-cli")
+    monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (None, ""))
+    assert ar3._playwright_cli_probe().ok
+    check = {c.name: c for c in ar3.CHECKS}["playwright-cli"]
+    assert not check.core
+    assert " ".join(playwright_cli.INSTALL_COMMAND) in check.hint

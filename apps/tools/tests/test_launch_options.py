@@ -58,14 +58,13 @@ def test_windows_launches_are_hidden_without_changing_io(monkeypatch, module, in
         assert options["env"] == plc.cli_env()
 
 
-def test_windows_tree_kill_uses_hidden_console(monkeypatch):
+def test_tree_kill_is_the_foundation_group_kill(monkeypatch):
+    """The Windows `taskkill /T` arm and its hidden console are the
+    foundation's (apps/ar3/tests/test_ar3_proc.py); the tool keeps no copy."""
     calls = []
-    monkeypatch.setattr(shell, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(shell, "launch_options", lambda **kw: launch_options(windows=True, **kw))
-    monkeypatch.setattr(shell.subprocess, "run", lambda argv, **kw: calls.append((argv, kw)))
+    monkeypatch.setattr(shell, "terminate_group", lambda proc, **kw: calls.append((proc.pid, kw)))
     shell._kill_tree(SimpleNamespace(pid=123, poll=lambda: 0))
-    assert calls[0][0] == ["taskkill", "/T", "/F", "/PID", "123"]
-    assert calls[0][1]["creationflags"] == 0x08000000
+    assert calls == [(123, {"grace_seconds": 0.5})]
 
 
 @pytest.mark.parametrize("interactive", [True, False])

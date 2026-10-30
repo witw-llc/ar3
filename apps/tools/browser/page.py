@@ -88,8 +88,6 @@ def _readings(data):
 
 # A sensitive step is named for what it guards, in the words of a sentence: "the passcode step failed".
 SECTION_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
-# One line of `playwright-cli tab-list`: the place of the tab, whether it is the current one, its title, its address.
-TAB_LINE = re.compile(r"- (\d+): (?:\(current\) )?\[(.*)\]\((.*)\)")
 
 
 class Response:
@@ -693,17 +691,8 @@ class Page:
         take "I could not tell" for "there is none"."""
         self._tick()
         index = self._say("tabs")
-        output = self._drive(lambda: plc.run(self._call.seat, "tab-list"))
-        urls = []
-        for line in plc.result_or(output).splitlines():
-            if not line.strip():
-                continue
-            found = TAB_LINE.fullmatch(line.strip())
-            if not found or int(found.group(1)) != len(urls):
-                raise plc.BrowserError("tabs: playwright-cli printed a list of tabs that this tool cannot read")
-            urls.append(found.group(3))
-        if not urls:
-            raise plc.BrowserError("tabs: playwright-cli printed no tab")
+        listing = self._drive(lambda: session.tabs(self._call.seat))
+        urls = [tab["url"] for tab in listing]
         self._amend(index, f"tabs -> {len(urls)}")
         return [self._clean(url) for url in urls]
 

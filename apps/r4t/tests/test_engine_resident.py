@@ -1192,3 +1192,44 @@ def test_a_stop_request_signals_a_busy_claude_at_once(tmp_path):
         pid = resident_mod.read_live_pid(home)
         if pid is not None:
             terminate_group(pid)
+
+
+# Held input: the submission text a busy session sends for queued input.
+
+def test_queued_text_is_the_drained_inbox_with_its_enqueue_times(tmp_path):
+    from engines import held_input
+
+    resident_mod._enqueue_message(tmp_path, "[t] a tells b (1 second ago): one")
+    resident_mod._enqueue_message(tmp_path, "[t] a tells b (2 seconds ago): two")
+    items = resident_mod._drain_inbox(tmp_path)
+    text = held_input.QueuedText.from_items(items)
+    assert text == "\n\n".join(item["message"] for item in items)
+    assert [message for message, _ in text.parts] == [item["message"] for item in items]
+    assert [at for _, at in text.parts] == [item["queued_at"] for item in items]
+
+
+def test_held_text_redates_only_header_ages():
+    from engines import held_input
+
+    single = "[t] alice tells bob (4 seconds ago): see (5 seconds ago): here"
+    batch = ("Local time is t.\n"
+             "----\nalice sent (3 minutes ago): one\n"
+             "----\ncarol sent (10 seconds ago): two (1 second ago): x")
+    text = held_input.QueuedText.from_items([
+        {"message": single, "queued_at": 100.0},
+        {"message": batch, "queued_at": 100.0},
+    ])
+    out = held_input.submission_text(text, now=100.0 + 2 * 3600)
+    assert out.splitlines()[0].startswith("[This input was held 120 minutes")
+    assert "[t] alice tells bob (2 hours ago): see (5 seconds ago): here" in out
+    assert "----\nalice sent (2 hours ago): one" in out
+    assert "----\ncarol sent (2 hours ago): two (1 second ago): x" in out
+
+
+def test_held_text_without_times_passes_through():
+    from engines import held_input
+
+    plain = "[t] alice tells bob (4 seconds ago): hi"
+    assert held_input.submission_text(plain, now=1e12) == plain
+    untimed = held_input.QueuedText.from_items([{"message": plain}])
+    assert held_input.submission_text(untimed, now=1e12) == plain

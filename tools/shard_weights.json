@@ -1,0 +1,49 @@
+{
+  "description": "Approximate module seconds inferred from 72-test timestamped progress blocks in release .122, not measured per-test timings. Top 18 modules have estimates; unlisted/new modules use residual elapsed seconds divided by remaining collected cases. Weights affect allocation only; refresh from JUnit after first certification.",
+  "weights": {
+    "a8s": {
+      "apps/a8s/tests/test_network.py": 116.073,
+      "apps/a8s/tests/test_shim_python.py": 88.51,
+      "apps/a8s/tests/test_commands.py": 54.082,
+      "apps/a8s/tests/test_autostart.py": 26.087,
+      "apps/a8s/tests/test_sync_folder_health.py": 20.992,
+      "apps/a8s/tests/test_mailbox.py": 20.638,
+      "apps/a8s/tests/test_tell.py": 19.96,
+      "apps/a8s/tests/test_daemon.py": 14.655,
+      "apps/a8s/tests/test_stop_hook.py": 10.952,
+      "apps/a8s/tests/test_tells.py": 10.703,
+      "apps/a8s/tests/test_registry.py": 9.71,
+      "apps/a8s/tests/test_definitions.py": 7.777,
+      "apps/a8s/tests/test_transport_folder.py": 7.688,
+      "apps/a8s/tests/test_transport_mqtt.py": 7.532,
+      "apps/a8s/tests/test_store_hold.py": 7.301,
+      "apps/a8s/tests/test_node_env.py": 6.444,
+      "apps/a8s/tests/test_listing_filters.py": 6.147,
+      "apps/a8s/tests/test_transport_s3.py": 5.926
+    },
+    "r4t": {
+      "apps/r4t/tests/test_engine_resident_cursor.py": 63.005,
+      "apps/r4t/tests/test_engine_resident_codex.py": 48.722,
+      "apps/r4t/tests/test_schedule.py": 44.563,
+      "apps/r4t/tests/test_engine_resident.py": 22.715,
+      "apps/r4t/tests/test_dispatch.py": 19.952,
+      "apps/r4t/tests/test_knowledge.py": 18.464,
+      "apps/r4t/tests/test_engine_resident_devin.py": 18.346,
+      "apps/r4t/tests/test_engine_muse.py": 17.018,
+      "apps/r4t/tests/test_sandbox.py": 14.515,
+      "apps/r4t/tests/test_runbook.py": 11.236,
+      "apps/r4t/tests/test_engine_run.py": 9.441,
+      "apps/r4t/tests/test_engine_devin_quota.py": 6.512,
+      "apps/r4t/tests/test_engine_memory.py": 6.251,
+      "apps/r4t/tests/test_addressing.py": 6.245,
+      "apps/r4t/tests/test_engine_devin.py": 5.991,
+      "apps/r4t/tests/test_engine_values.py": 4.542,
+      "apps/r4t/tests/test_rig.py": 3.971,
+      "apps/r4t/tests/test_engines.py": 3.226
+    }
+  },
+  "default_seconds_per_case": {
+    "a8s": 0.083964,
+    "r4t": 0.026934
+  }
+}

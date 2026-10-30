@@ -230,8 +230,6 @@ class WebdavService(StorageService):
                     shutil.copyfileobj(resp, out)
                 tmp.replace(safe_dest)
         except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return False
             raise StorageError(
                 f"webdav GET HTTP {e.code} for {get_url}: {e.reason}"
             ) from e

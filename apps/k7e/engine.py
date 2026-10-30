@@ -825,11 +825,13 @@ def reindex(embeddings=False):
     conn.execute("DELETE FROM nodes")
     conn.execute("DELETE FROM nodes_fts")
     conn.execute("DELETE FROM edges")
-    conn.execute("DELETE FROM pending_embeddings")
     if embeddings:
+        conn.execute("DELETE FROM pending_embeddings")
         conn.execute("DELETE FROM embeddings")
     try:
         _fill_index(conn, embeddings)
+        conn.execute("DELETE FROM pending_embeddings WHERE node_id NOT IN "
+                     "(SELECT id FROM nodes WHERE status = 'active' AND kind = '')")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2458,9 +2460,9 @@ def _update_mocs(node_id, title, tags):
 def _set_frontmatter_key(text, key, value):
     """`text` with frontmatter `key` set to `value` — replaced in place when
     the key is already there, added above the closing fence when it is not."""
-    match = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    match = re.match(r"^---\n(.*?)\n---(?:\n|\Z)", text, re.DOTALL)
     if not match:
-        return text
+        raise ValueError("cannot update an entry without valid frontmatter")
     front = match.group(1)
     line = f"{key}: {value}"
     lines = front.splitlines()

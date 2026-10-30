@@ -280,13 +280,17 @@ class TestCmdShimsPropagateTheExitCode:
 
 class TestTheGuardsAreRoutedToAJobThatRunsThem:
     """The `.cmd` and `.ps1` guards above are globbed, and they live in the
-    a8s suite. The per-PR workflow routes by path, so a change to `r4t.ps1`
-    ran the r4t suite and never the guards — and `r4t.cmd` and `k7e.cmd` were
-    in no filter at all, so a change to either ran nothing. A guard that can
-    stay green by not running is the same defect as a guard that cannot fail.
+    a8s suite. A workflow that routed by path once ran the r4t suite for a
+    change to `r4t.ps1` and never the guards, and `r4t.cmd` and `k7e.cmd`
+    were in no filter at all. A guard that can stay green by not running is
+    the same defect as a guard that cannot fail.
 
-    Parsed rather than imported: the repo has no YAML reader, and the two
-    levels of indentation this block uses are enough to read by hand.
+    Certification now runs every suite on every candidate, so the guards run
+    whatever changed. These tests pin that: no path filter, and a matrix lane
+    for every suite, a8s included.
+
+    Parsed rather than imported: the repo has no YAML reader, and the matrix
+    rows are one flow mapping per line.
     """
 
     WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
@@ -295,54 +299,28 @@ class TestTheGuardsAreRoutedToAJobThatRunsThem:
         for path in REPO_ROOT.iterdir()
         if path.suffix in (".cmd", ".ps1")
     )
+    SUITES = {"repo", "a8s", "r4t", "k7e", "ar3", "tools"}
 
     @classmethod
-    def _filters(cls):
-        lines = cls.WORKFLOW.read_text(encoding="utf-8").splitlines()
-        start = next(i for i, line in enumerate(lines) if line.endswith("filters: |"))
-        indent = len(lines[start]) - len(lines[start].lstrip())
-        groups = {}
-        name = None
-        for line in lines[start + 1:]:
-            if line.strip() and (len(line) - len(line.lstrip())) <= indent:
-                break
-            body = line.strip()
-            if not body or body.startswith("#"):
-                continue
-            if body.startswith("- "):
-                if name is not None:
-                    groups[name].append(body[2:].strip().strip("'\""))
-            elif body.endswith(":") or " &" in body:
-                name = body.split(":")[0].strip()
-                groups[name] = []
-        return groups
+    def _lanes(cls):
+        text = cls.WORKFLOW.read_text(encoding="utf-8")
+        return re.findall(r"^\s*- \{app: ([\w-]+), lane: ([\w-]+),", text, re.M)
 
-    def test_the_block_was_parsed(self):
-        groups = self._filters()
-        assert {"shared", "shims", "a8s", "r4t", "k7e", "ar3"} <= set(groups), groups
+    def test_the_matrix_was_parsed(self):
+        assert self._lanes(), "no suite lanes found in the certification matrix"
         assert self.GUARDED, "no shims found to guard"
 
-    def test_the_a8s_job_receives_every_shim_the_guards_glob(self):
-        groups = self._filters()
-        assert "*shims" in groups["a8s"], (
-            "the a8s job holds the globbed shim guards, so the shim filter has "
-            "to reach it"
+    def test_no_path_filter_can_skip_a_suite(self):
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        assert "filters: |" not in text and "paths-filter" not in text, (
+            "certification must run every suite; a path filter lets a guard "
+            "stay green by not running"
         )
-        patterns = groups["shims"]
-        for name in self.GUARDED:
-            suffix = "*" + name[name.rindex("."):]
-            assert suffix in patterns or name in patterns, (
-                f"{name} is guarded by a globbed test but no filter routes it "
-                f"to the job that runs it: {patterns}"
-            )
 
-    def test_each_app_still_runs_its_own_suite_for_its_own_shims(self):
-        """Routing every shim to a8s must not cost the app its own run."""
-        groups = self._filters()
-        for app in ("r4t", "k7e", "ar3"):
-            for name in (app, f"{app}.cmd", f"{app}.ps1"):
-                if name in self.GUARDED or name in (app,):
-                    assert name in groups[app], f"{name} does not run the {app} suite"
+    def test_every_suite_has_a_lane_including_the_shim_guards(self):
+        apps = {app for app, _ in self._lanes()}
+        assert apps == self.SUITES, apps
+        assert "a8s" in apps, "the a8s suite holds the globbed shim guards"
 
 
 PWSH = shutil.which("pwsh")

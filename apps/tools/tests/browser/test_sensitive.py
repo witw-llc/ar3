@@ -508,22 +508,21 @@ def test_tabs_are_the_addresses_in_order_without_the_titles(browser):
     assert page.tabs() == [f"{ORIGIN}/", "https://outlook.office.com/mail/", "about:blank"]
 
 
-def test_a_title_with_brackets_does_not_confuse_the_list(browser, monkeypatch):
+def test_tab_titles_and_console_text_are_not_used(browser, monkeypatch):
     page, _run = make_page()
-    monkeypatch.setattr(
-        plc, "run", lambda seat, *args, **kwargs: "### Result\n- 0: (current) [Inbox [3] (work)](https://outlook.office.com/mail/)\n- 1: [](about:blank)\n",
-    )
-    assert page.tabs() == ["https://outlook.office.com/mail/", "about:blank"]
+    browser.tabs = ["https://outlook.office.com/mail/", "about:blank"]
+    monkeypatch.setattr(plc, "run", lambda *a, **k: pytest.fail("tab text was requested"))
+    assert page.tabs() == browser.tabs
 
 
-@pytest.mark.parametrize("output", [
-    "### Result\n", "### Result\nno tabs\n", "### Result\n- 1: [](about:blank)\n",
-    "### Result\n- 0: [](about:blank)\nstray\n", "### Result\n- 0: [](about:blank)\n- 0: [](about:blank)\n",
-])
-def test_a_list_that_cannot_be_read_is_an_error_and_not_an_empty_list(browser, monkeypatch, output):
+def test_an_unreadable_tab_list_fails_the_recipe(browser, monkeypatch):
     page, _run = make_page()
-    monkeypatch.setattr(plc, "run", lambda seat, *args, **kwargs: output)
-    with pytest.raises(plc.BrowserError, match="tabs:"):
+
+    def refused(seat):
+        raise plc.BrowserError("tabs: invalid structured tab list")
+
+    monkeypatch.setattr(session, "tabs", refused)
+    with pytest.raises(plc.BrowserError, match="tabs: invalid structured tab list"):
         page.tabs()
 
 

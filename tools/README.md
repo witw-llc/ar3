@@ -1,14 +1,66 @@
 # tools
 
-Repo-local checkers. Each one runs on demand, from a checkout, with no
-GitHub Actions minutes attached — that is the whole point. Actions minutes are
-metered on this repo and a release must never wait on a budget, so a checker
-runs "for real" in `release.yml`. The one exception is the wiki gardener,
-which also runs on every non-draft PR on the owner's self-hosted runner, where
-minutes are not metered: release 0.1.113 failed on it after the merge.
+Repo-local checkers run on demand from a checkout. Explicit full verification
+in `test.yml` runs the suites and policy gates before merge; `release.yml`
+checks the recorded evidence and current publication policy without repeating
+the suites. Pull-request events check current-tip evidence and privacy.
 
-Every tool here is stdlib-only Python and reads nothing but the paths it is
-given.
+The checkers and verification helper use stdlib-only Python; the shard adapter
+loads inside pytest. The verification helper uses the GitHub API, and the other
+checkers inspect their input paths.
+
+## `verification.py`
+
+Request full verification after review, including while the PR is draft:
+
+```bash
+gh workflow run test.yml --ref VERSION_BRANCH -f pr=PR_NUMBER
+```
+
+Select the open same-repository PR's head branch. The workflow captures its
+immutable SHA, validates the selection, and runs all six suite roots separately
+on Ubuntu 24.04 with Python 3.12. Suite failures do not cancel other lanes.
+The k7e scope excludes model-backed tests with `-m "not llm"`.
+Docker isolation, version/changelog, wiki, source audits, and both
+diff and whole-tree privacy checks are mandatory. Each run retains suite reports
+and a JSON record of SHA, tree, version, run/attempt and job conclusions.
+
+The `full-suite` commit status belongs to the exact tested SHA.
+A new tip needs new verification. An initializer reports absent or failed
+evidence without running suites. Status writers query the current run attempt
+and every mandatory job; artifacts alone never authorize success. A full rerun
+is required: a partial rerun without the complete attempt's job inventory is
+not certification. A failed newer attempt revokes the older result. The status
+can turn green just before its writer job exits; release additionally requires
+the entire run to have completed successfully.
+
+The `release.yml` lifecycle listener reconciles requested, running and completed
+manual verification runs, including cancellation that prevents either writer
+from executing. It shares the writers' per-SHA serialization and cannot publish.
+GitHub activates this listener only from the default branch: the first PR that
+introduces it uses direct certification writers; cancellation reconciliation
+becomes active once that workflow reaches main. Initializer checks and final
+release validation still reject canceled evidence during that bootstrap.
+
+`tools/verification.py` and the workflow are reviewed together as trusted
+same-repository code. The isolated status jobs fetch only this fixed helper at
+`GITHUB_WORKFLOW_SHA`; they perform no candidate checkout, execute no suites,
+and receive no publication key. This is evidence of the reviewed candidate's
+tests, not independent attestation of hostile workflow edits. Forks are refused.
+
+The `pii` job checks the diff and whole tracked tree on every PR event and
+manual certification. PR scans use the captured head and base SHAs; forks are
+refused before checkout, and missing privacy patterns fail the check. A failed
+privacy check also prevents full certification.
+
+Configure the main ruleset to require `full-suite` and `pii` from GitHub Actions
+and an up-to-date branch through an owner-approved repository settings change.
+The workflow files do not install or establish that external enforcement.
+Release finds the PR merged into its immutable main SHA, validates the
+GitHub run and jobs for that PR head, and requires identical Git trees. This
+supports squash merges while preventing publication of untested merged content.
+Current wiki and privacy patterns remain release gates. Immutable source audits
+run during certification. The owner alone merges.
 
 ## `wiki-gardener.py`
 
@@ -72,10 +124,9 @@ reason, whether a category is the right one, and whether two rows on one surface
 should actually merge, stay with the gardener.
 Renames are not checked at all — the tool's docstring says why.
 
-`test.yml` runs the tool over the wiki on every non-draft PR and `release.yml`
-on every release, both blocking. `tests/test_wiki_gardener.py` drives every check over
-miniature wikis built in `tmp_path`, and the tool and that test are routed into
-the per-PR `a8s` job so a change to either runs it.
+`test.yml` runs the tool during explicit certification and `release.yml` on
+every release, both blocking. `tests/test_wiki_gardener.py` drives every check
+over miniature wikis built in `tmp_path`, in the certification's repository suite.
 
 ## `claim-sweep.py`
 
@@ -113,8 +164,7 @@ above it suppresses nothing and fails the run instead. The reason sits above
 the pattern rather than after a `#` on the same line, the way
 `surface-audit.allow` writes one, because `#` is a character a regex may need.
 
-`release.yml` runs it on every release, blocking: the tree reports clean as of
-2026-09-03.
+The certification policy job in `test.yml` runs this as a blocking check.
 
 ## `surface-audit.py`
 
@@ -180,10 +230,8 @@ and a line without one fails the check the same way an unaccounted item does.
 The tool also names a line it no longer needs, so the file shrinks as the
 suite is wired. Deleting the last line is the win condition.
 
-`release.yml` runs this on every release. `tests/test_surface_audit.py` drives
-the classifier over a fixture suite, and the tool, its allowlist and that test
-are all routed into the per-PR `a8s` job, so a change to any of the three runs
-it.
+The certification policy job runs this check. `tests/test_surface_audit.py`
+drives the classifier over a fixture suite in the full repository test lane.
 
 ## `changelog-heading.py`
 
@@ -198,9 +246,8 @@ tools/changelog-heading.py 0.1.96 --changelog PATH
 ```
 
 Exit 0 and silent when the changelog is ready to ship that version. Exit 1
-with a one-line message naming the fix otherwise. The per-PR `version` job
-runs this against `VERSION` on every PR, before merge, at no cost beyond the
-job it already runs in.
+with a one-line message naming the fix otherwise. Certification and release
+both run this against `VERSION`.
 
 ## `changelog-closes.py`
 
@@ -233,8 +280,32 @@ tools/version-bump.py 0.1.95 1.0.0
 
 Exit 0 and silent when the PR's version is one of the three allowed next
 versions. Exit 1 with a one-line message naming all three otherwise. The
-per-PR `version` job runs this against `main`'s `VERSION` on every PR.
+certification policy job compares against `main`; release compares against
+the preceding main commit.
 
 ## Process launch policy
 
-Run `python3 tools/process-launch-audit.py` to check every production Python subprocess in apps, foundation, repository tools and CI helpers. Each launch must call `ar3.proc.launch_options`; Windows flags belong only to the foundation. Intentional inherited-console launches declare `interactive=True`. Test fixtures, vendored code and archived experiments are excluded. `--self-test` checks alias detection and bypass rejection. The release workflow runs both.
+Run `python3 tools/process-launch-audit.py` to check every production Python subprocess in apps, foundation, repository tools and CI helpers. Each launch must call `ar3.proc.launch_options`; Windows flags belong only to the foundation. Intentional inherited-console launches declare `interactive=True`. Test fixtures, vendored code and archived experiments are excluded. `--self-test` checks alias detection and bypass rejection. The certification policy job runs both.
+
+
+Certification partitions the complete a8s and r4t collections into two isolated
+VM jobs each; the other four suites each retain one job. `shard_plugin.py`
+collects exactly the whole application before assigning whole modules. It refuses
+pytest filters and narrower roots. `shard_weights.json` contains approximate
+module costs from timestamped progress blocks, not measured per-test durations;
+unknown modules remain included with a deterministic default weight. Randomized
+parameter values require stable explicit pytest case IDs; the sync-marker URL
+cases retain their random inputs and assertions with descriptive IDs.
+
+Each shard retains full, selected, and actually started node IDs, digests, exact
+checkout SHA, run ID, and attempt. The record job validates the exact artifact
+set, bounded JSON schemas, identical full inventories, whole-module assignment,
+and exhaustive disjoint execution before recording complete coverage. GitHub's
+native mandatory job/run results remain authoritative; artifact claims alone
+cannot certify a commit. Collection-only receipts cannot certify execution.
+All eight lanes retain JUnit and report the 30 slowest durations.
+
+The owner's timing target is seven minutes with a ten-minute ceiling. These are
+targets, not measured achievements. Record certification and publication elapsed
+times separately; use the first full certification's job/JUnit timings to assess
+the allocation before claiming the target is met.

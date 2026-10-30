@@ -160,13 +160,7 @@ def _command(argv):
 
 
 def stop_process(proc):
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, **launch_options())
-        if proc.poll() is None:
-            proc.kill()
-    else:
-        terminate_group(proc)
+    terminate_group(proc)
 
 
 def memory_argv(argv):
@@ -271,6 +265,11 @@ def worker(home):
                     break
                 job = pending[0]
                 marker = json.loads(job.read_text(encoding="utf-8"))
+                if marker.get("attempts", 0) >= JOB_ATTEMPTS:
+                    (home / "queue" / "failed").mkdir(exist_ok=True)
+                    job.replace(home / "queue" / "failed" / job.name)
+                    note(f"{job.name}: moved to queue/failed after {JOB_ATTEMPTS} attempts")
+                    continue
                 marker["attempts"] = marker.get("attempts", 0) + 1
                 # Counted before the run, so a job that kills its worker still exhausts.
                 atomic_write_text(job, json.dumps(marker), fsync=True, mode=0o600)

@@ -145,7 +145,9 @@ the rest wait. Entries that expire (`valid_to`) are never folded or counted.
 ## Maintenance
 
 ### `reindex [--embeddings]`
-Rebuild `.index.db` from the markdown files. `--embeddings` recomputes vectors.
+Rebuild `.index.db` from the markdown files. Plain reindex preserves queued
+embedding work for active operational entries and makes no embedding requests.
+Deleted, retired and archive entries leave that queue. `--embeddings` recomputes vectors.
 Resets the `use_count`/`last_used_at` ranking signals (by design).
 
 ### `embed-pending [--json]`

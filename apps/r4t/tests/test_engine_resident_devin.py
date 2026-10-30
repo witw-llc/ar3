@@ -259,6 +259,24 @@ def test_terminal_prompt_error_does_not_release_queued_turn(tmp_path):
     assert not parsed.replies
 
 
+def test_long_held_prompt_is_redated_and_noted_once(tmp_path, monkeypatch):
+    from engines import held_input
+
+    obj = session(tmp_path)
+    settle(obj)
+    first = json.loads(obj.turn_lines('first')[0])
+    order = '[t] alice tells bob (4 seconds ago): ship'
+    assert obj.turn_lines(held_input.QueuedText.from_items(
+        [{'message': order, 'queued_at': 0.0}])) == []
+    monkeypatch.setattr(held_input, '_now', lambda: 5 * 60.0)
+    parsed = obj.on_frame({'id': first['id'], 'result': {'stopReason': 'end_turn'}})
+    (line,) = parsed.replies
+    sent = json.loads(line)['params']['prompt'][0]['text']
+    assert sent.startswith('[This input was held 5 minutes')
+    assert sent.endswith('[t] alice tells bob (5 minutes ago): ship')
+    assert not obj.held
+
+
 @pytest.fixture
 def native_tell_permission():
     from pathlib import Path

@@ -26,9 +26,9 @@ background child it leaves in that session is killed when the command ends, by
 exit, by the timeout, or by a stop signal to the tool (a8s ending the wake),
 which kills the tree first and then takes effect. The handler for a stop is in
 place before the command starts, and a stop that comes while the command is
-being started waits for it and then takes it down. On Windows the tree is killed through `taskkill /T`, and a stop from
-a8s is a plain TerminateProcess that no handler sees, so the command is on its
-own there; the drain after a kill is bounded either way.
+being started waits for it and then takes it down. On Windows the tree is killed through `taskkill /T`, and a8s
+ending the wake kills the wake's tree the same way, so the command goes with it while its parents still run; the drain
+after a kill is bounded either way.
 """
 from __future__ import annotations
 
@@ -120,20 +120,9 @@ def _group_alive(proc: subprocess.Popen) -> bool:
 
 
 def _kill_tree(proc: subprocess.Popen, *, grace_seconds: float = 0.5) -> None:
-    """The command and everything it started. POSIX: the foundation's group
-    kill, which reaches the whole session the command leads. Windows: the
-    foundation stops at the shell process (there is no group), so `taskkill
-    /T` takes the tree, as a command runner is exactly the case of a shell
-    that starts children."""
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **launch_options(),
-        )
-        if proc.poll() is None:
-            proc.kill()
-        return
+    """The command and everything it started: the foundation's group kill,
+    which reaches the whole session the command leads on POSIX and the
+    process tree (`taskkill /T`) on Windows."""
     terminate_group(proc, grace_seconds=grace_seconds)
 
 

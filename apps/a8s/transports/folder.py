@@ -204,6 +204,9 @@ class FolderTransport(Transport):
         self._started = False
         self._reachable = False
         self._last_sweep = 0.0
+        self._publishing: dict[str, int] = {}
+        # Only bookkeeping holds this lock, never I/O or a callback.
+        self._publishing_lock = threading.Lock()
 
     @staticmethod
     def _resolve_poll_seconds(remote_id: str, opts: dict) -> float:
@@ -415,30 +418,47 @@ class FolderTransport(Transport):
             raise TransportError(
                 f"{self._remote_id}: envelope is not a JSON object with a ULID id"
             )
-        staging = self._base / f".{msg_id}.json.part"
+        # Cover the visible-file/ledger gap without losing an overlapping
+        # publisher's guard when another attempt finishes or fails.
+        key = msg_id.upper()
+        with self._publishing_lock:
+            self._publishing[key] = self._publishing.get(key, 0) + 1
         try:
-            self._base.mkdir(parents=True, exist_ok=True)
-            staging.write_bytes(envelope)
-            # Retried: a sync client or a scanner opens a new file in a watched
-            # folder the moment it appears, and on Windows a rename of a file
-            # somebody else holds fails outright. Losing the race here would
-            # drop the message.
-            replace_with_retry(staging, self._base / f"{msg_id}.json")
-        except OSError as e:
-            # Single attempt: the replace retry already spent its budget, and a
-            # .part left behind is inert — the envelope glob never matches it,
-            # and a later send of the same envelope overwrites the same name.
+            staging = self._base / f".{msg_id}.json.part"
             try:
-                staging.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise TransportError(
-                f"{self._remote_id}: folder write failed: {e}"
-            ) from e
-        # We publish into the folder we read from, so our own envelope is
-        # consumed the moment it is written.
-        self._ledger.record(msg_id)
-        self._sweep()
+                self._base.mkdir(parents=True, exist_ok=True)
+                staging.write_bytes(envelope)
+                # Retried: a sync client or a scanner opens a new file in a watched
+                # folder the moment it appears, and on Windows a rename of a file
+                # somebody else holds fails outright. Losing the race here would
+                # drop the message.
+                replace_with_retry(staging, self._base / f"{msg_id}.json")
+            except OSError as e:
+                # Single attempt: the replace retry already spent its budget, and a
+                # .part left behind is inert — the envelope glob never matches it,
+                # and a later send of the same envelope overwrites the same name.
+                try:
+                    staging.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise TransportError(
+                    f"{self._remote_id}: folder write failed: {e}"
+                ) from e
+            # Record only after visibility: ledger compaction prunes IDs whose
+            # envelopes are absent. The in-flight guard covers the gap.
+            self._ledger.record(msg_id)
+            self._sweep()
+        finally:
+            with self._publishing_lock:
+                remaining = self._publishing[key] - 1
+                if remaining:
+                    self._publishing[key] = remaining
+                else:
+                    del self._publishing[key]
+
+    def _consumed_or_publishing(self, msg_id: str) -> bool:
+        with self._publishing_lock:
+            return msg_id.upper() in self._publishing or msg_id in self._ledger
 
     # ---------- poll ----------
 
@@ -453,7 +473,7 @@ class FolderTransport(Transport):
         self._sweep()
         for path in self._listing():
             stem = path.stem
-            if stem in self._ledger:
+            if self._consumed_or_publishing(stem):
                 continue
             try:
                 raw = path.read_bytes()
@@ -472,6 +492,8 @@ class FolderTransport(Transport):
                     f"WARN: remote {self._remote_id}: {path.name} is not a "
                     f"whole envelope yet",
                 )
+                continue
+            if self._consumed_or_publishing(stem):
                 continue
             cb = self._on_message
             if cb is None:

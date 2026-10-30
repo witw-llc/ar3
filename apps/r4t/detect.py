@@ -148,7 +148,7 @@ def _read_fuel(row: Detection, fuel_fn) -> None:
         return
     row.fuel = payload.get("fuel")
     row.fuel_state = payload.get("state")
-    row.plan = payload.get("plan")
+    row.plan = engines.plan_label(payload.get("plan"))
     row.origin = payload.get("origin")
     row.age_seconds = payload.get("age_seconds")
     if payload.get("note"):

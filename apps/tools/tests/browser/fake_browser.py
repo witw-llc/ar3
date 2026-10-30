@@ -63,8 +63,10 @@ class FakeBrowser:
         monkeypatch.setattr(plc, "call_in_page", self._call_in_page)
         monkeypatch.setattr(plc, "wait_for_selector", self._wait_for_selector)
         monkeypatch.setattr(session, "pages", self._pages)
+        monkeypatch.setattr(session, "tabs", self._tabs)
         monkeypatch.setattr(session, "close_page", self._close_page)
         monkeypatch.setattr(plc, "screenshot", self._screenshot)
+        monkeypatch.setattr(session, "indexed_screenshot", lambda seat, page_id, path: self._screenshot(seat, path))
         monkeypatch.setattr(plc, "fill_secret", self._fill_secret)
         monkeypatch.setattr(resolve, "click_target", lambda seat, argument: argument)
         monkeypatch.setattr(resolve, "fill_target", lambda seat, argument: argument)
@@ -94,6 +96,12 @@ class FakeBrowser:
             return None
         # The id of a page is its address here, which is stable while others close; Chrome's own ids are opaque.
         return [(url, url) for url in self.tabs]
+
+    def _tabs(self, seat):
+        self.check_open()
+        self.calls.append(("tabs",))
+        return [{"id": f"target-{index}", "url": url, "selected": index == self.tab}
+                for index, url in enumerate(self.tabs)]
 
     def _close_page(self, seat, page_id):
         if not self.devtools or page_id not in self.tabs or page_id in self.stuck:

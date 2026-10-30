@@ -328,6 +328,11 @@ def binding_index(buckets: list[dict]) -> int | None:
     return min(gauged, key=lambda i: buckets[i]["remaining_fraction"])
 
 
+def plan_label(plan: object) -> str | None:
+    """A plan label suitable for rig reports, excluding account identifiers."""
+    return plan if isinstance(plan, str) and "@" not in plan else None
+
+
 def fuel(preset_or_engine: str, model: str | None = None, spend: bool = False) -> dict:
     """How much tank is left for one model on one engine: the engine's quota,
     narrowed to the buckets that model burns, reduced to the binding one.
@@ -365,7 +370,7 @@ def fuel(preset_or_engine: str, model: str | None = None, spend: bool = False) -
         "binding_reset": binding.get("reset_time") if binding else None,
         "origin": payload.get("origin"),
         "age_seconds": payload.get("age_seconds"),
-        "plan": payload.get("plan"),
+        "plan": plan_label(payload.get("plan")),
         "buckets": buckets,
         "note": payload.get("note"),
     }

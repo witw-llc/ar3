@@ -16,6 +16,12 @@ resolve it, `pid` itself stands in as the pgid — true whenever `pid` names a
 equal to its own pid by construction — and only a `killpg` failure on that
 guess falls back further, to a plain kill of the pid itself.
 
+Windows has no process group to signal, and no signal a windowless process
+can catch, so `terminate_group` ends the process TREE there at once with
+`taskkill /T /F`: the process and every descendant still linked to it by
+parent pid. A descendant whose parent already exited is not linked and is
+not reached.
+
 `pid_alive` and `process_start_token` are the two halves of reading a pid
 file: the first says a process holds the number, the second says which one,
 so a pid the OS handed to another process after a reboot does not read as
@@ -159,10 +165,33 @@ def _signal_pgid(pgid: int, pid: int, sig: int) -> None:
             pass
 
 
+def _end_tree(pid: int) -> None:
+    """`taskkill /T /F` on `pid` and its descendants. When taskkill cannot
+    run or does not succeed, `pid` alone is ended (`os.kill` is
+    `TerminateProcess` on Windows)."""
+    try:
+        done = subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **launch_options(),
+        )
+        if done.returncode == 0:
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+
+
 def terminate_group(proc: subprocess.Popen | int, *, grace_seconds: float = 0.5) -> None:
     """SIGTERM `proc`'s process group, wait `grace_seconds`, then SIGKILL it.
-    `proc` is a `Popen` (its `.pid` is used) or a bare pid. No-op on Windows
-    beyond a plain `SIGTERM`/`kill` — there is no process group to target.
+    `proc` is a `Popen` (its `.pid` is used) or a bare pid. On Windows it
+    ends the process tree at once (`_end_tree`); there is no group and no
+    grace there.
 
     The pgid is captured once, before SIGTERM, and reused for SIGKILL. A
     group leader that can exit during the grace period (while a grandchild
@@ -180,10 +209,7 @@ def terminate_group(proc: subprocess.Popen | int, *, grace_seconds: float = 0.5)
     falls back to a plain kill of the pid itself."""
     pid = proc.pid if isinstance(proc, subprocess.Popen) else proc
     if os.name != "posix":
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+        _end_tree(pid)
         return
     try:
         pgid = os.getpgid(pid)

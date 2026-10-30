@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ar3.fsio import stat_or_none
-from ar3.proc import launch_options
+from ar3.proc import launch_options, process_start_token, terminate_group
 
 import autostart
 
@@ -50,7 +50,9 @@ from core import (
     pid_path,
     read_last_wake,
     read_wake_pid,
+    read_wake_unit,
     s3_ledger_path,
+    stop_request_path,
     trash_dir,
     unique_path,
     user_definitions_dir,
@@ -91,6 +93,7 @@ from daemon import (
     run_stop_hook_if_owed,
     _clear_detach_request,
     _clear_kill_request,
+    _clear_stop_request,
     _read_handler_pid,
     _read_handler_pid_locked,
     _unlink_pid_files,
@@ -98,6 +101,7 @@ from daemon import (
     pid_lock,
     _dead_letter,
     _write_kill_request,
+    _write_stop_request,
     attached_loop,
 )
 from network import (
@@ -110,13 +114,16 @@ from network import (
     deps_group_for,
     detect_service_kind,
     load_network_config,
+    load_secrets_config,
     merge_remote_secrets,
     merge_spec_secrets,
     put_remote_secrets,
     put_spec_secrets,
     save_network_config,
+    secret_warning_lines,
     split_secret_keys,
     transport_deps_group_for,
+    unusable_secret_entries,
 )
 from registry import (
     _scan_for_markers,
@@ -970,7 +977,10 @@ def cmd_ls(args: list[str] | None = None) -> int:
     with DEFINITION `remote` and the local time each last reached us. Without
     them the command answers "what runs here" while reading as "what can I
     reach", and an agent told to message a name it cannot find in `ls` goes
-    looking for a fault instead of sending."""
+    looking for a fault instead of sending.
+
+    A footer names each remote or storage entry whose stored password is not
+    used, with the command that stores it again (#322)."""
     from listing import arguments
 
     options = arguments("ls", args or [])
@@ -997,6 +1007,7 @@ def cmd_ls(args: list[str] | None = None) -> int:
         if not quiet:
             print("(no matching nodes)" if options.local or options.remote or options.since
                   else "(no nodes registered — use `a8s add <name> <dir>`)")
+            _print_secret_warning()
         return 0
 
     if quiet:
@@ -1031,7 +1042,18 @@ def cmd_ls(args: list[str] | None = None) -> int:
         _print_table(["NAME", "STATUS", "DEFINITION", "ROOT", "NAMESPACES"], rows)
     else:
         _print_table(["NAME", "STATUS", "DEFINITION", "ROOT"], [r[:4] for r in rows])
+    _print_secret_warning()
     return 0
+
+
+def _print_secret_warning() -> None:
+    """The `a8s ps` / `a8s ls` footer for a stored password a reader drops
+    (#322). Prints nothing when every stored password is usable. Names the
+    entry and the command that fixes it, never the password."""
+    for line in secret_warning_lines(
+        unusable_secret_entries(load_network_config(), load_secrets_config())
+    ):
+        print(line)
 
 
 def cmd_discover(args: list[str]) -> int:
@@ -1797,6 +1819,7 @@ def cmd_step(args: list[str], interval: float) -> int:
 STOP_WAIT_S = 600.0
 STOP_FORCE_GRACE_S = 8.0
 STOP_KILL_WAIT_S = 5.0
+STOP_SUSPEND_CONFIRM_S = 1.0
 STOP_POLL_S = 0.1
 
 
@@ -1848,18 +1871,11 @@ def cmd_stop(args: list[str]) -> int:
     return _each_name(rest, lambda name: _stop_one(name, force, disarm=not keep))
 
 
-def _hard_kill_targets(
-    posix: bool, handler_pid: int, wake_pid: int | None
-) -> list[tuple[str, int]]:
-    """What `stop --force` kills when the handler has not detached: the wake
-    first, so it is not orphaned, then the handler. A POSIX wake leads its own
-    session, so its group takes the CLI's helpers with it. Windows has no group
-    to aim at, and `os.kill` there already ends the process outright."""
-    targets: list[tuple[str, int]] = []
-    if wake_pid is not None:
-        targets.append(("group" if posix else "pid", wake_pid))
-    targets.append(("pid", handler_pid))
-    return targets
+def _wake_kill_target(posix: bool, wake_pid: int) -> tuple[str, int]:
+    """How `_kill_outright` kills a wake. A POSIX wake leads its own session,
+    so its group takes the CLI's helpers with it. Windows has no group to aim
+    at, so the wake's process tree goes instead."""
+    return ("group" if posix else "tree", wake_pid)
 
 
 def _hard_kill(targets: list[tuple[str, int]]) -> None:
@@ -1868,10 +1884,358 @@ def _hard_kill(targets: list[tuple[str, int]]) -> None:
         try:
             if kind == "group":
                 os.killpg(pid, sig)
+            elif kind == "tree":
+                terminate_group(pid)
             else:
                 os.kill(pid, sig)
         except OSError:
             pass
+
+
+def _nt_process_call(pid: int, entry: str) -> bool:
+    """Call the ntdll process routine `entry` (`NtSuspendProcess` or
+    `NtResumeProcess`) on `pid`. True when the call returns NTSTATUS 0; False
+    when the process cannot be opened or the call fails. Not run natively
+    here: tests mock the DLLs."""
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    PROCESS_SUSPEND_RESUME = 0x0800
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    routine = getattr(ntdll, entry)
+    routine.argtypes = [ctypes.c_void_p]
+    handle = kernel32.OpenProcess(PROCESS_SUSPEND_RESUME, False, pid)
+    if not handle:
+        return False
+    try:
+        return routine(handle) == 0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _process_stopped(pid: int) -> bool:
+    """Whether the kernel reports `pid` stopped (state `T`). Linux reads
+    `/proc`; other POSIX systems ask `ps`."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        fields = stat[stat.rfind(")") + 1:].split()
+        return bool(fields) and fields[0] in ("T", "t")
+    except OSError:
+        pass
+    try:
+        done = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, **launch_options(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "T" in done.stdout
+
+
+def _resume_process(pid: int) -> bool:
+    """Undo `_suspend_process`."""
+    try:
+        if hasattr(signal, "SIGCONT"):
+            os.kill(pid, signal.SIGCONT)
+            return True
+        return _nt_process_call(pid, "NtResumeProcess")
+    except (OSError, AttributeError):
+        return False
+
+
+def _suspend_process(pid: int) -> bool:
+    """Freeze `pid` and say whether it is frozen. `SIGSTOP` is asynchronous, so
+    POSIX confirms the stopped state for up to `STOP_SUSPEND_CONFIRM_S`; a stop
+    that cannot be confirmed is cancelled with `SIGCONT`. Windows confirms by
+    the status `NtSuspendProcess` returns. A False answer is never an error:
+    the caller tears down without a freeze."""
+    try:
+        if not hasattr(signal, "SIGSTOP"):
+            return _nt_process_call(pid, "NtSuspendProcess")
+        os.kill(pid, signal.SIGSTOP)
+    except (OSError, AttributeError):
+        return False
+    deadline = time.monotonic() + STOP_SUSPEND_CONFIRM_S
+    while not _process_stopped(pid):
+        if time.monotonic() >= deadline:
+            _resume_process(pid)
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _windows_child_pids(pid: int) -> list[int]:
+    """Direct children of `pid` from a Toolhelp process snapshot."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    TH32CS_SNAPPROCESS = 0x2
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel32.Process32FirstW.argtypes = kernel32.Process32NextW.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ProcessEntry),
+    ]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot in (None, ctypes.c_void_p(-1).value):
+        return []
+    children: list[int] = []
+    try:
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(ProcessEntry)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32ParentProcessID == pid and entry.th32ProcessID != pid:
+                children.append(entry.th32ProcessID)
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return children
+
+
+def _child_pids(pid: int) -> list[int]:
+    """The direct children of `pid`. Linux reads `/proc`, which every process
+    can read; other POSIX systems ask `ps`; Windows asks a Toolhelp snapshot.
+    Empty when the platform will not say."""
+    if os.name == "nt":
+        try:
+            return _windows_child_pids(pid)
+        except (OSError, AttributeError):
+            return []
+    proc = Path("/proc")
+    if (proc / "self" / "stat").exists():
+        children = []
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+            except OSError:
+                continue
+            fields = stat[stat.rfind(")") + 1:].split()
+            if len(fields) > 1 and fields[1] == str(pid):
+                children.append(int(entry.name))
+        return children
+    try:
+        done = subprocess.run(
+            ["ps", "-A", "-o", "pid=,ppid="],
+            capture_output=True, text=True, timeout=5,
+            **launch_options(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children = []
+    for line in done.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == str(pid) and fields[0].isdigit():
+            children.append(int(fields[0]))
+    return children
+
+
+def _windows_start_token(pid: int) -> str | None:
+    """`pid`'s creation time (`GetProcessTimes`), which names one process
+    start. None when the process cannot be opened."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user),
+        ):
+            return None
+        return f"{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _start_token(pid: int) -> str | None:
+    """Which process holds `pid`: two reads agree only for one process. None
+    means the process is gone or cannot be read, and then nothing is killed on
+    its pid."""
+    if os.name == "nt":
+        try:
+            return _windows_start_token(pid)
+        except (OSError, AttributeError):
+            return None
+    return process_start_token(pid)
+
+
+def _kill_unrecorded_child(child: int, token: str, posix: bool) -> None:
+    """Kill one direct child of a frozen handler, and what it started. Every
+    kill is preceded by a check that `child` still holds the pid it had when it
+    was listed, so a pid that was reused is never killed.
+
+    A POSIX child that leads its own group takes that group. Any other child
+    shares the handler's group, which may be a terminal's, so it is frozen,
+    its descendants are listed (each frozen in turn, so none forks while the
+    list is built), and each is killed alone. Windows ends the child's tree."""
+    if not posix:
+        if _start_token(child) == token:
+            _hard_kill([("tree", child)])
+        return
+    try:
+        leads = os.getpgid(child) == child
+    except OSError:
+        leads = False
+    if leads:
+        if _start_token(child) == token:
+            _hard_kill([("group", child)])
+        return
+    found: list[tuple[int, str]] = []
+    queue = [(child, token)]
+    while queue:
+        pid, tok = queue.pop()
+        if _start_token(pid) != tok:
+            continue
+        _suspend_process(pid)
+        found.append((pid, tok))
+        for grandchild in _child_pids(pid):
+            grand = _start_token(grandchild)
+            if grand is not None:
+                queue.append((grandchild, grand))
+    for pid, tok in found:
+        if _start_token(pid) == tok:
+            _hard_kill([("pid", pid)])
+
+
+def _kill_outright(
+    handlers: dict[int, str],
+    wakes: dict[str, tuple[int, int, list[str]]],
+    members: list[str],
+    affected: list[str],
+    reason: str,
+) -> bool:
+    """Kill each live handler in `handlers` with its wake, then settle what
+    they leave: their pid files and requests go, and a wake that did not
+    settle has its mail marked dead letters. True once they have let go.
+
+    Killing the processes: the handler is frozen first and killed last. Frozen
+    and confirmed stopped, it starts no wake and holds the pipes its wake
+    writes to, so the wake's leader is still alive when its record is read and
+    its group (its tree on Windows) takes the CLI's helpers with it. The wake
+    comes from its record at that point, not from `wakes`: a handler idle when
+    `wakes` was read may have started one since. Every direct child of the
+    frozen handler the record did not name is killed too, with its
+    descendants, which covers a child started and not yet recorded; the
+    stop hook the handler started is the one child spared, because the stop
+    waits for it. Then the handler dies. A handler that cannot be frozen (the
+    freeze failed or was not confirmed) is torn down in a bounded order
+    instead: the wake its record names, then the handler, then whatever wake
+    its record names now. No exit leaves a handler stopped: each is killed or
+    resumed.
+
+    The limit: a wake leader that exits on its own before the stop has killed
+    it (before the freeze, or during it) takes its record's pid with it. Its
+    children are then not found and run on, because the stop kills no pid it
+    cannot prove it owns.
+
+    Settling the mail is separate from killing: a wake record that survives
+    the handler proves a wake that did not settle, whether or not the stop
+    found its processes. Its envelopes become dead letters, from the record
+    (a claim names them before the wake has a pid). `wakes` is updated with
+    what was settled, for the caller's report."""
+    posix = not IS_WINDOWS
+    owner = {n: w[0] for n, w in wakes.items() if w[0] in handlers}
+    for n in affected:
+        pid = _read_handler_pid(n)
+        if pid in handlers:
+            owner[n] = pid
+    live = [pid for pid in handlers if _pid_alive(pid)]
+    frozen: set[int] = set()
+    killed: set[int] = set()
+    gone: set[int] = set()
+
+    def kill_wake(n: str, handler: int) -> None:
+        wake = read_wake_pid(n)
+        if wake is not None and wake[0] not in gone:
+            _hard_kill([_wake_kill_target(posix, wake[0])])
+            gone.add(wake[0])
+            wakes[n] = (handler, wake[0], wake[1])
+
+    try:
+        for pid in live:
+            if _suspend_process(pid):
+                frozen.add(pid)
+            else:
+                print(
+                    f"{handlers[pid]}: could not freeze PID {pid}; "
+                    "ending its wake, then it",
+                    file=sys.stderr,
+                )
+        for n, handler in owner.items():
+            if handler in live:
+                kill_wake(n, handler)
+        hooks = {
+            mark["pid"] for mark in map(read_stop_hook_mark, affected)
+            if mark and mark.get("state") == "running" and isinstance(mark.get("pid"), int)
+        }
+        for pid in frozen:
+            listed = [(c, _start_token(c)) for c in _child_pids(pid)]
+            for child, token in listed:
+                if token is not None and child not in gone and child not in hooks:
+                    _kill_unrecorded_child(child, token, posix)
+                    gone.add(child)
+        for pid in live:
+            _hard_kill([("pid", pid)])
+            killed.add(pid)
+            txlog.log("RUN_STOP", sender=handlers[pid], detail=f"killed by {reason}")
+            print(f"{handlers[pid]}: killed PID {pid}")
+    finally:
+        for pid in frozen - killed:
+            _resume_process(pid)
+    stopped = _wait_handlers_stopped(members, set(handlers), STOP_KILL_WAIT_S)
+    for n, handler in owner.items():
+        if handler in live and handler not in frozen:
+            kill_wake(n, handler)
+    for n in affected:
+        unit = read_wake_unit(n)
+        _clear_dead_handler_files(n)
+        if unit is not None and _read_handler_pid(n) is None:
+            _dead_letter(n, unit, f"wake killed by {reason}")
+            held = wakes.get(n, (owner.get(n, 0), 0, unit))
+            wakes[n] = (held[0], held[1], unit)
+    return stopped
+
+
+def _unheard_stop_requests(handlers: dict[int, str]) -> dict[int, str]:
+    """The handlers still alive `STOP_FORCE_GRACE_S` after their stop request
+    was written that have not taken it: they cannot act on one."""
+    deadline = time.time() + STOP_FORCE_GRACE_S
+    pending = dict(handlers)
+    while True:
+        pending = {
+            pid: label for pid, label in pending.items()
+            if stop_request_path(label).is_file() and _pid_alive(pid)
+        }
+        if not pending or time.time() >= deadline:
+            return pending
+        time.sleep(STOP_POLL_S)
 
 
 def _disarm(nodes: list[str], failures: list[str]) -> None:
@@ -1915,6 +2279,13 @@ def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) ->
     are reported. A wake the force kills is a failed wake: its mail is a dead
     letter, and the stop prints the message ids. A handler killed outright
     cannot settle its wake, so the stop marks that wake's mail itself.
+
+    On Windows `os.kill` is `TerminateProcess`: it would end the handler with
+    no chance to end its wake. There the signals are a stop request instead
+    (`stop_request_path`), level 1 for a plain stop and 2 for ``--force``,
+    and the handler acts on it as on that many signals. A handler that has
+    not taken its request `STOP_FORCE_GRACE_S` later cannot act on one, so
+    even a plain stop kills it outright, then its wake's tree.
     """
     members = _expand_to_agents(name)
     if members is None:
@@ -1943,7 +2314,7 @@ def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) ->
     if disarm:
         _disarm([n for n in affected if n not in members], failures)
     wakes: dict[str, tuple[int, int, list[str]]] = {}
-    if force:
+    if force or IS_WINDOWS:
         for n in affected:
             handler, wake = _read_handler_pid(n), read_wake_pid(n)
             if handler in seen_pids and wake is not None:
@@ -1952,12 +2323,28 @@ def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) ->
     for n in held:
         clear_stop_hook_mark(n)
     for pid, label in seen_pids.items():
+        if IS_WINDOWS:
+            _write_stop_request(label, os.getpid(), force)
+            print(f"{label}: sent {'force ' if force else ''}stop request to PID {pid}")
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             print(f"{label}: sent SIGTERM to PID {pid}")
         except OSError as e:
             print(f"{label}: could not signal PID {pid}: {e}", file=sys.stderr)
-    if force:
+    killed = wakes if force else {}
+    if IS_WINDOWS and not force:
+        unheard = _unheard_stop_requests(seen_pids)
+        if unheard:
+            for pid, label in unheard.items():
+                print(
+                    f"{label}: PID {pid} did not take the stop request within "
+                    f"{STOP_FORCE_GRACE_S:g}s — killing it",
+                    file=sys.stderr,
+                )
+            _kill_outright(unheard, wakes, members, affected, "`a8s stop`")
+            killed = {n: w for n, w in wakes.items() if w[0] in unheard}
+    if force and not IS_WINDOWS:
         time.sleep(0.05)
         for pid, label in seen_pids.items():
             try:
@@ -1972,19 +2359,10 @@ def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) ->
     stopped = _wait_handlers_stopped(members, set(seen_pids), wait_s)
     if not stopped and force:
         print(f"still attached after {wait_s:g}s — killing it", file=sys.stderr)
-        for pid, label in seen_pids.items():
-            if not _pid_alive(pid):
-                continue
-            wake_pid = next((w for h, w, _ in wakes.values() if h == pid), None)
-            _hard_kill(_hard_kill_targets(os.name == "posix", pid, wake_pid))
-            txlog.log("RUN_STOP", sender=label, detail="killed by `a8s stop --force`")
-            print(f"{label}: killed PID {pid}")
-        stopped = _wait_handlers_stopped(members, set(seen_pids), STOP_KILL_WAIT_S)
-        for n in affected:
-            unsettled = n in wakes and wake_pid_path(n).is_file()
-            _clear_dead_handler_files(n)
-            if unsettled and _read_handler_pid(n) is None:
-                _dead_letter(n, wakes[n][2], "wake killed by `a8s stop --force`")
+        stopped = _kill_outright(seen_pids, wakes, members, affected, "`a8s stop --force`")
+    if IS_WINDOWS:
+        for label in seen_pids.values():
+            _clear_stop_request(label)
     for n, handler in held.items():
         if handler is not None:
             run_stop_hook_if_owed(n, handler)
@@ -2003,11 +2381,16 @@ def _stop_handlers(name: str, force: bool, disarm: bool, failures: list[str]) ->
     for n in affected:
         if n not in members:
             print(f"{n}: stopped too; it shared the handler with {name}")
-    for n, (_, _, unit) in wakes.items():
+    _report_dead_letters(killed)
+    return 0
+
+
+def _report_dead_letters(killed: dict[str, tuple[int, int, list[str]]]) -> None:
+    """Name the messages of each killed wake that are now dead letters."""
+    for n, (_, _, unit) in killed.items():
         dead = [Path(f).stem for f in unit if (dead_letters_dir(n) / f).is_file()]
         if dead:
             print(f"{n}: the killed wake's {len(dead)} message(s) are dead letters: {', '.join(dead)}")
-    return 0
 
 
 def _clear_dead_handler_files(name: str) -> None:
@@ -2021,6 +2404,17 @@ def _clear_dead_handler_files(name: str) -> None:
     clear_wake_pid(name)
     _clear_kill_request(name)
     _clear_detach_request(name)
+    _clear_stop_request(name)
+    # A handler killed between the temp write and the replace of its wake
+    # record leaves the temp file (`atomic_write_text`): `.wake-pid.<ulid>.tmp`.
+    try:
+        for stale in agent_dir(name).glob(".wake-pid.*.tmp"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def cmd_restart(args: list[str]) -> int:
@@ -2169,7 +2563,11 @@ def cmd_kill(args: list[str]) -> int:
     matches, so siblings keep running. Falls back to whole-process SIGTERM
     if the holder doesn't honor the request within KILL_TIMEOUT_S — that's
     the only path that still creates collateral, and it's the user's
-    explicit force escalation."""
+    explicit force escalation. On Windows that SIGTERM is a level-1 stop
+    request, as in `_stop_handlers`: `os.kill` there would end the holder
+    without its wake. A holder that has not taken the request
+    `STOP_FORCE_GRACE_S` later cannot act on one, so it is killed outright
+    with its wake (`_kill_outright`), and the wake's mail is dead letters."""
     if len(args) != 1:
         print("usage: a8s kill <name>", file=sys.stderr)
         return 2
@@ -2208,22 +2606,47 @@ def cmd_kill(args: list[str]) -> int:
         else:
             print(
                 f"{name}: holder PID {holder} did not honor kill within {KILL_TIMEOUT_S}s — "
-                f"escalating to whole-process SIGTERM",
+                f"escalating to whole-process {'stop request' if IS_WINDOWS else 'SIGTERM'}",
                 file=sys.stderr,
             )
             held = _running_nodes_by_pid().get(holder, [name])
             for n in held:
                 clear_stop_hook_mark(n)
-            try:
-                os.kill(holder, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            if IS_WINDOWS:
+                _escalate_windows_kill(name, holder, held)
+            else:
+                try:
+                    os.kill(holder, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             _wait_handlers_stopped(held, {holder}, STOP_KILL_WAIT_S)
             for n in held:
                 run_stop_hook_if_owed(n, holder)
             rc = 1
         _clear_kill_request(name)
     return rc
+
+
+def _escalate_windows_kill(name: str, holder: int, held: list[str]) -> None:
+    """The Windows whole-process escalation of `a8s kill`: a level-1 stop
+    request, and a kill outright of a holder that has not taken it
+    `STOP_FORCE_GRACE_S` later, as in `_stop_handlers`."""
+    wakes: dict[str, tuple[int, int, list[str]]] = {}
+    for n in held:
+        wake = read_wake_pid(n)
+        if wake is not None and _read_handler_pid(n) == holder:
+            wakes[n] = (holder, wake[0], wake[1])
+    _write_stop_request(name, os.getpid(), False)
+    unheard = _unheard_stop_requests({holder: name})
+    if unheard:
+        print(
+            f"{name}: PID {holder} did not take the stop request within "
+            f"{STOP_FORCE_GRACE_S:g}s — killing it",
+            file=sys.stderr,
+        )
+        _kill_outright(unheard, wakes, held, held, "`a8s kill`")
+        _report_dead_letters(wakes)
+    _clear_stop_request(name)
 
 
 def _wait_stop_hook(name: str, holder: int) -> None:
@@ -2240,7 +2663,8 @@ def _wait_stop_hook(name: str, holder: int) -> None:
 
 
 def cmd_exit() -> int:
-    """`a8s exit` — SIGTERM every running agent's handler. Each daemon
+    """`a8s exit` — SIGTERM every running agent's handler (on Windows, a
+    level-1 stop request, as in `_stop_handlers`). Each daemon
     detaches gracefully on its own. A handler gone within `STOP_KILL_WAIT_S`
     without running its stop hook gets it run here; a busy one still running
     then runs its own."""
@@ -2257,6 +2681,11 @@ def cmd_exit() -> int:
         if pid is None:
             continue
         clear_stop_hook_mark(p.name)
+        if IS_WINDOWS:
+            _write_stop_request(p.name, os.getpid(), False)
+            print(f"{p.name}: stop request → PID {pid}")
+            signaled[p.name] = pid
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
             print(f"{p.name}: SIGTERM PID {pid}")
@@ -2323,7 +2752,8 @@ def cmd_ps(args: list[str] | None = None) -> int:
     the last 24 hours, `-` when none), DEFINITION, IN 24H, LAST SENT, ROOT.
     DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
     itself last wrote a message, the one column that says it was responsive.
-    `-q` prints just names, one per line."""
+    `-q` prints just names, one per line. A footer names each remote or
+    storage entry whose stored password is not used, as `a8s ls` does."""
     from listing import arguments
 
     options = arguments("ps", args or [])
@@ -2342,6 +2772,7 @@ def cmd_ps(args: list[str] | None = None) -> int:
     if not running:
         if not quiet:
             print("no nodes running (try: a8s ls)")
+            _print_secret_warning()
         return 0
 
     if quiet:
@@ -2361,6 +2792,7 @@ def cmd_ps(args: list[str] | None = None) -> int:
                      str(failed.get(name.lower()) or "-"), definition, count,
                      sent.get(name.lower(), "-"), root))
     _print_table(["NAME", "PID", "UPTIME", "STATUS", "FAILED", "DEFINITION", "IN 24H", "LAST SENT", "ROOT"], rows)
+    _print_secret_warning()
     return 0
 
 
@@ -3794,6 +4226,7 @@ configured path when that path is already dedicated to a8s.
   rclone        rclone://<remote>/<path>         --prefix (a8s) --timeout_s (300)
                                                  --rclone_path (rclone)
   sync_folder   <a local folder path>            --prefix (none) --retain-days (3)
+                                                 --peer-stale-seconds (86400)
 
 URLs must be https. A peer picks the URL your node downloads from, and these
 links carry their own authorization in the query string. A download follows at
@@ -4019,7 +4452,7 @@ def cmd_unstorage(args: list[str]) -> int:
 def cmd_health() -> int:
     """`a8s health` — test connectivity of all configured remotes and storage services."""
     import tempfile
-    from network import load_remotes, load_services
+    from network import configured_service_ids, load_remotes, load_services
 
     errors = 0
 
@@ -4067,8 +4500,13 @@ def cmd_health() -> int:
             errors += 1
 
     services = load_services()
-    if not services:
+    built_services = {svc.id for svc in services}
+    skipped_services = [name for name in configured_service_ids() if name not in built_services]
+    if not services and not skipped_services:
         print("storage: (none configured)")
+    for name in skipped_services:
+        print(f"storage {name}: FAIL (not started; see the WARN line above)")
+        errors += 1
     for svc in services:
         name = svc.id
         tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w")
@@ -4101,9 +4539,16 @@ def cmd_health() -> int:
             except Exception:
                 removed = False
             if ok and dl_dest.is_file() and dl_dest.read_text().strip() == "a8s health check":
-                how = "public URL" if used_public_get else "service"
                 left = "" if removed or svc.objects_expire else f"; probe left at {url}"
-                print(f"storage {name}: OK (upload + download verified via {how}{left})")
+                observation = svc.health_observation()
+                if observation is not None:
+                    fresh, detail = observation
+                    verdict = "OK" if fresh else "WARN"
+                    print(f"storage {name}: {verdict} (local round-trip verified; {detail}{left})")
+                    errors += not fresh
+                else:
+                    how = "public URL" if used_public_get else "service"
+                    print(f"storage {name}: OK (upload + download verified via {how}{left})")
             elif ok:
                 print(f"storage {name}: WARN (download succeeded but content mismatch)")
                 errors += 1

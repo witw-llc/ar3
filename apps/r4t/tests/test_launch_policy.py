@@ -106,16 +106,13 @@ def test_memory_writer_inherits_worker_io_without_opening_console(monkeypatch, t
                       {"env": {"TEST_ENV": "kept"}, "creationflags": 0x08000000})]
 
 
-def test_memory_tree_cleanup_command_stays_hidden(monkeypatch):
-    force_windows(monkeypatch, memory)
-    monkeypatch.setattr(memory, "os", SimpleNamespace(name="nt"))
+def test_memory_tree_cleanup_is_the_foundation_group_kill(monkeypatch):
+    """The Windows `taskkill /T` arm and its hidden console are the
+    foundation's (apps/ar3/tests/test_ar3_proc.py); r4t keeps no copy."""
     calls = []
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)))
+    monkeypatch.setattr(memory, "terminate_group", lambda proc, **kw: calls.append(proc.pid))
     memory.stop_process(SimpleNamespace(pid=1234, poll=lambda: 0))
-    argv, kwargs = calls[0]
-    assert argv == ["taskkill", "/PID", "1234", "/T", "/F"]
-    assert kwargs["creationflags"] == 0x08000000
-    assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+    assert calls == [1234]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Docker bundle uses a POSIX symlink")

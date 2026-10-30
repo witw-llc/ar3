@@ -10,6 +10,120 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.124
+
+Publishes 0.1.122 and 0.1.123, whose release run stopped before publishing.
+
+### Fixed
+
+- The release's verification step can read the certification status of the
+  tested PR head. Its token lacked `statuses: read`, so the first release under
+  exact-head certification stopped with HTTP 403 before publishing. A test now
+  derives the scopes from the API paths the release check reads and requires
+  each job that runs it to grant them.
+
+## 0.1.123
+
+Includes the browser tab commands and attachment, routing, sync-health,
+privacy, and memory fixes listed under 0.1.122, whose publication was blocked
+by the release-test failure repaired here.
+
+### Changed
+
+- Full verification runs explicitly for an exact PR tip and records all six
+  suites, Docker isolation, and release-policy results. Pull requests check
+  that evidence through the required `full-suite` status and run a separate
+  required `pii` privacy check. Release publishes
+  only the identical verified tree, retaining current privacy and wiki guards
+  without repeating the full suites.
+- Split a8s and r4t into two isolated jobs each, with exhaustive module-level
+  coverage proofs and retained JUnit/duration reports. The certification target
+  is seven minutes with a ten-minute ceiling; hosted timing remains to be measured.
+  Give random sync-marker parameter values stable case IDs so independent shard
+  collections agree without changing their test inputs or assertions.
+
+### Fixed
+
+- Every browser seat's Chrome opens without the bar "You are using an
+  unsupported command-line flag: --disable-blink-features=AutomationControlled".
+  Pages still see `navigator.webdriver` as false.
+  A seat now checks its Chrome's real command line after it starts. If Chrome
+  carries a flag the seat did not ask for, the node's log gets one line that
+  names it, and the launch goes on. The browser tool installs and checks
+  playwright-cli at one pinned version (0.1.22): `ar3 doctor` and
+  `ar3 tool browser doctor` note any other installed version, and neither
+  fails on it.
+- A resident session that held a message behind a running turn submits it
+  with its age measured at submission, not at wake. The absolute stamp is
+  kept. Input held for a minute or more starts with one line saying how long
+  it waited and that it may already appear in conversation history, so the
+  model checks before it acts twice. Held input is still submitted exactly
+  once and never dropped. Applies to the Muse, Codex, Cursor and Devin
+  residents. Closes #368.
+- `a8s ps`, `a8s ls` and `ar3 doctor` report a stored password that a8s does
+  not use. A password stored before 0.1.102, or for another destination, has
+  no matching binding, and the node runs that remote or storage with no
+  password; until now only the supervisor log said so. Each report names the
+  entry and the command that stores the password again, and says to restart
+  the nodes after a remote fix. `ar3 doctor` fails on it. A node that starts
+  with such a password writes the same fix to its agent log, so `a8s logs`
+  shows it. No report shows a password, and stored secrets do not change.
+  Closes #322.
+- `a8s stop` on Windows no longer leaves a running wake behind. The stop used
+  to end the handler outright, so its wake kept running and its mail was never
+  settled. `stop`, `stop --force`, `restart`, `exit` and the `kill` fallback
+  now write a stop-request file that the handler takes as one SIGTERM, or two
+  with `--force`: a plain stop waits for the wake, a forced stop kills it and
+  its messages are dead letters, as on POSIX. A handler that does not take the
+  request within 8 seconds is killed with its wake; a plain stop never kills
+  one that took it. On every platform such a
+  handler is now frozen first, so it starts no wake and its wake cannot die
+  on a closed pipe and leave its children running. Then its wake, any child it
+  has not yet recorded (with its descendants), and finally the handler are
+  killed. The wake's mail is a dead letter even when no process was found,
+  because the handler now records the mail before it starts the wake. On
+  Windows the foundation's group kill now ends the whole process tree with
+  `taskkill /T`, for every app (#342; the stop and tree-kill items of #166).
+- `a8s kill` on Windows still ends a wedged holder, and now its wake too. When
+  the holder ignores the kill request, the fallback writes a stop request; a
+  holder that has not taken it 8 seconds later is killed with its wake's
+  process tree, as in `a8s stop`, and the wake's messages are dead letters.
+- Pin the clock in the search-index re-derivation parity test so independently
+  built stores have identical timestamps even when setup crosses a second.
+  Exact output comparisons remain intact; runtime behavior is unchanged.
+
+## 0.1.122
+
+### Added
+
+- Browser scripts accept `tabs`, `tab N`, and `shot [N]`. Tab indices start at
+  zero; selection persists for later commands. Invalid indices and excess
+  arguments fail. Tab discovery uses structured driver data, and indexed
+  screenshots verify the selected target and refuse local-file navigation.
+
+### Fixed
+
+- Bare `shot` brings the driver-selected tab forward before capture, including
+  when another tab has window focus.
+- A claimed attachment URL stays on its storage service's download path after
+  a failure, so a plain GET cannot save a viewer page as the file (#140).
+- Conversation history records attachment outcomes for each actual recipient.
+  One recipient's failed copy no longer changes another's history; older rows
+  without that evidence show the outcome as unrecorded (#225).
+- Sync-folder health labels local access separately from peer activity. Missing
+  or stale peer evidence warns instead of reporting a bare success; the
+  per-service `--peer-stale-seconds` window defaults to one day (#223).
+- A node records an outgoing message's exact ID before publishing, preventing
+  its own broker echo from becoming fresh inbound mail. Folder publication also
+  suppresses its own poll callback while the visible file is being recorded in
+  the consumed ledger (#138).
+- Rig detection and fuel summaries omit plan labels containing account
+  identifiers in text and JSON. Explicit engine quota output is unchanged (#259).
+- Plain memory reindex and audit repair preserve eligible pending embeddings
+  and their queue times; supersession persists when frontmatter ends at EOF;
+  workers quarantine jobs already at their attempt cap before running them,
+  including jobs that repeatedly terminate their worker (#295).
+
 ## 0.1.121
 
 ### Added
@@ -1071,6 +1185,9 @@ job on a test race, so nothing was published.
   reports from the other nodes on a shared topic live only in the transaction
   log, and each row now names the reporting node.
 - **A stored secret is used only with the destination it was typed for.**
+  Every remote or storage password stored by an earlier release stops working
+  at the next node restart. Enter it again, then restart the node; from
+  0.1.123, `a8s ps`, `a8s ls` and `ar3 doctor` name each such entry (#322).
   `secrets.json` keeps a digest of the entry's address and options beside each
   password, and a reader that finds a different digest drops the password and
   names the entry, so a remote or storage entry replaced during a read can no

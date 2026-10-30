@@ -262,3 +262,15 @@ class TestGrades:
                 detect.GRADE_RUN_CAPABLE,
                 detect.GRADE_NEEDS_MODEL,
             }
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_detect_omits_identifier_plan(monkeypatch, tmp_path, capsys, as_json):
+    identifier = "synthetic-account@example.invalid"
+    stub_probes(monkeypatch, {"claude": report("claude")}, {"claude": gauged(0.4, identifier)})
+    assert r4t_main(["rig", "detect", "--dir", str(tmp_path), *(["--json"] if as_json else [])]) == 0
+    output = capsys.readouterr().out
+    assert identifier not in output
+    if as_json:
+        row = next(row for row in json.loads(output)["engines"] if row["preset"] == "claude")
+        assert row["plan"] is None

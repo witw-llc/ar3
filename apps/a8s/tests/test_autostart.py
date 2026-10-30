@@ -172,6 +172,9 @@ class TestLifecycle:
         monkeypatch.setattr("commands._read_handler_pid", lambda n: pid)
         monkeypatch.setattr("commands._running_nodes_by_pid", lambda: {pid: ["a1", "b2"]})
         monkeypatch.setattr("commands.os.kill", lambda *_: None)
+        # The POSIX stop signals; the Windows stop would treat this process,
+        # which holds the node here, as a handler that never took its request.
+        monkeypatch.setattr("commands.IS_WINDOWS", False)
         monkeypatch.setattr("commands._wait_handlers_stopped", lambda *a, **k: True)
         monkeypatch.setattr("commands.run_stop_hook_if_owed", lambda *a: None)
         assert cmd_stop(["a1"]) == 0
@@ -285,9 +288,10 @@ class TestClaim:
         assert daemon.claim_without_takeover("a1") == "claimed"
         pid_file = daemon.pid_path("a1")
         daemon._unlink_pid_files("a1")
-        pid_file.write_text("1")  # a live holder that is not us
+        holder = str(os.getppid())  # a live holder that is not us, on every platform
+        pid_file.write_text(holder)
         assert daemon.claim_without_takeover("a1") == "held"
-        assert pid_file.read_text() == "1"
+        assert pid_file.read_text() == holder
         assert not daemon.detach_request_path("a1").exists()
 
     def test_start_of_a_running_node_spawns_nothing(self, nodes, monkeypatch, capsys):
@@ -721,8 +725,12 @@ class TestReviewRegressions:
         created, resume = threading.Event(), threading.Event()
         real_write, first = os.write, {}
 
+        pid_bytes = str(os.getpid()).encode()
+
         def paused(fd, data):
-            if threading.get_ident() == first.get("id"):
+            # Only the pid write: on Windows `file_lock` first writes a byte
+            # to give the lock a region, before the claim is in flight.
+            if threading.get_ident() == first.get("id") and data == pid_bytes:
                 created.set()
                 assert resume.wait(5)
             return real_write(fd, data)
@@ -878,6 +886,8 @@ class TestPidLockDiscipline:
             return subprocess.CompletedProcess(argv, 0 if loaded["v"] else 1, "", "")
 
         monkeypatch.setattr(autostart, "_run", run)
+        # launchctl's domain names the uid; Windows has none to read.
+        monkeypatch.setattr(os, "getuid", lambda: 501, raising=False)
         b = autostart.LaunchdBackend(tmp_path / "LA")
         b.install(dataclasses.replace(spec, foreground=True))
         b.remove("n1")

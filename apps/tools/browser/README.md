@@ -10,12 +10,14 @@ See [Tool nodes](../../../docs/a8s-tools.md).
 
 ## Needs
 
-Use Linux or macOS. Install Chrome and Node. Install the Playwright CLI:
+Use Linux or macOS. Install Chrome and Node. Install the Playwright CLI at the version the tool is proven against:
 
 ```bash
-npm install -g @playwright/cli
+npm install -g @playwright/cli@0.1.22
 ar3 tool browser doctor
 ```
+
+`doctor` notes a different installed version. The tool still runs.
 
 The tool needs these executables on `PATH`. A routed wake does not load your
 shell startup files. If Node is in a version-manager directory, add that
@@ -179,6 +181,12 @@ EOF_SCRIPT
 
 ### Commands
 
+Use `tabs` to find a tab index. Indices start at zero: `shot 1` captures the
+second tab. `tab 1` and `shot 1` keep that tab selected for later commands.
+Bare `shot` brings the selected tab forward and captures it. The `*` marker
+shows the tab used for browser commands. Run `tabs` again after tabs open or close.
+An invalid index or extra argument fails the command.
+
 | Command | Syntax | Function |
 |---|---|---|
 | `open` | `open` | Starts Chrome if needed. Returns the URL. |
@@ -207,7 +215,9 @@ EOF_SCRIPT
 | `requests` | no arguments | The network log. |
 | `console` | no arguments | The console log, inline and attached as `console.log`. |
 | `snap` | no arguments | Accessibility snapshot with refs. Attached as `snapshot.txt`. |
-| `shot` | no arguments | Screenshot. Attached as `screen.png`. |
+| `tabs` | no arguments | Lists zero-based tab indices and URLs. `*` marks the selected tab. |
+| `tab` | `tab N` | Selects tab N and returns its URL. |
+| `shot` | `shot [N]` | Selects tab N if given, then attaches a screenshot as `screen.png`. |
 | `upload` | `upload <abs path>` | Answers a file chooser the page has opened. One file. |
 | `drop` | `drop <target> <abs path>...` | Drops files onto an element. Prefer it to `upload`. |
 | `download` | `download <target> [seconds]` | Clicks the target, waits for a finished file (default 30 seconds), attaches it. |
