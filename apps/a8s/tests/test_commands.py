@@ -8,11 +8,13 @@ import json
 import os
 import shutil
 import signal
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+import commands as commands_mod
 from ar3 import clock
 from ar3.ulid import new as new_ulid, parse as parse_ulid
 
@@ -1069,6 +1071,178 @@ class TestCmdUpdate:
         )
         assert cmd_update(["--force"]) == 0
         assert restarts == [["claude", "--force"]]
+
+
+class TestCmdUpdateBusy:
+    """A busy node is waited for, then skipped and named: a stop would end a
+    resident turn and drop the messages it holds."""
+
+    @pytest.fixture
+    def nodes(self, fake_home, tmp_path, monkeypatch):
+        save_registry({n: {"root": str(tmp_path)} for n in ("alpha", "beta")})
+        for n in ("alpha", "beta"):
+            _claim(n)
+        status = {"alpha": "idle", "beta": "idle"}
+        restarts = []
+        monkeypatch.setattr("commands._running_nodes_by_pid", lambda **kw: {1: ["alpha"], 2: ["beta"]})
+        monkeypatch.setattr("commands._busy_state", lambda name: status[name])
+        monkeypatch.setattr("commands.cmd_restart", lambda args: restarts.append(list(args)) or 0)
+        monkeypatch.setattr("commands.UPDATE_POLL_S", 0.01)
+        monkeypatch.delenv("A8S_UPDATE_WAIT_SECONDS", raising=False)
+        return status, restarts
+
+    def test_idle_nodes_restart_without_a_wait(self, nodes, capsys, monkeypatch):
+        status, restarts = nodes
+        monkeypatch.setattr("commands.time.sleep", lambda s: pytest.fail("idle nodes need no wait"))
+        assert cmd_update([]) == 0
+        assert restarts == [["alpha"], ["beta"]]
+        out = capsys.readouterr().out
+        assert "waiting" not in out and "busy" not in out
+        assert "update complete\n" in out
+
+    def test_a_busy_node_is_waited_for_then_restarted(self, nodes, capsys, monkeypatch):
+        status, restarts = nodes
+        status["beta"] = "busy"
+        checks = iter(range(3))
+
+        def turn_ends(seconds):
+            if next(checks, None) is None:
+                status["beta"] = "idle"
+
+        monkeypatch.setattr("commands.time.sleep", turn_ends)
+        assert cmd_update(["--wait", "60"]) == 0
+        assert restarts == [["alpha"], ["beta"]]
+        out = capsys.readouterr().out
+        assert "waiting up to 60s for busy node(s): beta" in out
+        assert "update complete\n" in out
+
+    def test_a_node_still_busy_at_the_deadline_is_skipped_and_named(self, nodes, capsys):
+        status, restarts = nodes
+        status["beta"] = "busy"
+        assert cmd_update(["--wait", "0.05"]) == 0
+        assert restarts == [["alpha"]]
+        out = capsys.readouterr().out
+        assert "update: beta is busy (a turn is in flight) — left on its current handler" in out
+        assert "run `a8s update` again" in out
+        assert "update complete, 1 busy node(s) skipped" in out
+
+    def test_running_the_update_again_restarts_the_node_once_it_is_idle(self, nodes):
+        status, restarts = nodes
+        status["beta"] = "busy"
+        assert cmd_update(["--wait", "0"]) == 0
+        status["beta"] = "idle"
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == [["alpha"], ["alpha"], ["beta"]]
+
+    def test_a_node_that_turns_busy_after_the_wait_is_skipped(self, nodes, monkeypatch):
+        status, restarts = nodes
+
+        def restart(args):
+            restarts.append(list(args))
+            status["beta"] = "busy"
+            return 0
+
+        monkeypatch.setattr("commands.cmd_restart", restart)
+        assert cmd_update([]) == 0
+        assert restarts == [["alpha"]]
+
+    def test_the_wait_defaults_from_the_environment(self, nodes, monkeypatch, capsys):
+        status, restarts = nodes
+        status["beta"] = "busy"
+        monkeypatch.setenv("A8S_UPDATE_WAIT_SECONDS", "0")
+        monkeypatch.setattr("commands.time.sleep", lambda s: pytest.fail("a zero wait sleeps"))
+        assert cmd_update([]) == 0
+        assert restarts == [["alpha"]]
+        assert "waiting" not in capsys.readouterr().out
+
+    def test_force_waits_for_nothing_and_restarts_every_node(self, nodes, monkeypatch):
+        status, restarts = nodes
+        status["beta"] = "busy"
+        monkeypatch.setattr("commands.time.sleep", lambda s: pytest.fail("--force waits"))
+        assert cmd_update(["--force"]) == 0
+        assert restarts == [["alpha", "--force"], ["beta", "--force"]]
+
+    def test_one_busy_member_holds_back_its_whole_alias(self, nodes, monkeypatch):
+        status, restarts = nodes
+        save_aliases({"pair": ["alpha", "beta"]})
+        monkeypatch.setattr("commands._running_nodes_by_pid", lambda **kw: {1: ["alpha", "beta"]})
+        status["beta"] = "busy"
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == []
+
+    def test_one_busy_member_holds_back_a_shared_handler_with_no_alias(self, nodes, monkeypatch, capsys):
+        """No alias matches the group, so it restarts member by member; a
+        restart of the idle member would still stop the handler both share."""
+        status, restarts = nodes
+        monkeypatch.setattr("commands._running_nodes_by_pid", lambda **kw: {1: ["alpha", "beta"]})
+        status["beta"] = "busy"
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == []
+        out = capsys.readouterr().out
+        assert "update: alpha shares its handler with a node that may be mid-turn" in out
+        assert "update: beta is busy (a turn is in flight)" in out
+
+    def test_a_shared_handler_with_no_alias_restarts_member_by_member_when_idle(self, nodes, monkeypatch):
+        status, restarts = nodes
+        monkeypatch.setattr("commands._running_nodes_by_pid", lambda **kw: {1: ["alpha", "beta"]})
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == [["alpha"], ["beta"]]
+
+    def test_membership_is_read_again_before_each_restart(self, nodes, monkeypatch, capsys):
+        """During the wait alpha is restarted into a handler shared with beta,
+        which starts a turn, and alpha turns idle. The restart decision uses
+        the group alpha is in now, so beta's handler is left alone."""
+        status, restarts = nodes
+        waiting = {"on": True}
+        monkeypatch.setattr(
+            "commands._running_nodes_by_pid",
+            lambda **kw: {101: ["alpha"]} if waiting["on"] else {202: ["alpha", "beta"]},
+        )
+        monkeypatch.setattr(
+            "commands._busy_state",
+            lambda name: "busy" if waiting["on"] or name == "beta" else "idle",
+        )
+        monkeypatch.setattr("commands.time.sleep", lambda s: waiting.update(on=False))
+        assert cmd_update(["--wait", "60"]) == 0
+        assert restarts == []
+        assert "update: beta is busy" in capsys.readouterr().out
+
+    def test_a_node_that_joined_a_group_is_restarted_with_it(self, nodes, monkeypatch):
+        status, restarts = nodes
+        snapshots = iter([{1: ["alpha"]}, {1: ["alpha", "beta"]}])
+        monkeypatch.setattr("commands._running_nodes_by_pid", lambda **kw: next(snapshots, {1: ["alpha", "beta"]}))
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == [["alpha"], ["beta"]]
+
+    def test_a_membership_that_cannot_be_read_restarts_nothing_more(self, nodes, monkeypatch, capsys):
+        from registry import RegistryUnreadable
+
+        status, restarts = nodes
+        snapshots = [{1: ["alpha"], 2: ["beta"]}]
+
+        def discover(**kw):
+            if snapshots:
+                return snapshots.pop()
+            raise RegistryUnreadable("registry is mid-write")
+
+        monkeypatch.setattr("commands._running_nodes_by_pid", discover)
+        assert cmd_update(["--wait", "0"]) == 1
+        assert restarts == []
+        captured = capsys.readouterr()
+        assert "restarting no more nodes" in captured.err
+        assert "update: alpha has a status probe that failed" in captured.out
+
+    def test_a_node_whose_status_is_unknown_is_held_and_named(self, nodes, capsys):
+        status, restarts = nodes
+        status["beta"] = "unknown"
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == [["alpha"]]
+        assert "update: beta has a status probe that failed, so it may be mid-turn" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("args", [["--wait"], ["--wait", "soon"], ["--wait", "-1"], ["extra"]])
+    def test_a_bad_wait_is_a_usage_error(self, nodes, args, capsys):
+        assert cmd_update(args) == 2
+        assert "usage: a8s update [--force] [--wait SECONDS]" in capsys.readouterr().err
 
 
 def _claim(name: str) -> None:
@@ -3932,3 +4106,352 @@ class TestHealthMqtt:
         output = capsys.readouterr().out
         assert "remote hub: FAIL (not connected)" in output
         assert "remote hub: OK" not in output
+
+
+class TestBusyState:
+    """The three-state busy read that update decisions use."""
+
+    @pytest.fixture
+    def seat(self, fake_home, tmp_path, monkeypatch):
+        save_registry({"seat": {"root": str(tmp_path)}})
+        _claim("seat")
+        monkeypatch.setattr("commands.read_wake_pid", lambda name, strict=False: None)
+        return monkeypatch
+
+    def _probe(self, monkeypatch, argv):
+        import daemon
+
+        monkeypatch.setattr(daemon, "load_definition", lambda name: {"status": {"invoke": argv}})
+        monkeypatch.setattr(daemon, "_hook_launch", lambda *a: (argv, dict(os.environ)))
+
+    def test_no_probe_and_no_wake_is_idle(self, seat):
+        seat.setattr("daemon._hook_launch", lambda *a: None)
+        assert commands_mod._busy_state("seat") == "idle"
+
+    @pytest.mark.parametrize("word,state", [("busy", "busy"), ("resident", "idle"), ("idle", "idle")])
+    def test_a_probe_answer_is_read(self, seat, word, state):
+        self._probe(seat, [sys.executable, "-c", f"print({word!r})"])
+        assert commands_mod._busy_state("seat") == state
+
+    def test_a_probe_that_prints_nothing_and_exits_0_is_idle(self, seat):
+        self._probe(seat, [sys.executable, "-c", "pass"])
+        assert commands_mod._busy_state("seat") == "idle"
+
+    def test_a_wake_in_flight_is_busy(self, seat):
+        seat.setattr("commands.read_wake_pid", lambda name, strict=False: (123, []))
+        assert commands_mod._busy_state("seat") == "busy"
+
+    def test_a_configured_probe_that_fails_is_unknown_and_update_holds_the_node(self, seat, capsys):
+        """A real probe that exits 1. ps shows the node idle; update must not
+        restart it, and `ps --json` must say unknown."""
+        restarts = []
+        self._probe(seat, [sys.executable, "-c", "raise SystemExit(1)"])
+        seat.setattr("commands.cmd_restart", lambda args: restarts.append(args) or 0)
+        assert commands_mod._node_status("seat") in ("idle", "fail")
+        assert commands_mod._busy_state("seat") == "unknown"
+        assert cmd_update(["--wait", "0"]) == 0
+        assert restarts == []
+        capsys.readouterr()
+        assert commands_mod.cmd_ps(["--json"]) == 0
+        rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert rows == [{"name": "seat", "pid": os.getpid(), "busy": "unknown"}]
+
+    def test_ps_json_prints_nothing_when_no_node_runs(self, fake_home, capsys):
+        assert commands_mod.cmd_ps(["--json"]) == 0
+        assert capsys.readouterr().out == ""
+
+
+class TestReadsHeldOffByAReplace:
+    """A Windows read that meets a replace is retried; a read the retries
+    never get past is not read as no wake, no request, or idle."""
+
+    @pytest.fixture
+    def unreadable(self, fake_home, monkeypatch):
+        import ar3.fsio as fsio
+
+        monkeypatch.setattr(fsio.time, "sleep", lambda s: None)
+        real = Path.read_text
+        state = {"fail": set()}
+
+        def read_text(self, *a, **k):
+            if self.name in state["fail"]:
+                raise PermissionError(13, "sharing violation")
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        return state
+
+    def test_a_wake_record_that_cannot_be_read_is_unknown_for_an_update(self, unreadable):
+        from core import read_wake_pid, write_wake_pid
+
+        write_wake_pid("seat", os.getpid(), ["01X.json"])
+        unreadable["fail"].add("wake-pid")
+        assert read_wake_pid("seat") is None
+        with pytest.raises(PermissionError):
+            read_wake_pid("seat", strict=True)
+        assert commands_mod._busy_state("seat") == "unknown"
+
+    def test_a_stop_request_that_cannot_be_read_is_kept(self, unreadable):
+        import daemon
+        from core import stop_request_path
+
+        daemon._write_stop_request("seat", os.getpid(), True)
+        unreadable["fail"].add(stop_request_path("seat").name)
+        assert daemon._read_stop_request("seat") is None
+        assert stop_request_path("seat").is_file()
+        unreadable["fail"].clear()
+        assert daemon._read_stop_request("seat") == (os.getpid(), 2)
+
+
+class TestUpdateReadsAreStrict:
+    """Every input an update's stop or restart decision reads: a read that
+    fails (EIO) or finds invalid content holds the node's handler group, or
+    the whole update when membership is unknown, and nothing is reaped."""
+
+    @pytest.fixture
+    def seats(self, fake_home, tmp_path, monkeypatch):
+        import errno
+
+        roots = {}
+        for n in ("alpha", "beta"):
+            roots[n] = tmp_path / n
+            roots[n].mkdir()
+        save_registry({n: {"root": str(r)} for n, r in roots.items()})
+        _claim("beta")
+        _claim("alpha")
+        pid_path("alpha").write_text(str(os.getppid()))
+        restarts = []
+        monkeypatch.setattr("commands.cmd_restart", lambda args: restarts.append(list(args)) or 0)
+        monkeypatch.delenv("A8S_UPDATE_WAIT_SECONDS", raising=False)
+        real = Path.read_text
+        broken: dict = {}
+
+        def read_text(path, *a, **k):
+            if path in broken:
+                raise broken[path]
+            return real(path, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        state = {"restarts": restarts, "broken": broken, "eio": OSError(errno.EIO, "I/O error")}
+        return state
+
+    def _update(self):
+        return cmd_update(["--wait", "0"])
+
+    @pytest.mark.parametrize("fault", ["eio", "garbage", "empty", "zero", "+5", "-3", "1e3", "5.0", "\u0665"])
+    def test_a_handler_pid_file_that_cannot_be_read_holds_the_update_and_is_kept(self, seats, fault):
+        target = pid_path("beta")
+        if fault == "eio":
+            seats["broken"][target] = seats["eio"]
+        else:
+            target.write_text({"garbage": "not a pid", "empty": "", "zero": "0"}.get(fault, fault))
+        assert self._update() == 1
+        assert seats["restarts"] == []
+        assert target.exists()
+
+    def test_a_start_stamp_that_cannot_be_read_holds_the_update(self, seats):
+        from daemon import pid_start_path
+
+        pid_start_path("beta").write_text("stamp")
+        seats["broken"][pid_start_path("beta")] = seats["eio"]
+        assert self._update() == 1
+        assert seats["restarts"] == []
+        assert pid_start_path("beta").exists()
+
+    @pytest.mark.parametrize("fault", ["eio", "garbage", "agents-not-an-object", "top-level-list"])
+    def test_a_registry_that_cannot_be_read_restarts_nothing(self, seats, fault):
+        from registry import registry_path
+
+        if fault == "eio":
+            seats["broken"][registry_path()] = seats["eio"]
+        else:
+            registry_path().write_text({
+                "garbage": "{ not json",
+                "agents-not-an-object": json.dumps({"agents": ["alpha", "beta"]}),
+                "top-level-list": "[]",
+            }[fault])
+        assert self._update() == 1
+        assert seats["restarts"] == []
+
+    @pytest.mark.parametrize("fault", ["eio", "garbage", "claim"])
+    def test_a_wake_record_that_cannot_be_read_or_is_a_claim_holds_its_node(self, seats, fault):
+        from core import wake_pid_path, write_wake_claim
+
+        if fault == "eio":
+            write_wake_claim("beta", [])
+            wake_pid_path("beta").write_text(json.dumps({"pid": os.getpid(), "unit": []}))
+            seats["broken"][wake_pid_path("beta")] = seats["eio"]
+        elif fault == "garbage":
+            wake_pid_path("beta").write_text("{ not json")
+        else:
+            write_wake_claim("beta", ["01CLAIM.json"])
+        assert commands_mod._busy_state("beta") == ("busy" if fault == "claim" else "unknown")
+        assert self._update() == 0
+        assert seats["restarts"] == [["alpha"]]
+        assert wake_pid_path("beta").exists()
+
+    def test_a_start_stamp_in_the_wrong_form_is_unknown_not_recycled(self, seats):
+        """Artemis's probe: beta's pid.start is 'garbage'. It was read as a
+        recycled pid, so busy beta left alpha's group and alpha restarted."""
+        from daemon import pid_start_path
+
+        pid_start_path("beta").write_text("garbage")
+        assert self._update() == 1
+        assert seats["restarts"] == []
+
+    def test_an_empty_stamp_leaves_liveness_to_decide(self, seats):
+        from daemon import pid_start_path
+
+        pid_start_path("beta").write_text("")
+        assert self._update() == 0
+        assert sorted(seats["restarts"]) == [["alpha"], ["beta"]]
+
+    def test_a_live_wake_with_a_start_in_the_wrong_form_is_unknown(self, seats, monkeypatch):
+        """Artemis's probe: a live wake whose start is 'garbage' read as
+        recycled, so idle."""
+        from core import wake_pid_path
+
+        wake_pid_path("alpha").write_text(json.dumps({"pid": os.getpid(), "start": "garbage", "unit": []}))
+        monkeypatch.setattr("commands.run_status_probe", lambda n: (False, None))
+        assert commands_mod._busy_state("alpha") == "unknown"
+
+    def test_only_a_valid_differing_stamp_is_recycled(self, seats):
+        from ar3.proc import _start_token_kind
+        from daemon import pid_start_path
+
+        other = {
+            "linux": "00000000-0000-0000-0000-000000000000 1",
+            "ps": "Thu Jan 1 00:00:00 1970",
+            "windows": "0000000000000001",
+        }[_start_token_kind()]
+        pid_start_path("beta").write_text(other)
+        assert self._update() == 0
+        assert seats["restarts"] == [["alpha"]]
+
+    @pytest.mark.parametrize("record", [
+        {"pid": "123", "unit": []},
+        {"pid": True, "unit": []},
+        {"pid": -1, "unit": []},
+        {"pid": 1.5, "unit": []},
+        {"pid": 123, "start": "garbage", "unit": []},
+        {"pid": 123, "start": 5, "unit": []},
+        {"pid": 123, "unit": "01A.json"},
+        {"pid": 123, "unit": [1]},
+        ["pid", 123],
+    ])
+    def test_a_wake_record_value_of_the_wrong_type_or_form_is_unknown(self, seats, record):
+        from core import wake_pid_path
+
+        wake_pid_path("beta").write_text(json.dumps(record))
+        assert commands_mod._busy_state("beta") == "unknown"
+        assert self._update() == 0
+        assert seats["restarts"] == [["alpha"]]
+        assert wake_pid_path("beta").exists()
+
+    def _with_definition(self, seats, tmp_path, definition):
+        path = tmp_path / "beta.json"
+        path.write_text(json.dumps(definition))
+        reg = {n: {"root": str(tmp_path / n)} for n in ("alpha", "beta")}
+        reg["beta"]["definition"] = str(path)
+        save_registry(reg)
+        return path
+
+    @pytest.mark.parametrize("status", [42, "probe", None, {}, {"invoke": "probe"}, {"invoke": []}, {"invoke": [1]}, {"invoke": [""]}])
+    def test_a_status_block_of_the_wrong_shape_is_unknown_not_no_probe(self, seats, tmp_path, status):
+        """Artemis's probe: status=42 read as no probe, so idle."""
+        self._with_definition(seats, tmp_path, {"invoke": ["x"], "status": status})
+        assert commands_mod._busy_state("beta") == "unknown"
+
+    def test_no_status_block_is_no_probe(self, seats, tmp_path):
+        self._with_definition(seats, tmp_path, {"invoke": ["x"]})
+        assert commands_mod._busy_state("beta") == "idle"
+
+    @pytest.mark.parametrize("output,state", [
+        ("busy", "busy"), ("resident", "idle"), ("idle", "idle"), ("", "idle"),
+        ("error: cannot reach the session", "unknown"), ("BUSY", "unknown"),
+    ])
+    def test_a_probe_answer_outside_what_the_parser_accepts_is_unknown(self, seats, tmp_path, output, state):
+        self._with_definition(seats, tmp_path, {
+            "invoke": ["x"], "status": {"invoke": [sys.executable, "-c", f"print({output!r})"]},
+        })
+        assert commands_mod._busy_state("beta") == state
+
+    def test_a_probe_pipe_that_cannot_be_read_is_unknown(self, seats, tmp_path, monkeypatch):
+        """Artemis's probe: an EIO reading the probe's stdout was read as an
+        empty answer, so idle."""
+        import errno
+
+        import daemon
+
+        self._with_definition(seats, tmp_path, {"invoke": ["x"], "status": {"invoke": ["probe"]}})
+
+        class BadPipe:
+            def read(self):
+                raise OSError(errno.EIO, "pipe read failure")
+
+        class Proc:
+            stdout = BadPipe()
+            returncode = 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        monkeypatch.setattr(daemon, "_hook_launch", lambda *a: (["probe"], {}))
+        monkeypatch.setattr(daemon.subprocess, "Popen", lambda *a, **k: Proc())
+        monkeypatch.setattr(daemon, "_end_probe", lambda proc: None)
+        assert daemon.run_status_probe("beta") == (True, None)
+        assert commands_mod._busy_state("beta") == "unknown"
+
+    def test_a_definition_that_cannot_be_read_holds_its_node(self, seats, tmp_path):
+        definition = tmp_path / "beta.json"
+        definition.write_text(json.dumps({"invoke": ["x"], "status": {"invoke": ["probe"]}}))
+        reg = {n: {"root": str(tmp_path / n)} for n in ("alpha", "beta")}
+        reg["beta"]["definition"] = str(definition)
+        save_registry(reg)
+        seats["broken"][definition] = seats["eio"]
+        assert commands_mod._busy_state("beta") == "unknown"
+        assert self._update() == 0
+        assert seats["restarts"] == [["alpha"]]
+
+    def test_a_registered_node_with_no_usable_root_is_unknown(self, seats, tmp_path):
+        save_registry({"alpha": {"root": str(tmp_path / "alpha")}, "beta": {"root": ""}})
+        assert commands_mod._busy_state("beta") == "unknown"
+
+    def test_ps_json_reads_strictly_and_exits_1_with_nothing_printed(self, seats, capsys):
+        seats["broken"][pid_path("beta")] = seats["eio"]
+        assert commands_mod.cmd_ps(["--json"]) == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "cannot read which nodes are running" in captured.err
+        pid_path("beta").write_text("garbage")
+        seats["broken"].clear()
+        assert commands_mod.cmd_ps(["--json"]) == 1
+        assert pid_path("beta").exists()
+
+    def test_the_normal_path_still_reaps_a_stale_pid_file(self, seats, capsys):
+        pid_path("beta").write_text("garbage")
+        commands_mod.cmd_ps([])
+        assert not pid_path("beta").exists()
+
+    def test_an_unreadable_busy_sibling_pid_is_neither_reaped_nor_ignored(self, seats, monkeypatch):
+        """Artemis's probe: alpha and beta share a handler; beta (busy) has a
+        pid file the update cannot read. Before, it was reaped and alpha was
+        restarted from the partial snapshot."""
+        monkeypatch.setattr("commands._busy_state", lambda n: "busy" if n == "beta" else "idle")
+        seats["broken"][pid_path("beta")] = PermissionError(13, "sharing violation")
+        import ar3.fsio as fsio
+
+        monkeypatch.setattr(fsio.time, "sleep", lambda s: None)
+        assert self._update() == 1
+        assert seats["restarts"] == []
+        assert pid_path("beta").exists()
+
+    def test_an_unreadable_live_wake_with_no_probe_is_unknown(self, seats, monkeypatch):
+        """Artemis's probe: an EIO on an existing live wake record, no status
+        probe configured, read as idle before."""
+        from core import wake_pid_path
+
+        wake_pid_path("alpha").write_text(json.dumps({"pid": os.getpid(), "unit": []}))
+        seats["broken"][wake_pid_path("alpha")] = seats["eio"]
+        monkeypatch.setattr("commands.run_status_probe", lambda n: (False, None))
+        assert commands_mod._busy_state("alpha") == "unknown"

@@ -108,8 +108,10 @@ fake.write_text('#!'+sys.executable+'\n'+"""import json, os, sys, time
 from pathlib import Path
 assert not any(k.startswith('A8S_TURN_') for k in os.environ)
 for n, line in enumerate(sys.stdin):
+    # Like Claude: a result names the client uuid of the message it answers.
+    uuids = [u for u in [json.loads(line).get('uuid')] if u]
     if Path('mode').read_text() == 'second' and n == 0:
-        print(json.dumps({'type':'result','result':'ok'}), flush=True)
+        print(json.dumps({'type':'result','result':'ok','user_message_uuids':uuids}), flush=True)
         Path('first-done').touch()
         continue
     if Path('mode').read_text() == 'exit':
@@ -118,7 +120,8 @@ for n, line in enumerate(sys.stdin):
     if Path('mode').read_text() == 'stop':
         Path('started').touch()
         time.sleep(30)
-    print(json.dumps({'type':'result','is_error':True,'errors':['auth required']}), flush=True)
+    print(json.dumps({'type':'result','is_error':True,'errors':['auth required'],
+                      'user_message_uuids':uuids}), flush=True)
     time.sleep(30)
 """)
 fake.chmod(0o700)

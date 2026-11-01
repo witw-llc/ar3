@@ -218,6 +218,16 @@ replaced), the selected engines update, the suite update runs, and exactly
 the nodes that were stopped start again. Nodes come back even when an
 update fails. The two flags contradict.
 
+**A busy node is waited for, never stopped mid-turn.** A stop would end a
+resident session's turn and drop the messages it holds. `--wait SECONDS`
+(default 600) is how long `ar3 update` waits for every node `a8s ps --json`
+reports as not idle (busy, or a status probe that failed). Each stop is then
+decided on a fresh `a8s ps --json` snapshot: a node that is not idle is left
+running on its current handler with every node that shares its handler, the
+output names it, and when no snapshot can be read no node is stopped. Run
+`ar3 update` again once `a8s ps` shows it idle. Without the engine flags the
+wait is handed to the installer's `a8s update`, which applies the same rule.
+
 Each engine is updated by its own known method — a self-update verb
 (`claude update`, `agent update`, `agy update`, `devin update`,
 `opencode upgrade`), its package manager when the binary resolves to one

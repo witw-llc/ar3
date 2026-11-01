@@ -14,3 +14,8 @@ TELL_OUTBOX_DIR_ENV = "TELL_OUTBOX_DIR"
 TELL_FILE_MAX_ENV = "TELL_FILE_MAX"
 
 ROUTING_OWNED = (TELL_OUTBOX_DIR_ENV, TELL_FILE_MAX_ENV)
+
+# How long `a8s update` waits for busy nodes when no `--wait` is given. Set
+# by a caller that has already waited for them (`ar3 update` before it runs
+# the installer, which ends in `a8s update`), so the wait is not paid twice.
+UPDATE_WAIT_ENV = "A8S_UPDATE_WAIT_SECONDS"

@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +56,8 @@ from ar3 import nodes  # noqa: E402
 from ar3.home import app_home  # noqa: E402
 from ar3.playwright_cli import INSTALL_COMMAND as PLAYWRIGHT_INSTALL, version_note  # noqa: E402
 from ar3.proc import pid_alive, process_start_token  # noqa: E402
+from ar3.envseam import UPDATE_WAIT_ENV  # noqa: E402
+from ar3.fsio import read_text_retry  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -169,7 +172,7 @@ def _live_pid(path: Path) -> int | None:
     if not pid_alive(pid):
         return None
     try:
-        stamped = path.with_name("pid.start").read_text(encoding="utf-8").strip()
+        stamped = read_text_retry(path.with_name("pid.start")).strip()
     except OSError:
         return pid
     current = process_start_token(pid) if stamped else None
@@ -979,29 +982,54 @@ def _a8s() -> Optional[str]:
     return str(shim) if shim.is_file() else None
 
 
-def _running_groups(a8s: str) -> dict[int, list[str]] | None:
-    """Handler PID → node names it serves, from `a8s ps` — or None when ps
-    cannot answer (a8s missing, errored, or slow). None is not "nothing
-    running": a caller that would restart the difference must not guess,
-    or it could start a second handler beside a live one. The PID grouping
-    matters because one handler serves a whole alias's members under a
-    single remote session identity."""
+def _ps_nodes(a8s: str) -> list[dict] | None:
+    """`a8s ps --json`: one `{"name", "pid", "busy"}` per running node, where
+    `busy` is `busy`, `idle` or `unknown` — or None when ps cannot answer
+    (a8s missing, errored, slow, or a row that does not parse or has a name
+    that is not a non-empty string or a pid that is not a positive int). A
+    `busy` that is not a string reads as unknown; any value but `idle` holds
+    the node's handler group."""
     try:
         done = subprocess.run(
-            [a8s, "ps"], capture_output=True, text=True, timeout=30,
+            [a8s, "ps", "--json"], capture_output=True, text=True, timeout=30,
             **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
         return None
-    groups: dict[int, list[str]] = {}
+    nodes = []
     for line in (done.stdout or "").splitlines():
-        cols = line.split()
-        if len(cols) < 3 or not cols[1].isdigit():
+        if not line.strip():
             continue
-        groups.setdefault(int(cols[1]), []).append(cols[0])
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(row, dict):
+            return None
+        name, pid, busy = row.get("name"), row.get("pid"), row.get("busy", "unknown")
+        if not isinstance(name, str) or not name or type(pid) is not int or pid <= 0:
+            return None
+        nodes.append({"name": name, "pid": pid, "busy": busy if isinstance(busy, str) else "unknown"})
+    return nodes
+
+
+def _groups_of(nodes: list[dict]) -> dict[int, list[str]]:
+    groups: dict[int, list[str]] = {}
+    for node in nodes:
+        groups.setdefault(node["pid"], []).append(node["name"])
     return groups
+
+
+def _running_groups(a8s: str) -> dict[int, list[str]] | None:
+    """Handler PID → node names it serves, from `a8s ps` — or None when ps
+    cannot answer. None is not "nothing running": a caller that would
+    restart the difference must not guess, or it could start a second
+    handler beside a live one. The PID grouping matters because one handler
+    serves a whole alias's members under a single remote session identity."""
+    nodes = _ps_nodes(a8s)
+    return None if nodes is None else _groups_of(nodes)
 
 
 def _running_nodes(a8s: str) -> list[str] | None:
@@ -1009,6 +1037,63 @@ def _running_nodes(a8s: str) -> list[str] | None:
     if groups is None:
         return None
     return [n for names in groups.values() for n in names]
+
+
+UPDATE_WAIT_S = 600.0
+UPDATE_POLL_S = 5.0
+
+
+def _held_by(nodes: list[dict]) -> dict[str, str]:
+    """Every node to leave running, by name, with its reason: each member of
+    a handler group with a member that is not `idle`. Stopping one member
+    stops their shared handler, and a stop would end a resident turn and
+    drop the messages it holds. `unknown` (a status probe that failed) is
+    not idle."""
+    state = {node["name"]: node["busy"] for node in nodes}
+    held = {}
+    for names in _groups_of(nodes).values():
+        if any(state[n] != "idle" for n in names):
+            for n in names:
+                held[n] = state[n]
+    return held
+
+
+def _say_held(held: dict[str, str]) -> None:
+    for name, state in held.items():
+        why = {
+            "busy": "is busy (a turn is in flight)",
+            "unknown": "has a status probe that failed, so it may be mid-turn",
+            "joined": "joined a handler this update is restarting after it began",
+            "shares": "shares its handler with a node that started after this update began",
+        }.get(state, "shares its handler with a node that may be mid-turn")
+        print(
+            f"ar3 update: {name} {why} — left running on its current handler; "
+            f"run `ar3 update` again once `a8s ps` shows it idle"
+        )
+
+
+def _cannot_read_status() -> None:
+    print(
+        "ar3 update: cannot read node status from `a8s ps` — stopping no "
+        "more nodes",
+        file=sys.stderr,
+    )
+
+
+def _wait_for_idle(a8s: str, nodes: list[dict], seconds: float) -> None:
+    """Wait up to `seconds` until no running node is held (`_held_by`). The
+    stop decisions themselves are made later, each on a fresh snapshot
+    (`_stop_nodes`); this only spends the wait."""
+    held = _held_by(nodes)
+    if not held or seconds <= 0:
+        return
+    print(f"ar3 update: waiting up to {seconds:g}s for busy node(s): {', '.join(held)}")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        time.sleep(min(UPDATE_POLL_S, max(0.0, deadline - time.monotonic())))
+        current = _ps_nodes(a8s)
+        if current is not None and not _held_by(current):
+            return
 
 
 def _a8s_names() -> tuple[set[str], dict[str, list[str]]]:
@@ -1101,23 +1186,46 @@ def _restart_targets(
 
 
 def _stop_nodes(a8s: str, names: list[str], stopped: list[str]) -> None:
-    """`a8s stop` each running node — it waits for the current wake to
-    detach, so nothing is mid-turn when its engine binary is replaced.
-    Every originally-running name confirmed down is appended to `stopped`
-    as it happens: one handler can serve several nodes, so a single stop
-    can take siblings with it, and a loop interrupted mid-stop still
-    leaves `stopped` holding what the restart must bring back. A node
-    that will not stop is reported and the update continues rather than
-    held hostage."""
-    live = list(names)
+    """`a8s stop` each running node that is idle — `a8s stop` waits for the
+    current wake to detach, so nothing is mid-turn when its engine binary is
+    replaced. Each stop is decided on an `a8s ps` snapshot taken just before
+    it (the refresh after the previous stop counts), with the handler groups
+    that snapshot shows: a node whose group has a member that is not idle is
+    left running and named (`_held_by`), and so is one whose group gained a
+    node this update did not find running, which the restart would not bring
+    back. A snapshot ps cannot give stops nothing more. Every
+    originally-running name confirmed down is appended to `stopped` as it
+    happens: one handler can serve several nodes, so a single stop can take
+    siblings with it, and a loop interrupted mid-stop still leaves `stopped`
+    holding what the restart must bring back. A node that will not stop is
+    reported and the update continues rather than held hostage."""
+    snapshot: list[dict] | None = None
+    said: set[str] = set()
     for name in names:
-        if name not in live:
+        if snapshot is None:
+            snapshot = _ps_nodes(a8s)
+        if snapshot is None:
+            _cannot_read_status()
+            return
+        if name not in {node["name"] for node in snapshot}:
+            continue
+        held = _held_by(snapshot)
+        group = next(g for g in _groups_of(snapshot).values() if name in g)
+        joined = [n for n in group if n not in names]
+        if joined and name not in held:
+            # Stopping it would take down a node this update did not find
+            # running, and the restart would not bring that node back.
+            held = {n: ("joined" if n in joined else "shares") for n in group}
+        if name in held:
+            _say_held({n: st for n, st in held.items() if n not in said and n in group})
+            said.update(group)
             continue
         print(f"ar3 update: stopping node {name}")
         try:
             done = subprocess.run([a8s, "stop", "--keep-autostart", name], **launch_options())
         except OSError as e:
             print(f"ar3 update: {name}: cannot stop: {e}", file=sys.stderr)
+            snapshot = None
             continue
         if done.returncode != 0:
             print(
@@ -1125,16 +1233,12 @@ def _stop_nodes(a8s: str, names: list[str], stopped: list[str]) -> None:
                 f"its engine may be mid-turn while it is replaced",
                 file=sys.stderr,
             )
+            snapshot = None
             continue
-        refreshed = _running_nodes(a8s)
-        down = (
-            [name]
-            if refreshed is None
-            else [n for n in names if n not in refreshed]
-        )
+        snapshot = _ps_nodes(a8s)
+        live = None if snapshot is None else {node["name"] for node in snapshot}
+        down = [name] if live is None else [n for n in names if n not in live]
         stopped.extend(n for n in down if n not in stopped)
-        if refreshed is not None:
-            live = refreshed
 
 
 def _start_nodes(a8s: str, names: list[str]) -> int:
@@ -1190,8 +1294,10 @@ def _posix_sh() -> Optional[str]:
     return None
 
 
-def _update_suite(script: Path) -> int:
-    """get.sh against this copy — the pre-flag behavior of `ar3 update`."""
+def _update_suite(script: Path, wait: float | None = None) -> int:
+    """get.sh against this copy — the pre-flag behavior of `ar3 update`. The
+    installer ends in `a8s update`, which waits `wait` seconds for busy
+    nodes (its own default when None)."""
     sh = _posix_sh()
     if sh is None:
         print(
@@ -1205,6 +1311,8 @@ def _update_suite(script: Path) -> int:
     # update whatever lives at ~/.ar3, which is not necessarily the copy the
     # operator just invoked.
     env = {**os.environ, "AR3_DIR": str(REPO_ROOT)}
+    if wait is not None:
+        env[UPDATE_WAIT_ENV] = f"{wait:g}"
     try:
         done = subprocess.run([sh, str(script)], env=env, **launch_options(interactive=True))
     except OSError as e:
@@ -1225,7 +1333,12 @@ def _update_everything(args: argparse.Namespace, script: Path) -> int:
     """The agent-machine pipeline: stop running nodes so no handler is
     mid-turn on a binary about to be replaced, update the engines, update
     the suite, then start exactly the nodes that were stopped. Nodes come
-    back in a `finally` — a failed update must not leave a machine dark."""
+    back in a `finally` — a failed update must not leave a machine dark.
+
+    A busy node is waited for (`--wait`), then left running when it is
+    still busy or its state cannot be read (`_stop_nodes`, each stop on a
+    fresh snapshot). The installer's own `a8s update` then waits for
+    nothing: the wait was spent here."""
     names, err = _engine_names(args)
     if names is None:
         return err
@@ -1242,11 +1355,16 @@ def _update_everything(args: argparse.Namespace, script: Path) -> int:
                 file=sys.stderr,
             )
         else:
-            groups = _running_groups(a8s) or {}
+            nodes = _ps_nodes(a8s)
+            if nodes is None:
+                _cannot_read_status()
+                nodes = []
+            groups = _groups_of(nodes)
             running = [n for names in groups.values() for n in names]
+            _wait_for_idle(a8s, nodes, args.wait)
             _stop_nodes(a8s, running, stopped)
         engine_rc = _run_engine_updates(names)
-        suite_rc = _update_suite(script)
+        suite_rc = _update_suite(script, 0 if a8s is not None else None)
     finally:
         if a8s is not None:
             # An interrupted stop may have taken a node down without a
@@ -1285,9 +1403,12 @@ def cmd_update(args: argparse.Namespace) -> int:
     if refusal:
         print(f"ar3 update: {refusal}", file=sys.stderr)
         return 1
+    if args.wait < 0:
+        print("ar3 update: --wait takes a number of seconds, 0 or more", file=sys.stderr)
+        return 2
     if args.all_engines or args.engines:
         return _update_everything(args, script)
-    return _update_suite(script)
+    return _update_suite(script, args.wait)
 
 
 # ---------- tool ----------
@@ -1785,6 +1906,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="all_engines",
         help="Also update every engine binary found on PATH — the set "
         "`ar3 doctor` probes — each by its own method.",
+    )
+    update.add_argument(
+        "--wait",
+        type=float,
+        default=UPDATE_WAIT_S,
+        metavar="SECONDS",
+        help="How long to wait for busy nodes before the restart "
+        f"(default {UPDATE_WAIT_S:g}); a node still busy is left running and named.",
     )
     update.set_defaults(func=cmd_update)
     raw = sys.argv[1:] if argv is None else list(argv)

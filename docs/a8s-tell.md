@@ -133,6 +133,13 @@ Envelope shape:
 }
 ```
 
+`tell --subject TEXT` (or `--subject=TEXT`) adds a top-level `"subject"`
+string: one line of at most 200 characters, refused with exit 2 when it holds
+a newline or is longer. With no `--subject` the key is absent. a8s carries it
+across every hop as it carries `meta`, `a8s convo --json` shows it, and the MCP
+`a8s_tell` tool takes it as the optional `subject` argument. A recipient's app
+may show it as the message's subject.
+
 A node that speaks a protocol with its peers may add a `meta` object
 (`"meta": {"class": "auto"}`). a8s carries it across every hop — local routing,
 alias fan-out, remote publish and receive — and expands it into the wake as

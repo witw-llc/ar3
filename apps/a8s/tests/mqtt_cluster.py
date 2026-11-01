@@ -26,24 +26,26 @@ def free_port() -> int:
 
 
 @pytest.fixture
-def mqtt_broker(tmp_path):
+def mqtt_broker():
     """Local mosquitto on a random port. Skips when `mosquitto` is absent."""
     if shutil.which("mosquitto") is None:
         pytest.skip("mosquitto binary not on PATH")
     port = free_port()
-    conf = tmp_path / "mosquitto.conf"
-    conf.write_text(
-        f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
-    )
-    with _broker_process(conf, port):
+    with _broker_process(port):
         yield port
 
 
 @contextmanager
-def _broker_process(conf: Path, port: int, *, timeout: float = 5.0) -> Iterator[None]:
+def _broker_process(port: int, *, timeout: float = 5.0) -> Iterator[None]:
+    """Run mosquitto with `-p` and no config file: local only mode, which
+    listens on loopback only, allows anonymous clients and keeps no
+    persistence. A config file is not used because the AppArmor profile
+    Ubuntu 26.04 ships for /usr/sbin/mosquitto lets it read config only
+    under /etc/mosquitto, so a file in a temporary directory is denied and
+    the broker exits."""
     with tempfile.TemporaryFile(mode="w+b") as errors:
         proc = subprocess.Popen(
-            ["mosquitto", "-c", str(conf)],
+            ["mosquitto", "-p", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=errors,
         )

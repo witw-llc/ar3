@@ -429,6 +429,50 @@ def parse_tell_argv(
     return recipient, attachments, message_argv, check, split, verbatim
 
 
+SUBJECT_MAX_CHARS = 200
+
+
+def take_subject(argv: list[str]) -> tuple[list[str], str | None]:
+    """`argv` without `--subject TEXT` / `--subject=TEXT`, and the subject.
+    Options end at the first `--`, so a `--subject` after it is message text.
+    The subject is one line of at most `SUBJECT_MAX_CHARS` characters."""
+    rest: list[str] = []
+    subject: str | None = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            rest.extend(argv[i:])
+            break
+        if arg.startswith("--subject="):
+            value = arg.split("=", 1)[1]
+        elif arg == "--subject":
+            i += 1
+            if i >= len(argv):
+                raise TellUsageError("--subject requires text")
+            value = argv[i]
+        else:
+            rest.append(arg)
+            i += 1
+            continue
+        if subject is not None:
+            raise TellUsageError("--subject given twice")
+        subject = check_subject(value)
+        i += 1
+    return rest, subject
+
+
+def check_subject(value: str) -> str:
+    """`value` as a subject, or TellUsageError naming what is wrong with it."""
+    if "\n" in value or "\r" in value:
+        raise TellUsageError("--subject must be one line")
+    if not value.strip():
+        raise TellUsageError("--subject requires text")
+    if len(value) > SUBJECT_MAX_CHARS:
+        raise TellUsageError(f"--subject is longer than {SUBJECT_MAX_CHARS} characters")
+    return value
+
+
 def split_recipients(recipient: str) -> list[str]:
     recipients = [name.strip() for name in re.split(r"[,;]", recipient)]
     if not all(recipients):
@@ -602,13 +646,14 @@ class TellVersion(Exception):
     the recipient name, which fails later and for the wrong reason."""
 
 
-_USAGE = "usage: tell [--attach PATH]... [--split] [--verbatim] [--] <name> [<message...>|-]"
+_USAGE = "usage: tell [--attach PATH]... [--subject TEXT] [--split] [--verbatim] [--] <name> [<message...>|-]"
 
 
 def _print_usage() -> None:
     print(_USAGE, file=sys.stderr)
     print('       quote comma/semicolon-separated recipients: "alpha,beta;gamma"', file=sys.stderr)
     print("       --attach/--file take exactly one path each; repeat the flag for more files", file=sys.stderr)
+    print("       --subject: one line (up to 200 characters) the recipient may show as the subject", file=sys.stderr)
     print("       --verbatim: send the body exactly as given; trailing FILE: lines stay text", file=sys.stderr)
     print("       --: end of options; the recipient and message follow as given", file=sys.stderr)
     print("       --split: chunk attachments over the size limit into .partNNNofMMM files", file=sys.stderr)
@@ -828,6 +873,7 @@ def run_check(recipient: str | None) -> int:
 def tell_main(argv: list[str]) -> int:
     harden_stdio()
     try:
+        argv, subject = take_subject(argv)
         recipient, attachments, message_argv, check, split, verbatim = parse_tell_argv(argv)
         recipients = split_recipients(recipient) if recipient is not None else []
     except TellHelp:
@@ -842,9 +888,9 @@ def tell_main(argv: list[str]) -> int:
         return 2
 
     if check:
-        if attachments or message_argv or split or verbatim:
+        if attachments or message_argv or split or verbatim or subject is not None:
             print(
-                "tell: --check does not accept a message, attachments, --split, or --verbatim",
+                "tell: --check does not accept a message, attachments, --subject, --split, or --verbatim",
                 file=sys.stderr,
             )
             return 2
@@ -949,6 +995,7 @@ def tell_main(argv: list[str]) -> int:
                     content,
                     staged_files,
                     from_name=sender[0] if sender is not None else None,
+                    extra={"subject": subject} if subject is not None else None,
                     msg_id=msg_id,
                 )
                 committed = True

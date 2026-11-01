@@ -41,6 +41,16 @@ class ParsedFrame:
     # Only a session that tracks submission tokens fills this: the exact
     # tokens the frame settled. The bridge settles those and no others.
     settled: tuple[int, ...] = ()
+    # Only an engine that echoes each message it takes into a turn fills this
+    # (Claude with --replay-user-messages): the id the echo carries, "" when
+    # it has none. A peer's or a channel's injected turn is echoed the same
+    # way, so the bridge settles only an echo whose id it wrote itself.
+    echo: str | None = None
+    # Only a result from such an engine fills this (Claude's
+    # `user_message_uuids`): the ids of the stdin messages the turn answered.
+    # None when the result has no such list or it is malformed; an empty
+    # tuple when the list is present and empty.
+    answered_ids: tuple[str, ...] | None = None
 
 
 def rpc(payload: dict) -> str:

@@ -93,6 +93,18 @@ def _allow_plaintext_http_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_wake_job_left_over():
+    """`daemon._WAKE_JOB` is module state the wake path sets; a test that
+    starts a wake and does not settle it would hand its job to the next
+    test, whose forced kill then ends that job instead of its own wake."""
+    import daemon
+
+    daemon._WAKE_JOB = None
+    yield
+    daemon._WAKE_JOB = None
+
+
+@pytest.fixture(autouse=True)
 def _settle_attachment_waits():
     """The attachment wait runs on a background pool that outlives the test
     that started it. Left to run, a wait from an earlier test announces its

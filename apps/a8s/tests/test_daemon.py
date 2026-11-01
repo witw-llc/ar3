@@ -8,6 +8,7 @@ subprocess actually received.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -52,6 +53,37 @@ from daemon import (
 )
 from mailbox import _write_outbox, ensure_mailboxes, route_outboxes
 from registry import save_aliases, save_registry
+
+
+def _wake_start(monkeypatch, start):
+    """`plain`: start the fake wake as a plain Popen, whatever the platform,
+    so a test about argv and environment never takes the suspended start's
+    recovery path by accident. `resume_fails`: force that path on any
+    platform (Windows branch, no job, a resume that fails), so a fake
+    process must survive the kill, wait and pipe close it does."""
+    import ar3.proc as proc
+    import daemon
+
+    closed: list = []
+    if start == "plain":
+        monkeypatch.setattr(
+            daemon, "start_in_job",
+            lambda argv, **kwargs: (daemon.subprocess.Popen(argv, **kwargs), None, None),
+        )
+        return closed
+
+    class _Os:
+        name = "nt"
+
+        def __getattr__(self, key):
+            return getattr(os, key)
+
+    monkeypatch.setattr(proc, "os", _Os())
+    monkeypatch.setattr(proc, "windows_job", lambda pid: None)
+    monkeypatch.setattr(proc, "_resume_process_threads", lambda pid: False)
+    real_close = proc._close_pipes
+    monkeypatch.setattr(proc, "_close_pipes", lambda p: (real_close(p), closed.append(p)))
+    return closed
 
 
 @pytest.fixture(autouse=True)
@@ -405,7 +437,8 @@ def _read_log(name: str) -> str:
 
 
 class TestTellOutboxEnv:
-    def test_run_with_prefix_sets_tell_outbox_dir(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("start", ["plain", "resume_fails"])
+    def test_run_with_prefix_sets_tell_outbox_dir(self, tmp_path, monkeypatch, start):
         from core import TELL_OUTBOX_DIR_ENV
 
         agent_root = tmp_path / "a"
@@ -417,24 +450,31 @@ class TestTellOutboxEnv:
 
         class FakeProc:
             pid = 424242
-            stdout = iter([])
             returncode = 0
 
-            def wait(self):
+            def __init__(self):
+                self.stdin, self.stdout, self.stderr = io.StringIO(), io.StringIO(""), io.StringIO()
+
+            def wait(self, timeout=None):
                 return 0
 
             def poll(self):
                 return 0
+
+            def kill(self):
+                pass
 
         def fake_popen(cmd, **kwargs):
             captured["env"] = kwargs["env"]
             return FakeProc()
 
         monkeypatch.setattr("daemon.subprocess.Popen", fake_popen)
+        closed = _wake_start(monkeypatch, start)
         from daemon import _tell_outbox_env, run_with_prefix
 
         run_with_prefix("X", ["true"], agent_root, env=_tell_outbox_env(p))
         assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(external.resolve())
+        assert len(closed) == (start == "resume_fails")
 
     def test_wake_env_matches_participant_outbox_path(self, tmp_path):
         from core import TELL_FILE_MAX_ENV, TELL_OUTBOX_DIR_ENV
@@ -554,30 +594,38 @@ class TestDeclaredWakeEnv:
         p = self._participant(tmp_path)
         assert _wake_env(p, {"invoke": ["x"]})["PATH"] == "/machine/bin:/usr/bin"
 
-    def test_the_spawned_process_gets_the_declared_path(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("start", ["plain", "resume_fails"])
+    def test_the_spawned_process_gets_the_declared_path(self, tmp_path, monkeypatch, start):
         from daemon import _wake_env, run_with_prefix
 
         captured: dict = {}
 
         class FakeProc:
             pid = 424242
-            stdout = iter([])
             returncode = 0
 
-            def wait(self):
+            def __init__(self):
+                self.stdin, self.stdout, self.stderr = io.StringIO(), io.StringIO(""), io.StringIO()
+
+            def wait(self, timeout=None):
                 return 0
 
             def poll(self):
                 return 0
 
+            def kill(self):
+                pass
+
         monkeypatch.setattr(
             "daemon.subprocess.Popen",
             lambda cmd, **kwargs: (captured.update(env=kwargs["env"]), FakeProc())[1],
         )
+        closed = _wake_start(monkeypatch, start)
         p = self._participant(tmp_path)
         run_with_prefix("X", ["true"], p.root, env=_wake_env(p, {"env": {"PATH": "/node/bin"}}))
         assert captured["env"]["PATH"] == "/node/bin"
         assert captured["env"][TELL_OUTBOX_DIR_ENV] == str(p.outbox_path().resolve())
+        assert len(closed) == (start == "resume_fails")
 
     def test_a_malformed_env_aborts_the_wake_instead_of_crashing(
         self, fake_home, tmp_path, fixtures_dir
@@ -1325,8 +1373,7 @@ class TestAttachedLoopIdleIntegration:
         _write_idle_def(defp, fixtures_dir, timeout=1)
         save_registry({"X": {"root": str(d), "definition": str(defp)}})
         ensure_mailboxes(Participant("X", d))
-        # Drop a self-tell so there's an inbox message to drain. We can't
-        # tell ourselves through routing (sender exclusion), so write the
+        # Drop a message so there's an inbox message to drain; write the
         # routed message directly into the inbox.
         from ar3.ulid import new as new_ulid
         msg_id = new_ulid()

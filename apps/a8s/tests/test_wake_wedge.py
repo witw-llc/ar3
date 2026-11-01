@@ -26,6 +26,8 @@ from core import Participant, agent_log_path, inbox_dir
 from daemon import attached_loop
 from mailbox import ensure_mailboxes
 from registry import save_registry
+from ar3.proc import pid_alive
+from packaged_python import launcher_led
 from ar3.ulid import new as new_ulid
 
 import daemon as daemon_mod
@@ -90,6 +92,7 @@ class TestWedgeRegression:
         defp.write_text(json.dumps({"invoke": [sys.executable, "-c", script]}))
         return defp
 
+    @launcher_led
     def test_wake_settles_well_under_the_grandchilds_lifetime(
         self, fake_home, tmp_path, monkeypatch
     ):
@@ -133,23 +136,18 @@ class TestWedgeRegression:
         thread.join(timeout=2.0)
         assert not thread.is_alive(), "reader thread never joined after the drain-timeout group kill"
 
-        if sys.platform != "win32":
-            deadline = time.monotonic() + 3.0
-            while not pidfile.is_file() and time.monotonic() < deadline:
-                time.sleep(0.02)
-            assert pidfile.is_file(), "grandchild never started"
-            gc_pid = int(pidfile.read_text())
+        # The leader has exited, so on Windows only the wake's job object
+        # reaches the grandchild; `taskkill /T` follows parent links.
+        deadline = time.monotonic() + 3.0
+        while not pidfile.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pidfile.is_file(), "grandchild never started"
+        gc_pid = int(pidfile.read_text())
 
-            deadline = time.monotonic() + 2.0
-            alive = True
-            while time.monotonic() < deadline:
-                try:
-                    os.kill(gc_pid, 0)
-                except ProcessLookupError:
-                    alive = False
-                    break
-                time.sleep(0.05)
-            assert not alive, "grandchild survived the drain-timeout group kill"
+        deadline = time.monotonic() + 2.0
+        while pid_alive(gc_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not pid_alive(gc_pid), "grandchild survived the drain-timeout kill"
 
 
 class TestReaderThreadPump:
@@ -214,11 +212,12 @@ class TestReaderThreadPump:
 
 
 class TestStuckReaderSweep:
-    """Finding 2's backstop: when a drain-timeout's own `terminate_group`
-    doesn't free a reader thread (simulated here by patching it to a no-op —
-    the real gap is Windows, which has no group to target, or a POSIX
-    straggler that survives the SIGKILL-window race), the thread is retained
-    and swept before the next wake spawn rather than accumulating silently."""
+    """Finding 2's backstop: when a drain-timeout's own kill doesn't free a
+    reader thread (simulated here by patching `terminate_group` and
+    `terminate_job` to no-ops — the real gaps are a POSIX straggler that
+    survives the SIGKILL-window race and a Windows wake with no job object),
+    the thread is retained and swept before the next wake spawn rather than
+    accumulating silently."""
 
     @pytest.fixture(autouse=True)
     def _reset_stuck_readers(self):
@@ -241,6 +240,7 @@ class TestStuckReaderSweep:
     def test_sweep_reports_then_drops_a_stuck_reader(self, fake_home, tmp_path, monkeypatch):
         monkeypatch.setenv("A8S_WAKE_DRAIN_GRACE_SECONDS", "0.2")
         monkeypatch.setattr(daemon_mod, "terminate_group", lambda *a, **k: None)
+        monkeypatch.setattr(daemon_mod, "terminate_job", lambda *a, **k: False)
 
         d = tmp_path / "a"
         d.mkdir()
@@ -461,7 +461,20 @@ class TestWakeSpawnFlags:
 
     @staticmethod
     def _capture(monkeypatch, is_windows: bool) -> list[dict]:
+        """One platform switch for the daemon (`IS_WINDOWS`) and for
+        `ar3.proc.start_in_job`, which reads `os.name`."""
+        import os as real_os
+
+        import ar3.proc as proc
+
+        class _Os:
+            name = "nt" if is_windows else "posix"
+
+            def __getattr__(self, key):
+                return getattr(real_os, key)
+
         monkeypatch.setattr(daemon_mod, "IS_WINDOWS", is_windows)
+        monkeypatch.setattr(proc, "os", _Os())
         seen: list[dict] = []
 
         def popen(cmd, **kwargs):
@@ -480,7 +493,7 @@ class TestWakeSpawnFlags:
     def test_wake_gets_a_hidden_console_on_windows(self, fake_home, tmp_path, monkeypatch):
         seen = self._capture(monkeypatch, True)
         assert not daemon_mod._start_wake_subprocess("A", ["x"], tmp_path)
-        assert seen[0]["creationflags"] == 0x08000000 | 0x200
+        assert seen[0]["creationflags"] == 0x08000000 | 0x200 | 0x4  # CREATE_SUSPENDED
         assert "start_new_session" not in seen[0]
 
     @staticmethod

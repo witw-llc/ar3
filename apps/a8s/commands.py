@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ar3.fsio import stat_or_none
 from ar3.proc import launch_options, process_start_token, terminate_group
+from ar3.envseam import UPDATE_WAIT_ENV
 
 import autostart
 
@@ -88,6 +89,7 @@ from definitions import (
 from daemon import (
     STOP_HOOK_SECONDS,
     probe_node_status,
+    run_status_probe,
     clear_stop_hook_mark,
     read_stop_hook_mark,
     run_stop_hook_if_owed,
@@ -95,6 +97,7 @@ from daemon import (
     _clear_kill_request,
     _clear_stop_request,
     _read_handler_pid,
+    read_handler_pid_strict,
     _read_handler_pid_locked,
     _unlink_pid_files,
     _unlink_pid_files_locked,
@@ -126,6 +129,7 @@ from network import (
     unusable_secret_entries,
 )
 from registry import (
+    RegistryUnreadable,
     _scan_for_markers,
     find_participant,
     load_aliases,
@@ -2048,44 +2052,6 @@ def _child_pids(pid: int) -> list[int]:
     return children
 
 
-def _windows_start_token(pid: int) -> str | None:
-    """`pid`'s creation time (`GetProcessTimes`), which names one process
-    start. None when the process cannot be opened."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return None
-    try:
-        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
-        if not kernel32.GetProcessTimes(
-            handle, ctypes.byref(created), ctypes.byref(exited),
-            ctypes.byref(kernel), ctypes.byref(user),
-        ):
-            return None
-        return f"{created.dwHighDateTime:08x}{created.dwLowDateTime:08x}"
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _start_token(pid: int) -> str | None:
-    """Which process holds `pid`: two reads agree only for one process. None
-    means the process is gone or cannot be read, and then nothing is killed on
-    its pid."""
-    if os.name == "nt":
-        try:
-            return _windows_start_token(pid)
-        except (OSError, AttributeError):
-            return None
-    return process_start_token(pid)
-
-
 def _kill_unrecorded_child(child: int, token: str, posix: bool) -> None:
     """Kill one direct child of a frozen handler, and what it started. Every
     kill is preceded by a check that `child` still holds the pid it had when it
@@ -2096,7 +2062,7 @@ def _kill_unrecorded_child(child: int, token: str, posix: bool) -> None:
     its descendants are listed (each frozen in turn, so none forks while the
     list is built), and each is killed alone. Windows ends the child's tree."""
     if not posix:
-        if _start_token(child) == token:
+        if process_start_token(child) == token:
             _hard_kill([("tree", child)])
         return
     try:
@@ -2104,23 +2070,23 @@ def _kill_unrecorded_child(child: int, token: str, posix: bool) -> None:
     except OSError:
         leads = False
     if leads:
-        if _start_token(child) == token:
+        if process_start_token(child) == token:
             _hard_kill([("group", child)])
         return
     found: list[tuple[int, str]] = []
     queue = [(child, token)]
     while queue:
         pid, tok = queue.pop()
-        if _start_token(pid) != tok:
+        if process_start_token(pid) != tok:
             continue
         _suspend_process(pid)
         found.append((pid, tok))
         for grandchild in _child_pids(pid):
-            grand = _start_token(grandchild)
+            grand = process_start_token(grandchild)
             if grand is not None:
                 queue.append((grandchild, grand))
     for pid, tok in found:
-        if _start_token(pid) == tok:
+        if process_start_token(pid) == tok:
             _hard_kill([("pid", pid)])
 
 
@@ -2196,7 +2162,7 @@ def _kill_outright(
             if mark and mark.get("state") == "running" and isinstance(mark.get("pid"), int)
         }
         for pid in frozen:
-            listed = [(c, _start_token(c)) for c in _child_pids(pid)]
+            listed = [(c, process_start_token(c)) for c in _child_pids(pid)]
             for child, token in listed:
                 if token is not None and child not in gone and child not in hooks:
                     _kill_unrecorded_child(child, token, posix)
@@ -2443,12 +2409,16 @@ def _restart_one(name: str, force: bool) -> int:
     return _start_one(name)
 
 
-def _running_nodes_by_pid() -> dict[int, list[str]]:
-    """Map handler PID → agent names currently attached to that process."""
-    reg = load_registry()
+def _running_nodes_by_pid(*, strict: bool = False) -> dict[int, list[str]]:
+    """Map handler PID → agent names currently attached to that process.
+    `strict` reads each pid with `read_handler_pid_strict`: nothing is
+    reaped, and a registry or pid file that cannot be read raises
+    (OSError, ValueError) instead of dropping the node from the map."""
+    reg = load_registry(strict=strict)
+    read = read_handler_pid_strict if strict else _read_handler_pid
     by_pid: dict[int, list[str]] = {}
     for name in sorted(reg, key=str.lower):
-        pid = _read_handler_pid(name)
+        pid = read(name)
         if pid is None:
             continue
         by_pid.setdefault(pid, []).append(name)
@@ -2489,8 +2459,98 @@ def _update_restart_targets(by_pid: dict[int, list[str]]) -> list[str]:
     return targets
 
 
+UPDATE_WAIT_S = 600.0
+UPDATE_POLL_S = 5.0
+UPDATE_USAGE = "usage: a8s update [--force] [--wait SECONDS]"
+
+
+def _update_wait(rest: list[str]) -> float | None:
+    """The busy-node wait: `--wait SECONDS`, else `A8S_UPDATE_WAIT_SECONDS`,
+    else `UPDATE_WAIT_S`. None when the arguments are not that shape."""
+    if rest[:1] == ["--wait"] and len(rest) == 2:
+        raw = rest[1]
+    elif not rest:
+        raw = os.environ.get(UPDATE_WAIT_ENV) or str(UPDATE_WAIT_S)
+    else:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _busy_state(name: str) -> str:
+    """`busy`, `idle` or `unknown`, for a decision that would stop the node.
+    `busy` is a wake in flight or a status probe that answers `busy` (a turn
+    in a detached resident session). A node with no status probe and no wake
+    is `idle`. A probe answers `busy`, or `resident`, `idle` or nothing
+    for idle; any other answer, an invalid `status` block, and a configured
+    probe that failed are `unknown`, never `idle`: a
+    detached resident turn leaves no wake record, so the probe is the only
+    witness. A wake record that is there and cannot be read or parsed is
+    `unknown` too, and a claim (a wake about to spawn) is `busy`. `a8s ps`
+    shows the same failures as `idle` or `fail`."""
+    try:
+        if read_wake_pid(name, strict=True) is not None:
+            return "busy"
+    except (OSError, ValueError):
+        return "unknown"
+    configured, word = run_status_probe(name)
+    if not configured:
+        return "idle"
+    if word == "busy":
+        return "busy"
+    if word in ("resident", "idle", ""):
+        return "idle"
+    return "unknown"
+
+
+def _target_members(target: str) -> list[str]:
+    """The names `target` restarts. A name the registry no longer resolves
+    is itself; a registry that cannot be read raises (RegistryUnreadable)."""
+    try:
+        return resolve_name(target)[1]
+    except KeyError:
+        return [target]
+
+
+def _held_groups(by_pid: dict[int, list[str]]) -> dict[int, dict[str, str]]:
+    """The handler groups with a member that is not `idle`, each with every
+    member's state. A group is held whole: restarting any member stops the
+    handler they share."""
+    held = {}
+    for pid, names in by_pid.items():
+        states = {n: _busy_state(n) for n in names}
+        if any(state != "idle" for state in states.values()):
+            held[pid] = states
+    return held
+
+
+def _wait_for_idle(by_pid: dict[int, list[str]], seconds: float) -> dict[int, dict[str, str]]:
+    """Wait up to `seconds` for every handler group to be idle; the groups
+    still held at the end."""
+    held = _held_groups(by_pid)
+    if held and seconds > 0:
+        names = ", ".join(n for states in held.values() for n in states)
+        print(f"waiting up to {seconds:g}s for busy node(s): {names}")
+        deadline = time.monotonic() + seconds
+        while held and time.monotonic() < deadline:
+            time.sleep(min(UPDATE_POLL_S, max(0.0, deadline - time.monotonic())))
+            held = _held_groups({pid: by_pid[pid] for pid in held})
+    return held
+
+
+def _held_reason(state: str) -> str:
+    return {
+        "busy": "is busy (a turn is in flight)",
+        "unknown": "has a status probe that failed, so it may be mid-turn",
+    }.get(state, "shares its handler with a node that may be mid-turn")
+
+
 def cmd_update(args: list[str]) -> int:
-    """`a8s update [--force]` — housekeep state and restart every running node.
+    """`a8s update [--force] [--wait SECONDS]` — housekeep state and restart
+    every running node.
 
     v1: no code pull — stop+start so background handlers re-exec the current
     on-disk ``a8s`` entrypoint. Use after ``git pull``. Later iterations may
@@ -2498,11 +2558,26 @@ def cmd_update(args: list[str]) -> int:
 
     Groups agents that share a handler PID: if they match an alias exactly,
     that alias is restarted as one process; otherwise each agent is restarted.
-    ``--force`` / ``-f`` is passed through to stop.
+
+    A busy node is not restarted: a stop would end a resident session's
+    turn and drop the messages it holds. A node whose configured status
+    probe fails is held the same way (`_busy_state`). The update waits up to `--wait`
+    seconds (default `UPDATE_WAIT_S`, or `A8S_UPDATE_WAIT_SECONDS`) for every
+    node to be idle, restarts the idle ones, and names each one still busy;
+    it stays on its current handler, and a later update restarts it. Busy
+    is judged per handler group, before the group becomes restart targets:
+    one busy member holds every node sharing its handler, alias or not.
+    Which nodes share a handler is read again just before each restart, so
+    a node restarted into a new shared handler during the wait is judged
+    with its new siblings, and a node that joined a group is restarted with
+    it; a membership that cannot be read restarts nothing more. ``--force`` / ``-f``
+    waits for nothing and is passed through to stop, which kills a wake in
+    flight.
     """
     rest, force = _split_force_flag(args)
-    if rest:
-        print("usage: a8s update [--force]", file=sys.stderr)
+    wait = _update_wait(rest)
+    if wait is None:
+        print(UPDATE_USAGE, file=sys.stderr)
         return 2
     from convo import ConversationArchiveError, prune_conversations
     from settings import get_int
@@ -2528,15 +2603,53 @@ def cmd_update(args: list[str]) -> int:
         f"transaction housekeeping: retained up to {max_rows} row(s), "
         f"pruned {pruned}"
     )
-    by_pid = _running_nodes_by_pid()
+    try:
+        by_pid = _running_nodes_by_pid(strict=True)
+    except (OSError, ValueError) as e:
+        print(f"update: cannot read which nodes are running ({e}) — restarting no node", file=sys.stderr)
+        print("update: if a pid file named above is stale, `a8s ps` clears it; then run the update again", file=sys.stderr)
+        return 1
     if not by_pid:
         print("no nodes running")
         return 0
-    targets = _update_restart_targets(by_pid)
     n_agents = sum(len(v) for v in by_pid.values())
-    print(f"updating {n_agents} node(s) via {len(targets)} restart(s)…")
+    try:
+        n_targets = len(_update_restart_targets(by_pid))
+    except (OSError, ValueError) as e:
+        print(f"update: cannot read the aliases ({e}) — restarting no node", file=sys.stderr)
+        return 1
+    print(f"updating {n_agents} node(s) via {n_targets} restart(s)…")
+    if not force:
+        _wait_for_idle(by_pid, wait)
     rc = 0
-    for target in targets:
+    skipped: dict[str, str] = {}
+    order = [n for _, names in sorted(by_pid.items(), key=lambda kv: kv[1][0].lower()) for n in names]
+    done: set[str] = set()
+    while True:
+        remaining = [n for n in order if n not in done and n not in skipped]
+        if not remaining:
+            break
+        name = remaining[0]
+        try:
+            current = _running_nodes_by_pid(strict=True)
+            pid = next((p for p, names in current.items() if name in names), None)
+            group = current.get(pid, [name]) if pid is not None else [name]
+            targets = _update_restart_targets({pid: group}) if pid is not None else [name]
+            target = next((t for t in targets if name in _target_members(t)), name)
+            members = _target_members(target)
+        except (OSError, ValueError) as e:
+            print(f"update: cannot read which nodes share a handler ({e}) — restarting no more nodes", file=sys.stderr)
+            skipped.update({n: "unknown" for n in remaining})
+            rc = 1
+            break
+        order.extend(n for n in group if n not in order)
+        if not force and pid is not None:
+            held = _held_groups({pid: group}).get(pid)
+            if held:
+                skipped.update(held)
+                continue
+        done.update(members)
+        done.add(name)
         restart_args = [target]
         if force:
             restart_args.append("--force")
@@ -2545,8 +2658,14 @@ def cmd_update(args: list[str]) -> int:
         if r != 0:
             print(f"update: {target} failed (rc={r})", file=sys.stderr)
             rc = r
+    for name, state in skipped.items():
+        print(
+            f"update: {name} {_held_reason(state)} — left on its current "
+            f"handler; run `a8s update` again once `a8s ps` shows it idle, "
+            f"or `a8s update --force` to end any turn"
+        )
     if rc == 0:
-        print("update complete")
+        print("update complete" + (f", {len(skipped)} busy node(s) skipped" if skipped else ""))
     return rc
 
 
@@ -2746,6 +2865,25 @@ def _last_sent_by_node() -> dict[str, str]:
     return {name: clock.stamp(newest) for name, newest in found.items()}
 
 
+def _ps_json() -> int:
+    """`a8s ps --json`: the input a caller deciding whether to stop a node
+    reads, so every read is strict (`_running_nodes_by_pid(strict=True)`,
+    `_busy_state`) and nothing is reaped. When which nodes run, or which
+    share a handler, cannot be read, it prints nothing and exits 1: a caller
+    must not decide from part of the picture."""
+    try:
+        by_pid = _running_nodes_by_pid(strict=True)
+    except (OSError, ValueError) as e:
+        print(f"ps: cannot read which nodes are running: {e}", file=sys.stderr)
+        return 1
+    running = sorted(((n, pid) for pid, names in by_pid.items() for n in names), key=lambda r: r[0].lower())
+    with ThreadPoolExecutor(max_workers=max(1, len(running))) as pool:
+        states = list(pool.map(lambda r: _busy_state(r[0]), running))
+    for (name, pid), state in zip(running, states):
+        print(json.dumps({"name": name, "pid": pid, "busy": state}))
+    return 0
+
+
 def cmd_ps(args: list[str] | None = None) -> int:
     """`a8s ps` — list only running node processes (docker/ollama style).
     Columns: NAME, PID, UPTIME, STATUS (`busy`, `resident`, `fail` or `idle`), FAILED (failed wakes of
@@ -2753,13 +2891,21 @@ def cmd_ps(args: list[str] | None = None) -> int:
     DEFINITION is the definition basename, as `a8s ls` shows it. IN 24H counts what landed in the node's inbox; LAST SENT is when the node
     itself last wrote a message, the one column that says it was responsive.
     `-q` prints just names, one per line. A footer names each remote or
-    storage entry whose stored password is not used, as `a8s ls` does."""
+    storage entry whose stored password is not used, as `a8s ls` does.
+
+    `--json` prints one object per running node, `{"name", "pid", "busy"}`,
+    and nothing when none runs. `busy` is `_busy_state`: `busy`, `idle` or
+    `unknown`, where `unknown` is a configured status probe that failed. It
+    is what a caller deciding whether to stop a node reads; STATUS is for
+    display and shows that failure as `idle` or `fail`."""
     from listing import arguments
 
     options = arguments("ps", args or [])
     if isinstance(options, int):
         return options
     quiet = options.q
+    if options.json:
+        return _ps_json()
     reg = load_registry()
     running: list[tuple[str, int, str, str]] = []
     for name in sorted(reg, key=str.lower):

@@ -1725,10 +1725,12 @@ def _cmd_engine_status(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    word = resident_mod.status_resident(_turn_dir(args), args.agent)
-    if word is None:
+    try:
+        word = resident_mod.status_resident(_turn_dir(args), args.agent)
+    except (OSError, ValueError) as e:
+        print(f"r4t engine: cannot read the resident session's state: {e}", file=sys.stderr)
         return 1
-    print(word)
+    print(word or "idle")
     return 0
 
 

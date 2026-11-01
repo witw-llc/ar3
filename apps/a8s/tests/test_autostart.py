@@ -1142,8 +1142,15 @@ class TestReviewFixes:
             cmd_stop(argv[2:])  # the node is not really running, so its code is not the point
             return Done(0)
 
+        snapshots: list[list[dict]] = []
+
+        def ps(a8s):
+            return snapshots.pop(0) if snapshots else []
+
+        idle = [{"name": "a1", "pid": 1, "busy": "idle"}]
         monkeypatch.setattr(cli.subprocess, "run", fake_run)
-        monkeypatch.setattr(cli, "_running_nodes", lambda a8s: [])
+        monkeypatch.setattr(cli, "_ps_nodes", ps)
+        snapshots[:] = [idle, []]
         stopped: list[str] = []
         cli._stop_nodes("a8s", ["a1"], stopped)
         assert "--keep-autostart" in argvs[0]
@@ -1152,6 +1159,7 @@ class TestReviewFixes:
 
         MemoryBackend.fail_remove = True
         monkeypatch.setattr(cli.subprocess, "run", lambda argv, **_k: Done(1))
+        snapshots[:] = [idle, idle]
         stopped.clear()
         cli._stop_nodes("a8s", ["a1"], stopped)
         assert stopped == [] and "stop exited 1" in capsys.readouterr().err

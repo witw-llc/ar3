@@ -13,7 +13,7 @@ def _replace_broker(monkeypatch, script):
     processes = []
 
     def launch(argv, **kwargs):
-        assert argv[0] == "mosquitto"
+        assert argv[:2] == ["mosquitto", "-p"]
         process = real_popen([sys.executable, "-c", script], **kwargs)
         processes.append(process)
         return process
@@ -28,7 +28,7 @@ def test_early_exit_reports_stderr_and_exit_code(monkeypatch, tmp_path):
     )
     started = time.monotonic()
     with pytest.raises(pytest.fail.Exception, match="code 7.*cannot read broker config"):
-        with _broker_process(tmp_path / "broker.conf", free_port(), timeout=5):
+        with _broker_process(free_port(), timeout=5):
             pytest.fail("a dead broker must not reach the test")
     assert time.monotonic() - started < 4
     assert processes[0].returncode == 7
@@ -40,7 +40,7 @@ def test_timeout_reports_stderr_and_reaps_broker(monkeypatch, tmp_path):
         "import sys,time; print('listener not ready', file=sys.stderr, flush=True); time.sleep(30)",
     )
     with pytest.raises(pytest.fail.Exception, match="within 0.5s.*listener not ready"):
-        with _broker_process(tmp_path / "broker.conf", free_port(), timeout=0.5):
+        with _broker_process(free_port(), timeout=0.5):
             pytest.fail("an unready broker must not reach the test")
     assert processes[0].returncode is not None
 
@@ -52,6 +52,6 @@ def test_test_failure_still_reaps_ready_broker(monkeypatch, tmp_path):
         f"import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(30)",
     )
     with pytest.raises(RuntimeError, match="test body failed"):
-        with _broker_process(tmp_path / "broker.conf", port):
+        with _broker_process(port):
             raise RuntimeError("test body failed")
     assert processes[0].returncode is not None

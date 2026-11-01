@@ -67,12 +67,14 @@ learned the grammar of all of them, including the ones that do not exist yet.
 
 ## 4. Processes
 
-- **One subprocess launch policy**, `ar3.proc.launch_options`, used by all production Python consumers. Background console applications launch without a window on Windows; intentional interactive launches explicitly inherit the console. Process-group intent is explicit. The flag contract follows [Microsoft process creation flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags). Do not set Windows creation flags in consumers or combine hidden launches with `DETACHED_PROCESS`. Each caller keeps its I/O, environment and teardown contract. Test fixtures and archived experiments may launch raw processes to reproduce platform behavior.
+- **One subprocess launch policy**, `ar3.proc.launch_options`, used by all production Python consumers. Background console applications launch without a window on Windows; intentional interactive launches explicitly inherit the console. Process-group intent is explicit, and so is leaving the caller's Windows job (`breakaway`). The flag contract follows [Microsoft process creation flags](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags). Do not set Windows creation flags in consumers or combine hidden launches with `DETACHED_PROCESS`. Each caller keeps its I/O, environment and teardown contract. Test fixtures and archived experiments may launch raw processes to reproduce platform behavior.
 - **One spawn/kill escalation policy**, `ar3.proc`, used everywhere: `SIGTERM`,
   a grace period, then `SIGKILL`, applied to the **process group** rather than
   the process. Windows has no group and no signal a windowless process can
   catch, so there the policy ends the **process tree** at once with
-  `taskkill /T /F`.
+  `taskkill /T /F`. A tree walk does not reach a descendant whose parent has
+  exited; a caller that must reach it holds a job object (`windows_job`,
+  `terminate_job`, `release_job`).
 - **One timeout convention**, with `124` as its exit code.
 - No app writes its own kill sequence.
 - **One pid-file liveness rule**: a pid file is live when `pid_alive` holds

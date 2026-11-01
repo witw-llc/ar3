@@ -23,9 +23,12 @@ def test_live_diagnostic_is_engine_specific_and_preserves_outcomes(tmp_path, eng
     child.write_text(
         f"engine={engine!r}\nkind={kind!r}\nfailed={failed!r}\ndiagnostic={diagnostic!r}\n"
         + """import json,sys
-sys.stdin.readline()
+sent = json.loads(sys.stdin.readline())
 result = ({'event': 'result', 'result': {'response': 'done'}}
           if engine == 'agy' else {'type': 'result', 'result': 'done'})
+if sent.get('uuid'):
+    # As Claude does: the result names the stdin message it answered.
+    result['user_message_uuids'] = [sent['uuid']]
 if kind == 'after_success':
     print(json.dumps(result), flush=True)
 if kind == 'quoted':

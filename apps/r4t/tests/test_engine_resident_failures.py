@@ -93,11 +93,70 @@ def test_bridge_launch_has_no_incompatible_detached_flag(monkeypatch, tmp_path, 
     assert len(launch_spy) == 1
     _, kwargs = launch_spy[0]
     if windows:
-        assert kwargs["creationflags"] == 0x08000200
+        assert kwargs["creationflags"] == 0x09000200
         assert not kwargs.get("start_new_session", False)
     else:
         assert kwargs["start_new_session"] is True
         assert kwargs.get("creationflags", 0) == 0
+
+
+def _bridge_launches(monkeypatch, *, windows, first_error):
+    """Popen that fails the first launch with `first_error` and starts a fake
+    bridge on the next one; every launch's flags are recorded."""
+    flags = []
+
+    def popen(argv, **kwargs):
+        flags.append(kwargs.get("creationflags", 0))
+        if len(flags) == 1 and first_error is not None:
+            raise first_error
+        return type("Bridge", (), {"pid": 4242})()
+
+    monkeypatch.setattr(resident, "IS_WINDOWS", windows)
+    monkeypatch.setattr(resident.subprocess, "Popen", popen)
+    return flags
+
+
+def _enqueue(tmp_path):
+    return resident.enqueue_or_start(
+        "claude", "hello", dir_path=tmp_path,
+        template=["claude", "-p", "{prompt}"], model=None, effort=None,
+        agent="test-seat", timeout=30, scaffold=False,
+    )
+
+
+def _access_denied():
+    error = PermissionError(13, "Access is denied")
+    error.winerror = 5
+    return error
+
+
+def test_windows_bridge_breaks_away_from_the_wake_job(monkeypatch, tmp_path, capsys):
+    flags = _bridge_launches(monkeypatch, windows=True, first_error=None)
+    assert _enqueue(tmp_path) == 0
+    assert flags == [0x09000200]
+    assert "inside the wake's job" not in capsys.readouterr().out
+
+
+def test_windows_bridge_starts_inside_a_job_that_forbids_breakaway(monkeypatch, tmp_path, capsys):
+    flags = _bridge_launches(monkeypatch, windows=True, first_error=_access_denied())
+    assert _enqueue(tmp_path) == 0
+    assert flags == [0x09000200, 0x08000200]
+    out = capsys.readouterr().out
+    assert out.count("resident bridge starts inside the wake's job") == 1
+
+
+def test_windows_bridge_launch_failing_otherwise_is_not_retried(monkeypatch, tmp_path):
+    error = OSError(2, "The system cannot find the file specified")
+    error.winerror = 2
+    flags = _bridge_launches(monkeypatch, windows=True, first_error=error)
+    assert _enqueue(tmp_path) == 1
+    assert flags == [0x09000200]
+
+
+def test_posix_bridge_launch_is_never_retried(monkeypatch, tmp_path):
+    flags = _bridge_launches(monkeypatch, windows=False, first_error=_access_denied())
+    assert _enqueue(tmp_path) == 1
+    assert flags == [0]
 
 
 @pytest.mark.parametrize("engine", sorted(resident.RESIDENT_ENGINES))

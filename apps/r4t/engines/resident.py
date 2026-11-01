@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,9 +38,12 @@ _R4T_DIR = str(Path(__file__).resolve().parents[1])
 if _R4T_DIR not in sys.path:
     sys.path.insert(0, _R4T_DIR)
 
-from ar3.fsio import atomic_write_text
+from ar3.fsio import atomic_write_text, read_text_retry
 from ar3.locking import file_lock
-from ar3.proc import launch_options, pid_alive, process_start_token, terminate_group
+from ar3.proc import (
+    ERROR_ACCESS_DENIED, launch_options, pid_alive, process_start_token, terminate_group,
+    valid_start_token,
+)
 from ar3.ulid import new as new_ulid
 from ar3.wake_outcome import origin_from_env, report_failure, valid_origin
 
@@ -97,6 +102,11 @@ class ResidentAdapter:
     term_grace_seconds: float = 2.0
     cancel_session: bool = False
     fatal_diagnostic_prefixes: tuple[str, ...] = ()
+    # The flag that makes the engine echo each message it takes into a turn.
+    # When the engine rejects it at start, the bridge restarts the session
+    # once without it and remembers that for this binary. With the flag,
+    # `encode_user_turn` also takes the id the echo will carry.
+    echo_flag: str = ""
 
 
 def _safe_agent_key(agent: str | None) -> str:
@@ -134,20 +144,41 @@ def _lock_file(home: Path) -> Path:
     return home / ".lock"
 
 
-def read_live_pid(home: Path) -> int | None:
+def read_live_pid(home: Path, *, strict: bool = False) -> int | None:
+    """The live bridge's pid, or None when there is none: no pid file, a pid
+    that is not alive, or one the OS gave to another process. Reads held off
+    by a replace are retried (`read_text_retry`). Any other failure to read
+    a file that is there (an OSError, contents that do not parse) reads as
+    no bridge, unless `strict`: then it raises, because a caller that must
+    not guess cannot tell a failed read from an absent bridge. `strict` also
+    raises for a stamp that is not in the form `process_start_token` writes:
+    "recycled" is concluded only from a valid token that differs."""
     pf = _pid_file(home)
-    if not pf.is_file():
-        return None
     try:
-        pid = int(pf.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+        text = read_text_retry(pf).strip()
+    except FileNotFoundError:
         return None
+    except OSError:
+        if strict:
+            raise
+        return None
+    if not text.isascii() or not text.isdigit() or int(text) <= 0:
+        if strict:
+            raise ValueError(f"{pf} holds no positive pid: {text[:40]!r}")
+        return None
+    pid = int(text)
+    try:
+        stamped = read_text_retry(_pid_start_file(home)).strip()
+    except FileNotFoundError:
+        stamped = ""
+    except OSError:
+        if strict:
+            raise
+        stamped = ""
+    if strict and stamped and not valid_start_token(stamped):
+        raise ValueError(f"{_pid_start_file(home)} is not a start token: {stamped[:40]!r}")
     if not pid_alive(pid):
         return None
-    try:
-        stamped = _pid_start_file(home).read_text(encoding="utf-8").strip()
-    except OSError:
-        stamped = ""
     if stamped:
         current = process_start_token(pid)
         if current is not None and current != stamped:
@@ -172,15 +203,23 @@ def _clear_pid_files(home: Path, expected_pid: int | None = None) -> None:
         p.unlink(missing_ok=True)
 
 
-def read_state(home: Path) -> dict | None:
+def read_state(home: Path, *, strict: bool = False) -> dict | None:
+    """The bridge's `state.json`, or None. With `strict`, a state that is
+    missing, cannot be read or does not parse to an object raises: it is
+    read for a live bridge, and an unreadable state says nothing about
+    whether a turn is in flight."""
     sf = _state_file(home)
-    if not sf.is_file():
-        return None
     try:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
+        data = json.loads(read_text_retry(sf))
     except (OSError, ValueError):
+        if strict:
+            raise
         return None
+    if isinstance(data, dict):
+        return data
+    if strict:
+        raise ValueError(f"{sf} does not hold a JSON object")
+    return None
 
 
 _KEEP = object()
@@ -263,12 +302,12 @@ def _boot_id_readable() -> bool:
 
 
 def _has_start_token_reader() -> bool:
-    """False on Windows, which has no start-token reader yet.
+    """False on Windows: the dead-bridge sweep there is not yet proven.
 
     The dead-bridge sweep in `enqueue_or_start` uses the token to tell the
-    published engine from a pid the OS reused. Without a reader that sweep
-    can end a live stranger, so enqueue skips it. `stop` still signals a
-    recorded pid, as it did before the reader existed."""
+    published engine from a pid the OS reused. Windows has a reader, but the
+    sweep's kill path there has no native proof, so enqueue skips it. `stop`
+    still signals a recorded pid."""
     return os.name != "nt"
 
 
@@ -332,8 +371,8 @@ def _end_published_bridge(home: Path, state: dict) -> None:
     if os.name != "posix":
         return
     try:
-        pid = int(_pid_file(home).read_text(encoding="utf-8").strip())
-        token = _pid_start_file(home).read_text(encoding="utf-8").strip()
+        pid = int(read_text_retry(_pid_file(home)).strip())
+        token = read_text_retry(_pid_start_file(home)).strip()
     except (OSError, ValueError):
         return
     if pid <= 0 or state.get("pid") != pid or not token:
@@ -390,6 +429,10 @@ def _compose_claude_argv(
         "--output-format",
         "stream-json",
         "--verbose",
+        # Claude echoes each message as it takes it into a turn. A message
+        # that arrives at a tool step joins the running turn, and one result
+        # answers the whole turn: the echoes say which messages it answered.
+        "--replay-user-messages",
     ]
     p_idx = argv.index("-p") if "-p" in argv else len(argv)
     argv[p_idx:p_idx] = stream_flags
@@ -444,25 +487,42 @@ def _extract_claude_assistant_text(frame: dict) -> str:
     return ""
 
 
-def _encode_claude_user_turn(text: str) -> str:
-    return json.dumps(
-        {
-            "type": "user",
-            "session_id": "",
-            "message": {"role": "user", "content": text},
-            "parent_tool_use_id": None,
-        },
-        ensure_ascii=False,
-    )
+def _encode_claude_user_turn(text: str, message_id: str = "") -> str:
+    frame = {
+        "type": "user",
+        "session_id": "",
+        "message": {"role": "user", "content": text},
+        "parent_tool_use_id": None,
+    }
+    if message_id:
+        # Claude's echo carries this uuid back (probed on 2.1.316).
+        frame["uuid"] = message_id
+    return json.dumps(frame, ensure_ascii=False)
 
 
 def _parse_claude_frame(frame: dict) -> ParsedFrame:
     ftype = frame.get("type")
+    if ftype == "user":
+        # A tool result is a user frame too; only an echo carries isReplay.
+        # An echo is not proof that the bridge wrote the message: a turn a
+        # peer or a channel injects is echoed the same way.
+        if frame.get("isReplay") is not True:
+            return ParsedFrame()
+        echo_id = frame.get("uuid")
+        return ParsedFrame(echo=echo_id if isinstance(echo_id, str) else "")
     if ftype == "assistant":
         return ParsedFrame(assistant_text=_extract_claude_assistant_text(frame))
     if ftype == "result":
         res_text = frame.get("result")
         result_text = res_text.strip() if isinstance(res_text, str) else ""
+        # The stdin uuids this turn answered (at most 64, per the SDK docs).
+        # Anything but a list of strings is no list at all.
+        listed = frame.get("user_message_uuids")
+        answered_ids = (
+            tuple(listed)
+            if isinstance(listed, list) and all(isinstance(i, str) for i in listed)
+            else None
+        )
         subtype = frame.get("subtype")
         errors = frame.get("errors")
         if (
@@ -482,10 +542,12 @@ def _parse_claude_frame(frame: dict) -> ParsedFrame:
                 turn_completed=True,
                 fatal=True,
                 turn_failed=True,
+                answered_ids=answered_ids,
             )
         return ParsedFrame(
             result_text=result_text,
             turn_completed=True,
+            answered_ids=answered_ids,
         )
     return ParsedFrame()
 
@@ -522,6 +584,7 @@ CLAUDE_ADAPTER = ResidentAdapter(
     parse_frame=_parse_claude_frame,
     tell_step=MCP_TELL_STEP,
     fatal_diagnostic_prefixes=("Failed to authenticate:",),
+    echo_flag="--replay-user-messages",
 )
 
 AGY_ADAPTER = ResidentAdapter(
@@ -1739,7 +1802,7 @@ def enqueue_or_start(
 
         try:
             with _open_log(home) as log_fh:
-                proc = subprocess.Popen(
+                proc = _start_bridge(
                     [sys.executable, str(Path(__file__).resolve()), "serve", str(home)],
                     cwd=str(dir_path),
                     env=clean_env,
@@ -1747,7 +1810,6 @@ def enqueue_or_start(
                     stdout=log_fh,
                     stderr=log_fh,
                     close_fds=True,
-                    **launch_options(windows=IS_WINDOWS, new_session=True),
                 )
         except OSError as exc:
             # This enqueuer's nonzero exit accounts for its own wake. Earlier
@@ -1760,6 +1822,29 @@ def enqueue_or_start(
         _write_pid_files(home, proc.pid)
         _write_state(home, pid=proc.pid, engine_pid=None, status="starting")
     return 0
+
+
+def _start_bridge(argv: list[str], **kwargs) -> subprocess.Popen:
+    """Start the bridge outside the job of the wake that started it, so it
+    outlives a forced stop of that wake, as its own session does on POSIX.
+    A job that forbids breakaway refuses with ERROR_ACCESS_DENIED; the
+    bridge then starts inside it, said in one line, and a forced stop of
+    the wake ends it. Ending a bridge is `stop_resident`'s job either way."""
+    try:
+        return subprocess.Popen(
+            argv, **kwargs,
+            **launch_options(windows=IS_WINDOWS, new_session=True, breakaway=True),
+        )
+    except OSError as exc:
+        if not IS_WINDOWS or getattr(exc, "winerror", None) != ERROR_ACCESS_DENIED:
+            raise
+    _log(
+        "resident bridge starts inside the wake's job: the job forbids "
+        "breakaway, so a forced stop of the wake ends the bridge"
+    )
+    return subprocess.Popen(
+        argv, **kwargs, **launch_options(windows=IS_WINDOWS, new_session=True),
+    )
 
 
 def _log(line: str) -> None:
@@ -2086,6 +2171,90 @@ def stop_engine(
     closer.join(timeout=STDIN_CLOSE_SECONDS)
 
 
+ECHO_REFUSED_NAME = "echo-refused.json"
+
+
+def _program_stamp(program: str) -> dict | None:
+    path = (
+        program if os.sep in program or (os.altsep and os.altsep in program)
+        else shutil.which(program)
+    )
+    if not path:
+        return None
+    try:
+        real = os.path.realpath(path)
+        st = os.stat(real)
+    except OSError:
+        return None
+    return {"path": real, "mtime_ns": st.st_mtime_ns, "size": st.st_size}
+
+
+def _echo_refusal_key(argv: list[str], flag: str) -> dict | None:
+    """What a refusal of `flag` is remembered against: the program the
+    session runs and, when that is a launcher (`ollama launch claude --`),
+    the `claude` on PATH too. A change to either forgets the refusal."""
+    if not argv:
+        return None
+    stamp = _program_stamp(argv[0])
+    if stamp is None:
+        return None
+    key = {"flag": flag, "program": stamp}
+    if Path(stamp["path"]).name != "claude" and Path(argv[0]).name != "claude":
+        inner = _program_stamp("claude")
+        if inner is not None:
+            key["claude"] = inner
+    return key
+
+
+def _echo_refused(home: Path, argv: list[str], flag: str) -> bool:
+    key = _echo_refusal_key(argv, flag)
+    if key is None:
+        return False
+    try:
+        stored = json.loads((home / ECHO_REFUSED_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return stored == key
+
+
+def _mark_echo_refused(home: Path, argv: list[str], flag: str) -> None:
+    key = _echo_refusal_key(argv, flag)
+    if key is None:
+        return
+    try:
+        atomic_write_text(home / ECHO_REFUSED_NAME, json.dumps(key))
+    except OSError:
+        pass
+
+
+def _restore_for_retry(
+    home: Path, items: list[dict], agent: str | None, cause: str,
+) -> tuple[int, int]:
+    """Put drained messages back in the inbox for a second session. A message
+    that cannot be written back is reported failed at once, never dropped and
+    never raised past the caller's accounting. Returns (restored, failed)."""
+    restored = failed = 0
+    for item in items:
+        try:
+            if not isinstance(item.get("id"), str):
+                raise ValueError("the message has no id")
+            atomic_write_text(
+                _inbox_dir(home) / f"{item['id']}.json",
+                json.dumps(item, ensure_ascii=False),
+            )
+            restored += 1
+            continue
+        except Exception as exc:
+            reason = f"{cause}; cannot put the message back in the inbox: {exc}"
+        failed += 1
+        try:
+            for origin in _item_origins([item], home, agent):
+                report_failure(origin, reason)
+        except Exception as exc:
+            _log(f"cannot report a message that was not put back: {exc}")
+    return restored, failed
+
+
 def _run_session(
     home: Path, spec: dict, stop_requested: threading.Event, current: dict
 ) -> int:
@@ -2123,6 +2292,14 @@ def _run_session(
         dropped = _fail_inbox(home, f"cannot compose {engine}: {exc}", agent)
         _log(f"resident cannot compose {engine}: {exc}; dropped {len(dropped)} message(s)")
         return 1
+    echo_flag = adapter.echo_flag
+    if echo_flag in argv and (
+        spec.get("echo") is False or _echo_refused(home, argv, echo_flag)
+    ):
+        argv = [a for a in argv if a != echo_flag]
+    echo_active = bool(echo_flag) and echo_flag in argv
+    # Claude Code's own wording, read from 2.1.316 given an unknown option.
+    echo_refusal = f"error: unknown option '{echo_flag}'"
     child_env = {
         k: v for k, v in session_env.items()
         if not k.startswith("A8S_TURN_") and not k.startswith("R4T_SESSION_")
@@ -2208,8 +2385,23 @@ def _run_session(
     turns_completed = threading.Condition()
     in_flight_turns = 0
     # Origins by submission token, oldest first. A session that tracks
-    # tokens settles exact ones; any other settles the oldest.
+    # tokens settles exact ones. An engine that echoes each message it takes
+    # settles every message the ending turn took: Claude merges a message
+    # that arrives at a tool step into the running turn and answers them all
+    # with one result (#378). Any other settles the oldest.
     turn_origins: dict[int, list[dict]] = {}
+    # With echoes: the one-use id written with each message, by token, until
+    # its echo arrives; then the tokens the running turn took, settled
+    # together at its result. An echo whose id the bridge did not write (a
+    # turn a peer or a channel injected), or whose id was already used,
+    # settles nothing. With the flag, a result settles only messages whose
+    # id it lists (`user_message_uuids`) or that were echoed; an engine that
+    # took the flag and does neither leaves its messages in flight. Without
+    # the flag, each result settles the oldest.
+    written: dict[str, int] = {}
+    taken_tokens: list[int] = []
+    echo_state = {"refused": False, "frames": False}
+    sent_items: list[dict] = []
     next_token = 0
     tracks_tokens = bool(getattr(session, "tracks_tokens", False))
     native_active = getattr(session, "native_work_active", lambda: False)
@@ -2234,6 +2426,8 @@ def _run_session(
                 frame = json.loads(line)
             except json.JSONDecodeError:
                 _log(line)
+                if echo_active and line == echo_refusal:
+                    echo_state["refused"] = True
                 if line.startswith(adapter.fatal_diagnostic_prefixes):
                     outcome["failed"] = True
                     outcome["reason"] = line
@@ -2256,6 +2450,7 @@ def _run_session(
             # frame parsed before the decision always counts and one parsed
             # after it is after the window. Lock order is condition, then
             # the session's own lock.
+            echo_state["frames"] = True
             with turns_completed:
                 last_activity = time.monotonic()
                 was_native = native_active()
@@ -2265,6 +2460,10 @@ def _run_session(
                 )
                 if parsed.fatal:
                     fatal.set()
+                if parsed.echo and echo_active:
+                    token = written.pop(parsed.echo, None)
+                    if token is not None:
+                        taken_tokens.append(token)
                 native_changed = native_active() != was_native
                 if native_changed:
                     last_activity = time.monotonic()
@@ -2285,7 +2484,34 @@ def _run_session(
                 with turns_completed:
                     last_activity = time.monotonic()
                     completed_origins = []
-                    for token in parsed.settled or (next(iter(turn_origins), None),):
+                    if parsed.settled:
+                        tokens = parsed.settled
+                    elif echo_active:
+                        # Only messages the bridge wrote, by id, each once;
+                        # never the oldest. A turn the engine started
+                        # itself, or one a peer or a channel injected,
+                        # settles nothing, before the first echo as after.
+                        ids = parsed.answered_ids
+                        if ids is None:
+                            # No list: the messages echoed since the last
+                            # result that settled any.
+                            tokens = tuple(taken_tokens)
+                            taken_tokens.clear()
+                        elif not ids:
+                            # The result says it answered no stdin message.
+                            # Echoed messages wait for a result that does.
+                            tokens = ()
+                        else:
+                            # The list holds at most 64 ids; the echoes
+                            # cover a turn that took more.
+                            listed = [written.pop(i, None) for i in ids]
+                            tokens = tuple(dict.fromkeys(
+                                [*taken_tokens, *(tok for tok in listed if tok is not None)]
+                            ))
+                            taken_tokens.clear()
+                    else:
+                        tokens = (next(iter(turn_origins), None),)
+                    for token in tokens:
                         if token in turn_origins:
                             completed_origins.extend(turn_origins.pop(token))
                             if in_flight_turns > 0:
@@ -2320,13 +2546,19 @@ def _run_session(
             next_token += 1
             token = next_token
             turn_origins[token] = origins or []
+            message_id = str(uuid.uuid4()) if echo_active else ""
+            if echo_active:
+                written[message_id] = token
             last_activity = time.monotonic()
         publish_turns()
         if proc.poll() is not None or proc.stdin is None:
             end_flags["write_failed"] = True
             return False
         if session is None:
-            lines = [adapter.encode_user_turn(prompt_text)]
+            lines = [
+                adapter.encode_user_turn(prompt_text, message_id) if echo_active
+                else adapter.encode_user_turn(prompt_text)
+            ]
         elif tracks_tokens:
             lines = session.turn_lines(prompt_text, token)
         else:
@@ -2506,6 +2738,7 @@ def _run_session(
 
             batch = _drain_inbox(home)
             if batch:
+                sent_items.extend(batch)
                 origins = _item_origins(batch, home, agent)
                 if origins:
                     session_origin = origins[-1]
@@ -2605,6 +2838,43 @@ def _run_session(
             end_engine()
         current["proc"] = None
         reader.join(timeout=2)
+        # A CLI that does not know the echo flag rejects it at start, in its
+        # own words, and exits before it reads any input or writes a frame.
+        # Its messages go back to the inbox unanswered and unreported, and
+        # the session starts once more without the flag. Any frame read, or
+        # any other wording, is an ordinary engine exit.
+        retry_without_echo = (
+            echo_active and echo_state["refused"] and not echo_state["frames"]
+            and proc.returncode not in (0, None) and not bridge_signaled["hit"]
+            and not stop_requested.is_set()
+        )
+        requeue_failed = False
+        rerun_without_echo = False
+        if retry_without_echo:
+            # Nothing was settled: the engine wrote no frame. Every drained
+            # message is either back in the inbox or reported failed here.
+            try:
+                _mark_echo_refused(home, argv, echo_flag)
+            except Exception as exc:
+                _log(f"cannot record that {argv[0]} rejected {echo_flag}: {exc}")
+            restored, lost = _restore_for_retry(
+                home, sent_items, agent, f"{argv[0]} rejected {echo_flag}",
+            )
+            requeue_failed = lost > 0
+            with turns_completed:
+                turn_origins.clear()
+                written.clear()
+                in_flight_turns = 0
+            try:
+                rerun_without_echo = _inbox_waiting(home)
+            except OSError:
+                rerun_without_echo = False
+            _log(
+                f"{argv[0]} rejected {echo_flag}; {restored} message(s) kept, "
+                f"{lost} reported failed; "
+                + ("starting the session again without it" if rerun_without_echo
+                   else "nothing left to run")
+            )
         # The outcome is the session's, after the engine has exited and the
         # reader has stopped. A signal this bridge sent is not the engine's
         # own non-zero exit. A turn still open, a fatal frame, or a missed
@@ -2617,7 +2887,7 @@ def _run_session(
         self_nonzero = (
             code is not None and code != 0 and not bridge_signaled["hit"]
         )
-        bad = (
+        bad = not retry_without_echo and (
             outcome["failed"]
             or fatal.is_set()
             or still_open
@@ -2627,7 +2897,7 @@ def _run_session(
             or not handshake_ready
             or (not booted and _inbox_waiting(home))
         )
-        session_outcome = 1 if bad else 0
+        session_outcome = 1 if bad or requeue_failed else 0
         if bad:
             if stop_requested.is_set() and still_open:
                 cause = "stop"
@@ -2651,13 +2921,13 @@ def _run_session(
                 report_failure(session_origin, reason, session=True)
             drop_held_turns(cause)
         exit_code = session_outcome
-        if not booted:
+        if not booted and not retry_without_echo:
             # The engine ended before it read anything. A failed wake simply
             # fails: drop what it never read rather than respawn on it forever.
             dropped = _fail_inbox(home, "engine exited before its first turn", agent)
             if dropped:
                 _log(f"engine exited before its first turn; dropped {len(dropped)} message(s)")
-        if memory_turn is not None:
+        if memory_turn is not None and not retry_without_echo:
             try:
                 memory_turn.finish("\n\n".join(collected_outputs), session_outcome)
             except Exception:
@@ -2666,6 +2936,11 @@ def _run_session(
         detail = f", engine code {raw_code}" if raw_code != exit_code else ""
         _log(f"resident session exited (code {exit_code}{detail})")
 
+    if rerun_without_echo:
+        # A restore that lost a message already made this session a failure;
+        # the retry runs the kept work but cannot clear that failure.
+        retry_outcome = _run_session(home, {**spec, "echo": False}, stop_requested, current)
+        return max(session_outcome, retry_outcome)
     return session_outcome
 
 
@@ -2740,20 +3015,39 @@ def status_resident(dir_path: Path, agent: str | None) -> str | None:
     bridge, or a bridge whose state says `stopping`. `busy`: a turn is in
     flight (`turns` > 0; a state written before the field existed reads as
     0), or the bridge is `starting` with a message queued. Everything else is
-    `resident`, including `closing`. Reads only; takes no lock."""
+    `resident`, including `closing`. Reads only; takes no lock. Only "no
+    live bridge" answers None. A pid file or stamp that is there and cannot
+    be read or is not valid, a live bridge whose state cannot be read, whose
+    `status` is not one the bridge writes or whose `turns` is not an int of
+    0 or more, and a queue that cannot be listed, raise (OSError or
+    ValueError): a probe that cannot tell must not answer idle."""
     home = resident_home(dir_path, agent)
-    if read_live_pid(home) is None:
+    if read_live_pid(home, strict=True) is None:
         return None
-    state = read_state(home) or {}
+    state = read_state(home, strict=True) or {}
     status = state.get("status")
+    if status not in ("starting", "running", "closing", "stopping"):
+        raise ValueError(f"{_state_file(home)}: status {status!r}")
+    turns = state.get("turns", 0)
+    if type(turns) is not int or turns < 0:
+        raise ValueError(f"{_state_file(home)}: turns {turns!r}")
     if status == "stopping":
         return None
-    turns = state.get("turns", 0)
-    if isinstance(turns, int) and turns > 0:
+    if turns > 0:
         return "busy"
-    if status == "starting" and _inbox_waiting(home):
+    if status == "starting" and _inbox_waiting_strict(home):
         return "busy"
     return "resident"
+
+
+def _inbox_waiting_strict(home: Path) -> bool:
+    """Whether a message is queued; a queue that is there and cannot be
+    listed raises rather than answer no."""
+    try:
+        with os.scandir(_inbox_dir(home)) as entries:
+            return any(e.name.endswith(".json") for e in entries)
+    except FileNotFoundError:
+        return False
 
 
 def stop_resident(

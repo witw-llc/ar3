@@ -72,6 +72,12 @@ def make_fake_stream_claude(
             rec = load_rec()
             rec["turns"].append(content)
             save(rec)
+            if "--replay-user-messages" in sys.argv:
+                sys.stdout.write(json.dumps({{
+                    "type": "user", "isReplay": True, "message": frame.get("message"),
+                    "uuid": frame.get("uuid"),
+                }}) + "\\n")
+                sys.stdout.flush()
 
             time.sleep({sleep_per_turn})
             if {bare_values!r}:
@@ -258,6 +264,7 @@ class TestComposeResidentArgv:
         assert "--output-format" in composed
         assert composed[composed.index("--output-format") + 1] == "stream-json"
         assert "--verbose" in composed
+        assert "--replay-user-messages" in composed
         assert "-p" in composed
         assert "{prompt}" not in composed
 
@@ -1069,16 +1076,140 @@ class TestResidentStatus:
         (home / "inbox" / "1.json").write_text("{}", encoding="utf-8")
         assert self._run(tmp_path, capsys) == (0, "busy")
 
-    def test_stopping_prints_nothing_and_exits_1(self, tmp_path, capsys):
+    def test_stopping_is_idle(self, tmp_path, capsys):
         self._live_home(tmp_path, status="stopping", turns=2)
-        assert self._run(tmp_path, capsys) == (1, "")
+        assert self._run(tmp_path, capsys) == (0, "idle")
 
-    def test_a_dead_bridge_prints_nothing_and_exits_1(self, tmp_path, capsys):
+    def test_a_dead_bridge_is_idle(self, tmp_path, capsys):
         home = self._live_home(tmp_path, status="running", turns=1)
         resident_mod._pid_file(home).write_text("4194300\n", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "idle")
+
+    def test_no_session_at_all_is_idle(self, tmp_path, capsys):
+        """An answer, not a failure: an update reads a failed probe as
+        unknown and will not stop the node."""
+        assert self._run(tmp_path, capsys) == (0, "idle")
+
+    def test_a_state_that_cannot_be_read_fails_the_probe(self, tmp_path, capsys, monkeypatch):
+        self._live_home(tmp_path, status="running", turns=1)
+
+        def unreadable(*a, **k):
+            raise PermissionError(13, "sharing violation")
+
+        monkeypatch.setattr(resident_mod, "status_resident", unreadable)
         assert self._run(tmp_path, capsys) == (1, "")
 
-    def test_no_session_at_all_exits_1(self, tmp_path, capsys):
+    def test_status_raises_rather_than_answer_idle_when_state_is_unreadable(self, tmp_path, monkeypatch):
+        import ar3.fsio as fsio
+
+        home = self._live_home(tmp_path, status="running", turns=1)
+        monkeypatch.setattr(fsio.time, "sleep", lambda s: None)
+        real = Path.read_text
+
+        def read_text(self, *a, **k):
+            if self.name == "state.json":
+                raise PermissionError(13, "sharing violation")
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        assert resident_mod.read_state(home) is None
+        with pytest.raises(PermissionError):
+            resident_mod.status_resident(tmp_path, "ares")
+
+    @pytest.mark.parametrize("target,error", [
+        ("state.json", OSError(5, "I/O error")),
+        ("state.json", ValueError("not JSON")),
+        ("pid", OSError(5, "I/O error")),
+    ])
+    def test_any_read_failure_of_a_live_bridge_fails_the_probe(
+        self, tmp_path, capsys, monkeypatch, target, error
+    ):
+        """A live bridge with a turn in flight whose state cannot be read must
+        not answer resident or idle."""
+        home = self._live_home(tmp_path, status="running", turns=1)
+        real = Path.read_text
+
+        def read_text(self, *a, **k):
+            if self == home / target:
+                raise error
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+        with pytest.raises((OSError, ValueError)):
+            resident_mod.status_resident(tmp_path, "ares")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    @pytest.mark.parametrize("field,value", [
+        ("turns", "1"), ("turns", -1), ("turns", True), ("turns", 1.0), ("turns", None),
+        ("status", "weird"), ("status", None), ("status", 3),
+    ])
+    def test_a_state_value_of_the_wrong_type_fails_the_probe(self, tmp_path, capsys, field, value):
+        """Artemis's probe: turns="1" on a live bridge answered resident."""
+        home = self._live_home(tmp_path, status="running", turns=1)
+        state = json.loads((home / "state.json").read_text(encoding="utf-8"))
+        state[field] = value
+        (home / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_a_state_that_is_not_an_object_fails_the_probe(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="running", turns=1)
+        (home / "state.json").write_text("[1]", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    @pytest.mark.parametrize("pid_text", ["+5", "-5", "5.0", "garbage", ""])
+    def test_a_pid_file_in_the_wrong_form_fails_the_probe(self, tmp_path, capsys, pid_text):
+        home = self._live_home(tmp_path, status="running", turns=1)
+        resident_mod._pid_file(home).write_text(pid_text, encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_a_start_stamp_in_the_wrong_form_fails_the_probe(self, tmp_path, capsys):
+        """Artemis's probe: a garbage pid.start answered no live bridge."""
+        home = self._live_home(tmp_path, status="running", turns=1)
+        resident_mod._pid_start_file(home).write_text("garbage\n", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_a_valid_differing_stamp_is_no_live_bridge(self, tmp_path, capsys):
+        from ar3.proc import _start_token_kind
+
+        home = self._live_home(tmp_path, status="running", turns=1)
+        other = {
+            "linux": "00000000-0000-0000-0000-000000000000 1",
+            "ps": "Thu Jan 1 00:00:00 1970",
+            "windows": "0000000000000001",
+        }[_start_token_kind()]
+        resident_mod._pid_start_file(home).write_text(other + "\n", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "idle")
+
+    @pytest.mark.parametrize("error", ["eio", "denied"])
+    def test_a_queue_that_cannot_be_listed_fails_the_probe(self, tmp_path, capsys, monkeypatch, error):
+        """Artemis's probe: a starting bridge with a queued message is busy;
+        a listing that is denied read as an empty queue, so resident."""
+        import errno
+
+        home = self._live_home(tmp_path, status="starting")
+        (home / "inbox").mkdir(exist_ok=True)
+        (home / "inbox" / "work.json").write_text("{}", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "busy")
+        real = os.scandir
+
+        def scandir(path):
+            if Path(path) == home / "inbox":
+                if error == "denied":
+                    raise PermissionError(13, "listing denied")
+                raise OSError(errno.EIO, "I/O error")
+            return real(path)
+
+        monkeypatch.setattr(resident_mod.os, "scandir", scandir)
+        assert self._run(tmp_path, capsys) == (1, "")
+
+    def test_an_empty_stamp_leaves_liveness_to_decide(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="running", turns=1)
+        resident_mod._pid_start_file(home).write_text("\n", encoding="utf-8")
+        assert self._run(tmp_path, capsys) == (0, "busy")
+
+    def test_a_live_bridge_with_no_state_fails_the_probe(self, tmp_path, capsys):
+        home = self._live_home(tmp_path, status="running", turns=1)
+        (home / "state.json").unlink()
         assert self._run(tmp_path, capsys) == (1, "")
 
     def test_an_engine_without_a_resident_session_is_refused(self, tmp_path, capsys):

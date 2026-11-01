@@ -10,6 +10,77 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.125
+
+Bug fixes: Windows stop and kill, updates that no longer stop a busy seat, and the broker tests on Ubuntu 26.04. Messages can carry a subject.
+
+### Added
+
+- A message can carry a subject line the recipient's app may show:
+  `tell --subject "TEXT"`, or the optional `subject` argument of the MCP
+  `a8s_tell` tool. It is one line of up to 200 characters. Every route and
+  remote carries it, and `a8s convo --json` shows it.
+
+### Fixed
+
+- A plain `tell <own-name>` from a node's own outbox is now delivered to that
+  node's inbox and wakes it. Since 0.1.122 it was lost: local routing left the
+  sender out, and the broker echo it used to ride back on is now dropped as a
+  duplicate. An alias or namespace that includes the sender still leaves the
+  sender out of its own fan-out (#380).
+- On Windows, `a8s stop --force` and `a8s kill` no longer end a process that
+  took over the pid of a wake whose handler died. The wake record and the
+  handler's pid file now carry the process's creation time there, as they do
+  on Linux and macOS, so a reused pid reads as no wake. Records written
+  without one still read as before.
+- A native Windows test run now covers the stop and kill paths it can.
+  The stop tests that force the Windows branch with mocks no longer sit
+  behind a POSIX-only marker; only the tests that need POSIX signals or
+  process groups do.
+- On Windows, a forced stop or a stuck wake no longer leaves a wake's
+  orphaned process running. Each wake now runs in a job object, so killing it
+  ends every process it started, even one whose parent has already exited,
+  and a handler killed outright takes its wake with it. A wake that finishes
+  normally still leaves its background processes running, and an r4t
+  resident session a wake started keeps running after a forced stop of that
+  wake that the node carries out, as it does on Linux and macOS. A node too
+  hung to take the stop is killed with its wake's whole process tree.
+  A wake started through a Windows app execution alias, or through a venv
+  of a Microsoft Store Python, starts its program outside the job, so a
+  forced stop may still leave its processes running; its log says so. Use a
+  python.org interpreter on Windows for full cleanup.
+- `ar3 update` and `a8s update` no longer stop a busy node mid-turn. They wait
+  up to 10 minutes (`--wait SECONDS` changes it) for busy nodes, restart the
+  idle ones, and name each node still busy; it keeps running on its current
+  handler with its messages, and running the update again later restarts it.
+  A node whose status cannot be read counts as busy, and so does every node
+  that shares a handler with a busy one.
+- On Windows, reading a node's wake record, stop request or resident
+  session state while it is being rewritten no longer fails. The read is
+  retried briefly; a stop request is never discarded for it, and a state
+  that still cannot be read counts as possibly busy, so an update leaves
+  the node alone.
+- A resident Claude session no longer keeps a message in flight after
+  Claude has answered it. Claude takes a message that arrives while a turn
+  runs tools into that turn and answers the whole turn once; the bridge
+  counted that one answer for one message only. The leftover count kept the
+  node `busy` for good, so the session never closed after its quiet window
+  and every update skipped the node, and a stop then reported each answered
+  message as failed and dropped. Each message the bridge writes now carries
+  its own id, and the bridge asks Claude to echo each message it takes
+  (`--replay-user-messages`). When a turn ends, the bridge counts as answered
+  the messages whose ids the result lists and the messages echoed during the
+  turn, each once. A turn that a peer session or a channel injects answers
+  nothing, and a message that arrives during a turn's final reply still
+  waits for its own turn. A Claude CLI that rejects the flag at start gets
+  the session started again once without it, with every message kept, or
+  reported failed if it cannot be put back; the bridge remembers that for
+  that `claude` (or `ollama` launcher) until the program changes, and without
+  the flag each result counts for one message, as before. Closes #378.
+- The MQTT broker tests run on Ubuntu 26.04. Its AppArmor profile for
+  mosquitto lets the broker read config only under `/etc/mosquitto`, so the
+  test broker now starts from command-line options with no config file.
+
 ## 0.1.124
 
 Publishes 0.1.122 and 0.1.123, whose release run stopped before publishing.

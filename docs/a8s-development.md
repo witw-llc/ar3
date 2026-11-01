@@ -497,10 +497,59 @@ accounting path. Completed turns stay completed if a later session step fails.
   deadline (`wake_drain_grace_seconds`) — never an unbounded `for line in
   proc.stdout:` EOF wait. An inherited write end (a grandchild that keeps the
   pipe open after the wake itself exits) must not wedge the runner.
+- **An update stops or restarts a node only on strict reads.** `a8s update`,
+  `a8s ps --json` and `ar3 update` read the registry, each handler pid file
+  and its `pid.start` (`read_handler_pid_strict`), each wake record
+  (`read_wake_pid(strict=True)`) and each status probe (`run_status_probe`)
+  without reaping or deleting anything, and validate every value they
+  decide on: a pid is a positive decimal int, a start token has the exact
+  form `process_start_token` writes on this platform (`valid_start_token`),
+  a wake record's fields have their written types, a status block is an
+  object with a non-empty `invoke` list of strings, a probe answers `busy`,
+  `resident`, `idle` or nothing, and a resident state's `status` and
+  `turns` (an int of 0 or more) are what the bridge writes. An absent file
+  means "not running" or "no wake"; any other failure (an OSError, content
+  that does not parse, a value of the wrong type or form) is unknown, never
+  absent, recycled or idle. Only a valid start token that differs from the
+  live process's shows a recycled pid. Unknown holds the node's whole
+  handler group, and an unreadable membership (registry, pid file) holds the
+  whole update.
+  Reaping stale files stays on the normal paths (`a8s ps`, `start`, `stop`).
 - **The watchdog's kill boundary is the wake's own process group, nothing
   else.** Recovery closes the runner's end of the current wake's stdout and,
   if that process is still alive, terminates its process group — never a
   detached process (its own session) or anything outside the in-flight wake.
+- **On Windows each wake runs in its own job object, the stand-in for its
+  process group.** The handler starts the wake suspended, assigns it to a
+  new job, then resumes it (`ar3.proc.start_in_job`), so nothing the wake
+  starts — the real program behind a launcher such as a venv's python.exe
+  or a `.cmd` shim included — begins outside the job. It holds the handle
+  until the wake settles. A job that cannot be made leaves the wake
+  running with no job; a resume that fails ends the suspended process and,
+  once its exit is confirmed, starts it again with no job; an exit that
+  cannot be confirmed fails the wake. Each case writes one line to the
+  agent's log. A packaged (MSIX, for example Microsoft Store) program
+  activated through its app execution alias under
+  `%LOCALAPPDATA%\Microsoft\WindowsApps`, or a venv launcher whose base is
+  a packaged Python, starts the real program outside the job even so, and
+  everything it starts with it; the packaged interpreter run directly stays
+  in the job. The handler logs one line when the wake starts through such a
+  launcher or `IsProcessInJob` says the leader is not in its job
+  (`windows_job_escape_note`). Recommend a python.org interpreter on Windows. A
+  forced kill or a drain timeout ends the job (`terminate_job`), then the
+  leader by pid, so a descendant whose parent has exited dies too. It does
+  not run `taskkill /T`, which follows parent links into a child that left
+  the job; the tree walk runs only when the wake has no job or ending the
+  job fails. A settled
+  wake's job is released with its kill on close cleared (`release_job`), so
+  a settle kills nothing, as on POSIX. The job kills on close, so a handler
+  killed outright takes its wake's tree with it. A child started with
+  `CREATE_BREAKAWAY_FROM_JOB` may leave the job, as a POSIX child may leave
+  its group with `setsid`. r4t's resident bridge does, so it survives a
+  forced stop of its wake that the handler carries out, whether or not the
+  process that launched it still runs. A handler that does not take the
+  stop is killed from the CLI, which ends the wake's tree with
+  `taskkill /T`; that reaches a bridge whose launching process still runs.
 - **Native autostart remains experimental until owner-run basic OS checks.**
   Do not require disposable machines for this acceptance. The owner tests
   startup after boot/login and removal of the owned startup entry on existing

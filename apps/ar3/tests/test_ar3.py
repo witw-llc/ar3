@@ -537,7 +537,7 @@ def test_no_note_when_every_harness_resolves(monkeypatch, capsys):
 def _update_args(**kw):
     import argparse
 
-    base = {"all_engines": False, "engines": None}
+    base = {"all_engines": False, "engines": None, "wait": 600.0}
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -971,7 +971,8 @@ def _which(binary_map):
 
 
 def _pipeline(tmp_path, monkeypatch, nodes=(), binaries=None, fail=(),
-              shared=None, interrupt=(), interrupt_drops=(), aliases=None):
+              shared=None, interrupt=(), interrupt_drops=(), aliases=None,
+              status=None):
     """Stage an install copy with a8s on PATH and record every spawned
     command in order. `nodes` is what `a8s ps` reports; `binaries` maps
     engine names to paths; `fail` is the argv prefix that exits 3.
@@ -979,7 +980,9 @@ def _pipeline(tmp_path, monkeypatch, nodes=(), binaries=None, fail=(),
     takes them all down; `aliases` is written to the fake registry for
     restart-target matching; `interrupt` is the argv prefix that raises
     KeyboardInterrupt, with `interrupt_drops` naming nodes the
-    interrupted command still took down before the signal propagated."""
+    interrupted command still took down before the signal propagated.
+    `status` maps a node to the `busy` field `a8s ps --json` reports
+    (default `idle`); a callable is asked on every ps."""
     root = _installed(tmp_path)
     monkeypatch.setattr(ar3, "REPO_ROOT", root)
     a8s = _engine_path(tmp_path, "bin", "a8s")
@@ -1013,10 +1016,13 @@ def _pipeline(tmp_path, monkeypatch, nodes=(), binaries=None, fail=(),
             live.difference_update(interrupt_drops)
             raise KeyboardInterrupt
         if argv[:2] == [a8s, "ps"]:
+            assert argv[2:] == ["--json"], argv
+            states = status() if callable(status) else (status or {})
             rows = "".join(
-                f"{n}   {pids[n]}   1m   /r\n" for n in nodes if n in live
+                json.dumps({"name": n, "pid": pids[n], "busy": states.get(n, "idle")}) + "\n"
+                for n in nodes if n in live
             )
-            return _Done(0, stdout="NAME   PID   UPTIME   ROOT\n" + rows)
+            return _Done(0, stdout=rows)
         if argv[:2] == [a8s, "stop"]:
             target = argv[-1]
             if target not in live:
@@ -1230,10 +1236,10 @@ def test_update_engine_runs_the_engine_then_the_suite(tmp_path, monkeypatch):
     root, a8s, seen = _pipeline(tmp_path, monkeypatch, binaries={"claude": binary})
     assert ar3.cmd_update(_update_args(engines=["claude"])) == 0
     assert seen == [
-        [a8s, "ps"],
+        [a8s, "ps", "--json"],
         [binary, "update"],
         ["/bin/sh", str(root / "get.sh")],
-        [a8s, "ps"],
+        [a8s, "ps", "--json"],
     ]
 
 
@@ -1303,15 +1309,17 @@ def test_update_stops_nodes_before_engines_and_restarts_them(tmp_path, monkeypat
         tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary}
     )
     assert ar3.cmd_update(_update_args(all_engines=True)) == 0
+    ps = [a8s, "ps", "--json"]
     assert seen == [
-        [a8s, "ps"],
+        ps,
+        ps,
         [a8s, "stop", "--keep-autostart", "N1"],
-        [a8s, "ps"],
+        ps,
         [a8s, "stop", "--keep-autostart", "N2"],
-        [a8s, "ps"],
+        ps,
         [binary, "update"],
         ["/bin/sh", str(root / "get.sh")],
-        [a8s, "ps"],
+        ps,
         [a8s, "start", "N1"],
         [a8s, "start", "N2"],
     ]
@@ -1461,6 +1469,225 @@ def test_update_group_without_a_matching_alias_starts_each_member(
     assert [a8s, "start", "worker-a"] in seen
     assert [a8s, "start", "worker-b"] in seen
     assert [a8s, "start", "devs"] not in seen
+
+
+def _installer_env(monkeypatch):
+    """Wrap the pipeline's fake run to keep the installer's environment."""
+    envs = {}
+    inner = ar3.subprocess.run
+
+    def run(argv, env=None, **kw):
+        if str(argv[-1]).endswith("get.sh"):
+            envs.update(env or {})
+        return inner(argv, env=env, **kw)
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    return envs
+
+
+def test_update_with_idle_nodes_does_not_wait(tmp_path, monkeypatch, capsys):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(tmp_path, monkeypatch, nodes=("N1",), binaries={"claude": binary})
+    envs = _installer_env(monkeypatch)
+    monkeypatch.setattr(ar3.time, "sleep", lambda s: pytest.fail("idle nodes need no wait"))
+    assert ar3.cmd_update(_update_args(all_engines=True)) == 0
+    assert seen[:3] == [[a8s, "ps", "--json"]] * 2 + [[a8s, "stop", "--keep-autostart", "N1"]]
+    assert "busy" not in capsys.readouterr().out
+    assert envs["A8S_UPDATE_WAIT_SECONDS"] == "0"
+
+
+def test_update_waits_for_a_busy_node_then_stops_it(tmp_path, monkeypatch, capsys):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    answers = iter([{"N2": "busy"}, {"N2": "busy"}])
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary},
+        status=lambda: next(answers, {}),
+    )
+    monkeypatch.setattr(ar3.time, "sleep", lambda s: None)
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=60)) == 0
+    assert "waiting up to 60s for busy node(s): N2" in capsys.readouterr().out
+    assert seen.index([a8s, "stop", "--keep-autostart", "N2"]) < seen.index([binary, "update"])
+    assert [a8s, "start", "N2"] in seen
+
+
+def test_update_leaves_a_node_busy_past_the_wait_running_and_names_it(tmp_path, monkeypatch, capsys):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary},
+        status={"N2": "busy"},
+    )
+    envs = _installer_env(monkeypatch)
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0.05)) == 0
+    assert [a8s, "stop", "--keep-autostart", "N1"] in seen
+    assert [a8s, "stop", "--keep-autostart", "N2"] not in seen
+    assert [a8s, "start", "N2"] not in seen
+    assert [a8s, "start", "N1"] in seen
+    out = capsys.readouterr().out
+    assert "ar3 update: N2 is busy (a turn is in flight) — left running on its current handler" in out
+    assert "run `ar3 update` again" in out
+    assert envs["A8S_UPDATE_WAIT_SECONDS"] == "0"
+
+
+def test_update_holds_back_every_member_of_a_busy_handler(tmp_path, monkeypatch):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("worker-a", "worker-b"), binaries={"claude": binary},
+        shared={"worker-a": ("worker-b",)}, status={"worker-b": "busy"},
+    )
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0)) == 0
+    assert not any(argv[1:2] in (["stop"], ["start"]) for argv in seen)
+
+
+def test_update_leaves_every_node_running_when_ps_stops_answering(tmp_path, monkeypatch, capsys):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary},
+        status={"N2": "busy"},
+    )
+    inner = ar3.subprocess.run
+    calls = iter(range(1))
+
+    def run(argv, **kw):
+        if argv[1:2] == ["ps"] and next(calls, None) is None:
+            raise OSError("ps is gone")
+        return inner(argv, **kw)
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    ar3.cmd_update(_update_args(all_engines=True, wait=0.2))
+    assert not any(argv[1:2] == ["stop"] for argv in seen)
+    assert "cannot read node status" in capsys.readouterr().err
+
+
+def test_update_stops_nothing_when_the_first_ps_fails(tmp_path, monkeypatch, capsys):
+    """The first snapshot cannot be read; a later one would show N1 busy.
+    No snapshot of the decision means no stop."""
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1",), binaries={"claude": binary}, status={"N1": "busy"},
+    )
+    original = ar3.subprocess.run
+    failed = []
+
+    def run(argv, **kw):
+        if argv[:2] == [a8s, "ps"] and not failed:
+            failed.append(argv)
+            raise OSError("transient ps error")
+        return original(argv, **kw)
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0)) == 0
+    assert [a8s, "stop", "--keep-autostart", "N1"] not in seen
+    assert "cannot read node status" in capsys.readouterr().err
+
+
+def test_update_rechecks_before_each_stop(tmp_path, monkeypatch, capsys):
+    """N2 turns busy while N1 is stopping; N2's stop is decided on the
+    snapshot taken after N1's stop, so N2 is left running."""
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    status = {}
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary},
+        status=lambda: status,
+    )
+    original = ar3.subprocess.run
+
+    def run(argv, **kw):
+        if argv == [a8s, "stop", "--keep-autostart", "N1"]:
+            status["N2"] = "busy"
+        return original(argv, **kw)
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0)) == 0
+    assert [a8s, "stop", "--keep-autostart", "N1"] in seen
+    assert [a8s, "stop", "--keep-autostart", "N2"] not in seen
+    assert "ar3 update: N2 is busy" in capsys.readouterr().out
+
+
+def test_update_leaves_a_node_with_an_unknown_state_running(tmp_path, monkeypatch, capsys):
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N2"), binaries={"claude": binary},
+        status={"N2": "unknown"},
+    )
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0)) == 0
+    assert [a8s, "stop", "--keep-autostart", "N2"] not in seen
+    assert [a8s, "stop", "--keep-autostart", "N1"] in seen
+    assert "N2 has a status probe that failed" in capsys.readouterr().out
+
+
+def test_update_does_not_stop_a_node_whose_handler_gained_an_unknown_node(tmp_path, monkeypatch, capsys):
+    """N1 shares its handler with N9, which was not running when the update
+    began; stopping N1 would take N9 down and the restart would not bring it
+    back."""
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(
+        tmp_path, monkeypatch, nodes=("N1", "N9"), binaries={"claude": binary},
+        shared={"N1": ("N9",)},
+    )
+    original = ar3.subprocess.run
+    first = []
+
+    def run(argv, **kw):
+        done = original(argv, **kw)
+        if argv[1:2] == ["ps"] and not first:
+            first.append(argv)
+            rows = [line for line in done.stdout.splitlines() if '"N9"' not in line]
+            done.stdout = "\n".join(rows) + "\n"
+        return done
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    assert ar3.cmd_update(_update_args(all_engines=True, wait=0)) == 0
+    assert [a8s, "stop", "--keep-autostart", "N1"] not in seen
+    assert "N9 joined a handler this update is restarting" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("answer", [
+    _Done(1),
+    _Done(0, stdout='{"name": "N1", "pid": "not a pid", "busy": "idle"}\n'),
+    _Done(0, stdout='{"name": "N1", "pid": "9000", "busy": "idle"}\n'),
+    _Done(0, stdout='{"name": "N1", "pid": true, "busy": "idle"}\n'),
+    _Done(0, stdout='{"name": "N1", "pid": -1, "busy": "idle"}\n'),
+    _Done(0, stdout='{"name": "", "pid": 9000, "busy": "idle"}\n'),
+    _Done(0, stdout='{"name": 7, "pid": 9000, "busy": "idle"}\n'),
+    _Done(0, stdout='["N1", 9000, "idle"]\n'),
+    _Done(0, stdout='{"name": "N1", "pid": 9000, "busy": "maybe"}\n'),
+    _Done(0, stdout='{"name": "N1", "pid": 9000, "busy": 0}\n'),
+    _Done(0, stdout="not json\n"),
+])
+def test_update_stops_nothing_when_ps_json_fails_or_is_invalid(tmp_path, monkeypatch, capsys, answer):
+    """a8s ps --json exits 1 when it cannot read which nodes run (a pid
+    file or the registry it cannot read); a row that does not parse is no
+    snapshot either."""
+    binary = _engine_path(tmp_path, ".local", "bin", "claude")
+    root, a8s, seen = _pipeline(tmp_path, monkeypatch, nodes=("N1",), binaries={"claude": binary})
+    original = ar3.subprocess.run
+
+    def run(argv, **kw):
+        if argv[1:2] == ["ps"]:
+            seen.append(list(argv))
+            return answer
+        return original(argv, **kw)
+
+    monkeypatch.setattr(ar3.subprocess, "run", run)
+    ar3.cmd_update(_update_args(all_engines=True, wait=0))
+    assert not any(argv[1:2] == ["stop"] for argv in seen)
+
+
+def test_update_without_engines_hands_its_wait_to_the_installer(tmp_path, monkeypatch):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    _sh_on_path(monkeypatch)
+    envs = {}
+    monkeypatch.setattr(ar3.subprocess, "run", lambda argv, env=None, **kw: envs.update(env) or _Done(0))
+    assert ar3.cmd_update(_update_args(wait=90)) == 0
+    assert envs["A8S_UPDATE_WAIT_SECONDS"] == "90"
+
+
+def test_update_refuses_a_negative_wait(tmp_path, monkeypatch, capsys):
+    root = _installed(tmp_path)
+    monkeypatch.setattr(ar3, "REPO_ROOT", root)
+    assert ar3.cmd_update(_update_args(wait=-1)) == 2
+    assert "--wait" in capsys.readouterr().err
 
 
 def test_update_restart_targets_expand_nested_aliases():

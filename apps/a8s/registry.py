@@ -60,7 +60,7 @@ class RegistryUnreadable(OSError):
     and `tells` in a sandbox) keep that behavior."""
 
 
-def _load_raw_registry() -> dict:
+def _load_raw_registry(*, strict: bool = False) -> dict:
     p = registry_path()
     try:
         text = p.read_text()
@@ -77,6 +77,8 @@ def _load_raw_registry() -> dict:
     raw = {}
     for section in _REGISTRY_SECTIONS:
         value = data.get(section)
+        if strict and value is not None and not isinstance(value, dict):
+            raise RegistryUnreadable(f"registry unreadable: {p}: '{section}' is not an object")
         raw[section] = value if isinstance(value, dict) else {}
     return raw
 
@@ -86,9 +88,11 @@ def _save_raw_registry(data: dict) -> None:
     atomic_write_text(registry_path(), json.dumps(payload, indent=2, sort_keys=True))
 
 
-def load_registry() -> dict:
-    """Return just the agents section."""
-    return _load_raw_registry()["agents"]
+def load_registry(*, strict: bool = False) -> dict:
+    """Return just the agents section. `strict` raises RegistryUnreadable
+    for a section that is there and is not an object, which otherwise reads
+    as empty: a decision that must not guess cannot read it as no agents."""
+    return _load_raw_registry(strict=strict)["agents"]
 
 
 def save_registry(agents: dict) -> None:

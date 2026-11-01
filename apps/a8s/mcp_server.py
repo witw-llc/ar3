@@ -32,7 +32,9 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ar3.proc import launch_options
+from tell import TellUsageError, check_subject
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "a8s"
@@ -71,6 +73,13 @@ TOOL = {
                 "type": "string",
                 "description": "The message text. Sent verbatim.",
             },
+            "subject": {
+                "type": "string",
+                "description": (
+                    "Optional one-line subject, up to 200 characters, that the "
+                    "recipient's app may show above the message."
+                ),
+            },
             "attachments": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -99,7 +108,9 @@ def log_call(event: dict) -> None:
         pass
 
 
-def send(recipient: str, body: str, attachments: list[str] | None = None) -> tuple[bool, str]:
+def send(
+    recipient: str, body: str, attachments: list[str] | None = None, subject: str | None = None,
+) -> tuple[bool, str]:
     """Deliver through `a8s tell --verbatim -- <recipient> -`, body on stdin.
 
     `--verbatim` keeps a body that ends in `FILE:` lines as text, and `--` keeps
@@ -111,6 +122,8 @@ def send(recipient: str, body: str, attachments: list[str] | None = None) -> tup
     """
     argv = [sys.executable, str(A8S_PY), "tell"]
     argv += [f"--attach={path}" for path in (attachments or [])]
+    if subject is not None:
+        argv.append(f"--subject={subject}")
     argv += ["--verbatim", "--", recipient, "-"]
     try:
         proc = subprocess.Popen(
@@ -158,13 +171,23 @@ def _call_tool(params: dict) -> dict:
     if not isinstance(raw, list):
         return _text_result("attachments must be a list of paths", is_error=True)
     attachments = [str(p).strip() for p in raw if str(p).strip()]
+    subject = args.get("subject")
+    if subject is not None:
+        if not isinstance(subject, str):
+            return _text_result("subject must be a string", is_error=True)
+        try:
+            check_subject(subject)
+        except TellUsageError as e:
+            return _text_result(str(e).replace("--subject", "subject"), is_error=True)
     record = {"tool": name, "recipient": recipient, "body": body}
+    if subject is not None:
+        record["subject"] = subject
     if attachments:
         # Only when there are some: the record is read back by experiments that
         # compare calls, and an empty key on every line is noise.
         record["attachments"] = attachments
     log_call(record)
-    ok, detail = send(recipient, body, attachments)
+    ok, detail = send(recipient, body, attachments, subject)
     return _text_result(detail, is_error=not ok)
 
 

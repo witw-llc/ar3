@@ -20,6 +20,18 @@ def test_windows_policy(new_session, interactive):
     assert not flags.get("creationflags", 0) & 0x18
 
 
+@pytest.mark.parametrize("new_session", [False, True])
+def test_windows_breakaway_adds_only_its_flag(new_session):
+    plain = launch_options(windows=True, new_session=new_session)["creationflags"]
+    away = launch_options(windows=True, new_session=new_session, breakaway=True)
+    assert away == {"creationflags": plain | 0x01000000}
+
+
+def test_posix_breakaway_adds_nothing():
+    assert launch_options(windows=False, breakaway=True) == {}
+    assert launch_options(windows=False, new_session=True, breakaway=True) == {"start_new_session": True}
+
+
 @pytest.mark.parametrize("interactive", [False, True])
 def test_posix_group_intent(interactive):
     assert launch_options(windows=False, interactive=interactive) == {}

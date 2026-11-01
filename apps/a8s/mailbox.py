@@ -424,7 +424,7 @@ def _finalize_pending(sender: Participant, pending_file: Path) -> None:
 
 def _shape_error(msg: dict) -> str:
     """Why a pending message cannot be routed as written, or '' when it can."""
-    for key in ("to", "from", "id", "content"):
+    for key in ("to", "from", "id", "content", "subject"):
         if not isinstance(msg.get(key) or "", str):
             return f"'{key}' is not a string"
     files = msg.get("files") or []
@@ -851,7 +851,11 @@ def _process_pending(
             recipients: list[Participant] = []
             for m in member_names:
                 rp = by_name.get(m.lower())
-                if rp is not None and rp.name != sender.name:
+                # A plain name that is the sender's own is delivered to its own
+                # inbox: the broker echo is dropped by the seen row (#138), so
+                # local delivery is the only path (#380). An alias or namespace
+                # still leaves the sender out of its own fan-out.
+                if rp is not None and (kind == "agent" or rp.name != sender.name):
                     recipients.append(rp)
             if recipients:
                 staged: list[tuple[Participant, Path, Path]] = []
@@ -922,8 +926,8 @@ def _process_pending(
                                     })
                             convo.record({**delivered, "files": files}, recipients=[recipient.name])
             else:
-                # An alias whose only member is the sender, or the sender
-                # addressing itself: nothing to deliver here.
+                # An alias or namespace whose only member is the sender:
+                # nothing to deliver here.
                 out_agent(sender.name, f"{recipient_name!r} has no local recipients (excluding self)")
                 local_delivered = True
         # ----- REMOTE ROUTING -----

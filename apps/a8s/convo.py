@@ -152,9 +152,10 @@ def convo_help_epilog() -> str:
 {heading_help()}
 
 output:
-  --json         one JSON object per row (ulid, seq, from, to, utc, content, files,
-                 files_unavailable), newline-delimited, in the same seq order as the
-                 markdown view -- pairs with --since: record the newest ulid, ask
+  --json         one JSON object per row (ulid, seq, from, to, utc, subject when
+                 present, content, files, files_unavailable), newline-delimited,
+                 in the same seq order as the markdown view -- pairs with
+                 --since: record the newest ulid, ask
                  --since <it> next time. files_unavailable carries one
                  {{filename, error, detail}} object per attachment the transfer could
                  not deliver for this recipient. files_outcome_unrecorded lists
@@ -192,6 +193,7 @@ def json_row(entry: dict[str, Any], seq: int | None = None) -> dict[str, Any]:
         "from": entry.get("from", ""),
         "to": entry.get("to", ""),
         "utc": entry.get("date", ""),
+        **({"subject": entry["subject"]} if entry.get("subject") else {}),
         "content": entry.get("content", ""),
         "files": entry.get("files", []),
         "files_unavailable": [
@@ -364,6 +366,9 @@ def entry_from_message(msg: dict[str, Any], *, recipients: list[str] | None = No
     }
     if unavailable:
         entry["files_unavailable"] = unavailable
+    subject = msg.get("subject")
+    if isinstance(subject, str) and subject:
+        entry["subject"] = subject
     return entry
 
 

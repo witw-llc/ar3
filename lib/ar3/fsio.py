@@ -76,6 +76,27 @@ def replace_with_retry(src: Path | str, dst: Path | str) -> None:
     os.replace(src, dst)
 
 
+READ_ATTEMPTS = 20
+READ_BACKOFF_SECONDS = 0.025
+
+
+def read_text_retry(path: Path | str, encoding: str = "utf-8") -> str:
+    """`Path.read_text`, retried briefly on PermissionError.
+
+    On Windows a read that meets `os.replace` of the same file (every write
+    here is one) can fail with a sharing violation for a moment. Bounded:
+    `READ_ATTEMPTS` tries `READ_BACKOFF_SECONDS` apart, then the last
+    `PermissionError` is raised, so a caller that must not guess can say
+    the file could not be read. Any other error is raised at once.
+    """
+    for _ in range(READ_ATTEMPTS - 1):
+        try:
+            return Path(path).read_text(encoding=encoding)
+        except PermissionError:
+            time.sleep(READ_BACKOFF_SECONDS)
+    return Path(path).read_text(encoding=encoding)
+
+
 def atomic_write_text(
     path: Path,
     text: str,

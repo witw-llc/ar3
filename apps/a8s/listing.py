@@ -16,6 +16,11 @@ def arguments(command: str, args: list[str]):
                      else "List running local node processes; remote process status is unknown."),
     )
     parser.add_argument("-q", action="store_true", help="Print names only.")
+    if command == "ps":
+        parser.add_argument(
+            "--json", action="store_true",
+            help="One JSON object per running node: name, pid, and busy (busy, idle or unknown).",
+        )
     if command == "ls":
         parser.add_argument("--autostart", action="store_true", help="Show local startup preferences and OS entries.")
         source = parser.add_mutually_exclusive_group()

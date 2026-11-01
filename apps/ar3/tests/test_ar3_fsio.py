@@ -159,3 +159,50 @@ class TestUnreadablePath:
         assert exists(blocked) is False
         assert stat_or_none(blocked) is None
         assert is_dir(sibling) is True
+
+
+def _flaky_read(monkeypatch, failures, error=PermissionError):
+    import ar3.fsio as fsio
+
+    real = Path.read_text
+    calls = []
+
+    def read_text(self, *a, **k):
+        calls.append(self)
+        if len(calls) <= failures:
+            raise error(13, "sharing violation")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(fsio.time, "sleep", lambda s: None)
+    return calls
+
+
+def test_read_text_retry_rides_out_a_brief_sharing_violation(tmp_path, monkeypatch):
+    from ar3.fsio import read_text_retry
+
+    f = tmp_path / "pid"
+    f.write_text("42")
+    calls = _flaky_read(monkeypatch, 3)
+    assert read_text_retry(f) == "42"
+    assert len(calls) == 4
+
+
+def test_read_text_retry_is_bounded_and_raises_the_permission_error(tmp_path, monkeypatch):
+    from ar3.fsio import READ_ATTEMPTS, read_text_retry
+
+    f = tmp_path / "pid"
+    f.write_text("42")
+    calls = _flaky_read(monkeypatch, 10**6)
+    with pytest.raises(PermissionError):
+        read_text_retry(f)
+    assert len(calls) == READ_ATTEMPTS
+
+
+def test_read_text_retry_does_not_retry_other_errors(tmp_path, monkeypatch):
+    from ar3.fsio import read_text_retry
+
+    calls = _flaky_read(monkeypatch, 0)
+    with pytest.raises(FileNotFoundError):
+        read_text_retry(tmp_path / "absent")
+    assert len(calls) == 1

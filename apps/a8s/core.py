@@ -44,7 +44,7 @@ except ImportError:
         return f"{app} unknown (ar3, python {platform.python_version()})"
 
 from ar3 import envseam  # noqa: E402
-from ar3.fsio import atomic_write_text  # noqa: E402
+from ar3.fsio import atomic_write_text, read_text_retry  # noqa: E402
 from ar3.home import app_home  # noqa: E402
 from ar3.proc import pid_alive as ar3_pid_alive  # noqa: E402
 from ar3.proc import process_start_token  # noqa: E402,F401
@@ -377,7 +377,7 @@ def read_wake_unit(name: str) -> list[str] | None:
     leaves its record, so a record is proof of an unsettled wake and says
     nothing about its processes."""
     try:
-        data = json.loads(wake_pid_path(name).read_text(encoding="utf-8"))
+        data = json.loads(read_text_retry(wake_pid_path(name)))
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
@@ -388,23 +388,63 @@ def read_wake_unit(name: str) -> list[str] | None:
         return []
 
 
-def read_wake_pid(name: str) -> tuple[int, list[str]] | None:
+def read_wake_pid(name: str, *, strict: bool = False) -> tuple[int, list[str]] | None:
     """`(pid, envelope filenames)` of the wake in flight for `name`, or None.
     A recorded pid that is gone, or that the OS has since handed to another
-    process, reads as no wake."""
+    process, reads as no wake, and so does a record that cannot be read.
+
+    `strict` is for a decision that must not guess (an update). No record is
+    still no wake, but a record that is there and cannot be read (any
+    OSError after `read_text_retry`), does not parse, or holds a value of
+    the wrong type or form (`_check_wake_record`) raises, and a claim (pid
+    0: the handler is about to spawn the wake) reads as a wake, `(0, unit)`.
+    "Recycled" is concluded only from a valid token that differs."""
     try:
-        data = json.loads(wake_pid_path(name).read_text(encoding="utf-8"))
+        text = read_text_retry(wake_pid_path(name))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        if strict:
+            raise
+        return None
+    try:
+        data = json.loads(text)
+        if strict:
+            _check_wake_record(data)
         pid = int(data["pid"])
         start = str(data.get("start") or "")
         unit = [str(f) for f in data.get("unit") or []]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        if strict:
+            raise ValueError(f"{wake_pid_path(name)}: not a wake record ({e})") from e
         return None
+    if strict and pid == 0:
+        return 0, unit
     if pid <= 0 or not _pid_alive(pid):
         return None
     current = process_start_token(pid)
     if start and current is not None and current != start:
         return None
     return pid, unit
+
+
+def _check_wake_record(data: object) -> None:
+    """Raise ValueError unless `data` is the shape `_write_wake_record`
+    writes: `pid` an int of 0 or more, `start` "" (no token) or a valid
+    start token, `unit` a list of strings."""
+    from ar3.proc import valid_start_token
+
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+    pid = data.get("pid")
+    if type(pid) is not int or pid < 0:
+        raise ValueError(f"pid {pid!r}")
+    start = data.get("start", "")
+    if not isinstance(start, str) or (start and not valid_start_token(start)):
+        raise ValueError(f"start {start!r}")
+    unit = data.get("unit", [])
+    if not isinstance(unit, list) or not all(isinstance(f, str) for f in unit):
+        raise ValueError(f"unit {unit!r}")
 
 
 def dead_letters_dir(name: str) -> Path:

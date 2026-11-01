@@ -14,6 +14,7 @@ Module-level mutable state used by signal handlers:
   _STOP_CAUSE          — the 1st signal's name and the parent it found; the
                          RUN_STOP detail carries it
   _CURRENT_WAKE_PROC   — the currently-running wake subprocess (or None)
+  _WAKE_JOB            — the Windows job object holding that wake (or None)
   _WAKE_*              — in-flight wake timing / completion callback
   _WAKE_STDOUT_*       — the reader thread + queue draining that wake's stdout
   _STUCK_WAKE_READERS  — reader threads a drain-timeout kill failed to free;
@@ -29,8 +30,9 @@ only ever drains the thread's queue with a bounded deadline
 (`_pump_wake_stdout_once` while running, `_drain_wake_stdout` after exit).
 When the bounded drain times out, `_drain_wake_stdout_after_exit` terminates
 the exited wake's whole process group — the grandchild holding the pipe dies
-with it, on POSIX — and hands the reader thread to `_STUCK_WAKE_READERS` as a
-backstop for the platforms/races where that doesn't free it.
+with it, on POSIX; on Windows the wake's job object ends it — and hands the
+reader thread to `_STUCK_WAKE_READERS` as a backstop for the races where that
+doesn't free it.
 
 `attached_loop` also sets `core.PRINT_LOCK` to a fresh Lock so `core.out` /
 `core.out_agent` serialize log writes across threads.
@@ -57,12 +59,15 @@ from pathlib import Path
 import autostart
 import core
 from ar3 import clock
-from ar3.fsio import atomic_write_text, stat_or_none
+from ar3.fsio import atomic_write_text, read_text_retry, stat_or_none
 from ar3.locking import file_lock
 from ar3.wake_outcome import (
     ENVELOPES_ENV, OUTCOME_DIR_ENV, RECIPIENT_ENV, outcome_dir, take_failures,
 )
-from ar3.proc import launch_options, terminate_group
+from ar3.proc import (
+    launch_options, release_job, start_in_job, terminate_group, terminate_job,
+    valid_start_token, windows_job_escape_note,
+)
 from settings import DEFAULTS, get_float, get_setting
 from core import (
     Participant,
@@ -139,7 +144,7 @@ from network import (
     stop_remotes,
     unusable_secret_entries,
 )
-from registry import RegistryUnreadable, participants_from_registry, unresolved_mailboxes
+from registry import RegistryUnreadable, load_registry, participants_from_registry, unresolved_mailboxes
 import convo
 import txlog
 
@@ -152,6 +157,10 @@ import txlog
 # being killed.
 _CURRENT_WAKE_PROC: subprocess.Popen | None = None
 _CURRENT_WAKE_NAME: str | None = None
+# Windows only: the job object the wake was put in at spawn, held until the
+# wake settles. A handler killed outright closes it, which ends the wake's
+# whole tree. None on POSIX, and when the job could not be made.
+_WAKE_JOB: int | None = None
 _WAKE_STARTED_MONO: float | None = None
 _WAKE_MAX_SECONDS: float | None = None
 _WAKE_ON_COMPLETE: Callable[[int | None], None] | None = None
@@ -197,12 +206,16 @@ def _heartbeat_detail() -> str:
 
 
 def _clear_wake_state(rc: int | None = None) -> None:
-    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
+    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME, _WAKE_JOB
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     global _WAKE_STDOUT_THREAD, _WAKE_STDOUT_QUEUE
     settled_name = _CURRENT_WAKE_NAME
+    job = _WAKE_JOB
     _CURRENT_WAKE_PROC = None
     _CURRENT_WAKE_NAME = None
+    _WAKE_JOB = None
+    if job is not None:
+        release_job(job)
     _WAKE_STARTED_MONO = None
     _WAKE_MAX_SECONDS = None
     _WAKE_STDOUT_THREAD = None
@@ -358,18 +371,19 @@ def _drain_wake_stdout_after_exit(name: str) -> None:
     properly-detached child (its own session — the p0o supervisor design) is
     outside the group by construction and untouched.
 
-    That kill is not a guarantee — Windows has no group to target, and a
-    POSIX straggler can still survive the SIGKILL-window race — so the
-    runner's own end is also closed in the background as before (belt, not a
-    wait), and a reader thread still alive after both is handed to
-    `_STUCK_WAKE_READERS` for the retention sweep to keep reporting until it
-    dies on its own."""
+    Windows has no group; the wake's job object (`_WAKE_JOB`) ends every
+    process the wake started, its leader gone or not. That kill is not a
+    guarantee — the job may not exist, and a POSIX straggler can still
+    survive the SIGKILL-window race — so the runner's own end is also closed
+    in the background as before (belt, not a wait), and a reader thread
+    still alive after both is handed to `_STUCK_WAKE_READERS` for the
+    retention sweep to keep reporting until it dies on its own."""
     if _drain_wake_stdout(get_float("wake_drain_grace_seconds")):
         return
     _diagnose_stuck_wake_stdout(name)
     proc = _CURRENT_WAKE_PROC
     if proc is not None:
-        terminate_group(proc)
+        _end_wake_tree(proc)
         _close_wake_stdout_in_background(proc)
     thread = _WAKE_STDOUT_THREAD
     if thread is not None and thread.is_alive():
@@ -444,8 +458,13 @@ def _start_wake_subprocess(
 
     `on_complete` fires from `_clear_wake_state` with the subprocess exit code
     once the wake finishes. It does NOT fire when the spawn itself fails —
-    callers see that as a False return and settle the delivery themselves."""
-    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME
+    callers see that as a False return and settle the delivery themselves.
+
+    On Windows the wake starts suspended in a job object and is resumed
+    once it is assigned (`start_in_job`): the job is what reaches a
+    descendant whose parent has exited, and nothing the wake starts can
+    begin outside it."""
+    global _CURRENT_WAKE_PROC, _CURRENT_WAKE_NAME, _WAKE_JOB
     global _WAKE_STARTED_MONO, _WAKE_MAX_SECONDS, _WAKE_ON_COMPLETE
     global _WAKE_STDOUT_THREAD, _WAKE_STDOUT_QUEUE
     if _wake_in_flight():
@@ -456,7 +475,7 @@ def _start_wake_subprocess(
     if env:
         proc_env.update(env)
     try:
-        proc = subprocess.Popen(
+        proc, job, note = start_in_job(
             cmd,
             cwd=str(cwd),
             env=proc_env,
@@ -481,6 +500,11 @@ def _start_wake_subprocess(
         out_agent(name, f"{name}> [{ts}] cannot start {cmd[0]}: {e}")
         clear_wake_pid(name)
         return False
+    _WAKE_JOB = job
+    if job is not None:
+        note = windows_job_escape_note(cmd[0], proc.pid, job)
+    if note is not None:
+        out_agent(name, f"{name}> [{clock.time_stamp()}] wake {note}")
     stdout_queue: "queue.Queue[str | object]" = queue.Queue()
     stdout_thread = threading.Thread(
         target=_wake_stdout_reader, args=(proc, stdout_queue), daemon=True
@@ -1046,6 +1070,53 @@ def pid_lock(name: str):
         yield
 
 
+def read_handler_pid_strict(name: str) -> int | None:
+    """The handler pid of `name` for a decision that must not guess (an
+    update). It never reaps or deletes. None means not running: no pid file,
+    a pid that is not alive, or one the OS gave to another process, which
+    only a valid stamped start token that differs from the live one shows.
+    No stamp, or an empty one (no token on this platform), leaves liveness
+    to decide.
+    A pid file or stamp that is there and cannot be read, a pid file that
+    is not a positive decimal pid, or a stamp that is not in the form
+    `process_start_token` writes here, raises (OSError, ValueError). Read under `pid_lock`, so an in-flight claim is
+    waited for; where the lock cannot be taken it reads without it."""
+    if not pid_path(name).parent.is_dir():
+        return None
+    try:
+        lock = pid_lock(name)
+        lock.__enter__()
+    except OSError:
+        return _read_handler_pid_strict_locked(name)
+    try:
+        return _read_handler_pid_strict_locked(name)
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _read_handler_pid_strict_locked(name: str) -> int | None:
+    try:
+        text = read_text_retry(pid_path(name)).strip()
+    except FileNotFoundError:
+        return None
+    if not text.isascii() or not text.isdigit() or int(text) <= 0:
+        raise ValueError(f"{pid_path(name)} holds no positive pid: {text[:40]!r}")
+    pid = int(text)
+    try:
+        stamped = read_text_retry(pid_start_path(name)).strip() or None
+    except FileNotFoundError:
+        stamped = None
+    if stamped is not None and not valid_start_token(stamped):
+        raise ValueError(f"{pid_start_path(name)} is not a start token: {stamped[:40]!r}")
+    if not _pid_alive(pid):
+        return None
+    if stamped is not None:
+        current = process_start_token(pid)
+        if current is not None and current != stamped:
+            return None
+    return pid
+
+
 def _read_handler_pid(name: str) -> int | None:
     """Validate (and reap) under `pid_lock`, waiting for an in-flight claim.
     A node with no directory has no claim to wait for. Where the lock file
@@ -1103,7 +1174,7 @@ def _read_handler_pid_locked(name: str) -> int | None:
 
 def _pid_recycled(name: str, pid: int) -> bool:
     try:
-        stamped = pid_start_path(name).read_text().strip()
+        stamped = read_text_retry(pid_start_path(name)).strip()
     except OSError:
         return False
     current = process_start_token(pid)
@@ -1279,12 +1350,20 @@ def _write_stop_request(name: str, requester_pid: int, force: bool) -> None:
 def _read_stop_request(name: str) -> tuple[int, int] | None:
     """`(requester pid, level)`, with the parse-and-reap discipline of
     `_read_detach_request`: malformed contents and a dead requester are
-    removed and read as no request."""
+    removed and read as no request. A read a replace holds off past the
+    retries is not malformed: it reads as no request this poll and is kept."""
     p = stop_request_path(name)
     if not p.is_file():
         return None
     try:
-        pid_text, level_text = p.read_text().split()
+        text = read_text_retry(p)
+    except PermissionError:
+        return None
+    except OSError:
+        _clear_stop_request(name)
+        return None
+    try:
+        pid_text, level_text = text.split()
         pid, level = int(pid_text), int(level_text)
         if pid <= 0 or level not in (1, 2):
             raise ValueError("bad stop request")
@@ -1408,18 +1487,47 @@ def _hook_launch(name: str, p: Participant, build) -> tuple[list[str], dict[str,
 STATUS_PROBE_SECONDS = 3.0
 
 
+def _valid_hook_spec(spec: object) -> bool:
+    """A `status` (or `stop`) block a8s can run: an object whose `invoke` is
+    a non-empty list of non-empty strings."""
+    if not isinstance(spec, dict):
+        return False
+    argv = spec.get("invoke")
+    return (
+        isinstance(argv, list) and bool(argv)
+        and all(isinstance(arg, str) and arg for arg in argv)
+    )
+
+
 def probe_node_status(name: str) -> str | None:
     """Run the node's `status.invoke`, if it declares one, in the node's root
     with the env the stop hook gets. Returns the first word of stdout, or None
     when there is no probe, it failed, exited nonzero or ran past
     `STATUS_PROBE_SECONDS`."""
+    return run_status_probe(name)[1] or None
+
+
+def run_status_probe(name: str) -> tuple[bool, str | None]:
+    """`(configured, first word)` of the node's `status.invoke`. `configured`
+    is False when the node declares no probe (or is not registered). The
+    word is `""` when the probe exited 0 and printed nothing, and None when
+    there is no probe or a configured one could not start, exited nonzero
+    or ran past `STATUS_PROBE_SECONDS`. A caller that must not guess tells
+    them apart: a probe that failed says nothing about the node."""
     try:
         p = next((q for q in participants_from_registry() if q.name == name), None)
         if p is None:
-            return None
+            # A registered node whose root or mailboxes do not resolve has a
+            # definition nobody read: that is not "no probe".
+            return (name in load_registry()), None
+        definition = load_definition(name)
+        if "status" not in definition:
+            return False, None
+        if not _valid_hook_spec(definition["status"]):
+            return True, None
         launch = _hook_launch(name, p, build_status_command)
         if launch is None:
-            return None
+            return True, None
         cmd, env = launch
         proc = subprocess.Popen(
             cmd,
@@ -1433,32 +1541,36 @@ def probe_node_status(name: str) -> str | None:
             # otherwise hold the pipe, and `ps`, for as long as it lives.
             **launch_options(new_session=True, windows=IS_WINDOWS),
         )
-    except (OSError, RegistryUnreadable, FileNotFoundError, RuntimeError, ValueError):
-        return None
+    except Exception:
+        # Whatever stopped the probe from starting (a registry, definition,
+        # vars or environment that cannot be read) leaves the node's state
+        # unknown; it never reads as idle.
+        return True, None
     stdout = _read_until(proc, STATUS_PROBE_SECONDS)
     if stdout is None:
         _end_probe(proc)
-        return None
+        return True, None
     words = stdout.split()
-    return words[0] if words else None
+    return True, (words[0] if words else "")
 
 
 def _read_until(proc: subprocess.Popen, seconds: float) -> str | None:
     """stdout of `proc` once the pipe hits EOF and the process has exited,
-    or None after `seconds`. A daemon thread does the read, so a deadline
+    or None after `seconds`, when the read fails, or when it exits nonzero. A daemon thread does the read, so a deadline
     that passes leaves nothing for the caller to wait on: `communicate`'s
     own reader (a thread on Windows) holds the stream's lock while blocked,
     and a `close` from this side would wait on that lock until whatever
     holds the pipe lets go. `ps` is a short-lived command; a reader left
     behind by a hung probe ends with it."""
     chunks: list[bytes] = []
+    failed: list[BaseException] = []
 
     def read() -> None:
         assert proc.stdout is not None
         try:
             chunks.append(proc.stdout.read())
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            failed.append(e)
 
     # One budget from here: the join and the wait share it, so a late EOF
     # cannot buy the exit a second deadline.
@@ -1472,7 +1584,7 @@ def _read_until(proc: subprocess.Popen, seconds: float) -> str | None:
         proc.wait(timeout=max(0.0, deadline - _time.monotonic()))
     except subprocess.TimeoutExpired:
         return None
-    if proc.returncode != 0:
+    if proc.returncode != 0 or failed:
         return None
     return b"".join(chunks).decode("utf-8", "replace")
 
@@ -1625,16 +1737,47 @@ _STOP_CAUSE: str | None = None
 def _kill_wake_subprocess_group() -> None:
     """SIGTERM-then-SIGKILL the current wake's subprocess group. Targets the
     whole process tree on POSIX so the LLM CLI dies along with our wake
-    wrapper; on Windows, where there is no process group to target,
-    `ar3.proc.terminate_group` ends the wake's process tree with
-    `taskkill /T /F`. Delegated to the foundation rather than reimplemented
-    here — `os.getpgid`/`os.killpg` don't exist on `nt`, and this helper now
-    runs from the iteration-top kill-request branch on every platform, not
-    only from the POSIX-only SIGUSR1 handler."""
+    wrapper. Delegated to the foundation rather than reimplemented here —
+    `os.getpgid`/`os.killpg` don't exist on `nt`, and this helper runs from
+    the iteration-top kill-request branch on every platform, not only from
+    the POSIX-only SIGUSR1 handler. On Windows see `_end_wake_job`."""
     proc = _CURRENT_WAKE_PROC
-    if proc is None or proc.poll() is not None:
+    if proc is None:
         return
-    terminate_group(proc)
+    if _WAKE_JOB is not None:
+        _end_wake_job(proc)
+    elif proc.poll() is None:
+        terminate_group(proc)
+
+
+def _end_wake_tree(proc: subprocess.Popen) -> None:
+    """End an exited wake's leftovers: its group on POSIX, its job on
+    Windows (`_end_wake_job`)."""
+    if _WAKE_JOB is not None:
+        _end_wake_job(proc)
+    else:
+        terminate_group(proc)
+
+
+def _end_wake_job(proc: subprocess.Popen) -> None:
+    """End a Windows wake held in a job object: the job, then the leader by
+    pid. Not `taskkill /T`: it follows parent links, so it would end a
+    resident bridge that broke away from the job while the process that
+    launched it is still alive. The job reaches every process the wake
+    started that stayed in it, its parent alive or not. Only when ending the
+    job fails does the tree walk run, as it does for a wake with no job."""
+    if not terminate_job(_WAKE_JOB):
+        terminate_group(proc)
+        return
+    _kill_leader(proc)
+
+
+def _kill_leader(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 # ---------- alive-but-deaf watchdog ----------
@@ -1744,7 +1887,7 @@ def _attempt_wedge_recovery(
         )
         _close_wake_stdout_for_watchdog()
         try:
-            terminate_group(proc)
+            _end_wake_tree(proc)
         except (OSError, ValueError):
             pass
     else:

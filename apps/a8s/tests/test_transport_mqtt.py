@@ -9,7 +9,6 @@ from __future__ import annotations
 import shutil
 import socket
 import ssl
-import subprocess
 import threading
 import time
 
@@ -21,47 +20,18 @@ import paho.mqtt.client as mqtt
 
 from transports.mqtt import MqttTransport
 from transports import PublishAmbiguous, TransportError
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+from mqtt_cluster import _broker_process, free_port
 
 
 @pytest.fixture
-def mqtt_broker(tmp_path):
-    """Spawn a local `mosquitto` broker on a random port. Anonymous access
-    enabled (sufficient for these tests). Yields the broker URL string."""
+def mqtt_broker():
+    """A local `mosquitto` broker on a random port (the shared fixture's
+    launch, `mqtt_cluster._broker_process`). Yields the broker URL string."""
     if shutil.which("mosquitto") is None:
         pytest.skip("mosquitto binary not on PATH")
-    port = _free_port()
-    conf = tmp_path / "mosquitto.conf"
-    conf.write_text(
-        f"listener {port} 127.0.0.1\nallow_anonymous true\npersistence false\n"
-    )
-    proc = subprocess.Popen(
-        ["mosquitto", "-c", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    # Wait until the port is accepting connections.
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                break
-        except OSError:
-            time.sleep(0.05)
-    else:
-        proc.terminate()
-        pytest.fail("mosquitto failed to start within 5s")
-    yield f"mqtt://127.0.0.1:{port}"
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    port = free_port()
+    with _broker_process(port):
+        yield f"mqtt://127.0.0.1:{port}"
 
 
 def test_publish_and_receive_round_trip(mqtt_broker):
@@ -114,7 +84,7 @@ def test_unreachable_broker_publish_raises():
     # pass can warn and retry.
     t = MqttTransport(
         remote_id="dead",
-        broker=f"mqtt://127.0.0.1:{_free_port()}",
+        broker=f"mqtt://127.0.0.1:{free_port()}",
         topic="a8s/test-dead",
         client_id="a8s-test-dead",
         connect_timeout_s=0.5,  # keep the test fast
@@ -392,7 +362,7 @@ def test_is_connected_follows_the_link(mqtt_broker):
 
 def test_is_connected_is_false_when_no_broker_answers():
     t = MqttTransport(
-        remote_id="dead", broker=f"mqtt://127.0.0.1:{_free_port()}",
+        remote_id="dead", broker=f"mqtt://127.0.0.1:{free_port()}",
         topic="a8s/test-dead-link", client_id="a8s-test-dead-link",
         connect_timeout_s=0.2,
     )
@@ -427,7 +397,7 @@ def test_control_publish_sends_once_when_connected(mqtt_broker):
 
 def test_control_publish_with_the_link_down_raises_without_waiting():
     t = MqttTransport(
-        remote_id="dead", broker=f"mqtt://127.0.0.1:{_free_port()}",
+        remote_id="dead", broker=f"mqtt://127.0.0.1:{free_port()}",
         topic="a8s/test-dead-control", client_id="a8s-test-dead-control",
         connect_timeout_s=2.0,
     )

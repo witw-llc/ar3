@@ -542,7 +542,7 @@ r4t engine claude stop --agent my-node
 The first `run` starts a detached bridge for `(DIR, agent)` and returns 0 at
 once, so the router is never held up. The bridge spawns the engine in its
 long-running mode: `claude -p --input-format stream-json --output-format
-stream-json --verbose` with the `a8s_tell` MCP server injected via
+stream-json --verbose --replay-user-messages` with the `a8s_tell` MCP server injected via
 `--mcp-config`; `agy --input-format stream-json --output-format stream-json
 --print=`; `codex app-server` (see [Codex](#codex-app-server) below); or
 `agent acp` (see [Cursor](#cursor-agent-acp) below). The opening turn carries the same [scaffold](#the-scaffold-default-on---no-scaffold-sends-prompt-untouched)
@@ -568,11 +568,43 @@ are bounded too.
   a racing turn finish (up to 2 minutes), sends one wrap-up turn to rewrite
   `STATUS.md` and `LESSONS.md` (up to 5 minutes), and closes the engine.
   agy's own `--print-timeout` is dropped in this mode.
+- On Claude, a message that arrives while a turn runs tools joins that turn,
+  and one result answers the whole turn. The bridge writes a `uuid` on each
+  message. Claude echoes each message it takes (`--replay-user-messages`)
+  with that `uuid`, and its result lists the `uuid`s the turn answered
+  (`user_message_uuids`, at most 64). At a result the bridge counts as
+  answered the messages the list names together with the messages echoed
+  since the last result that counted any, each once. A result with no list,
+  or a list that is not all strings, counts the echoed messages only. A
+  result with an empty list counts none; echoed messages wait for a later
+  result. An id the bridge did not write, such as a turn that a peer
+  session or a channel injects, counts for nothing, and so does a second
+  echo of one id. A message that arrives during the turn's final reply gets
+  a turn of its own. With the flag, a result never counts a message by
+  order alone: a `claude` that took the flag but neither echoed nor listed
+  a message would leave it in flight. Claude Code 2.1.x does both.
+- A `claude` that does not know `--replay-user-messages` exits at start with
+  `error: unknown option '--replay-user-messages'` before it writes a frame.
+  The bridge then starts the session once more without the flag and keeps
+  every message; a message it cannot put back in the inbox is reported
+  failed at once. It writes `echo-refused.json` in the session's state
+  directory so later sessions skip the flag. The file names the program's
+  path, size and modification time (and those of the `claude` on `PATH`
+  under a launcher such as `ollama`); when any of them changes, the flag is
+  tried again. Without the flag, each result counts for its oldest message.
 - Sessions run one after another, never side by side. A message that arrives
   during the wrap-up waits, and the same bridge starts the next session from
   the `STATUS.md` the wrap-up wrote.
 - `--idle` with `--resident` runs no turn: the session wraps itself up.
   `--memory` still gets its idle pass.
+- The bridge outlives the wake that started it. It leads its own session
+  on POSIX; on Windows it starts outside the a8s wake's job object, so a
+  forced stop of that wake that the node's handler carries out leaves it
+  running. A handler too hung to take the stop is killed from the CLI with
+  the wake's process tree, which reaches the bridge while the process that
+  launched it still runs. A job that forbids breakaway
+  refuses that launch; the bridge then starts inside the job, the turn's
+  log says so in one line, and a forced stop of the wake ends it.
 - `r4t engine <id> stop [--dir DIR] --agent NAME` ends the session now: no
   wrap-up turn, and queued messages are dropped, as is a message that arrives
   during the stop. The bundled resident a8s
@@ -581,8 +613,10 @@ are bounded too.
 - `r4t engine <id> status [--dir DIR] --agent NAME` prints one word and
   exits 0: `busy` when a turn is in flight (or the bridge is starting with a
   message queued), `resident` when the session is up with no turn in flight
-  (a closing session counts). With no live bridge, or a stopping one, it
-  prints nothing and exits 1. The bridge keeps the in-flight count in
+  (a closing session counts), and `idle` with no live bridge or a stopping
+  one. It exits 1, printing nothing, only when it cannot read the session's
+  state; an update then treats the node as possibly mid-turn and does not
+  stop it. The bridge keeps the in-flight count in
   `state.json` (`turns`). The bundled resident a8s definitions run it from
   `status.invoke`, which is how `a8s ps` shows `busy` and `resident`.
 - If the engine exits before it reads its first message, the queued messages
@@ -618,7 +652,7 @@ stdio) holding one thread. Proven on codex-cli 0.163.0.
   A missing response ends the session and records held messages as failed.
 - One turn is on the wire at a time. app-server merges a turn sent mid-turn
   into the running turn, so a message that arrives mid-turn waits for the next
-  turn, as on Claude.
+  turn.
 - Verified child completion notices request a bounded reconciliation turn after
   active turns and queued messages finish. The parent is asked to inspect the
   child results and continue only unfinished authorized work. Notices coalesce;
@@ -717,9 +751,9 @@ still exit on stdin EOF.
   at spawn, so a bridge that died outright does not leave that group
   behind. A dead leader's group is signaled only when its start token is
   from this boot. That boot check is Linux only; macOS has no boot id to
-  read, so the check does not apply there. Where no start-token reader
-  exists (Windows), a new bridge does not end the engine a dead bridge
-  published; only `stop` signals a recorded pid. Memory is decided after
+  read, so the check does not apply there. On Windows a new bridge does
+  not end the engine a dead bridge published; only `stop` signals a
+  recorded pid. Memory is decided after
   the engine has exited and the
   reader has stopped. It is 0 only when there was no fatal frame, no turn
   left in flight, the engine did not exit by itself with a non-zero code,
