@@ -1,5 +1,6 @@
 """A live Claude authentication failure cannot leave a wake pending."""
 import json
+import os
 import sys
 import threading
 
@@ -20,10 +21,14 @@ from engines import resident
 def test_live_diagnostic_is_engine_specific_and_preserves_outcomes(tmp_path, engine, kind, failed):
     diagnostic = "Failed to authenticate: OAuth session expired and could not be refreshed"
     child = tmp_path / "fake_vendor.py"
+    received = tmp_path / "received.json"
     child.write_text(
         f"engine={engine!r}\nkind={kind!r}\nfailed={failed!r}\ndiagnostic={diagnostic!r}\n"
+        f"received={str(received)!r}\n"
         + """import json,sys
+from pathlib import Path
 sent = json.loads(sys.stdin.readline())
+Path(received).write_text(json.dumps(sent), encoding='utf-8')
 result = ({'event': 'result', 'result': {'response': 'done'}}
           if engine == 'agy' else {'type': 'result', 'result': 'done'})
 if sent.get('uuid'):
@@ -57,10 +62,12 @@ for line in sys.stdin:
             "engine": engine, "dir_path": str(tmp_path), "agent": "probe",
             "template": [sys.executable, str(child), "--", "-p", "{prompt}"],
             "timeout": 0.05, "scaffold": False, "memory": "off",
+            "launch_context": resident._launch_context(dict(os.environ), tmp_path),
         }, stop, {"proc": None})
     finally:
         rescue.cancel()
     assert not stop.is_set(), "live diagnostic required watchdog rescue"
+    assert json.loads(received.read_text())["message"]["content"] == "fake local turn"
     assert code == int(failed)
     events = list(take_failures(tmp_path / "failures", "probe"))
     assert len(events) == int(failed)

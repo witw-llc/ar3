@@ -874,6 +874,20 @@ def execute(
     if resident:
         from engines import resident as resident_mod
 
+        child_env = merge_env(env if env is not None else os.environ, identity)
+        # The bridge consumes wake/session metadata before spawning the CLI.
+        # agy's adapter adds no child environment; probe that same environment
+        # and carry the resolved executable across the detached bridge.
+        launch = (
+            resolve_launch(
+                HARNESS_PRESETS[engine]["invoke"][0],
+                {k: v for k, v in child_env.items()
+                 if not k.startswith(("A8S_TURN_", "R4T_SESSION_"))},
+                cwd=dir_path,
+            )
+            if HARNESS_PRESETS.get(engine, {}).get("model_resolver") == "agy-live"
+            else None
+        )
         template, note = _build_argv_template(
             engine,
             model=model,
@@ -890,8 +904,11 @@ def execute(
             allow_tools=allow_tools,
             deny_tools=deny_tools,
             deny_floor=deny_floor,
-            env=env,
+            env=launch.env if launch is not None else env,
+            launch=launch,
         )
+        if launch is not None:
+            template = launch.pin(template)
         if note:
             # The one-shot note names exec's flag; a resident session rewrites
             # it, so the note says what the session really runs with.
@@ -901,7 +918,7 @@ def execute(
         # adapter refuses fails this call rather than the detached session.
         composed = resident_mod.compose_resident_argv(
             template,
-            dict(env if env is not None else os.environ),
+            dict(launch.env if launch is not None else (env if env is not None else os.environ)),
             engine=engine,
         )
         if echo:
@@ -919,7 +936,6 @@ def execute(
                 else message
             )
             _print_echo(composed, boot_preview, identity)
-        child_env = merge_env(env if env is not None else os.environ, identity)
         return resident_mod.enqueue_or_start(
             engine,
             message,

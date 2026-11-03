@@ -10,6 +10,18 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.127
+
+### Fixed
+
+- Resident agy sessions resolve explicit models using the intended executable
+  and environment, and keep that executable pinned when starting the session.
+  A changed launch environment is refused while the resident bridge is alive;
+  stop the session before changing it. Fixes #387.
+- `ar3 update --auto on` keeps the Linux cron command short even when the
+  shell has a long `PATH`, including on WSL. The scheduled run restores the
+  captured `PATH` from its saved state. Fixes #384.
+
 ## 0.1.126
 
 An install updates itself at night, only when every seat is idle, and puts the old release back when the new one does not come up.

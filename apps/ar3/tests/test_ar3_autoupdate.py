@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shlex
 import stat
 import subprocess
 import sys
@@ -266,7 +267,7 @@ def test_cron_adds_one_line_and_leaves_the_rest_byte_identical(fake_crontab, tmp
     assert text.startswith(OTHER)
     added = text[len(OTHER):]
     assert added.count("\n") == 1
-    assert added.startswith("*/15 * * * * env 'PATH=/a b/bin:/usr/bin' /usr/bin/python3 ")
+    assert added.startswith("*/15 * * * * /usr/bin/python3 ")
     assert f"/usr/bin/python3 {root} >/dev/null 2>&1" in added
     assert added.rstrip().endswith("# ar3-autoupdate install=abc1234567")
     assert not added.startswith("@reboot")
@@ -284,10 +285,44 @@ def test_cron_remove_restores_the_original_bytes(fake_crontab, tmp_path):
 def test_cron_reinstall_replaces_instead_of_duplicating(fake_crontab, tmp_path):
     root = _root(tmp_path)
     cron = _cron(tmp_path)
-    cron.install("abc1234567", root, "/usr/bin/python3", {"PATH": "/one"})
-    cron.install("abc1234567", root, "/usr/bin/python3", {"PATH": "/two"})
+    cron.install("abc1234567", root, "/py-one", {})
+    cron.install("abc1234567", root, "/py-two", {})
     assert fake_crontab.read().count("ar3-autoupdate") == 1
-    assert "/two" in fake_crontab.read()
+    assert "/py-two" in fake_crontab.read() and "/py-one" not in fake_crontab.read()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runs the cron command through sh")
+def test_long_path_stays_in_state_and_is_restored_by_the_scheduled_launcher(tmp_path, monkeypatch):
+    import shutil
+
+    repo = Path(__file__).resolve().parents[3]
+    root = _root(tmp_path)
+    shutil.copytree(repo / "apps" / "ar3", root / "apps" / "ar3",
+                    ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    shutil.copytree(repo / "lib", root / "lib", ignore=shutil.ignore_patterns("__pycache__"))
+    (root / ".git").mkdir()
+    fake_bin = tmp_path / "captured bin"
+    fake_bin.mkdir()
+    seen = tmp_path / "seen-path"
+    git = fake_bin / "git"
+    git.write_text(f'#!/bin/sh\nprintf "%s" "$PATH" > {shlex.quote(str(seen))}\nexit 1\n')
+    git.chmod(0o755)
+    saved_path = str(fake_bin) + ":/missing path/100%/bin" * 200
+    monkeypatch.setenv("PATH", saved_path)
+    au.arm(root)
+    state = au.load(root)
+    now = datetime.now()
+    state["window"] = f"{now - timedelta(hours=23):%H:%M}-{now + timedelta(minutes=30):%H:%M}"
+    au.save(root, state)
+    assert state["env"]["PATH"] == saved_path and len(saved_path) > 4000
+    line = _cron(tmp_path).line(au.install_id(root), au.launcher_path(root), sys.executable, state["env"])
+    assert len(line.encode()) < 1024 and "PATH=" not in line
+    command = line.split(None, 5)[5]
+    done = _REAL_RUN(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=30,
+                     env={"PATH": "/nonexistent", "HOME": str(tmp_path)})
+    assert done.returncode == 0, done.stderr
+    assert seen.read_text() == saved_path
+    assert au.load(root)["last_result"]["outcome"] == "skip-refused"
 
 
 def test_cron_keeps_two_installs_apart(fake_crontab, tmp_path):

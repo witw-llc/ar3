@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -79,6 +80,7 @@ def _spec(tmp_path: Path, engine: str) -> dict:
                      else ["devin", "acp"] if engine == "devin"
                      else [engine, "-p", "{prompt}"]), "timeout": 0.1,
         "scaffold": False, "memory": "off",
+        "launch_context": resident._launch_context(dict(os.environ), tmp_path),
     }
 
 

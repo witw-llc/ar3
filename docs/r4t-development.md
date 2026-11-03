@@ -2,6 +2,8 @@
 
 ## Hard constraints
 
+- **Keep resident model probes bound to the session launch context.** Refuse an incompatible queued launch before replacing the spec or accepting the message. Compare with the live bridge generation’s founding context; missing or unreadable context refuses. Persist a fingerprint, never the raw environment. Preserve same-context serial reuse.
+
 - **Use the foundation process-launch helper for every subprocess.** Windows console policy lives only in `ar3.proc.launch_options`; background launches are hidden, intentional interactive launches declare that intent, and no consumer invents Windows creation flags. Preserve each caller’s I/O, environment, grouping and teardown contract.
 
 - **Every node distilled from a turn names the turn; a node born from a file

@@ -97,6 +97,7 @@ def test_windows_state_stop_interrupts_real_session_waits(
         'engine': 'cursor' if phase == 'handshake' else 'agy',
         'dir_path': str(tmp_path), 'template': [sys.executable, str(fake)],
         'agent': 'probe', 'timeout': 1, 'scaffold': phase == 'wrapup',
+        'launch_context': r._launch_context(dict(os.environ), tmp_path),
     }), encoding='utf-8')
     monkeypatch.setattr(r, "compose_resident_argv", lambda template, *a, **kw: template)
     calls = []

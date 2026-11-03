@@ -142,7 +142,7 @@ try:
         # A live bridge can be between sessions. Queue both wakes before
         # allowing that bridge to enter its next session.
         original=r.read_live_pid
-        r.read_live_pid=lambda home: os.getpid()
+        r.read_live_pid=lambda home, *, strict=False: os.getpid()
         for f in files: enqueue([f])
         r.read_live_pid=original
         if mode=='stop':
@@ -214,15 +214,18 @@ if earlier:
     # Earlier accepted idle and message wakes remain in the dead bridge's
     # inbox. Both need outcomes when the next enqueuer cannot start a bridge.
     live_pid = r.read_live_pid
-    r.read_live_pid = lambda home: os.getpid()
+    r.read_live_pid = lambda home, *, strict=False: os.getpid()
     assert enqueue(dict(env, A8S_TURN_ENVELOPES='[]')) == 0
     assert enqueue(dict(env, A8S_TURN_ENVELOPES=json.dumps([earlier]))) == 0
     r.read_live_pid = live_pid
+spawn_attempts = []
 def fail(*args, **kwargs):
+    spawn_attempts.append(1)
     raise OSError('simulated bridge spawn failure')
 r.subprocess.Popen = fail
 rc = enqueue(env)
 assert not r._inbox_waiting(r.resident_home(root, 'probe'))
+print(json.dumps({'spawn_attempts': len(spawn_attempts), 'enqueue': rc}))
 sys.exit(rc)
 '''
 
@@ -243,6 +246,7 @@ def test_bridge_spawn_failure_counts_current_wake_once(node, tmp_path, idle, wit
         env=env, capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 1, result.stdout + result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == {'spawn_attempts': 1, 'enqueue': 1}
     records = [json.loads(p.read_text())
                for p in outcome_dir(agent_dir(node.name)).glob('*.json')]
     assert sorted(r['envelopes'] for r in records) == (

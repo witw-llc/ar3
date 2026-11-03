@@ -12,6 +12,7 @@ wraps up waits in the inbox, and the bridge starts the next session from the
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -144,6 +145,15 @@ def _lock_file(home: Path) -> Path:
     return home / ".lock"
 
 
+def _launch_context(env: dict[str, str], cwd: Path) -> str:
+    child = {k: v for k, v in merge_env(env).items()
+             if not k.startswith(("A8S_TURN_", "R4T_SESSION_"))}
+    encoded = json.dumps(
+        [str(cwd.resolve()), child], sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def read_live_pid(home: Path, *, strict: bool = False) -> int | None:
     """The live bridge's pid, or None when there is none: no pid file, a pid
     that is not alive, or one the OS gave to another process. Reads held off
@@ -234,6 +244,7 @@ def _write_state(
     turns: int = 0,
     engine_start: str | None | object = _KEEP,
     engine_group: int | None | object = _KEEP,
+    bridge_context: dict | None | object = _KEEP,
 ) -> None:
     """`status` is `starting`, `running`, `closing` or `stopping`. A message
     that finds `closing` still queues for the next session; one that finds
@@ -244,8 +255,11 @@ def _write_state(
 
     The start token and the process group are captured at spawn. A later
     write for the same pid keeps them; it does not read the token again
-    after the leader has been reaped."""
+    after the leader has been reaped. The bridge's founding context survives
+    engine/session changes; only a fresh bridge replaces it."""
     previous = read_state(home) or {}
+    if bridge_context is _KEEP:
+        bridge_context = previous.get("bridge_context") if previous.get("pid") == pid else None
     same = bool(engine_pid) and engine_pid == previous.get("engine_pid")
     if engine_start is _KEEP:
         if same and previous.get("engine_start"):
@@ -264,6 +278,7 @@ def _write_state(
         "engine_start": start,
         "status": status,
         "turns": turns,
+        "bridge_context": bridge_context,
     }
     if isinstance(group, int) and group > 0:
         payload["engine_group"] = group
@@ -1749,6 +1764,7 @@ def enqueue_or_start(
     home = resident_home(dir_path, agent)
     spawn_env = dict(os.environ if env is None else env)
     origin = origin_from_env(spawn_env, agent)
+    context = _launch_context(spawn_env, dir_path)
     spec = {
         "engine": engine,
         "dir_path": str(dir_path.resolve()),
@@ -1766,19 +1782,32 @@ def enqueue_or_start(
         "memory_people": memory_people,
         "memory_rig_context": memory_rig_context,
     }
+    if engine == "agy":
+        spec["launch_context"] = context
 
     with file_lock(_lock_file(home)):
+        try:
+            live_pid = read_live_pid(home, strict=engine == "agy")
+            state = read_state(home, strict=engine == "agy" and live_pid is not None) or {}
+        except (OSError, ValueError):
+            _log("resident environment cannot be verified; stop the resident session before changing its environment")
+            return 1
+        if live_pid is not None:
+            if state.get("status") == "stopping":
+                return 1
+            if engine == "agy":
+                start = process_start_token(live_pid)
+                if (not valid_start_token(start) or state.get("pid") != live_pid
+                        or state.get("bridge_context") != {"digest": context, "start": start}):
+                    _log("resident environment differs or is unavailable; stop the resident session before changing its environment")
+                    return 1
         # Queued messages live in the agent's own working tree; the directory
         # ignores itself so the agent's own commits never carry them.
         ignore = home.parent / ".gitignore"
         if not ignore.is_file():
             atomic_write_text(ignore, "*\n")
         atomic_write_text(_spec_file(home), json.dumps(spec), mode=0o600)
-        live_pid = read_live_pid(home)
-        state = read_state(home) or {}
         if live_pid is not None:
-            if state.get("status") == "stopping":
-                return 1
             if state.get("status") == "closing" and charge_hook is not None:
                 charge_hook()
             _enqueue_message(home, message, origin)
@@ -1818,7 +1847,10 @@ def enqueue_or_start(
             _log(f"resident failed to start bridge: {exc}")
             return 1
         _write_pid_files(home, proc.pid)
-        _write_state(home, pid=proc.pid, engine_pid=None, status="starting")
+        _write_state(
+            home, pid=proc.pid, engine_pid=None, status="starting",
+            bridge_context={"digest": context, "start": process_start_token(proc.pid)},
+        )
     return 0
 
 
@@ -2268,6 +2300,12 @@ def _run_session(
     lessons_cap = int(spec.get("lessons_cap") or 200)
     lessons_cap_bytes = int(spec.get("lessons_cap_bytes") or 35 * 1024)
     memory_mode = spec.get("memory") or "off"
+
+    if engine == "agy" and spec.get("launch_context") != _launch_context(dict(os.environ), dir_path):
+        with file_lock(_lock_file(home)):
+            dropped = _fail_inbox(home, "resident launch context differs from the bridge environment", agent)
+        _log(f"resident launch context differs from the bridge environment; dropped {len(dropped)} message(s)")
+        return 1
 
     copies = (
         prepare_lessons_copies(

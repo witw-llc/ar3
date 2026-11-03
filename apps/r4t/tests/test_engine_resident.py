@@ -227,6 +227,271 @@ def _stop(workdir: Path, agent: str) -> None:
         terminate_group(pid)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="executable fake uses a POSIX shebang")
+class TestResidentAgyLaunch:
+    @pytest.fixture
+    def agy_launch(self, tmp_path, monkeypatch):
+        intended = tmp_path / "intended"
+        decoy = tmp_path / "decoy"
+        workdir = tmp_path / "seat"
+        for directory in (intended, decoy, workdir):
+            directory.mkdir()
+        record = tmp_path / "launch.json"
+        script = textwrap.dedent(f"""\
+            #!{sys.executable}
+            import fcntl, json, os, sys
+            from pathlib import Path
+            def record(kind, **extra):
+                path = Path({str(record)!r})
+                with path.with_suffix(".lock").open("w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    rows = json.loads(path.read_text()) if path.exists() else []
+                    rows.append({{
+                        "kind": kind, "binary": sys.argv[0], "argv": sys.argv[1:],
+                        "env": dict(os.environ), "cwd": str(Path.cwd()),
+                        **extra,
+                    }})
+                    pending = path.with_suffix(".tmp")
+                    pending.write_text(json.dumps(rows))
+                    os.replace(pending, path)
+            if sys.argv[1:] == ["models"]:
+                catalog = Path(os.environ["HOME"]) / "agy-models.txt"
+                listing = catalog.read_text() if catalog.exists() else "gemini-3.8-flash-high\\tGemini 3.8 Flash (High)"
+                record("models", catalog=listing)
+                print(listing)
+                sys.exit(0)
+            record("spawn")
+            for line in sys.stdin:
+                json.loads(line)
+                record("turn")
+                print(json.dumps({{"event": "result", "result": {{"response": "ok"}}}}), flush=True)
+            """)
+        for directory in (intended, decoy):
+            binary = directory / "agy"
+            binary.write_text(script, encoding="utf-8")
+            binary.chmod(0o755)
+        monkeypatch.setenv("PATH", str(decoy) + os.pathsep + os.environ.get("PATH", ""))
+        env = {
+            **os.environ, "PATH": str(intended), "HOME": str(tmp_path),
+            "AGY_LAUNCH_MARKER": "caller", "A8S_TURN_TEST": "routing-only",
+            "R4T_SESSION_TEST": "bridge-only",
+        }
+        return workdir, intended / "agy", record, env
+
+    @staticmethod
+    def run(workdir, env, **kwargs):
+        return engine_run.execute(
+            "agy", "hello", dir_path=workdir, model="gemini-3.8-flash-high",
+            effort="high", agent="vela", timeout=1, scaffold=kwargs.pop("scaffold", False),
+            resident=True, env=env, git_name="Vela (agent)", **kwargs,
+        )
+
+    @pytest.mark.parametrize("permissions", [None, "bypass"], ids=["base", "unrestricted"])
+    def test_public_resident_caller_probes_and_enqueues_same_launch(
+        self, agy_launch, monkeypatch, permissions,
+    ):
+        workdir, binary, record, env = agy_launch
+        enqueued = []
+        monkeypatch.setattr(
+            resident_mod, "enqueue_or_start",
+            lambda *args, **kwargs: (enqueued.append(kwargs), 0)[1],
+        )
+        assert self.run(workdir, env, permissions=permissions) == 0
+        [probe] = json.loads(record.read_text())
+        [queued] = enqueued
+        assert probe["binary"] == queued["template"][0] == str(binary)
+        assert probe["cwd"] == str(queued["dir_path"]) == str(workdir)
+        assert probe["env"] == {
+            key: value for key, value in queued["env"].items()
+            if not key.startswith(("A8S_TURN_", "R4T_SESSION_"))
+        }
+        assert probe["env"]["GIT_AUTHOR_NAME"] == "Vela (agent)"
+        assert probe["env"]["AGY_LAUNCH_MARKER"] == "caller"
+        assert queued["env"]["A8S_TURN_TEST"] == "routing-only"
+        assert queued["template"][queued["template"].index("--model") + 1] == "Gemini 3.8 Flash (High)"
+        assert "--dangerously-skip-permissions" in queued["template"]
+
+        # Re-create the omitted caller argument: composition fails before
+        # either a model probe or enqueue, despite the executable on PATH.
+        compose = engine_run._build_argv_template
+        monkeypatch.setattr(
+            engine_run, "_build_argv_template",
+            lambda *args, **kwargs: compose(*args, **{**kwargs, "launch": None}),
+        )
+        with pytest.raises(engine_run.RunError, match="no agy was resolved for this launch"):
+            self.run(workdir, env, permissions=permissions)
+        assert len(enqueued) == 1
+        assert len(json.loads(record.read_text())) == 1
+
+    def test_detached_session_spawns_the_probed_binary_environment_and_cwd(self, agy_launch):
+        workdir, binary, record, env = agy_launch
+        home = resident_mod.resident_home(workdir, "vela")
+        try:
+            assert self.run(workdir, env) == 0
+            def rows():
+                return json.loads(record.read_text())
+            _wait_until(lambda: any(row["kind"] == "turn" for row in rows()))
+            probe, spawned, *_ = rows()
+            assert probe["kind"] == "models" and spawned["kind"] == "spawn"
+            for key in ("binary", "env", "cwd"):
+                assert probe[key] == spawned[key]
+            assert spawned["binary"] == str(binary)
+            assert spawned["argv"][spawned["argv"].index("--model") + 1] == "Gemini 3.8 Flash (High)"
+            _wait_until(lambda: resident_mod.read_live_pid(home) is None, timeout=15)
+        finally:
+            _stop(workdir, "vela")
+
+    def test_missing_intended_binary_never_uses_host_agy(self, agy_launch, monkeypatch):
+        workdir, binary, record, env = agy_launch
+        binary.unlink()
+        monkeypatch.setattr(resident_mod, "enqueue_or_start", lambda *a, **kw: pytest.fail("enqueued"))
+        with pytest.raises(engine_run.RunError, match="no agy was resolved for this launch"):
+            self.run(workdir, env)
+        assert not record.exists()
+
+
+    @pytest.mark.parametrize("changed", ["path", "home", "both"])
+    def test_closing_bridge_refuses_changed_context_then_accepts_same_context(
+        self, agy_launch, changed, capsys,
+    ):
+        workdir, binary, record, env = agy_launch
+        release = workdir / "release-wrapup"
+        gate = ('    if "Resident session quiet" in line:\n'
+                '        import time\n'
+                f'        while not Path({str(release)!r}).exists(): time.sleep(0.02)\n')
+        binary.write_text(binary.read_text().replace('    record("turn")\n', '    record("turn")\n' + gate))
+        home_b = workdir.parent / "account-b"
+        home_b.mkdir()
+        (home_b / "agy-models.txt").write_text("gemini-3.8-flash-high\tGemini 3.8 Flash Account B (High)")
+        new_env = dict(env)
+        if changed in ("path", "both"):
+            new_env["PATH"] = str(binary.parent.parent / "decoy")
+        if changed in ("home", "both"):
+            new_env["HOME"] = str(home_b)
+        charged = []
+        home = resident_mod.resident_home(workdir, "vela")
+        def run(child):
+            return self.run(workdir, child, scaffold=True, charge_hook=lambda: charged.append(1))
+        def rows():
+            return json.loads(record.read_text())
+        try:
+            assert run(env) == 0
+            _wait_until(lambda: (resident_mod.read_state(home) or {}).get("status") == "closing")
+            _wait_until(lambda: sum(row["kind"] == "turn" for row in rows()) == 2)
+            bridge = resident_mod.read_live_pid(home)
+            spec_before = resident_mod._spec_file(home).read_bytes()
+            state_before = resident_mod._state_file(home).read_bytes()
+            inbox_before = list(resident_mod._inbox_dir(home).glob("*.json"))
+            assert run(new_env) == 1
+            assert "resident environment differs" in capsys.readouterr().out
+            assert resident_mod._spec_file(home).read_bytes() == spec_before
+            assert resident_mod._state_file(home).read_bytes() == state_before
+            assert list(resident_mod._inbox_dir(home).glob("*.json")) == inbox_before
+            assert charged == [1]
+            assert resident_mod.read_live_pid(home) == bridge
+            probes = [row for row in rows() if row["kind"] == "models"]
+            assert probes[1]["env"]["HOME"] == new_env["HOME"]
+            assert ("Account B" in probes[1]["catalog"]) == (changed in ("home", "both"))
+            matching = {**env, "A8S_TURN_TEST": "new-origin", "R4T_SESSION_TEST": "new-metadata"}
+            assert run(matching) == 0
+            assert charged == [1, 1]
+            release.touch()
+            _wait_until(lambda: resident_mod.read_live_pid(home) is None, timeout=15)
+            spawns = [row for row in rows() if row["kind"] == "spawn"]
+            probes = [row for row in rows() if row["kind"] == "models"]
+            assert len(spawns) == 2
+            for probe, spawned in zip((probes[0], probes[2]), spawns):
+                for key in ("binary", "env", "cwd"):
+                    assert probe[key] == spawned[key]
+        finally:
+            release.touch()
+            _stop(workdir, "vela")
+
+    def test_immediate_same_context_enqueue_preserves_founding_record(self, agy_launch):
+        workdir, binary, record, env = agy_launch
+        home = resident_mod.resident_home(workdir, "vela")
+        try:
+            assert self.run(workdir, env) == 0
+            bridge = resident_mod.read_live_pid(home)
+            context = resident_mod.read_state(home)["bridge_context"]
+            assert context["digest"] == resident_mod._launch_context(
+                {**env, "GIT_AUTHOR_NAME": "Vela (agent)", "GIT_COMMITTER_NAME": "Vela (agent)"}, workdir,
+            )
+            assert self.run(workdir, env) == 0
+            assert resident_mod.read_live_pid(home) == bridge
+            assert resident_mod.read_state(home)["bridge_context"] == context
+            _wait_until(lambda: resident_mod.read_live_pid(home) is None, timeout=15)
+            assert sum(row["kind"] == "spawn" for row in json.loads(record.read_text())) == 1
+        finally:
+            _stop(workdir, "vela")
+
+    @pytest.mark.parametrize("damage", ["missing", "unreadable", "pid", "start", "digest"])
+    def test_unverifiable_generation_refuses_without_mutating_accepted_work(
+        self, agy_launch, monkeypatch, damage,
+    ):
+        workdir, _binary, _record, env = agy_launch
+        monkeypatch.setattr(resident_mod, "_start_bridge", lambda *a, **kw: type("Bridge", (), {"pid": os.getpid()})())
+        monkeypatch.setattr(resident_mod, "_has_start_token_reader", lambda: False)
+        assert self.run(workdir, env) == 0
+        home = resident_mod.resident_home(workdir, "vela")
+        state = resident_mod.read_state(home)
+        if damage == "missing":
+            del state["bridge_context"]
+        elif damage == "pid":
+            state["pid"] += 1
+        elif damage == "start":
+            state["bridge_context"]["start"] += "0"
+        elif damage == "digest":
+            state["bridge_context"]["digest"] = "0" * 64
+        resident_mod._state_file(home).write_text("{" if damage == "unreadable" else json.dumps(state))
+        before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file() and path.name != ".lock"}
+        assert self.run(workdir, env, charge_hook=lambda: pytest.fail("charged refused turn")) == 1
+        assert {path: path.read_bytes() for path in home.rglob("*") if path.is_file() and path.name != ".lock"} == before
+
+    def test_other_engine_spec_updates_do_not_replace_bridge_context(self, agy_launch, monkeypatch):
+        workdir, binary, _record, env = agy_launch
+        monkeypatch.setattr(resident_mod, "_start_bridge", lambda *a, **kw: type("Bridge", (), {"pid": os.getpid()})())
+        monkeypatch.setattr(resident_mod, "_has_start_token_reader", lambda: False)
+        home = resident_mod.resident_home(workdir, "vela")
+        home.mkdir(parents=True)
+        resident_mod._write_state(home, pid=os.getpid(), engine_pid=None, status="closing",
+                                  bridge_context={"digest": "old-generation", "start": "old-start"})
+        founding = {**env, "GIT_AUTHOR_NAME": "Vela (agent)", "GIT_COMMITTER_NAME": "Vela (agent)"}
+        def unbound(child):
+            return resident_mod.enqueue_or_start(
+                "claude", "hello", dir_path=workdir, template=["claude", "-p", "{prompt}"],
+                model=None, effort=None, agent="vela", timeout=1, scaffold=False, env=child,
+            )
+        assert unbound(founding) == 0
+        context = resident_mod.read_state(home)["bridge_context"]
+        assert context["digest"] == resident_mod._launch_context(founding, workdir)
+        changed = {**founding, "PATH": str(binary.parent.parent / "decoy")}
+        assert unbound(changed) == 0
+        assert resident_mod.read_state(home)["bridge_context"] == context
+        spec_before = resident_mod._spec_file(home).read_bytes()
+        assert self.run(workdir, changed) == 1
+        assert resident_mod._spec_file(home).read_bytes() == spec_before
+        assert self.run(workdir, env) == 0
+        assert resident_mod.read_state(home)["bridge_context"] == context
+
+    def test_actual_bridge_environment_must_match_before_first_vendor_spawn(self, agy_launch, monkeypatch):
+        workdir, _binary, record, env = agy_launch
+        start_bridge = resident_mod._start_bridge
+        def changed_bridge(argv, **kwargs):
+            kwargs["env"] = {**kwargs["env"], "AGY_LAUNCH_MARKER": "changed-at-bridge-start"}
+            return start_bridge(argv, **kwargs)
+        monkeypatch.setattr(resident_mod, "_start_bridge", changed_bridge)
+        home = resident_mod.resident_home(workdir, "vela")
+        try:
+            assert self.run(workdir, env) == 0
+            _wait_until(lambda: resident_mod.read_live_pid(home) is None, timeout=15)
+            assert [row["kind"] for row in json.loads(record.read_text())] == ["models"]
+            assert not list(resident_mod._inbox_dir(home).glob("*.json"))
+            assert "launch context differs from the bridge environment" in (home / "resident.log").read_text()
+        finally:
+            _stop(workdir, "vela")
+
+
 def _reaped(pid: int) -> bool:
     """The bridge is this test process's own child, so it lingers as a zombie
     (and reads alive) until reaped; the r4t CLI exits at once and never hits it."""
@@ -546,6 +811,8 @@ class TestResidentLifecycle:
                 "--timeout", "2",
                 "--dir", str(workdir),
                 "--agent", "vela",
+                "--git-name", "Vela (agent)",
+                "--git-email", "vela@example.com",
                 "second message for vela",
             ])
             assert rc2 == 0

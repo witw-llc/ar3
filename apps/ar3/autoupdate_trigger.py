@@ -84,9 +84,8 @@ class CronTrigger(Trigger):
 
     def line(self, install_id: str, launcher: Path, python: str, env: dict[str, str]) -> str:
         cmd = " ".join(shlex.quote(a) for a in command(launcher, python))
-        path = env.get("PATH")
-        prefix = f"env {shlex.quote('PATH=' + path)} " if path else ""
-        text = f"*/15 * * * * {prefix}{cmd} >/dev/null 2>&1".replace("%", "\\%")
+        # The tick restores PATH from state; embedding it can exceed cron's command limit.
+        text = f"*/15 * * * * {cmd} >/dev/null 2>&1".replace("%", "\\%")
         return f"{text} {self._tail(install_id)}"
 
     def check(self) -> None:
