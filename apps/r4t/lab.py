@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import platform
 import random
 import re
@@ -30,7 +31,10 @@ from pathlib import Path
 
 from ar3.proc import launch_options
 
-from rig import RigError, default_config_path, load_rig_config
+from rig import (
+    Launch, RigError, access_binary_state, apply_access, default_config_path,
+    load_rig_config, resolve_launch,
+)
 from state import new_ulid, r4t_home, utc_now
 
 R4T_DIR = Path(__file__).resolve().parent
@@ -282,20 +286,6 @@ def _rig_config_path(rig_config: str | None) -> Path:
     return default_config_path()
 
 
-def _rig_preset(config_path: Path, rig_name: str) -> str | None:
-    """The recorded preset for a rig, read from the raw config payload."""
-    try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    entry = raw.get(rig_name.lower())
-    if isinstance(entry, dict):
-        preset = entry.get("preset")
-        if isinstance(preset, str) and preset.strip():
-            return preset.strip().lower()
-    return None
-
-
 def _ollama_model_of(invoke: list) -> str | None:
     """The model token from an ollama-preset invoke (`ollama run MODEL ...`)."""
     argv = invoke[0] if invoke and isinstance(invoke[0], list) else invoke
@@ -342,6 +332,16 @@ def _binary_version(binary: str) -> tuple[str | None, str | None]:
 def resolve_role(
     manifest: Manifest, role: str, rig_name: str, config_path: Path
 ) -> dict:
+    """Bind one role to its rig (see `_bind_role`). The binding's launch is
+    resolved and probed in an empty directory of its own, which is the shape of
+    the one each trial runs in; it is removed when the binding is done."""
+    with tempfile.TemporaryDirectory(prefix="r4t-lab-bind-") as bind_cwd:
+        return _bind_role(manifest, role, rig_name, config_path, bind_cwd)
+
+
+def _bind_role(
+    manifest: Manifest, role: str, rig_name: str, config_path: Path, bind_cwd: str
+) -> dict:
     """Bind one role to its rig and resolve the model. Raises LabError (with a
     `(try:)` hint) when the rig is missing/invalid or its harness cannot run.
     A rig that resolves OUTSIDE the manifest pin's series still resolves — the
@@ -367,11 +367,57 @@ def resolve_role(
         )
     if rig.error:
         raise LabError(f"rig {rig_name!r} is invalid: {rig.error}")
-    preset = _rig_preset(config_path, rig_name)
+    preset = rig.preset
     invoke = list(rig.pool()[0]) if rig.pool() else list(rig.invoke)
+    # One launch for the gate, the version record and `_run_judge`: the file
+    # resolved here on this process's environment is the file that runs.
+    # The judge runs in a fresh empty directory (`run_one_posthoc_trial`), so a
+    # relative executable, or a relative or empty PATH entry, can resolve to
+    # nothing there: they are resolved against such a directory, not against
+    # this process's cwd, and anything that needs the router's cwd is refused.
+    launch = resolve_launch(
+        invoke[0] if invoke else "", dict(os.environ), cwd=bind_cwd
+    )
+    # The judge model call is a launch on this node. It runs the frozen invoke
+    # as written, so the node's deny floor (and the rig's denies) are spelled
+    # into that invoke here; rules this path cannot carry refuse the binding
+    # instead of being dropped.
+    effective, problem = config.effective_rig(rig)
+    if effective is None:
+        raise LabError(f"rig {rig_name!r} is invalid: {problem}")
+    if rig.add_dirs or rig.allow_tools:
+        raise LabError(
+            f"rig {rig_name!r} sets add_dirs / allow_tools, which a lab judge "
+            f"run cannot carry (it runs the frozen invoke) - use a rig "
+            f"without them"
+        )
+    if effective.deny_tools:
+        try:
+            invoke = apply_access(
+                invoke, preset, deny_tools=effective.deny_tools,
+                where=f"rig {rig_name!r}: ",
+            )
+        except RigError as e:
+            raise LabError(str(e)) from e
+        # The same version gate every knob-carrying launch meets, against the
+        # executable this run will spawn and the environment it will spawn
+        # with. `_run_judge` runs with this process's environment and applies
+        # no rig `env`, so a rig that sets one cannot have its preconditions
+        # checked against it: refuse rather than vouch for another process.
+        if rig.env:
+            raise LabError(
+                f"rig {rig_name!r} sets env, which a lab judge run does not "
+                f"apply, and deny rules apply to it - the build that would "
+                f"run cannot be checked against that environment; use a rig "
+                f"without env"
+            )
+        try:
+            access_binary_state(preset, launch, where=f"rig {rig_name!r}: ")
+        except RigError as e:
+            raise LabError(str(e)) from e
 
     if preset == "ollama":
-        if not shutil.which("ollama"):
+        if launch.binary is None:
             raise LabError("ollama not on PATH (try: install ollama)")
         model = _ollama_model_of(rig.invoke)
         if not model:
@@ -395,8 +441,9 @@ def resolve_role(
     binary = invoke[0] if invoke else None
     if not binary:
         raise LabError(f"rig {rig_name!r} has an empty invoke")
-    if not shutil.which(binary):
+    if launch.binary is None:
         raise LabError(f"{binary} not on PATH (try: install {binary})")
+    invoke = launch.pin(invoke)
     resolved = _rig_model_of(rig)
     if not resolved:
         raise LabError(
@@ -404,7 +451,7 @@ def resolve_role(
             f"record what it cannot resolve "
             f"(try: r4t rig swap {rig_name} {preset or '<preset>'} --model MODEL)"
         )
-    version, version_note = _binary_version(binary)
+    version, version_note = _binary_version(launch.binary)
     info = {
         "role": role,
         "rig": rig_name,
@@ -557,17 +604,24 @@ def parse_answers(output: str, expected_ids: list[str]) -> dict | None:
 
 
 def _run_judge(
-    invoke: list[str], prompt: str, timeout: float, cwd: Path
+    launch: Launch, invoke: list[str], prompt: str, timeout: float
 ) -> tuple[int, str, str]:
+    """Run the judge through `launch`: its executable, environment and working
+    directory, and nothing else's."""
     argv = [prompt if a == "{prompt}" else a for a in invoke]
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, cwd=str(cwd),
-            **launch_options(),
+        proc = launch.start(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+    except FileNotFoundError:
+        return 127, "", f"{launch.argv0} not found in {launch.cwd}"
+    try:
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         return 124, "", "timeout"
-    return proc.returncode, proc.stdout, proc.stderr
+    return proc.returncode, out, err
 
 
 def _write_trial_report(
@@ -619,7 +673,8 @@ def run_one_posthoc_trial(
     start = time.time()
     try:
         code, out, err = _run_judge(
-            invoke, prompt, float(manifest.box_seconds), workdir
+            resolve_launch(invoke[0], dict(os.environ), cwd=workdir),
+            invoke, prompt, float(manifest.box_seconds),
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

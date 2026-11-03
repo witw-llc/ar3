@@ -42,8 +42,45 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+
+def find_executable(
+    name: str,
+    path: str | None,
+    cwd: str | os.PathLike,
+    *,
+    pathext: str | None = None,
+) -> str | None:
+    """The absolute file a child with PATH `path`, starting in `cwd`, would run
+    for the bare name `name`, or None. Each PATH entry is read against `cwd`
+    when relative, and an empty entry is `cwd`, as the child's own exec reads
+    them. Nothing else is searched: in particular not the CALLER's cwd, which
+    `shutil.which` puts first on Windows. On Windows a name with no extension
+    is tried with each PATHEXT extension, and one that already ends in a
+    PATHEXT extension is tried as written; elsewhere the name is taken as
+    written. The caller supplies the child's PATH and PATHEXT; this reads
+    neither from this process."""
+    windows = sys.platform.startswith("win")
+    where = os.path.abspath(os.fspath(cwd))
+    if windows:
+        extensions = [e for e in (pathext or ".COM;.EXE;.BAT;.CMD").split(";") if e]
+        written = os.path.splitext(name)[1].lower() in [e.lower() for e in extensions]
+        candidates = ([name] if written else [])
+        for e in extensions:
+            # Windows ignores case; this also runs on POSIX, where it does not.
+            candidates += [c for c in (name + e, name + e.lower()) if c not in candidates]
+    else:
+        candidates = [name]
+    for entry in (path if path is not None else os.defpath).split(os.pathsep):
+        folder = os.path.abspath(os.path.join(where, entry or os.curdir))
+        for candidate in candidates:
+            full = os.path.join(folder, candidate)
+            if os.path.isfile(full) and (windows or os.access(full, os.X_OK)):
+                return full
+    return None
 
 
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000

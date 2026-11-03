@@ -26,6 +26,8 @@ from pathlib import Path
 
 from ar3.fsio import stat_or_none
 
+from rig import engine_home
+
 # How far back to look for the newest turn's usage record. Transcripts reach
 # tens of megabytes; the rows we want are at the end, and a bounded read keeps
 # the probe off the critical path of every turn.
@@ -67,12 +69,12 @@ def _tail_lines(path: Path, limit: int = TAIL_BYTES) -> list[str]:
     return raw.decode("utf-8", errors="replace").splitlines()
 
 
-def _claude_conversation(workdir: Path) -> Conversation | None:
+def _claude_conversation(workdir: Path, env: dict | None = None) -> Conversation | None:
     """Claude Code keeps one JSONL per session under its config directory,
     in a folder named for the working directory with `/` and `.` flattened
-    to `-`. The newest file is the one `--continue` would resume."""
-    raw_home = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    home = Path(raw_home).expanduser() if raw_home else Path.home() / ".claude"
+    to `-`. The newest file is the one `--continue` would resume. `env` is
+    the environment the turn was spawned with: the home is the one it names."""
+    home = engine_home("claude", env)
     slug = re.sub(r"[/.]", "-", str(workdir))
     folder = home / "projects" / slug
     try:
@@ -125,17 +127,20 @@ PROBES = {
 }
 
 
-def probe(preset: str | None, workdir: Path) -> Conversation | None:
+def probe(
+    preset: str | None, workdir: Path, env: dict | None = None
+) -> Conversation | None:
     """Measure the conversation `preset` would continue in `workdir`.
 
     None means "no answer": no probe for this harness, no transcript yet, or
     a transcript this process cannot read. Callers treat all three the same —
-    they do not gate on a number they do not have.
+    they do not gate on a number they do not have. `env` is the spawned
+    environment, so the probe reads the home the turn wrote to.
     """
     fn = PROBES.get(preset or "")
     if fn is None:
         return None
     try:
-        return fn(workdir)
+        return fn(workdir, env)
     except OSError:
         return None

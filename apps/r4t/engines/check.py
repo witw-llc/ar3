@@ -29,17 +29,19 @@ installed cursor is not a machine with a broken cursor preset.
 """
 from __future__ import annotations
 
+import os
 import re
-import shutil
-import subprocess
 
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ar3.proc import launch_options
+from rig import (
+    HARNESS_PRESETS, Launch, RigError, access_binary_state, access_engine,
+    resolve_launch,
+)
 
 from engines.run import (
-    RUN_ENGINES, RunError, _build_argv_template, interpreter_gap, resolve_argv0,
+    RUN_ENGINES, RunError, _build_argv_template, interpreter_gap,
 )
 
 __all__ = ["PROBES", "EngineReport", "check_engine", "check_all", "format_text"]
@@ -157,30 +159,20 @@ class EngineReport:
         }
 
 
-def _run(argv: list[str]) -> tuple[int, str]:
-    """One probe process: stdin closed, output captured, hard timeout. A CLI
-    that cannot answer leaves the caller with `unverifiable` rather than a
-    hung check."""
-    try:
-        proc = subprocess.run(
-            resolve_argv0(argv),
-            capture_output=True,
-            # Explicit decode: Windows' locale default is the ANSI code page
-            # with strict errors, and a CLI's UTF-8 help text crashes it —
-            # the decode-side failure class of the Windows research §4.6.
-            encoding="utf-8",
-            errors="replace",
-            timeout=PROBE_TIMEOUT_SECONDS,
-            stdin=subprocess.DEVNULL,
-            **launch_options(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return -1, str(exc)
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+def _run(launch: Launch, args: list[str]) -> tuple[int, str]:
+    """One probe process, run through the launch (its resolved file, its cwd and
+    env): stdin closed, output captured, hard timeout. A CLI that cannot answer
+    leaves the caller with `unverifiable` rather than a hung check. Output is
+    decoded explicitly (`Launch.probe`): Windows' locale default is the ANSI
+    code page with strict errors, and a CLI's UTF-8 help text crashes it."""
+    done = launch.probe(args, timeout=PROBE_TIMEOUT_SECONDS)
+    if done is None:
+        return -1, f"could not run {launch.argv0!r}"
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
 
 
-def _version(binary: str) -> str | None:
-    code, out = _run([binary, "--version"])
+def _version(launch: Launch) -> str | None:
+    code, out = _run(launch, ["--version"])
     if code != 0:
         return None
     first = next((line.strip() for line in out.splitlines() if line.strip()), "")
@@ -218,6 +210,10 @@ def check_engine(
     resident: bool = False,
     timeout: int = 900,
     workdir: Path | None = None,
+    add_dirs: tuple[str, ...] | list[str] = (),
+    allow_tools: tuple[str, ...] | list[str] = (),
+    deny_tools: tuple[str, ...] | list[str] = (),
+    deny_floor: dict[str, list[str]] | None = None,
 ) -> EngineReport:
     """Compose this engine's argv and ask the installed CLI whether it parses.
     The same flags `run` takes are accepted here, so a composition can be
@@ -226,6 +222,14 @@ def check_engine(
     session_env: dict[str, str] = {}
     if model is None and engine.startswith("ollama-"):
         model = PROBE_MODEL
+    # One launch for everything this check asks of the CLI, resolved the way
+    # `engine run` resolves it (the engine's own head, this process's env, the
+    # directory the turn would start in), so the file the check vouches for is
+    # the file a run starts.
+    launch = resolve_launch(
+        HARNESS_PRESETS[engine]["invoke"][0], dict(os.environ),
+        cwd=workdir or Path.cwd(),
+    )
     try:
         template, _ = _build_argv_template(
             engine,
@@ -237,6 +241,11 @@ def check_engine(
             permissions=permissions,
             allowed_tools=allowed_tools,
             resident=resident,
+            add_dirs=add_dirs,
+            allow_tools=allow_tools,
+            deny_tools=deny_tools,
+            deny_floor=(deny_floor or {}).get(access_engine(engine) or "", ()),
+            launch=launch,
         )
         if resident:
             from engines import resident as resident_mod
@@ -254,24 +263,38 @@ def check_engine(
 
     report.argv = template
     report.binary = template[0]
+    if template[0] != launch.argv0:
+        launch = resolve_launch(template[0], launch.env, cwd=launch.cwd)
     probe = PROBES[engine]
     if resident and engine == "muse":
         probe = Probe("muse", ("serve", "--help"), "muse serve flags are checked against its own help")
-    report.installed = shutil.which(report.binary) is not None
+    report.installed = launch.binary is not None
     if not report.installed:
         report.runnable = False
         report.detail = f"{report.binary} is not on PATH"
         return report
-    gap = interpreter_gap(report.binary)
+    gap = interpreter_gap(launch.binary, launch.env.get("PATH"))
     if gap:
         report.runnable = False
         report.detail = gap
         return report
-    report.version = _version(report.binary)
+    if add_dirs or allow_tools or deny_tools or (deny_floor or {}).get(
+        access_engine(engine) or ""
+    ):
+        # The same version gate a run meets: an older build, or a file that is
+        # not named like the CLI, is rejected here exactly as it is there.
+        try:
+            access_binary_state(engine, launch, where="r4t engine: ")
+        except RigError as exc:
+            report.verdict = REJECTED
+            report.detail = str(exc)
+            report.method = "version gate"
+            return report
+    report.version = _version(launch)
 
     if probe.strict:
         report.method = "parse probe"
-        code, out = _run([a for a in template if a != "{prompt}"] + ["--help"])
+        code, out = _run(launch, [a for a in template[1:] if a != "{prompt}"] + ["--help"])
         if code != 0:
             report.verdict = REJECTED
             report.detail = next(
@@ -280,17 +303,21 @@ def check_engine(
             )
             return report
         if resident and engine == "devin":
-            return _check_devin_acp(report, template, workdir or Path.cwd(), session_env)
+            return _check_devin_acp(report, launch.pin(template), workdir or Path.cwd(), session_env)
         if resident and engine in APP_SERVER_ENGINES:
-            return _check_app_server(report, template, workdir or Path.cwd())
+            return _check_app_server(report, launch.pin(template), workdir or Path.cwd())
         report.verdict = ACCEPTED
         return report
 
     report.method = "help scan"
-    if shutil.which(probe.help_binary) is None:
+    help_launch = (
+        launch if probe.help_binary == launch.argv0
+        else resolve_launch(probe.help_binary, launch.env, cwd=launch.cwd)
+    )
+    if help_launch.binary is None:
         report.detail = f"{probe.help_binary} is not on PATH to read its flags from"
         return report
-    code, help_text = _run([probe.help_binary, *probe.help_argv])
+    code, help_text = _run(help_launch, list(probe.help_argv))
     if code != 0 or not help_text.strip():
         report.detail = f"`{probe.help_binary} {' '.join(probe.help_argv)}` gave no help text"
         return report
@@ -307,7 +334,7 @@ def check_engine(
         return report
     if resident and engine == "cursor":
         return _check_cursor_acp(
-            report, template, workdir or Path.cwd(), session_env,
+            report, launch.pin(template), workdir or Path.cwd(), session_env,
         )
     if resident and engine == "muse":
         from engines.muse_resident import probe_muse
@@ -317,7 +344,7 @@ def check_engine(
             report.detail = "muse help did not confirm the serve subcommand"
             return report
         report.method = "MSP handshake"
-        result = probe_muse(resolve_argv0(template), workdir or Path.cwd(), session_env)
+        result = probe_muse(launch.pin(template), workdir or Path.cwd(), session_env)
         if result.get("version"):
             report.version = "Muse MSP " + result["version"]
         if result.get("error"):
@@ -345,7 +372,7 @@ def _check_app_server(report: EngineReport, argv: list[str], workdir: Path) -> E
     from engines import resident as resident_mod
 
     report.method = "app-server handshake"
-    probe = resident_mod.codex_app_server_probe(resolve_argv0(argv), workdir)
+    probe = resident_mod.codex_app_server_probe(argv, workdir)
     version = probe.get("version")
     if version:
         report.version = f"app-server {version}"
@@ -380,7 +407,7 @@ def _check_cursor_acp(
     from engines import resident as resident_mod
 
     report.method = "acp handshake"
-    probe = resident_mod.cursor_acp_probe(resolve_argv0(argv), workdir, env=env)
+    probe = resident_mod.cursor_acp_probe(argv, workdir, env=env)
     if probe.get("error"):
         report.verdict = REJECTED
         report.detail = probe["error"]
@@ -401,7 +428,7 @@ def _check_devin_acp(report, argv, workdir, env):
     from engines.devin_resident import PROVEN_VERSION
 
     report.method = "acp handshake"
-    probe = resident.devin_acp_probe(resolve_argv0(argv), workdir, env=env)
+    probe = resident.devin_acp_probe(argv, workdir, env=env)
     if probe.get("error"):
         report.verdict = REJECTED
         report.detail = probe["error"]

@@ -10,6 +10,7 @@ import pytest
 import rig as rig_module
 from isolate import Isolation
 from rig import (
+    DISTILL_TRANSPORT,
     Rig,
     CONFIGURABLE_RIG_KEYS,
     DEFAULT_BUDGET_EARN_PER_HOUR,
@@ -27,6 +28,7 @@ from rig import (
     RigError,
     add_preset_rig,
     apply_mcp,
+    mcp_env,
     build_preset_invoke,
     continue_collisions,
     continue_presets,
@@ -1150,7 +1152,7 @@ class TestAgyModelNames:
             "gemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n"
             "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
         ))
-        assert rig_module.agy_model_names() == [
+        assert rig_module.agy_model_names(launch=AGY_LAUNCH) == [
             "Gemini 3.1 Pro (Low)",
             "Claude Sonnet 4.6 (Thinking)",
         ]
@@ -1159,7 +1161,7 @@ class TestAgyModelNames:
         monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run(
             "Gemini 3.1 Pro (Low)\n\nClaude Sonnet 4.6 (Thinking)\n"
         ))
-        assert rig_module.agy_model_names() == [
+        assert rig_module.agy_model_names(launch=AGY_LAUNCH) == [
             "Gemini 3.1 Pro (Low)",
             "Claude Sonnet 4.6 (Thinking)",
         ]
@@ -1167,12 +1169,15 @@ class TestAgyModelNames:
     def test_empty_output_errors(self, monkeypatch):
         monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run("\n \n"))
         with pytest.raises(RigError, match="no models"):
-            rig_module.agy_model_names()
+            rig_module.agy_model_names(launch=AGY_LAUNCH)
 
     def test_nonzero_exit_errors(self, monkeypatch):
         monkeypatch.setattr(rig_module.subprocess, "run", self._fake_run("", 1, "boom"))
         with pytest.raises(RigError, match="exit 1"):
-            rig_module.agy_model_names()
+            rig_module.agy_model_names(launch=AGY_LAUNCH)
+
+
+AGY_LAUNCH = rig_module.Launch("agy", "/fake/agy", {}, "/")
 
 
 class TestRemoveRig:
@@ -1990,7 +1995,7 @@ class TestMcpInjection:
 
         assert argv == rig.argv("PROMPT")
         assert "OPENCODE_CONFIG_CONTENT" not in env
-        config = Path(env["OPENCODE_CONFIG"])
+        config = Path(mcp_env(rig, env, cwd)["OPENCODE_CONFIG"])
         # A dir of its own beside the staging outbox: nothing else lives there,
         # so a container can mount it without exposing the member's transcripts,
         # and a `.json` here is never mistaken for a staged envelope.
@@ -2007,7 +2012,7 @@ class TestMcpInjection:
         env, cwd = self._turn(tmp_path)
         argv = apply_mcp(rig, rig.argv("PROMPT"), env, cwd).argv
         assert argv == rig.argv("PROMPT")
-        assert Path(env["OPENCODE_CONFIG"]).is_file()
+        assert Path(mcp_env(rig, env, cwd)["OPENCODE_CONFIG"]).is_file()
         assert "OPENCODE_CONFIG_CONTENT" not in env
 
     def test_cursor_drops_a_file_and_keeps_other_servers(self, tmp_path):
@@ -2039,7 +2044,9 @@ class TestMcpInjection:
         env, cwd = self._turn(tmp_path)
         env["A8S_MCP_LOG"] = str(tmp_path / "calls.jsonl")
         apply_mcp(rig, rig.argv("PROMPT"), env, cwd)
-        config = json.loads(Path(env["OPENCODE_CONFIG"]).read_text(encoding="utf-8"))
+        config = json.loads(
+            Path(mcp_env(rig, env, cwd)["OPENCODE_CONFIG"]).read_text(encoding="utf-8")
+        )
         assert config["mcp"]["a8s"]["environment"]["A8S_MCP_LOG"] == env["A8S_MCP_LOG"]
 
 
@@ -2345,27 +2352,32 @@ class TestDistillCommand:
     shell command k7e's `K7E_DISTILL_COMMAND` expects (#52). k7e pipes the
     prompt to the command's stdin with no shell of its own, and not every
     harness reads stdin as its prompt (agy prints usage instead), so a
-    `{prompt}` token becomes `"$(cat)"` under an `sh -c` wrapper — the prompt
+    `{prompt}` token becomes `"$p"` under an `sh -c` wrapper — the prompt
     lands in the invoke's own argument position."""
 
     def inner(self, cmd):
         parts = shlex.split(cmd)
         assert parts[:2] == ["sh", "-c"] and len(parts) == 3
-        return parts[2]
+        assert parts[2].startswith(DISTILL_TRANSPORT)
+        body = parts[2][len(DISTILL_TRANSPORT):]
+        # The command starts in the member's workdir, where its launch was
+        # resolved and probed.
+        assert body.startswith("cd ") and " && " in body
+        return body.split(" && ", 1)[1]
 
     def test_prompt_token_becomes_cat_substitution(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
             "local": {"invoke": ["ollama", "run", "qwen3:1.7b", "{prompt}"], "preset": "ollama"},
         }))
         cmd = config.rigs["local"].distill_command(tmp_path)
-        assert self.inner(cmd) == 'ollama run qwen3:1.7b "$(cat)"'
+        assert self.inner(cmd) == 'ollama run qwen3:1.7b "$p"'
 
     def test_embedded_prompt_token_concatenates(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
             "flag": {"invoke": ["mycli", "--prompt={prompt}"]},
         }))
         cmd = config.rigs["flag"].distill_command(tmp_path)
-        assert self.inner(cmd) == 'mycli --prompt="$(cat)"'
+        assert self.inner(cmd) == 'mycli --prompt="$p"'
 
     def test_fills_the_workdir_placeholder(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
@@ -2376,14 +2388,14 @@ class TestDistillCommand:
         }))
         home = tmp_path / "store"
         cmd = config.rigs["code"].distill_command(home)
-        assert self.inner(cmd) == f'opencode run --auto --dir {home} "$(cat)"'
+        assert self.inner(cmd) == f'opencode run --auto --dir {home} "$p"'
 
     def test_quotes_argv_tokens_that_need_it(self, tmp_path):
         config = load_rig_config(write_config(tmp_path, {
             "local": {"invoke": ["my cli", "{prompt}"]},
         }))
         cmd = config.rigs["local"].distill_command(tmp_path)
-        assert self.inner(cmd) == '\'my cli\' "$(cat)"'
+        assert self.inner(cmd) == '\'my cli\' "$p"'
 
     def test_empty_rig_returns_none(self):
         assert Rig(name="empty").distill_command(Path(".")) is None
@@ -2404,8 +2416,8 @@ class TestDistillCommand:
         assert payload.startswith(
             f"cd {shlex.quote(str(tmp_path))} && exec bash --login -c "
         )
-        inner = shlex.split(payload)[-1]
-        assert inner == 'agy --print "$(cat)"'
+        inner = shlex.split(payload)[-1].removeprefix(DISTILL_TRANSPORT)
+        assert inner == 'agy --print "$p"'
 
     def test_run_as_cds_into_the_workdir_before_the_bridge_starts(self, tmp_path):
         """k7e launches the bridge with cwd inside its own router-owned
@@ -2432,7 +2444,7 @@ class TestDistillCommand:
         payload = shlex.split(cmd)[-1]
         assert payload == (
             f"cd {shlex.quote(str(workdir))} && exec bash --login -c "
-            + shlex.quote(f'opencode run --auto --dir {workdir} "$(cat)"')
+            + shlex.quote(f'{DISTILL_TRANSPORT}opencode run --auto --dir {workdir} "$p"')
         )
 
     def test_no_run_as_keeps_the_plain_shell_wrapper(self, tmp_path):
@@ -2440,7 +2452,7 @@ class TestDistillCommand:
             "local": {"invoke": ["agy", "--print", "{prompt}"]},
         }))
         cmd = config.rigs["local"].distill_command(tmp_path, run_as=None)
-        assert self.inner(cmd) == 'agy --print "$(cat)"'
+        assert self.inner(cmd) == 'agy --print "$p"'
 
     def test_agy_resolves_the_live_model_before_bridging(self, tmp_path, monkeypatch):
         config = load_rig_config(write_config(tmp_path, {
@@ -2453,7 +2465,7 @@ class TestDistillCommand:
             rig_module, "resolve_agy_model", lambda query, **k: "Gemini 3.6 Flash Low"
         )
         cmd = config.rigs["brain"].distill_command(tmp_path)
-        assert self.inner(cmd) == "agy --model 'Gemini 3.6 Flash Low' --print \"$(cat)\""
+        assert self.inner(cmd) == "agy --model 'Gemini 3.6 Flash Low' --print \"$p\""
 
     def test_agy_unresolved_model_returns_none(self, tmp_path, monkeypatch):
         config = load_rig_config(write_config(tmp_path, {

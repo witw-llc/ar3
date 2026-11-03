@@ -1234,13 +1234,21 @@ def read_parked(node: str, name: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def park_member(node: str, name: str, *, reason: str, rig: str, probe: str) -> dict:
+def park_member(
+    node: str, name: str, *, reason: str, rig: str, probe: str,
+    probe_path: str | None = None, probe_cwd: str | None = None,
+) -> dict:
     """Park `name`, or leave an existing park untouched. Returns the park
     record when this call created it and {} when the member was already
     parked — the caller speaks exactly once per episode off that."""
     if read_parked(node, name):
         return {}
     record = {"at": utc_now(), "reason": reason, "rig": rig, "probe": probe}
+    if probe_path:
+        # The PATH the rig's turn spawns with: the un-park probe looks there.
+        record["probe_path"] = probe_path
+    if probe_cwd:
+        record["probe_cwd"] = probe_cwd
     update_meta(node, name, parked=record)
     return record
 

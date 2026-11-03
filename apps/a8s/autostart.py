@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape, unescape as xml_unescape
 
+from ar3 import crontab
 from ar3.fsio import atomic_write_text
 from ar3.locking import file_lock
 from ar3.proc import launch_options
@@ -62,22 +63,12 @@ class AutostartUnavailable(AutostartError):
 
 
 def _account_lock_root() -> Path:
-    """A private directory of the OS account itself, found from the account
-    database and never from HOME, TMPDIR, LOGNAME or the config home, so every
-    config home of the account reaches the same lock. Tests replace this
-    function; nothing else may."""
-    import pwd
-
-    uid = os.getuid()
-    root = Path(pwd.getpwuid(uid).pw_dir) / ".a8s-locks"
+    """The account's private lock directory (`ar3.crontab.account_lock_root`).
+    Tests replace `account_lock_root`; nothing else may."""
     try:
-        root.mkdir(mode=0o700, exist_ok=True)
-        st = root.lstat()
-    except OSError as e:
-        raise AutostartError(f"cannot prepare the account lock directory {root}: {e}") from e
-    if root.is_symlink() or st.st_uid != uid or st.st_mode & 0o077:
-        raise AutostartError(f"{root} is not a private directory owned by this account")
-    return root
+        return crontab.account_lock_root()
+    except crontab.CrontabError as e:
+        raise AutostartError(str(e)) from e
 
 
 account_lock_root = _account_lock_root
@@ -322,12 +313,10 @@ class CronBackend(Backend):
             )
 
     def _read(self) -> str:
-        proc = _run(["crontab", "-l"])
-        if proc.returncode == 0:
-            return proc.stdout
-        if "no crontab" in (proc.stderr or "").lower():
-            return ""
-        raise AutostartError(f"crontab -l failed: {(proc.stderr or '').strip() or proc.returncode}")
+        try:
+            return crontab.read()
+        except crontab.CrontabError as e:
+            raise AutostartError(str(e)) from e
 
     def _line(self, spec: EntrySpec) -> str:
         cmd = " ".join(shlex.quote(a) for a in spec.argv).replace("%", "\\%")
@@ -339,43 +328,15 @@ class CronBackend(Backend):
         return bool(m) and m["home"] == home_id() and (node is None or m["node"] == node)
 
     def _rewrite(self, drop_node: str, add: str | None) -> None:
-        # Every config home of this account edits the same crontab.
-        with file_lock(account_lock_root() / "crontab.lock"):
-            self._rewrite_locked(drop_node, add)
-
-    def _rewrite_locked(self, drop_node: str, add: str | None) -> None:
-        for _ in range(2):
-            before = self._read()
-            lines = before.splitlines()
-            kept = [ln for ln in lines if not self._owned(ln, drop_node)]
-            if add is not None:
-                kept.append(add)
-            if self._read() == before:
-                break
-        else:
-            raise AutostartError("crontab changed while it was being updated; try again")
-        if kept == lines and (add is None or add in lines):
-            return
-        backup = home_dir() / "autostart-crontab.bak"
-        if before:
-            atomic_write_text(backup, before, mode=0o600)
-        if kept:
-            proc = _run(["crontab", "-"], input="\n".join(kept) + "\n")
-        elif before:
-            proc = _run(["crontab", "-r"])
-        else:
-            return
-        if proc.returncode != 0:
-            raise AutostartError(f"crontab rejected the update: {(proc.stderr or '').strip() or proc.returncode}")
-        after = self._read().splitlines()
-        unrelated_before = [ln for ln in lines if not self._owned(ln, drop_node)]
-        unrelated_after = [ln for ln in after if not self._owned(ln, drop_node) or ln == add]
-        if [ln for ln in unrelated_after if ln != add] != unrelated_before:
-            raise AutostartError(
-                f"crontab changed during the update; the prior copy is {backup}"
+        # Every config home of this account edits the same crontab, under one
+        # lock that the ar3 auto-update trigger shares.
+        try:
+            crontab.rewrite(
+                lambda ln: self._owned(ln, drop_node), add,
+                home_dir() / "autostart-crontab.bak", lock_root=account_lock_root(),
             )
-        if (add is not None) != any(ln == add for ln in after):
-            raise AutostartError("crontab does not hold the expected entry after the update")
+        except crontab.CrontabError as e:
+            raise AutostartError(str(e)) from e
 
     def install(self, spec: EntrySpec) -> None:
         self.check()

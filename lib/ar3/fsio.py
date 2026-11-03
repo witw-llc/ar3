@@ -159,3 +159,66 @@ def _atomic_write(
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# The two errors that mean "nothing is there": the last name does not exist, or
+# a parent on the way is a file. Every other OSError (PermissionError,
+# IsADirectoryError, ELOOP, an I/O error) means something IS there and cannot
+# be read.
+_ABSENT = (FileNotFoundError, NotADirectoryError)
+
+
+class DanglingLink(OSError):
+    """A symlink is there but leads nowhere (an unmounted volume, an offline
+    sync folder). Something IS configured; it just cannot be reached."""
+
+
+def _check_links(path: Path) -> None:
+    """Refuse a symlink, at the file or at any folder above it, that is present
+    but cannot be followed. `open` reports that as FileNotFoundError, the same
+    as a file that was never there, so the check looks at each link first."""
+    here = Path(os.path.abspath(path))
+    for step in (*reversed(here.parents), here):
+        try:
+            if step.is_symlink() and not step.exists():
+                raise DanglingLink(
+                    f"{step} is a symlink to {os.readlink(step)} and that "
+                    f"leads nowhere (an unmounted or offline target)"
+                )
+        except PermissionError:
+            return  # unreadable: the read itself will say so
+
+
+def read_text_if_present(path: Path, encoding: str = "utf-8") -> str | None:
+    """The text of `path`, or None only when it is genuinely absent.
+
+    A policy file must tell "no policy" from "policy I cannot read". Python
+    3.14's `Path.is_file()` answers False for an unreadable parent (3.12
+    raises PermissionError instead), so `if not path.is_file()` reads
+    existing policy as absent on one interpreter and crashes on the other.
+    This opens the file and catches only the absent errors: PermissionError, a
+    directory in the file's place, a symlink loop or any other OSError
+    propagates for the caller to refuse on. Undecodable bytes raise
+    UnicodeDecodeError (a ValueError), never an empty text."""
+    _check_links(path)
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except _ABSENT:
+        return None
+    return data.decode(encoding)
+
+
+def is_present(path: Path) -> bool:
+    """False only when `path` is genuinely absent (see `read_text_if_present`).
+    A path that exists but cannot be statted or read counts as present, so the
+    read that follows fails loudly instead of the caller concluding "no
+    file"."""
+    try:
+        _check_links(path)
+        os.stat(path)
+    except _ABSENT:
+        return False
+    except OSError:
+        return True
+    return True

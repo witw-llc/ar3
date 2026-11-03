@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import uuid
 
@@ -471,19 +472,22 @@ def test_view_gap_closes_session_without_replay_or_queue_release(tmp_path, busy)
 @pytest.mark.parametrize("error", [None, "policy refused"])
 def test_check_scans_serve_help_and_uses_no_turn_probe(tmp_path, monkeypatch, error):
     from engines import check
+    from conftest import write_path_executable
+
     calls = []
-    monkeypatch.setattr(check.shutil, "which", lambda name: name)
-    monkeypatch.setattr(check, "interpreter_gap", lambda *_: None)
+    fake = write_path_executable(tmp_path / "bin", "muse", "pass\n")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(check, "interpreter_gap", lambda *_, **k: None)
     monkeypatch.setattr(check, "_version", lambda *_: "1.4.13")
-    monkeypatch.setattr(check, "_run", lambda argv: (calls.append(argv) or (0, "Usage: muse serve [OPTIONS]\n--disable-request-user-input")))
+    monkeypatch.setattr(check, "_run", lambda launch, args: (calls.append(args) or (0, "Usage: muse serve [OPTIONS]\n--disable-request-user-input")))
     def probe(argv, cwd, env):
-        assert argv[:2] == ["muse", "serve"]
+        assert argv[:2] == [str(fake), "serve"]
         assert env["R4T_SESSION_APPROVAL"] == "onRequest"
         assert env["R4T_SESSION_TELL_GRANT"] == "1"
         return {"version": "1.4.13", **({"error": error} if error else {})}
     monkeypatch.setattr(muse, "probe_muse", probe)
     report = check.check_engine("muse", resident=True, workdir=tmp_path)
-    assert calls == [["muse", "serve", "--help"]]
+    assert calls == [["serve", "--help"]]
     assert report.method == "MSP handshake"
     assert report.verdict == (check.REJECTED if error else check.ACCEPTED)
 

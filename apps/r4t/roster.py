@@ -106,6 +106,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ar3.fsio import read_text_if_present
+
 if TYPE_CHECKING:
     from rig import Rig
 
@@ -731,12 +733,12 @@ def load_roster(path: Path, *, validate: bool = True, node: str | None = None) -
             return load_runbook(path, node=node, validate=validate).roster
         except RunbookError as e:
             raise RosterError(str(e)) from e
-    if not path.is_file():
-        raise RosterError(f"roster not found: {path}")
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
+        text = read_text_if_present(path)
+    except (OSError, ValueError) as e:
         raise RosterError(f"cannot read roster {path}: {e}") from e
+    if text is None:
+        raise RosterError(f"roster not found: {path}")
     roster = parse_roster(text, path)
     if validate:
         problem = roster.leader_problem()

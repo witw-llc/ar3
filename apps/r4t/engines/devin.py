@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from ar3.proc import launch_options
 
 from engines.base import QuotaError
+from rig import merge_env
 
 BOOT_TIMEOUT_S = 20
 USAGE_TIMEOUT_S = 20
@@ -156,7 +157,7 @@ def _usage_screen() -> str:
         raise QuotaError("devin is not on PATH")
     master, slave = os.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", SCREEN_ROWS, SCREEN_COLS, 0, 0))
-    env = {**os.environ, "TERM": os.environ.get("TERM") or "xterm-256color"}
+    env = merge_env(os.environ, {"TERM": os.environ.get("TERM") or "xterm-256color"})
     with tempfile.TemporaryDirectory(prefix="r4t-devin-quota-") as cwd:
         try:
             proc = subprocess.Popen(

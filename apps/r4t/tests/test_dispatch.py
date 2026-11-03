@@ -898,10 +898,15 @@ PINNED_ROSTER = textwrap.dedent(
 
 
 @pytest.fixture
-def pinned_ctx(r4t_home, tmp_path, tells):
+def pinned_ctx(r4t_home, tmp_path, tells, monkeypatch):
     """A roster on an engine that continues by naming a session (copilot's
     preset shape) rather than by a bare continue flag."""
     from dispatch import DispatchContext
+    from engines import copilot as copilot_engine
+
+    # The harness below is the rig's own binary, so a usage-flag probe of it
+    # would be recorded as a turn; these tests are about the session pin.
+    monkeypatch.setattr(copilot_engine, "supports_usage_file", lambda *a: False)
 
     calls = tmp_path / "pinned-calls"
     calls.mkdir()
@@ -1377,7 +1382,7 @@ class TestCacheLog:
             ephemeral_1h_tokens=created,
             ephemeral_5m_tokens=0,
         )
-        monkeypatch.setattr(dispatch.transcript, "probe", lambda p, w: convo)
+        monkeypatch.setattr(dispatch.transcript, "probe", lambda p, w, env=None: convo)
         ctx = DispatchContext(
             root=tmp_path,
             node=NODE,

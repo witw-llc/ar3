@@ -58,11 +58,11 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ar3.fsio import stat_or_none
-from ar3.proc import launch_options
 try:
     from ar3.clock import (
         local_now,
@@ -131,9 +131,17 @@ from rig import (
     RigConfig,
     RigError,
     Rig,
+    Launch,
+    access_binary_state,
+    home_env_problem as rig_mod_home_env_problem,
+    mcp_env,
+    merge_env,
+    resolve_launch,
     apply_mcp,
+    child_home,
     load_rig_config,
     mcp_home_peers,
+    normalize_add_dirs,
     resolve_agy_model,
     revoke_mcp,
 )
@@ -786,6 +794,29 @@ def _kb(n: int) -> str:
     return f"{n / 1000:.1f}k"
 
 
+class RosterContext(NamedTuple):
+    """The routing facts a roster turn's env carries: `R4T_NODE`, `R4T_MEMBER`
+    and the member's pinned `R4T_SESSION` (None when there is none)."""
+
+    node: str
+    member: str
+    session: str | None
+
+
+def roster_context(env: dict | None) -> RosterContext:
+    """The ONE reader of the turn's routing names. It reads the canonical view
+    of `env` (`rig.merge_env`), so on Windows a lowercase or mixed-case name
+    reads as the variable the child gets, and the telemetry names the same node,
+    member and session as the Launch. A raw `env.get("R4T_...")` anywhere else
+    in the roster path is a defect (a source test holds the line)."""
+    effective = merge_env(env)
+    return RosterContext(
+        node=effective.get("R4T_NODE", "") or "",
+        member=effective.get("R4T_MEMBER", "") or "",
+        session=effective.get("R4T_SESSION") or None,
+    )
+
+
 def run_harness(
     rig: Rig,
     prompt: str,
@@ -806,42 +837,223 @@ def run_harness(
     `run_as` probes it for write before the turn starts. Machine scratch would
     reach the child in neither.
     """
-    with copilot_engine.turn_instruments(
-        rig.instruments, scratch=cwd, max_credits=rig.max_ai_credits
-    ) as instruments:
-        result = _run_harness_turn(
-            rig, prompt, cwd, env=env, variant=variant, instruments=instruments
+    # ONE structure covers every way out, and EVERY copilot turn of a node and
+    # member leaves exactly one `last_denials` record, so meta never shows an
+    # earlier turn's result. The instrumented body measures its own turn (see
+    # `_record_measurement`) when its denial probe is armed. Otherwise this
+    # `finally` writes the record: `unknown (not-armed)` when the turn reached
+    # its instruments with no probe (an unpinned turn on a build without the
+    # usage flag, an unresolvable binary), whether it ran or was refused, and
+    # `unknown (not-started)` when it left before the instruments existed (a
+    # refused state home, an exception while the env or launch was built, an
+    # interrupt). A new early return in the body needs nothing added here.
+    measured: list = []
+    try:
+        # The launch is built ONCE, for the pool variant this turn runs, with
+        # its FINAL environment: the caller's env (or this process's, when the
+        # caller has none), the rig's `env`, and every injection the turn owns
+        # (the instruments' exporter path, the MCP idiom's file variable, the
+        # PWD pin). Nothing changes the env after this point; the instruments'
+        # feature probe, the access gate, the models list and the spawn all run
+        # through this object, so a probe and the spawn cannot see different
+        # inputs, on the `env=None` path (the judge) as on a roster turn.
+        isolation = isolate.isolation_from_env(env)
+        turn_context = env is not None
+        workdir = Path(os.path.abspath(cwd))
+        final_env = merge_env(
+            env if turn_context else os.environ,
+            rig.env,
+            copilot_engine.instrument_env(rig.instruments, workdir),
         )
-        _record_measurement(env, instruments)
+        if turn_context and rig.mcp_on:
+            final_env = merge_env(final_env, mcp_env(rig, final_env, workdir))
+        # PWD is a shell convention no kernel maintains, so a spawned harness
+        # inherits the PWD of whoever started r4t however the cwd is set. A
+        # harness that resolves its own paths against it (opencode does, for
+        # --dir) would anchor them outside the member's workdir.
+        final_env = merge_env(final_env, {"PWD": str(workdir)})
+        bad_home = rig_mod_home_env_problem(final_env)
+        if bad_home:
+            return 126, f"rig {rig.name!r}: {bad_home}", 0.0, False
+        pool = rig.pool()
+        launch = resolve_launch(
+            pool[variant % len(pool)][0] if pool else "",
+            final_env,
+            cwd=workdir,
+            isolated=bool(isolation.run_as or isolation.container),
+        )
+        return _run_instrumented(
+            rig, prompt, launch=launch, final_env=final_env, variant=variant,
+            turn_context=turn_context,
+            session=roster_context(env).session,
+            measured=measured,
+        )
+    finally:
+        if not measured:
+            _record_fallback(rig, env, "not-started")
+        elif measured[0] == "unarmed":
+            _record_fallback(rig, env, "not-armed")
+
+
+def _record_fallback(rig: Rig, env: dict | None, reason: str) -> None:
+    """The record of a roster turn whose denials were not measured: the denial
+    line in the node's day log and `last_denials` in the member's meta,
+    `unknown (<reason>)`. Only for an instrumented rig with a roster context,
+    and it never raises (it runs in a `finally`)."""
+    try:
+        node, member, _ = roster_context(env)
+        if rig.instruments != "copilot" or not (node and member):
+            return
+        summary = copilot_engine.unknown_summary(reason)
+        state.append_log(node, f"r4t: {copilot_engine.format_denials(summary)}")
+        state.update_meta(node, member, last_denials=summary)
+    except Exception:
+        pass
+
+
+def _run_instrumented(
+    rig: Rig,
+    prompt: str,
+    *,
+    launch: Launch,
+    final_env: dict,
+    variant: int,
+    turn_context: bool,
+    session: str | None,
+    measured: list,
+) -> tuple[int, str, float, bool]:
+    """The instrumented half of `run_harness`, from the built launch on.
+    `measured` gets one entry the moment the turn reaches its measurement,
+    "armed" or "unarmed" by whether the denial probe exists; `run_harness` reads
+    it to know whether any return or exception before that point skipped it,
+    and writes the record an unarmed turn lacks."""
+    with copilot_engine.turn_instruments(
+        rig.instruments,
+        scratch=Path(launch.cwd),
+        max_credits=rig.max_ai_credits,
+        launch=launch,
+        session=session,
+        # Every roster turn runs under the member's AgentLock.
+        lock_held=True,
+    ) as instruments:
+        # Measured on every exit path, once: a turn that ends in an exception
+        # or an interrupt still leaves what the session already wrote.
+        finished = False
+        try:
+            result = _run_harness_turn(
+                rig, prompt, launch=launch, variant=variant, instruments=instruments,
+                turn_context=turn_context,
+            )
+            finished = True
+        finally:
+            measured.append("armed" if instruments.denials is not None else "unarmed")
+            _record_measurement(
+                final_env if turn_context else None, instruments, finished=finished
+            )
     return result
 
 
 def _record_measurement(
-    env: dict | None, instruments: copilot_engine.TurnInstruments
+    env: dict | None, instruments: copilot_engine.TurnInstruments, *, finished: bool = True
 ) -> None:
     """What the turn measured, into the member's own record: one line each in
     the node's day log, and `spend` / `otel` under `last_spend` in the
     member's meta — the same objects `r4t rig run --json` prints. Written here
     rather than by the caller so the `run_fn` contract stays four values, and
-    under its own key so the caller's `last_turn` write cannot race it."""
-    node = (env or {}).get("R4T_NODE", "")
-    member = (env or {}).get("R4T_MEMBER", "")
-    if not (instruments.armed and node and member):
-        return
-    measured, lines = instruments.measure()
-    for line in lines:
-        state.append_log(node, f"r4t: {line}")
-    state.update_meta(node, member, last_spend=measured)
+    under its own key so the caller's `last_turn` write cannot race it.
+
+    It runs in a `finally` and never raises (`Exception`): a diagnostic does not
+    change how a turn ends. A turn that did not finish writes only its denials;
+    a turn that was refused before the spawn replaces the previous turn's
+    `last_denials` with `unknown (not-started)` instead of leaving it to read
+    as this turn's."""
+    try:
+        node, member, _ = roster_context(env)
+        has_probe = instruments.denials is not None
+        if not ((instruments.armed or has_probe) and node and member):
+            return
+        measured, lines = instruments.measure(
+            denials_only=not finished, expect_denials=True
+        )
+        for line in lines:
+            state.append_log(node, f"r4t: {line}")
+        # Denials are a diagnostic of their own: logged and kept in the member's
+        # meta, never told to anyone, and never part of the spend record.
+        denials = measured.pop("denials", None)
+        if finished and (instruments.armed or measured):
+            state.update_meta(node, member, last_spend=measured)
+        if denials is not None:
+            state.update_meta(node, member, last_denials=denials)
+    except Exception:
+        pass
+
+
+def _access_for_turn(
+    rig: Rig,
+    launch: Launch,
+    isolation: isolate.Isolation,
+    turn_env: dict | None,
+) -> tuple[list[str] | None, dict | None, str | None]:
+    """The access knobs' preconditions, checked before anything spawns:
+    (normalized `add_dirs` or None when the rig has none, the binary record or
+    None when the rig carries no knob, a refusal or None). `~/` expands against
+    the child's HOME and every directory must exist in the child's view; a
+    container refuses `add_dirs` (a bind mount is the operator's decision, not
+    a flag); a build older than the one the flags were read against refuses
+    the knobs. The build probed is `launch.binary`, the executable the selected
+    pool variant spawns, resolved once on the child's environment."""
+    where = f"rig {rig.name!r}: "
+    carries = bool(rig.add_dirs or rig.allow_tools or rig.deny_tools)
+    if not carries:
+        return None, None, None
+    dirs: list[str] | None = None
+    try:
+        if rig.add_dirs:
+            if isolation.container:
+                return None, None, (
+                    f"{where}add_dirs is refused under container isolation — "
+                    f"the container sees only what it mounts; mount the "
+                    f"directory instead"
+                )
+            if isolation.run_as:
+                relative = [
+                    e for e in rig.add_dirs
+                    if not (e.startswith("~/") or os.path.isabs(e))
+                ]
+                if relative:
+                    raise RigError(
+                        f"{where}add_dirs entry {relative[0]!r} is a relative path"
+                    )
+                found, problem = isolate.resolve_dirs_as(isolation.run_as, rig.add_dirs)
+                if problem:
+                    return None, None, f"{where}{problem}"
+                dirs = list(dict.fromkeys(os.path.normpath(p) for p in found))
+            else:
+                dirs = normalize_add_dirs(
+                    rig.add_dirs, home=child_home(launch.env), where=where
+                )
+        access = access_binary_state(rig.preset, launch, where=where)
+    except RigError as exc:
+        return None, None, str(exc)
+    node, member, _ = roster_context(turn_env)
+    if node and member:
+        state.append_log(
+            node,
+            f"r4t: ACCESS {member} {access['binary'] or rig.preset} "
+            f"{access['version'] or '?'} ({access['status']})",
+        )
+        state.update_meta(node, member, last_access=access)
+    return dirs, access, None
 
 
 def _run_harness_turn(
     rig: Rig,
     prompt: str,
-    cwd: Path,
     *,
-    env: dict | None = None,
+    launch: Launch,
     variant: int = 0,
     instruments: copilot_engine.TurnInstruments,
+    turn_context: bool,
 ) -> tuple[int, str, float, bool]:
     """Run the rig's argv (pool variant `variant`) with {prompt} substituted
     as a single argv element — never a shell — and {workdir} with `cwd`, for a
@@ -867,12 +1079,22 @@ def _run_harness_turn(
     continues by pinning one (copilot) — founding it when `R4T_CONTINUE` is
     absent and resuming it when it is set. Both ride the env for the same
     reason isolation does: the run_fn contract stays narrow."""
+    # The binary, the environment and the working directory all come from the
+    # launch; `env` below is only the launch's env, read, never rebuilt. A turn
+    # with no caller context (the judge) carries none of the turn-owned keys.
+    cwd = Path(launch.cwd)
+    env = launch.env if turn_context else {}
+    isolation = isolate.isolation_from_env(launch.env if turn_context else None)
+    access_dirs, access_state, refusal = _access_for_turn(rig, launch, isolation, env)
+    if refusal:
+        return 126, refusal, 0.0, False
     argv = rig.argv(
         prompt,
         variant,
-        continue_conversation=(env or {}).get("R4T_CONTINUE") == "1",
+        continue_conversation=env.get("R4T_CONTINUE") == "1",
         workdir=cwd,
-        session=(env or {}).get("R4T_SESSION") or None,
+        session=roster_context(env).session,
+        access_dirs=access_dirs,
     )
     if rig.model_resolver == "agy-live":
         # Resolve the friendly --model against the live `agy models` list before
@@ -880,7 +1102,9 @@ def _run_harness_turn(
         # silently ignores an unrecognized string, so a stale/bad value must
         # fail the turn loudly rather than run the account default.
         try:
-            resolved = resolve_agy_model(rig.model or "", effort=rig.effort)
+            resolved = resolve_agy_model(
+                rig.model or "", effort=rig.effort, launch=launch
+            )
         except RigError as e:
             return 127, f"agy --model {rig.model!r} did not resolve: {e}", 0.0, False
         argv = [resolved if a == "{model}" else a for a in argv]
@@ -888,17 +1112,16 @@ def _run_harness_turn(
     # Next to the binary, the position `Rig.argv` splices its own translations
     # at, and before any isolation wrapper takes the argv over.
     argv = argv[:1] + instruments.flags() + argv[1:]
+    if argv[0] != launch.argv0:
+        return 126, (
+            f"rig {rig.name!r}: the executable changed from {launch.argv0!r} to "
+            f"{argv[0]!r} after its launch was resolved"
+        ), 0.0, False
 
-    # The rig's `env` map (docs/r4t-rigs.md): static harness knobs on every turn.
-    # It goes on before r4t's own per-turn injections below (the mcp idiom's
-    # variables, the PWD pin) so those still win, and a name the turn owns fails
-    # the rig closed at parse time, so this cannot shadow one.
-    if env is not None:
-        env.update(rig.env)
-
-    staging = (env or {}).get("TELL_OUTBOX_DIR", "")
-    delivered = (env or {}).get("R4T_DELIVERED_DIR", "")
-    isolation = isolate.isolation_from_env(env)
+    # The rig's `env` map (docs/r4t-rigs.md) and r4t's per-turn injections are
+    # already in the launch's env: they were applied before it was built.
+    staging = env.get("TELL_OUTBOX_DIR", "")
+    delivered = env.get("R4T_DELIVERED_DIR", "")
 
     # The `mcp` knob: splice the a8s MCP server in with this harness's own
     # idiom, before any isolation wrapper takes the argv over. The idioms ride
@@ -906,7 +1129,7 @@ def _run_harness_turn(
     # cross when the wrapper is told to carry them — so the injection states its
     # needs and the wrapper below honours them.
     mcp = McpPlan(argv=argv)
-    if env is not None:
+    if turn_context:
         if rig.mcp_on:
             try:
                 mcp = apply_mcp(rig, argv, env, cwd, isolation)
@@ -923,14 +1146,14 @@ def _run_harness_turn(
             # its prompt no longer teaches is degraded, not broken, so a removal
             # that cannot happen is logged and the turn runs anyway.
             stale = revoke_mcp(rig, env, isolation)
-            node = env.get("R4T_NODE", "")
+            node = roster_context(env).node
             if stale and node:
                 state.append_log(node, f"r4t: MCP-STALE {stale}")
 
     # An `env_reset`/container keeps only what the wrapper is told to carry, so
     # the rig map has to be named to it the same way the mcp idiom's env is.
     # The idiom wins a collision — it is r4t's own per-turn injection.
-    boundary_env = {**rig.env, **mcp.env_pass, **instruments.pass_env()}
+    boundary_env = merge_env(rig.env, mcp.env_pass, instruments.pass_env())
 
     kill_container_name: str | None = None
     if isolation.run_as:
@@ -952,50 +1175,51 @@ def _run_harness_turn(
             gid = isolate.agent_gid(isolation.run_as)
             isolate.assert_readonly_shared_dir(Path(delivered).parent, gid)
             isolate.assert_readonly_shared_dir(delivered, gid)
-        argv = isolate.wrap_run_as(
-            argv, isolation.run_as, staging, cwd, env_pass=boundary_env
-        )
+        try:
+            argv = isolate.wrap_run_as(
+                argv, isolation.run_as, staging, cwd, env_pass=boundary_env
+            )
+        except isolate.IsolationError as e:
+            return 126, str(e), 0.0, False
     elif isolation.container:
-        kill_container_name = isolate.container_name(
-            (env or {}).get("R4T_NODE", ""), (env or {}).get("R4T_MEMBER", "")
-        )
-        argv = isolate.build_container_argv(
-            argv,
-            isolation.container,
-            name=kill_container_name,
-            staging_dir=staging,
-            workplace=cwd,
-            tell_outbox=staging,
-            container_args=isolation.container_args,
-            delivered_dir=delivered or None,
-            extra_env=boundary_env,
-            extra_ro_dirs=mcp.mount_dirs,
-        )
+        context = roster_context(env)
+        kill_container_name = isolate.container_name(context.node, context.member)
+        try:
+            argv = isolate.build_container_argv(
+                argv,
+                isolation.container,
+                name=kill_container_name,
+                staging_dir=staging,
+                workplace=cwd,
+                tell_outbox=staging,
+                container_args=isolation.container_args,
+                delivered_dir=delivered or None,
+                extra_env=boundary_env,
+                extra_ro_dirs=mcp.mount_dirs,
+            )
+        except isolate.IsolationError as e:
+            return 126, str(e), 0.0, False
 
-    live_log = (env or {}).get("R4T_LIVE_LOG")
-    # PWD is a shell convention no kernel maintains, so a spawned harness
-    # inherits the PWD of whoever started r4t however `cwd` is set. A harness
-    # that resolves its own paths against it (opencode does, for --dir) would
-    # anchor them outside the member's workdir.
-    turn_env = instruments.env_for(
-        dict(env if env is not None else os.environ, PWD=str(cwd))
-    )
+    live_log = env.get("R4T_LIVE_LOG")
+    if instruments.denials is not None:
+        # The home the CHILD uses, read from the launch's own env: a run_as user
+        # or a container keeps its own, which this process cannot read, so those
+        # turns report it unknown.
+        instruments.denials.bind(launch)
     start = time.monotonic()
     try:
-        proc = subprocess.Popen(
+        proc = launch.start(
             argv,
-            cwd=str(cwd),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=turn_env,
-            **launch_options(new_session=True),
+            new_session=True,
         )
     except FileNotFoundError:
         return (
             127,
-            f"failed to spawn harness {argv[0]!r}: not on PATH ({turn_env.get('PATH', '')})",
+            f"failed to spawn harness {argv[0]!r}: not on PATH ({launch.env.get('PATH', '')})",
             0.0,
             False,
         )
@@ -1918,6 +2142,7 @@ def _log_cache_usage(
     rig: Rig,
     workdir: Path,
     continued: bool,
+    env: dict | None = None,
 ) -> None:
     """Record what the turn just did to the provider's cache.
 
@@ -1932,7 +2157,7 @@ def _log_cache_usage(
     process-boundary breakpoint miss that makes automatic continuation
     uneconomic. That gets a CACHE-MISS line with the same numbers.
     """
-    convo = transcript.probe(rig.preset, workdir)
+    convo = transcript.probe(rig.preset, workdir, env)
     if convo is None or not convo.measured:
         return
     missed = (
@@ -2088,7 +2313,7 @@ def _run_turn(
     stats = prompt_stats(sections)
     prompt_total = len(prompt.encode("utf-8"))
 
-    env = dict(os.environ)
+    env = merge_env(os.environ)
     env["TELL_OUTBOX_DIR"] = str(staging)
     if delivered is not None:
         env["R4T_DELIVERED_DIR"] = str(delivered)
@@ -2106,7 +2331,7 @@ def _run_turn(
         env["R4T_SESSION"] = session
     # The org's OS-level boundary (org.py) rides in the same way — one setting
     # wraps every member turn regardless of rig (machinery outside, hands inside).
-    env.update(ctx.isolation.to_env())
+    env = merge_env(env, ctx.isolation.to_env())
     # agy takes MCP config only from the member's own `~/.gemini`, and the
     # roster is the only place a second agy member sharing that home shows up.
     if rig.mcp_idiom == AGY_HOME_IDIOM:
@@ -2175,7 +2400,9 @@ def _run_turn(
     )
     # The CONTINUE-COLD retry deletes the marker, so this reads what actually
     # ran: only a turn that resumed a prior conversation can be a MISS.
-    _log_cache_usage(ctx, member, rig, workdir, continued="R4T_CONTINUE" in env)
+    _log_cache_usage(
+        ctx, member, rig, workdir, continued="R4T_CONTINUE" in env, env=env
+    )
 
     _capture_turn(
         ctx,
@@ -2394,21 +2621,31 @@ def _rig_probe(rig: Rig) -> str:
     return pool[0][0] if pool and pool[0] else ""
 
 
-def _probe_resolves(command: str) -> str | None:
-    """Where `command` resolves today, or None. `shutil.which` for a bare name,
-    an executable-file test for a path — no subprocess, no tokens, no wake."""
+# A directory that cannot exist, for resolving a command when the member's own
+# is unknown: relative PATH entries then resolve to nothing instead of to the
+# router's cwd.
+_NO_CWD = os.path.join(os.sep, "nonexistent-r4t-member-cwd")
+
+
+def _probe_resolves(
+    command: str, path: str | None = None, cwd: str | os.PathLike | None = None
+) -> str | None:
+    """Where `command` resolves today, or None: through the same resolver a
+    turn's launch uses, on the rig's own PATH when it set one and from the
+    member's directory (`cwd`) that its turn starts in. No subprocess, no
+    tokens, no wake."""
     if not command:
         return None
-    if os.sep in command or (os.altsep and os.altsep in command):
-        path = Path(command).expanduser()
-        return str(path) if path.is_file() and os.access(path, os.X_OK) else None
-    return shutil.which(command)
+    env = merge_env(os.environ, {"PATH": path}) if path else None
+    return resolve_launch(command, env, cwd=cwd if cwd is not None else _NO_CWD).binary
 
 
 def _park(ctx: DispatchContext, member: Member, rig: Rig, reason: str) -> None:
     probe = _rig_probe(rig)
     record = state.park_member(
-        ctx.node, member.name, reason=reason, rig=rig.name, probe=probe
+        ctx.node, member.name, reason=reason, rig=rig.name, probe=probe,
+        probe_path=rig.env.get("PATH"),
+        probe_cwd=str(resolve_workdir(ctx, member)),
     )
     if not record:
         return
@@ -2431,7 +2668,9 @@ def _park_probe_sweep(ctx: DispatchContext, roster: Roster) -> list[str]:
         if not parked:
             continue
         probe = str(parked.get("probe", ""))
-        where = _probe_resolves(probe)
+        where = _probe_resolves(
+            probe, parked.get("probe_path") or None, parked.get("probe_cwd") or None
+        )
         if where is None:
             continue
         state.unpark_member(ctx.node, member.name)

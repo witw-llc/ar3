@@ -74,6 +74,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ar3.fsio import is_present
 from ar3.proc import launch_options
 
 from rig import (
@@ -81,12 +82,15 @@ from rig import (
     PERMISSION_MODES,
     A8S_PY,
     Rig,
+    RigError,
     build_preset_invoke,
     ceiling_refusal,
     machine_ceiling,
+    parse_access_list,
     permission_rank,
     preset_names,
     rig_from_spec,
+    union_rules,
 )
 from roster import (
     Member,
@@ -138,7 +142,16 @@ SCHEDULE_HINT = (
     "(machine-local time; there is no cron form)"
 )
 
-ENGINE_FLAGS = ("--model", "--permissions", "--allowed-tools", "--timeout")
+ENGINE_FLAGS = (
+    "--model", "--permissions", "--allowed-tools", "--timeout",
+    "--add-dir", "--allow-tool", "--deny-tool",
+)
+# The repeatable engine-line flags and the rig key each one builds.
+ENGINE_LIST_FLAGS = {
+    "--add-dir": "add_dirs",
+    "--allow-tool": "allow_tools",
+    "--deny-tool": "deny_tools",
+}
 
 MEMBER_KEYS = {
     "engine", "rig", "leader", "ingress", "cell", "lead", "workdir", "role",
@@ -148,6 +161,7 @@ CELL_KEYS = {"lead", "ingress"}
 RIG_KEYS = {
     "engine", "allowedtools", "rigbudget", "memberbudget", "env", "mcp",
     "echo", "echomax", "maxsends", "history",
+    "adddirs", "allowtools", "denytools",
 }
 RITUAL_KEYS = {"when", "to", "budget"}
 
@@ -704,9 +718,11 @@ def _check_name(name: str, kind: str) -> str | None:
 
 def parse_engine_line(value: str) -> dict:
     """`<engine-id> [--model M] [--permissions MODE] [--allowed-tools SPEC]
-    [--timeout S]` -> the rig spec it names. The flag set is closed on
-    purpose: this is AR3's own translated vocabulary, not an argv
-    passthrough into a repo-controlled file."""
+    [--timeout S] [--add-dir D]... [--allow-tool R]... [--deny-tool R]...` ->
+    the rig spec it names. The flag set is closed on purpose: this is AR3's
+    own translated vocabulary, not an argv passthrough into a repo-controlled
+    file. The three list flags repeat; each value is parsed on its own, so
+    one value's unbalanced parenthesis can never be closed by the next."""
     try:
         tokens = shlex.split(value)
     except ValueError as e:
@@ -723,6 +739,7 @@ def parse_engine_line(value: str) -> dict:
     permissions: str | None = None
     allowed_tools: str | None = None
     timeout: str | None = None
+    lists: dict[str, list[str]] = {}
     index = 1
     while index < len(tokens):
         flag = tokens[index]
@@ -750,6 +767,14 @@ def parse_engine_line(value: str) -> dict:
             permissions = raw
         elif flag == "--allowed-tools":
             allowed_tools = raw
+        elif flag in ENGINE_LIST_FLAGS:
+            knob = ENGINE_LIST_FLAGS[flag]
+            try:
+                lists.setdefault(knob, []).extend(
+                    parse_access_list(raw, knob, where="Engine: ")
+                )
+            except RigError as e:
+                raise RunbookError(str(e)) from e
         else:
             timeout = raw
         index += 2
@@ -763,6 +788,9 @@ def parse_engine_line(value: str) -> dict:
         spec["permissions"] = permissions
     if allowed_tools:
         spec["allowed_tools"] = allowed_tools
+    for knob, found in lists.items():
+        if found:
+            spec[knob] = ",".join(union_rules(found))
     if timeout:
         try:
             spec["timeout_seconds"] = float(timeout)
@@ -793,6 +821,26 @@ def _ceiling_problem(
     return ceiling_refusal(rig.permissions, ceiling, node)
 
 
+def _access_problem(rig: Rig | None, ceiling: str, node: str | None) -> str | None:
+    """Why this rig widens access past what the machine grants, or None.
+    `add_dirs` and `allow_tools` widen what an engine may touch, and the file
+    they sit in is checked in, so — like a stance — they are the machine's to
+    grant: a node whose ceiling is below `bypass` fails the rig closed. A
+    `deny_tools` entry only narrows and is always welcome."""
+    if rig is None or not (rig.add_dirs or rig.allow_tools):
+        return None
+    if permission_rank(ceiling) >= permission_rank("bypass"):
+        return None
+    where = f"node {node}" if node else "this machine"
+    held = "add_dirs" if rig.add_dirs else "allow_tools"
+    return (
+        f"{held} widens access, and {where} caps a runbook at {ceiling}: a "
+        f"checked-in file that could grant itself a directory or a tool rule "
+        f"would not be a boundary. Register with `r4t add <dir> --trust` to "
+        f"raise it, or set it on the machine rig (`r4t rig set`)"
+    )
+
+
 def _rig_from_block(
     block: Block, path: Path, ceiling: str, node: str | None
 ) -> Rig:
@@ -821,6 +869,22 @@ def _rig_from_block(
         )
     elif block.one("allowedtools"):
         spec["allowed_tools"] = block.one("allowedtools")
+
+    for key, knob in (
+        ("adddirs", "add_dirs"), ("allowtools", "allow_tools"), ("denytools", "deny_tools"),
+    ):
+        raw = block.one(key)
+        if not raw:
+            continue
+        if knob in spec:
+            errors.append(
+                _at(
+                    block, key, path,
+                    f"the rig sets {key} and an Engine: flag for the same list — delete one",
+                )
+            )
+        else:
+            spec[knob] = raw
 
     for key, (earn_field, max_field), label in (
         ("rigbudget", ("rig_budget_earn_per_hour", "rig_budget_max"), "Rig budget"),
@@ -879,6 +943,14 @@ def _rig_from_block(
     if over:
         errors.append(_at(block, "engine", path, over))
         rig.permissions = None
+    wide = _access_problem(rig, ceiling, node)
+    if wide:
+        errors.append(_at(block, "engine", path, wide))
+    # Provenance: this rig came from a checked-in file, so its `Env:` is held to
+    # the machine's allowlist when the rig is resolved (RigConfig.repo_env_problem),
+    # before any probe. The check needs the machine config, which a runbook load
+    # does not have, so it is not made here.
+    rig.repo_ceiling = ceiling
     if errors:
         rig.error = "; ".join(errors)
     return rig
@@ -916,11 +988,12 @@ def _member_from_block(
             errors.append(_at(block, "engine", path, str(e)))
         else:
             over = _ceiling_problem(override, ceiling, node)
+            wide = _access_problem(override, ceiling, node)
             if override.error:
                 errors.append(_at(block, "engine", path, override.error))
                 override = None
-            elif over:
-                errors.append(_at(block, "engine", path, over))
+            elif over or wide:
+                errors.append(_at(block, "engine", path, over or wide))
                 override = None
     elif rig_name:
         # The determinism ruling: a rig named in `## Rigs` shadows a machine rig
@@ -1001,7 +1074,7 @@ def runbook_path(root: Path) -> Path:
 
 
 def has_runbook(root: Path) -> bool:
-    return runbook_path(root).is_file()
+    return is_present(runbook_path(root))
 
 
 def is_runbook(path: Path) -> bool:
@@ -1091,7 +1164,7 @@ def load_runbook(
     raise even then — a file whose sections cannot be identified has no
     findings to report.
     """
-    if not path.is_file():
+    if not is_present(path):
         raise RunbookError(f"runbook not found: {path}")
     root = _node_root(path, node)
     resolver = vars if vars is not None else NodeVars(node)
@@ -1275,10 +1348,13 @@ def org_settings(root: Path) -> dict | None:
     resolves with no node name and no registry — which is what lets the org
     layer call it without asking the roster who it is first."""
     path = runbook_path(root)
-    if not path.is_file():
+    if not is_present(path):
         return None
+    # A runbook that is there and cannot be read raises: its frontmatter holds
+    # the node's isolation, and "no runbook" would run the turns un-isolated.
+    text = _read(path)
     try:
-        frontmatter, _body, _first = _split_frontmatter(_read(path), path)
+        frontmatter, _body, _first = _split_frontmatter(text, path)
     except RunbookError:
         return None
     out = dict(frontmatter)

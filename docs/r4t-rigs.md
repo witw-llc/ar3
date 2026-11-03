@@ -112,6 +112,7 @@ r4t rig run <rig> [--wait | --now] [--json] [--dir DIR] [--model M] [--effort LE
                   [--echo] [--lessons-cap N] [--lessons-cap-bytes N]
                   [--continue]
                   [--permissions MODE] [--allowed-tools SPEC]
+                  [--add-dir DIR]... [--allow-tool RULE]... [--deny-tool RULE]...
                   [--resident]
                   [--rig-config PATH] [--] PROMPT
 ```
@@ -127,8 +128,11 @@ already on it and the rig's budget in front of it. No roster and no
 **What the rig supplies.** The `preset` is the engine, and it must be one the
 `run` verb supports (a rig with no preset, or one riding `ollama` /
 `ollama-copilot`, is refused with the engines that can). On top of it the rig
-supplies `model`, `effort`, `permissions`, `allowed_tools`, `timeout_seconds` and the
-`env` map. **Precedence is flag > rig > preset**: a per-invocation flag wins,
+supplies `model`, `effort`, `permissions`, `allowed_tools`, `add_dirs`,
+`allow_tools`, `deny_tools`, `timeout_seconds` and the `env` map. The access
+lists are the one exception to *flag wins*: a flag adds to the rig's list
+(rig entries first, then the flag's, duplicates dropped), and a deny can only
+grow. **Precedence is flag > rig > preset**: a per-invocation flag wins,
 then the rig's own key, then unset — which is the preset's own flags, byte for
 byte. `--echo` prints the composed argv so the resolution is readable in one
 command.
@@ -183,6 +187,14 @@ carrying `rig`, `engine`, `dir`, `ran`, `reason` (`ran`, `resting`,
 ungated rig, else `max`, `earn_per_hour`, `level_before`, `level_after`,
 `waited_seconds`, `forced`, plus `seconds_until` on a refusal.
 
+A turn on a copilot rig adds `spend`, `otel` and `denials` when it measured them.
+`denials` is the bounded record of what copilot refused during the turn
+(`observed`, `complete`, `reason`, `by_tool`, `by_class`, `event_ids`,
+`rule_tools`, `rules_omitted`, `session`); `complete: false` means `observed` is "at least", and `observed:
+null` means unknown. It is a diagnostic and never changes `exit_code`. A
+dispatched member keeps the same object as `last_denials` in its meta; see
+[r4t-engine.md](r4t-engine.md).
+
 ## `rig fuel` — the tank as one number
 
 ```bash
@@ -198,6 +210,14 @@ An engine has dials; only a rig has a tank. [`r4t engine <id>
 quota`](r4t-engine.md) reports every bucket an account carries, and no two
 engines' panels are shaped alike. `rig fuel` narrows that answer to the
 buckets the rig's **model** burns and reports the lowest of them.
+
+**Whose account.** A rig whose `env` sets `COPILOT_HOME` (or a token
+variable) is read with that environment, as the turn runs: the router's `gh`
+login and stored token answer for the router's rigs only, and a reading is
+cached per account, keyed by a hash of the credential the rig resolves
+(never the token). A rig with its own account and no readable credential
+caches nothing and gets no stale snapshot. A claude or codex rig with its own `CLAUDE_CONFIG_DIR` or
+`CODEX_HOME` still reads the router's login; `note` says so.
 
 **Which buckets count.** A bucket whose label names a model family is a dial
 only that family turns; every other bucket constrains everything the engine
@@ -468,7 +488,8 @@ Rig settings never need hand-edited JSON. The configurable keys are
 `rig_budget_max`, `rig_budget_earn_per_hour`, the context knobs
 `history_max_bytes` / `history_body_max` / `prompt_body_max`, `model`, `mcp`,
 the echo keys `echo` / `echo_max_chars`, the harness stance keys
-`permissions` / `allowed_tools`, and `env.<NAME>` for a
+`permissions` / `allowed_tools`, the access lists `add_dirs` / `allow_tools` /
+`deny_tools`, and `env.<NAME>` for a
 [harness env knob](#harness-env-knobs-env)
 (each detailed in the [knob table](#governance-knobs) below).
 
@@ -532,6 +553,168 @@ node, re-checked every turn. So a member editing the repo still cannot raise
 its own permissions — the same boundary
 [r4t-security.md](r4t-security.md) draws for argv. Choosing the rig is choosing
 the stance, and `r4t rig get <rig> permissions` says what it is.
+
+## Access knobs (`add_dirs` / `allow_tools` / `deny_tools`)
+
+```bash
+r4t rig set ar3-eng add_dirs /srv/repos/shared-lib
+r4t rig set ar3-eng allow_tools "url(example.org),url(example.net)"
+r4t rig set ar3-eng deny_tools "shell(git push),shell(rm)"
+```
+
+Three lists that widen or narrow what an engine may touch, spelled in each
+CLI's own flags from one table. They are not an OS sandbox: `add_dirs` means
+what the engine means by an extra directory, and a rule is opaque text in the
+engine's own syntax (copilot takes URLs as `url(...)` rules).
+
+| Engine | `add_dirs` | `allow_tools` | `deny_tools` |
+|---|---|---|---|
+| `claude` | `--add-dir` | appended to the `--allowedTools` element | `--disallowedTools` |
+| `copilot` | `--add-dir=D` | `--allow-tool=R` | `--deny-tool=R` |
+| `codex` | `exec --add-dir` (refused with `--continue`) | no | no |
+| `cursor` | `--add-dir` | no | no |
+| `agy` | `--add-dir` | no | no |
+| `ollama-claude`, `ollama-codex`, `ollama-copilot` | as the wrapped engine, after the launcher's anchor | same | same |
+| `opencode`, `ollama-opencode`, `devin`, `muse`, `ollama` | no | no | no |
+
+An engine with no direct flag fails the turn before it starts, naming the
+reason and the engines that take the knob; nothing is dropped. `allow_tools`
+adds approval rules and is not an exclusive allowlist (`allowed_tools` stays
+the claude-only replacement of the preset's list, resolved first).
+
+**Grammar.** A list is split on commas outside parentheses, trimmed, emptied of
+blanks and deduplicated (first kept), and never shell-expanded. Refused, not
+repaired: unbalanced parentheses, a control character, and an entry that starts
+with `-`. Each repeated flag is parsed on its own. A `add_dirs` entry is an
+absolute path or starts with `~/` (the agent's `HOME`, not the router's); it
+must be a directory in the child's view before the turn starts. Container
+isolation refuses `add_dirs`.
+
+**Layers and denies.** `allow_tools` and `add_dirs` are unioned across layers
+(rig, then invocation). The deny set is the **node floor**, the denies of the
+machine rig a runbook rig shadows, the effective rig's, and the invocation's,
+emitted once. A deny wins over an allow, survives every stance (`bypass`,
+`--allow-all`) and `allowed_tools`, and a runbook rig that shadows a machine
+rig keeps that rig's denies (the one exception to whole-block shadowing,
+because a deny only narrows). If the shadow runs a different engine, the turn
+is refused rather than translating or dropping the denies. A deny can be left
+behind by moving a member to a differently named rig; mandatory policy belongs
+in the floor. `rig swap` to another engine is refused while `allow_tools` or
+`deny_tools` are saved.
+
+**Node floor.** `rigs.json` takes a reserved key mapping an engine to deny
+rules:
+
+```json
+{ "deny_floor": { "copilot": ["shell(git push)"], "claude": "Bash(git push:*)" } }
+```
+
+It applies to every turn of that engine on the node: roster members, inline
+`Engine:` members, `rig run`, `engine run`, `engine check` and `ollama-*`
+wrappers. An engine with no deny flag is refused when the file loads. While the
+floor names an engine, a launch that cannot carry it (`--resident`) is refused
+even when no knob was passed. The floor is also part of every background model
+call: knowledge distill and compile (the default rig and a named `Knowledge:`
+rig), the engine-memory writer and the judge carry it, with the rig's own
+access lists. One that cannot is refused and logged, never run bare.
+
+**What a checked-in runbook may set in `Env:`.** Below `bypass` a checked-in
+`Env:` may set only the names on one short allowlist, `rig.IN_REPO_ENV_SAFE`
+(today: `ENABLE_PROMPT_CACHING_1H`), plus the names the operator grants in the
+machine `rigs.json`:
+
+```json
+{ "env_allow": ["NODE_OPTIONS"] }
+```
+
+Everything else is refused when the rig is resolved, before any `--version` or
+`--help` probe, with one line naming the rig, the variable and the fix ("set it
+in the machine rig, or add it to the node's trusted env list"). An allowlist,
+because an environment is open ended: no denylist can name every variable that
+picks an executable (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`), a runtime or loader,
+a home, a shell wrapper (`CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_ENV_FILE`), an
+endpoint, proxy or certificate (`*_BASE_URL`, `HTTPS_PROXY`, `SSL_CERT_FILE`,
+`NODE_EXTRA_CA_CERTS`), a credential (`*_API_KEY`, `GH_TOKEN`) or a permission
+(`COPILOT_ALLOW_ALL`). None of those is on the safe list, for any engine; one
+rule covers them all.
+
+**`env_allow` is a privileged machine grant. Allowing a name lets the repo choose
+that variable's value**, so grant only names whose every value you accept from
+the repo. It is a list of exact names (letters, digits, underscore; no wildcards,
+no prefixes), and names match exactly. On Linux and macOS environment names
+are case-sensitive, so a grant of `node_options` does not admit `NODE_OPTIONS`
+(list the spelling the repo uses), and the safe name is only
+`ENABLE_PROMPT_CACHING_1H`. On Windows names are case-insensitive, so a grant
+matches in any case, a rig's `env` names are stored upper case (as Python's
+`os.environ` does there), and a rig that lists two names differing only by case
+(`Path` and `PATH`) is refused. Every environment r4t hands a child is merged by
+one rule: a later layer (caller env, rig `env`, instruments, MCP, turn) replaces
+an earlier one whatever the case, so a granted `copilot_home` selects the rig's
+home, token and quota cache. On Linux and macOS names stay as written. It is read
+from the machine `rigs.json` only: a runbook rig key,
+a `## Rigs` block that shadows a machine rig, an `extends` chain and a runbook's
+own frontmatter cannot set or add to it. A wrong-typed or malformed value is not
+read as "no grants" or as "all": it refuses every in-repo `Env:` on the node
+with one error until it is fixed. At or above `bypass` the rule does not apply.
+In every rig, machine or runbook, a `PATH` entry must be an absolute folder (no
+relative, no empty entry) and a state-home variable must be an absolute path with
+no `~`.
+
+**The floor follows the binary.** A rig whose preset is unknown is refused at
+load. When a node has a `deny_floor`, a rig with no preset is refused, and so is
+any rig (or pool variant) whose executable is not the preset's own CLI by file
+name (`.exe`/`.cmd` stripped): a launcher such as `env` or `npx`, a wrapper
+script, or another engine, would be handed flags that are not its own. The
+`ollama-*` presets are the known launchers. A runbook rig that shadows a machine
+rig which is itself invalid is refused, not run without that rig's denies.
+
+**Scope.** An `extends` child that redefines `## Rigs` replaces its base's rigs
+whole, denies included, so mandatory policy belongs in the node `deny_floor`. A
+repo's own engine settings files (a checked-in `.claude/settings.json`, a
+project `.github/copilot` file, and the like) are out of scope: they are the
+engine's own configuration, read by the engine, and r4t does not police them.
+
+**The boundary tools are the router's.** `sudo` and `docker` are found once, from
+the router's own PATH and working directory, as absolute paths; the probes and
+the spawn use that same path, and the rig's `env` reaches the child only through
+the boundary's `env_pass`.
+
+**An unreadable config is not an empty one.** Only a file that is genuinely
+absent counts as no config. One that exists but cannot be read (a closed folder
+above it, no read bit, a directory in its place) refuses the turn with the path
+and the fix, because a floor that vanishes with its file is not mandatory. The
+runbook, roster and org config follow the same rule.
+
+**Build record.** A turn that carries any knob resolves the engine binary,
+runs `--version`, and records the path and version (`ACCESS` line in the node
+log, `access` in `rig run --json`). A build older than the one the flags were
+read against refuses the knobs; a newer or unreadable one runs and is recorded
+as `unverified <version>`. The probe runs the executable the turn will spawn
+(the selected pool variant's `argv[0]`, an absolute path included), not the
+name on `PATH`. A launcher such as `ollama launch` starts a CLI r4t cannot
+name, so it is recorded `unverified launcher`.
+The executable, the complete environment and the working directory are
+resolved once and used by the probe and the spawn alike; a relative path or PATH
+entry resolves against the member's directory. A file replaced at the probed
+path between the probe and the start is not detected. A launch is never
+resolved with `shutil.which` (on Windows it searches the current directory
+first); `ar3.proc.find_executable` reads the child's PATH and PATHEXT. The
+copilot usage-flag answer is cached by the file's path, mtime and size; a shim
+that answers differently by environment or cwd is a documented residual. A file
+whose name is not the engine's CLI is refused, not run unverified, when knobs or
+a floor are set. `r4t engine <id> check` proves
+only that the argv parses.
+
+**a8s vars.** An `engine-*` node takes `ADD_DIRS`, `ALLOW_TOOLS` and
+`DENY_TOOLS` vars (see [a8s](a8s.md)).
+
+**Copilot's state home.** `COPILOT_HOME` holds copilot's login, approvals and
+`session-state/`. r4t sets no per-seat default; a seat opts in with
+`env.COPILOT_HOME` and one `copilot login`. Session lookup, the quota token and
+the transcript probe read the home the spawned environment names (a non-empty
+variable, else the child's `HOME` plus the default). A shared home does not
+isolate seats or their saved approvals. r4t writes no copilot settings or hook
+files; `.github/copilot/settings.local.json` is the operator's.
 
 ## Echo rigs
 
@@ -681,6 +864,8 @@ invoke lines is a fully governed roster. Rationale and prior art per layer:
 | `permissions` (rig) | unset — the preset's own flags | The rig's permission stance in three words (`ask` / `auto` / `bypass`), translated into each harness's own flags (see [the three translated parameters](r4t-engine.md#the-three-translated-parameters)). A mode below the engine's floor is refused at `rig set`; one above its ceiling resolves to the strongest the engine has | A stance the machine caps: a runbook may name one, and the trust ceiling (`auto` unless `r4t add --trust`) is what a repo cannot raise |
 | `effort` (rig) | unset — embedded model effort or engine default | Reasoning depth translated through the preset; runtime `--effort` overrides it for one turn. Invalid values and unsupported engines error | Tune routine turns cheaply or increase reasoning for difficult work |
 | `allowed_tools` (rig) | unset — the preset's own list | The engine's own tool-allowlist string, replacing the preset's for every turn. claude and `ollama-claude` only; the rest error with the reason | The claude preset's narrow list blocking a member that has to run `git` and `gh` — and hand edits that `rig swap` used to revert |
+| `add_dirs` / `allow_tools` / `deny_tools` (rig) | unset | Extra directories, approval rules and deny rules in the engine's own flags (see [Access knobs](#access-knobs-add_dirs-allow_tools-deny_tools)). A runbook rig may set the first two only on a node whose ceiling is `bypass` | A second repo or one URL needing `bypass`; a push or a delete a stance cannot take away |
+| `deny_floor` (top-level) | unset | Engine to deny rules every turn of that engine on the node carries; a runbook cannot drop one | A checked-in file loosening a node's mandatory denies |
 | `env` (rig) | empty | Static `NAME=value` pairs handed to the harness every turn — harness knobs r4t has no flag for (see [Harness env knobs](#harness-env-knobs-env)); set one at a time with `r4t rig set <rig> env.<NAME> <value>`. Frugal by doctrine; r4t's own turn variables are refused | Money burned on a harness default you cannot reach any other way — the first case is `ENABLE_PROMPT_CACHING_1H=1` on claude, the 1-hour prompt-cache tier for wakes minutes apart |
 | `timeout_seconds` (rig) | 900 | Harness wall clock; the process group is killed and the batch is a dead letter. A dispatch wake starts no turn whose timeout exceeds the time left before the a8s definition's `max_wake_seconds` | Hung harnesses |
 | `cell_budget_max` / `cell_budget_earn_per_hour` | 16 / 8 | Shared cell spend bucket; a turn also costs 1 cell unit. When empty, everyone rests | Whole-cell money burn |

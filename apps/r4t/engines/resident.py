@@ -56,7 +56,7 @@ from engines.run import (
 )
 from rig import (
     MCP_CLAUDE_TOOL, _mcp_codex_override, _mcp_command, _mcp_servers_json,
-    _toml_string,
+    _toml_string, merge_env,
 )
 
 RESIDENT_ENGINES = frozenset({"agy", "claude", "codex", "cursor", "devin", "muse", "ollama-claude"})
@@ -1462,9 +1462,7 @@ def _acp_probe(
     """
     import tempfile
 
-    session_env = dict(os.environ)
-    if env:
-        session_env.update(env)
+    session_env = merge_env(os.environ, env)
     session = session_type(argv, cwd, session_env)
     errors = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
     try:

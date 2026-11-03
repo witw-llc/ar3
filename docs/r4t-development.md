@@ -148,6 +148,16 @@
 apps/r4t/tests/run     # from the repo root; builds tests/.venv on first run
 ```
 
+**The suites write nothing real.** Every test starts with `A8S_HOME`,
+`R4T_HOME`, `K7E_HOME`, `AR3_HOME` and `XDG_CONFIG_HOME` at a throwaway dir, so
+an override inherited from the launcher cannot survive. As a second wall, a
+session guard records the real `~/.config/r4t` and `~/.config/k7e` trees when
+the run starts and compares them when it ends. A seat running live on the same
+machine can move those trees during a run, so the guard has three modes:
+`CI` set or `AR3_TESTS_STRICT_HOME=1` fails the run (exit 1) and names the
+paths; otherwise it prints a warning listing them and the run's own result
+stands; `AR3_TESTS_ALLOW_REAL_HOME=1` turns it off.
+
 ### Failure scenarios
 
 `r4t sandbox --fake --break MEMBER[:SHAPE]` breaks one member on purpose and

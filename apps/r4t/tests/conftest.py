@@ -20,6 +20,31 @@ sys.path.insert(0, str(_PKG))
 sys.path.insert(0, str(_PKG.parent.parent / "lib"))
 
 
+from ar3 import homeguard  # noqa: E402  (lib is on sys.path above)
+from ar3.homeguard import HomeGuard  # noqa: E402
+
+# Recorded at import, before any fixture redirects a home: the real trees.
+_HOME_GUARD = HomeGuard(("r4t", "k7e"))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _HOME_GUARD.finish(session)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_r4t_state(tmp_path_factory, monkeypatch):
+    """No test may reach the developer's real state. `~/.config/r4t` holds the
+    live rosters, rig config and quota cache; a test that forgot the
+    `r4t_home` fixture used to write a node called `acme` and the quota
+    snapshots there. Every home variable, A8S_HOME, R4T_HOME, K7E_HOME,
+    AR3_HOME and XDG_CONFIG_HOME, starts each test at a throwaway dir, so an
+    override inherited from the launcher cannot survive fixture setup; the
+    `r4t_home` fixture, and tests that set their own, still override it."""
+    root = tmp_path_factory.mktemp("r4t-isolated")
+    for name, value in homeguard.throwaway_homes(root).items():
+        monkeypatch.setenv(name, value)
+
+
 def pytest_configure(config):
     # Registered so a future in-pytest hook for the real-boundary docker test
     # has a home. The current integration lives entirely in tests/docker/ and
@@ -199,6 +224,17 @@ def repo(tmp_path):
     root.mkdir()
     (root / "ROSTER.md").write_text(ROSTER_TEXT, encoding="utf-8")
     return root
+
+
+def launch_for(argv0, env=None, cwd=None, *, isolated=False):
+    """A resolved `rig.Launch` for a test: `argv0` found on `env` (this
+    process's by default), as the child starting in `cwd` would find it."""
+    from rig import resolve_launch
+
+    return resolve_launch(
+        argv0, os.environ if env is None else env,
+        cwd=os.getcwd() if cwd is None else cwd, isolated=isolated,
+    )
 
 
 def write_path_executable(directory: Path, name: str, source: str) -> Path:

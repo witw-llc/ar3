@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 import threading
 
@@ -212,12 +213,14 @@ def test_definition_hooks_are_resident_and_policy_is_explicit():
 def test_check_uses_no_turn_effective_config_probe(monkeypatch, tmp_path, problem):
     from engines import check
 
+    from conftest import write_path_executable
+
     calls = []
-    monkeypatch.setattr(check.shutil, "which", lambda name: "/fake/devin")
-    monkeypatch.setattr(check, "interpreter_gap", lambda name: None)
-    monkeypatch.setattr(check, "_version", lambda name: devin.PROVEN_VERSION)
+    fake = write_path_executable(tmp_path / "bin", "devin", "pass\n")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(check, "interpreter_gap", lambda *a, **k: None)
+    monkeypatch.setattr(check, "_version", lambda launch: devin.PROVEN_VERSION)
     monkeypatch.setattr(check, "_run", lambda *args, **kwargs: (0, "help"))
-    monkeypatch.setattr(check, "resolve_argv0", lambda argv: argv)
     def probe(argv, cwd, *, env):
         calls.append((argv, env))
         return {"error": problem} if problem else {"model": "model-a"}
@@ -226,7 +229,7 @@ def test_check_uses_no_turn_effective_config_probe(monkeypatch, tmp_path, proble
                                model="model-a", effort="high", permissions="ask")
     assert report.verdict == (check.REJECTED if problem else check.ACCEPTED)
     assert report.method == "acp handshake"
-    assert calls[0][0] == ["devin", "acp"]
+    assert calls[0][0] == [str(fake), "acp"]
     assert calls[0][1]["R4T_SESSION_MODE"] == "ask"
 
 

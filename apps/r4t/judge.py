@@ -337,7 +337,12 @@ def _resolve_rig(rig_name: str, config_path: Path):
             f"judge: rig {rig_name!r} is invalid: {rig.error}   "
             f"(try: r4t rig configure {rig_name})"
         )
-    return rig
+    # The judge model call is a launch on this node: the deny floor joins the
+    # rig's denies, and a rig it cannot be carried into is refused.
+    effective, problem = config.effective_rig(rig)
+    if effective is None:
+        raise JudgeError(f"judge: rig {rig_name!r} is invalid: {problem}")
+    return effective
 
 
 def _invoke_chunks(rig, chunks: list[str], cwd: Path, result: Result) -> None:

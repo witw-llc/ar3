@@ -38,6 +38,7 @@ keep their own name, `remaining_fraction`.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ from pathlib import Path
 
 from engines import agy, claude, codex, copilot, cursor, devin, muse, ollama, opencode, run
 from engines.base import QuotaError
+from rig import ENGINE_HOME_ENV, engine_home, merge_env
 from state import r4t_home
 
 __all__ = [
@@ -142,12 +144,15 @@ SNAPSHOT_MAX_AGE_SECONDS = 4 * 3600
 SNAPSHOT_FUTURE_TOLERANCE_SECONDS = 60
 
 
-def snapshot_path(engine: str) -> Path:
-    return r4t_home() / "quota" / f"{engine}.json"
+def snapshot_path(engine: str, scope: str = "") -> Path:
+    """One snapshot file per engine, and per account when a rig names its own
+    (`scope`, see `copilot.account_key`, a hash of the credential): one
+    account's reading is never served as another's."""
+    return r4t_home() / "quota" / f"{engine}{scope}.json"
 
 
-def save_snapshot(engine: str, payload: dict) -> None:
-    path = snapshot_path(engine)
+def save_snapshot(engine: str, payload: dict, scope: str = "") -> None:
+    path = snapshot_path(engine, scope) if scope else snapshot_path(engine)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(
@@ -157,10 +162,13 @@ def save_snapshot(engine: str, payload: dict) -> None:
     tmp.replace(path)
 
 
-def load_snapshot(engine: str) -> dict | None:
+def load_snapshot(engine: str, scope: str = "") -> dict | None:
     """The last good answer, re-labeled with its age, else None."""
     try:
-        data = json.loads(snapshot_path(engine).read_text(encoding="utf-8"))
+        data = json.loads(
+            (snapshot_path(engine, scope) if scope else snapshot_path(engine))
+            .read_text(encoding="utf-8")
+        )
         saved_at = float(data["saved_at"])
         payload = dict(data["payload"])
     except (OSError, ValueError, KeyError, TypeError):
@@ -204,7 +212,21 @@ def format_age(seconds: float | None) -> str:
     return f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
 
 
-def quota(preset_or_engine: str, spend: bool = False) -> dict:
+def _home_override_note(engine: str, env: dict | None) -> str | None:
+    """A caveat for an engine whose quota check cannot read the rig's own
+    config home: it answers for the router's account."""
+    if env is None or engine not in ENGINE_HOME_ENV:
+        return None
+    if engine_home(engine, env) == engine_home(engine, None):
+        return None
+    variable = ENGINE_HOME_ENV[engine][0]
+    return (
+        f"this rig sets {variable}, which the {engine} quota check does not "
+        f"read: the figures are the router's account, not the rig's"
+    )
+
+
+def quota(preset_or_engine: str, spend: bool = False, env: dict | None = None) -> dict:
     """Live check for the engine behind `preset_or_engine`, falling back to a
     snapshot young enough to still be true. Raises QuotaError when neither can
     answer.
@@ -219,6 +241,8 @@ def quota(preset_or_engine: str, spend: bool = False) -> dict:
             f"unknown engine or preset '{preset_or_engine}' "
             f"(engines: {', '.join(sorted(MODULES))})"
         )
+    if env is not None:
+        env = merge_env(env)   # a caller's env reads through the canonical view
     checker = capability(engine, "quota")
     if checker is None:
         answering = sorted(e for e in MODULES if capability(e, "quota"))
@@ -227,15 +251,20 @@ def quota(preset_or_engine: str, spend: bool = False) -> dict:
             f"read without spending a turn (engines that do: "
             f"{', '.join(answering)})"
         )
+    takes_env = "env" in inspect.signature(checker).parameters
+    scope = copilot.account_key(env) if engine == "copilot" else ""
     try:
         if not spend and getattr(MODULES[engine], "QUOTA_SPENDS_TURN", False):
             raise QuotaError(
                 f"{engine}'s live quota check spends a provider turn — "
                 f"`r4t engine {engine} quota` mints a reading on demand"
             )
-        payload = checker()
+        payload = checker(env) if takes_env else checker()
     except QuotaError as exc:
-        snapshot = load_snapshot(engine)
+        # No account identity (a rig that names its own account but whose
+        # token cannot be read) means no cache: any snapshot could be another
+        # account's.
+        snapshot = load_snapshot(engine, scope) if scope is not None else None
         if snapshot is None:
             raise
         crossed = reset_passed(snapshot)
@@ -262,8 +291,11 @@ def quota(preset_or_engine: str, spend: bool = False) -> dict:
         snapshot["note"] = f"live check failed: {exc}"
         return snapshot
     payload["engine"] = engine
-    if payload.get("origin") == "live":
-        save_snapshot(engine, payload)
+    if payload.get("origin") == "live" and scope is not None:
+        save_snapshot(engine, payload, scope)
+    caveat = None if takes_env else _home_override_note(engine, env)
+    if caveat:
+        payload["note"] = f"{payload['note']}; {caveat}" if payload.get("note") else caveat
     return payload
 
 
@@ -333,10 +365,17 @@ def plan_label(plan: object) -> str | None:
     return plan if isinstance(plan, str) and "@" not in plan else None
 
 
-def fuel(preset_or_engine: str, model: str | None = None, spend: bool = False) -> dict:
+def fuel(
+    preset_or_engine: str,
+    model: str | None = None,
+    spend: bool = False,
+    env: dict | None = None,
+) -> dict:
     """How much tank is left for one model on one engine: the engine's quota,
     narrowed to the buckets that model burns, reduced to the binding one.
-    `spend` is `quota()`'s own opt-in, passed through unchanged.
+    `spend` is `quota()`'s own opt-in, passed through unchanged. `env` is the
+    rig's spawned environment: an engine that can read its account from it
+    does, and the rest say in `note` that they answered for the router.
 
     `state` is what a dispatcher branches on, because `fuel` alone cannot tell
     an empty account from an unmeasured one:
@@ -354,7 +393,10 @@ def fuel(preset_or_engine: str, model: str | None = None, spend: bool = False) -
     asked for, the same value `rig run --json` calls `engine`; `quota_engine`
     is the engine that actually answered. Raises QuotaError exactly where
     `quota` does."""
-    payload = quota(preset_or_engine, spend=spend)
+    payload = quota(
+        preset_or_engine, spend=spend,
+        **({} if env is None else {"env": merge_env(env)}),
+    )
     buckets = [b for b in payload.get("buckets") or [] if _constrains(b, model)]
     index = binding_index(buckets)
     binding = buckets[index] if index is not None else None

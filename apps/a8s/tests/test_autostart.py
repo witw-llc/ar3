@@ -932,6 +932,20 @@ class TestReviewRound3:
         a = autostart.account_lock_root() / "crontab.lock"
         assert a == autostart.account_lock_root() / "crontab.lock"
 
+    def test_cron_rewrite_takes_the_lock_the_ar3_trigger_shares(self, crontab, spec, monkeypatch):
+        from ar3 import crontab as shared
+
+        seen = []
+        real = shared.file_lock
+
+        def spy(path, **kw):
+            seen.append(path)
+            return real(path, **kw)
+
+        monkeypatch.setattr(shared, "file_lock", spy)
+        autostart.CronBackend().install(spec)
+        assert seen == [autostart.account_lock_root() / "crontab.lock"]
+
     def test_reader_of_a_missing_node_creates_nothing(self, fake_home):
         import daemon
 

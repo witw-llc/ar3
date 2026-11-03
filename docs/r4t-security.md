@@ -10,6 +10,26 @@ What keeps a repo edit, or a lying message, from changing what runs.
   stance, and the machine caps which one: `auto` until `r4t add <dir> --trust`
   raises it for that node, re-checked every turn. Cloning a repo and
   registering it is not a code-execution decision made silently.
+- **Access knobs.** `add_dirs` and `allow_tools` widen what an engine may
+  touch, so a runbook may set them only on a node whose ceiling is `bypass`;
+  `deny_tools` only narrows and is always accepted. The node's `deny_floor` (a
+  reserved `rigs.json` key) is added to every turn of its engine, and neither a
+  stance, `allowed_tools`, a runbook rig that shadows a machine rig, nor
+  `--resident` can drop it: a launch that cannot carry the floor is refused.
+  The `ADD_DIRS`, `ALLOW_TOOLS` and `DENY_TOOLS` a8s vars are the operator's
+  dials, but an agent that can run `a8s vars` on its own node can set them, so
+  mail that steers such an agent reaches `ADD_DIRS` and `ALLOW_TOOLS` at its
+  next wake; keep `a8s vars` out of a seat's allowed tools, and put what must
+  never happen in the floor. An access flag is the engine's own and not an OS
+  sandbox; `COPILOT_ALLOW_ALL=true` in a copilot seat's environment trusts the
+  folder the CLI starts in.
+- **Copilot denials are logged, never told.** After a copilot turn r4t reads
+  the session's own events and writes a bounded denial summary to the a8s log,
+  the day log and `rig run --json`: counts, a fixed tool set, a kind slug, at
+  most ten event ids and a count of the deny rules named. It holds no
+  argument, command, path, URL, rule or error text, it is never sent to the owner or any
+  seat, and it never changes an exit code. A denial count is not an audit: it
+  says "complete" only when coverage is proven (see `r4t-engine.md`).
 - **Pins.** `"pins": {"gerry": "leader"}` overrides the roster's Harness
   line silently — an in-repo edit can't upgrade a pinned agent.
 - **Out-of-repo state.** All r4t state lives under `~/.config/r4t/` (relocate

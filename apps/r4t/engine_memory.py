@@ -21,7 +21,7 @@ from ar3.ulid import new as new_ulid
 from dispatch import class_from_meta
 import knowledge
 import state
-from rig import knowledge_tier_bytes, load_rig_config, resolve_config_path
+from rig import knowledge_tier_bytes, load_rig_config, merge_env, resolve_config_path
 from roster import KNOWLEDGE_SIZES
 
 WORKER_SECONDS = 240
@@ -172,10 +172,12 @@ def memory_argv(argv):
     return argv
 
 
-def spawn(argv, directory, timeout, env):
-    proc = subprocess.Popen(memory_argv(argv), cwd=directory, env=env,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            **launch_options(new_session=True))
+def spawn(launch, argv, timeout):
+    """Run a turn through `launch` with its output captured: the executable,
+    environment and working directory are the launch's and nothing else's."""
+    proc = launch.start(memory_argv(launch.pin(argv)),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                        new_session=True)
     chunks = []
 
     def stream():
@@ -217,7 +219,7 @@ def spawn(argv, directory, timeout, env):
 
 def _run_job(home, capture, timeout):
     bridge = _command([sys.executable, str(Path(__file__).resolve()), "writer", str(capture)])
-    env = {**os.environ, "K7E_HOME": str(home), "K7E_DISTILL_COMMAND": bridge}
+    env = merge_env(os.environ, {"K7E_HOME": str(home), "K7E_DISTILL_COMMAND": bridge})
     argv = [sys.executable, str(knowledge.K7E_ENTRY), "distill", str(capture), "--job", capture.stem]
     proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **launch_options(new_session=True))
@@ -237,7 +239,7 @@ def _run_compile(home, capture, timeout):
     compile --due` through the same writer bridge, which k7e keeps to one
     pass a day per store."""
     bridge = _command([sys.executable, str(Path(__file__).resolve()), "writer", str(capture)])
-    env = {**os.environ, "K7E_HOME": str(home), "K7E_COMPILE_COMMAND": bridge}
+    env = merge_env(os.environ, {"K7E_HOME": str(home), "K7E_COMPILE_COMMAND": bridge})
     proc = subprocess.Popen([sys.executable, str(knowledge.K7E_ENTRY), "compile", "--due"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             **launch_options(new_session=True))
@@ -309,41 +311,77 @@ def worker(home):
 
 def writer(capture_path):
     from engines.run import build_argv
+    from rig import (
+        HARNESS_PRESETS, access_binary_state, child_home, normalize_add_dirs,
+        merge_env, resolve_launch,
+    )
+
     capture = json.loads(capture_path.read_text(encoding="utf-8"))
     spec = capture["writer"]
     workdir = capture_path.parent.parent / "writer"
     workdir.mkdir(exist_ok=True)
     prompt = sys.stdin.read()
-    env = {k: v for k, v in os.environ.items() if not k.startswith("A8S_TURN_")}
+    env = merge_env({k: v for k, v in os.environ.items() if not k.startswith("A8S_TURN_")})
     context = spec.get("context") or {}
-    config = None
-    if context or spec.get("rig"):
-        config = load_rig_config(resolve_config_path(context.get("config")))
+    # The writer is a launch on this node like any turn: the config is ALWAYS
+    # loaded (an unreadable one refuses, see `load_rig_config`) because the
+    # node's deny floor lives in it, and the rig it names gets the same
+    # effective-rig resolution a turn does.
+    config = load_rig_config(resolve_config_path(context.get("config")))
     if context.get("rig"):
         original = config.rigs.get(context["rig"].lower())
         if original is None or original.error:
             raise ValueError(f"source rig {context['rig']!r} is missing or invalid")
-        env.update(original.env)
+        env = merge_env(env, original.env)
+    where = "memory writer: "
     if spec.get("rig"):
-        rig = config.rigs.get(spec["rig"].lower())
-        if rig is None or rig.error:
+        named = config.rigs.get(spec["rig"].lower())
+        if named is None or named.error:
             raise ValueError(f"memory writer rig {spec['rig']!r} is missing or invalid")
+        rig, problem = config.effective_rig(named)
+        if rig is None:
+            raise ValueError(f"memory writer rig {spec['rig']!r} is invalid: {problem}")
+        env = merge_env(env, rig.env)
+        add_dirs = (
+            normalize_add_dirs(rig.add_dirs, home=child_home(env), where=where)
+            if rig.add_dirs else []
+        )
         if rig.preset:
             argv = build_argv(rig.preset, prompt, model=rig.model, effort=rig.effort,
                               timeout=JOB_SECONDS, workdir=workdir,
-                              permissions=rig.permissions, allowed_tools=rig.allowed_tools)
+                              permissions=rig.permissions, allowed_tools=rig.allowed_tools,
+                              add_dirs=add_dirs, allow_tools=rig.allow_tools,
+                              deny_tools=rig.deny_tools,
+                              deny_floor=config.floor_for(rig.preset),
+                              launch=resolve_launch(
+                                  HARNESS_PRESETS[rig.preset]["invoke"][0], env,
+                                  cwd=workdir))
         else:
-            argv = rig.argv(prompt, workdir=workdir)
-        env.update(rig.env)
+            argv = rig.argv(prompt, workdir=workdir, access_dirs=add_dirs)
+        preset = rig.preset
     else:
-        argv = build_argv(spec["engine"], prompt, model=spec["model"], effort=spec.get("effort"),
-                          timeout=JOB_SECONDS, workdir=workdir)
-    argv = memory_argv(argv)
-    os.chdir(workdir)
+        engine = spec["engine"]
+        floor = config.floor_for(engine)
+        argv = build_argv(engine, prompt, model=spec["model"], effort=spec.get("effort"),
+                          timeout=JOB_SECONDS, workdir=workdir, deny_floor=floor,
+                          launch=resolve_launch(
+                              HARNESS_PRESETS[engine]["invoke"][0], env, cwd=workdir))
+        rig, add_dirs, preset = None, [], engine
+    # One launch for the build record and the exec: the file probed is the file
+    # started, under the environment and in the directory both see.
+    launch = resolve_launch(argv[0], env, cwd=workdir)
+    if (rig is not None and (rig.add_dirs or rig.allow_tools or rig.deny_tools)) or (
+        rig is None and floor
+    ):
+        # The build that will run must be one the flags were read against.
+        access_binary_state(preset, launch, where=where)
+    if launch.binary is None:
+        raise FileNotFoundError(f"memory writer: {launch.argv0!r} is not on PATH")
+    argv = memory_argv(launch.pin(argv))
+    os.chdir(launch.cwd)
     if os.name == "nt":
-        return subprocess.call(argv, env=env, **launch_options())
-    os.execvpe(argv[0], argv, env)
-
+        return subprocess.call(argv, env=launch.env, cwd=launch.cwd, **launch_options())
+    os.execve(argv[0], argv, launch.env)
 
 if __name__ == "__main__":
     try:

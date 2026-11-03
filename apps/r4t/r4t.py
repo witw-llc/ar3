@@ -61,6 +61,7 @@ from dispatch import (
 )
 from rig import (
     A8S_PY,
+    merge_env,
     CONTINUE_POOR,
     DEFAULT_TIMEOUT_SECONDS,
     PERMISSION_MODES,
@@ -73,7 +74,11 @@ from rig import (
     default_config_path,
     format_preset_invoke,
     is_below_knowledge_floor,
+    access_engine,
+    load_deny_floor,
     load_rig_config,
+    parse_access_list,
+    union_rules,
     machine_ceiling,
     mcp_home_refusals,
     permission_ceiling_note,
@@ -81,6 +86,7 @@ from rig import (
     raise_machine_ceiling,
     remove_rig,
     resolve_config_path,
+    rig_config_present,
     resolve_override,
     rig_preset,
     rig_setting,
@@ -569,7 +575,7 @@ def cmd_default(_args: argparse.Namespace) -> int:
     print()
     print("Next steps")
     for step in _next_steps(
-        config_missing=not config_path.is_file(),
+        config_missing=not rig_config_present(config_path),
         roster_path=roster_path,
         rosters=rosters,
     ):
@@ -1457,7 +1463,7 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
         _resolve_root(getattr(args, "root", None)), getattr(args, "roster", None)
     )
     print("r4t rig — map the roster's symbolic rigs to what actually runs")
-    print(f"config: {config_path}" + (" (missing)" if not config_path.is_file() else ""))
+    print(f"config: {config_path}" + (" (missing)" if not rig_config_present(config_path) else ""))
     print()
     print("Rigs")
     _print_rig_summary(config_path, roster_path if roster_path.is_file() else None)
@@ -1468,7 +1474,7 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
         print(f"  {name:<{width}}  {blurb}")
     print()
     print("Next steps")
-    if not config_path.is_file():
+    if not rig_config_present(config_path):
         print("  - `r4t rig detect --add` — find the harnesses you already have")
         print("  - `r4t rig presets` — see the available CLI presets")
         print("  - `r4t rig add leader <preset>` — create the config with your first rig")
@@ -1482,7 +1488,7 @@ def cmd_rig_overview(args: argparse.Namespace) -> int:
 
 def cmd_rig_list(args: argparse.Namespace) -> int:
     config_path = resolve_config_path(args.rig_config)
-    print(f"rig config: {config_path}" + (" (missing)" if not config_path.is_file() else ""))
+    print(f"rig config: {config_path}" + (" (missing)" if not rig_config_present(config_path) else ""))
     print()
     roster_path = resolve_roster_path(_resolve_root(args.root), args.roster)
     _print_rig_summary(
@@ -1491,7 +1497,7 @@ def cmd_rig_list(args: argparse.Namespace) -> int:
         indent="",
         wide=args.wide,
     )
-    if config_path.is_file() and not args.wide:
+    if rig_config_present(config_path) and not args.wide:
         print()
         print("(full invoke lines: r4t rig ls --wide)")
     return 0
@@ -1632,6 +1638,18 @@ def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
         resident=args.resident,
         workdir=Path(args.dir).expanduser().resolve() if args.dir else Path.cwd(),
     )
+    try:
+        options.update(_access_options(args))
+    except RigError as exc:
+        print(f"r4t engine: {exc}", file=sys.stderr)
+        return 2
+    try:
+        options["deny_floor"] = load_deny_floor(
+            resolve_config_path(getattr(args, "rig_config", None))
+        )
+    except RigError as exc:
+        print(f"r4t engine: {exc}", file=sys.stderr)
+        return 1
     reports = (
         engine_check.check_all(**options)
         if engine is None
@@ -1647,6 +1665,33 @@ def _cmd_engine_check(args: argparse.Namespace, engine: str | None) -> int:
             how += ", and app-server's initialize and an ephemeral thread/start"
         print(f"No turn is spent: {how}.")
     return 1 if any(r.verdict == engine_check.REJECTED for r in reports) else 0
+
+
+def _access_options(args: argparse.Namespace) -> dict:
+    """The invocation's `add_dirs` / `allow_tools` / `deny_tools`: each
+    repeated flag value is parsed on its own (so one value's unbalanced
+    parenthesis is never closed by the next), then the values are joined in
+    order and deduplicated. Raises RigError on a malformed list."""
+    options: dict[str, list[str]] = {}
+    for knob, dest, flag in (
+        ("add_dirs", "add_dir", "--add-dir"),
+        ("allow_tools", "allow_tool", "--allow-tool"),
+        ("deny_tools", "deny_tool", "--deny-tool"),
+    ):
+        options[knob] = union_rules(*(
+            parse_access_list(value, knob, where=f"{flag} ")
+            for value in getattr(args, dest, None) or []
+        ))
+    return options
+
+
+def _engine_floor(args: argparse.Namespace, engine: str) -> list[str]:
+    """The node's mandatory deny rules for `engine`, read from the machine
+    rig config. A bare `engine run` has no rig, but it is still a turn on this
+    node: the floor applies to it."""
+    floor = load_deny_floor(resolve_config_path(getattr(args, "rig_config", None)))
+    wrapped = access_engine(engine)
+    return list(floor.get(wrapped, [])) if wrapped else []
 
 
 def _turn_dir(args: argparse.Namespace) -> Path:
@@ -1762,6 +1807,17 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    try:
+        access = _access_options(args)
+    except RigError as exc:
+        print(f"r4t engine run: {exc}", file=sys.stderr)
+        return 2
+    try:
+        floor = _engine_floor(args, engine)
+    except RigError as exc:
+        print(f"r4t engine run: {exc}", file=sys.stderr)
+        return 1
+
     dir_path = _turn_dir(args)
     prompt, code = _turn_prompt(args, dir_path, "r4t engine run")
     if prompt is None:
@@ -1792,6 +1848,13 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             git_name=args.git_name,
             git_email=args.git_email,
             resident=args.resident,
+            deny_floor=floor,
+            # The memory writer is a launch on this node too: it reads the
+            # config this turn was floored by, not the default one.
+            memory_rig_context={"config": str(
+                resolve_config_path(getattr(args, "rig_config", None))
+            )},
+            **access,
             **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
@@ -1903,6 +1966,15 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
     engine, problem = _rig_run_engine(rig, config_path, args.rig.strip())
     if engine is None:
         print(f"r4t rig run: {problem}", file=sys.stderr)
+        return 1
+    try:
+        access = _access_options(args)
+    except RigError as exc:
+        print(f"r4t rig run: {exc}", file=sys.stderr)
+        return 2
+    effective, problem = config.effective_rig(rig)
+    if effective is None:
+        print(f"r4t rig run: rig {rig.name!r} is invalid: {problem}", file=sys.stderr)
         return 1
 
     # #155 rule 4, as `engine run` enforces it: an idle wake is a cold wake.
@@ -2016,12 +2088,16 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             continue_conversation=args.continue_conversation,
             permissions=resolve_override(args.permissions, rig.permissions),
             allowed_tools=resolve_override(args.allowed_tools, rig.allowed_tools),
-            env={**os.environ, **rig.env} if rig.env else None,
+            env=merge_env(os.environ, rig.env) if rig.env else None,
             charge_hook=_charge if budgeted else None,
             max_credits=resolve_override(args.max_credits, rig.max_ai_credits),
             record=report,
             memory_rig_context={"rig": rig.name, "config": str(config_path)},
             resident=args.resident,
+            add_dirs=union_rules(rig.add_dirs, access["add_dirs"]),
+            allow_tools=union_rules(rig.allow_tools, access["allow_tools"]),
+            deny_tools=union_rules(effective.deny_tools, access["deny_tools"]),
+            deny_floor=config.floor_for(rig.preset),
             **_memory_kwargs(args),
         )
     except engine_run.RunError as exc:
@@ -2090,7 +2166,12 @@ def cmd_rig_fuel(args: argparse.Namespace) -> int:
     try:
         report = {
             "rig": rig.name,
-            **engines.fuel(preset, _rig_pinned_model(rig)),
+            # The rig's own env, so the account read is the one the rig runs
+            # under (COPILOT_HOME, a token variable), as the spawn sees it.
+            **engines.fuel(
+                preset, _rig_pinned_model(rig),
+                **({"env": merge_env(os.environ, rig.env)} if rig.env else {}),
+            ),
         }
     except engines.QuotaError as exc:
         print(f"r4t rig fuel: {exc}", file=sys.stderr)
@@ -2824,6 +2905,36 @@ def cmd_lab_ledger(args: argparse.Namespace) -> int:
     return cmd_ledger(args.name, as_json=args.json)
 
 
+def _access_arguments(p: argparse.ArgumentParser, lead: str) -> None:
+    """The three repeatable access flags, spelled once for every verb that
+    takes them."""
+    p.add_argument(
+        "--add-dir",
+        action="append",
+        metavar="DIR",
+        dest="add_dir",
+        help=f"{lead}one more directory the engine may reach (repeatable; a "
+        "comma list works too). Absolute, or ~/ for the agent's home. Engine "
+        "semantics, not an OS sandbox.",
+    )
+    p.add_argument(
+        "--allow-tool",
+        action="append",
+        metavar="RULE",
+        dest="allow_tool",
+        help=f"{lead}one more approval rule in the engine's own syntax "
+        "(repeatable). Not an exclusive allowlist.",
+    )
+    p.add_argument(
+        "--deny-tool",
+        action="append",
+        metavar="RULE",
+        dest="deny_tool",
+        help=f"{lead}one more deny rule in the engine's own syntax "
+        "(repeatable). A deny always wins, and the node's deny_floor is added.",
+    )
+
+
 def _add_common(p: argparse.ArgumentParser, *, with_node: bool = False) -> None:
     p.add_argument("--root", help="Roster repo root (default: cwd).")
     p.add_argument(
@@ -3136,6 +3247,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allowed_tools",
         help="Tool-allowlist string for this turn, overriding the rig's.",
     )
+    _access_arguments(rig_run_p, "")
     rig_run_p.add_argument(
         "--rig-config",
         help="Harness config path (default: ~/.config/r4t/rigs.json).",
@@ -3443,6 +3555,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="allowed_tools",
         help="run/check: the engine's own tool-allowlist string, replacing the "
         "preset's list (claude and ollama-claude only; other engines error).",
+    )
+    _access_arguments(engine_p, "run/check: ")
+    engine_p.add_argument(
+        "--rig-config",
+        help="run: harness config path whose deny_floor applies to this turn "
+        "(default: ~/.config/r4t/rigs.json).",
     )
     engine_p.add_argument(
         "--git-name",

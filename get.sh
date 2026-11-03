@@ -18,6 +18,11 @@
 #                          the suite shims into AR3_BIN (default /usr/local/bin)
 #                          instead of editing a shell rc
 #   AR3_BIN=/usr/local/bin bin dir for AR3_SYSTEM=1 shim symlinks
+#   AR3_NO_RESTART=1       pull or unpack only; leave running a8s nodes on
+#                          their current code (the nightly auto-update restarts
+#                          them itself, after it has looked at them again)
+#   AR3_AUTO_UPDATE=0      record nightly auto-update as off for this install
+#                          (otherwise a fresh install turns it on)
 #
 # Wrapped in main() so a truncated pipe cannot run a partial script (nvm /
 # ollama / tailscale precedent). When a re-run actually changes the tree and
@@ -92,6 +97,7 @@ main() {
   fi
 
   _restart_nodes_if_needed
+  _arm_auto_update
 
   if [ -n "$AR3_BIN" ]; then
     _link_system_shims
@@ -228,19 +234,36 @@ _install_git() {
     after="$(git -C "$AR3_DIR" rev-parse HEAD)"
     [ "$before" = "$after" ] || AR3_CHANGED=1
   else
-    if [ -e "$AR3_DIR" ]; then
-      [ -f "$AR3_DIR/.ar3-release" ] || {
-        echo "ar3: $AR3_DIR exists and is not an ar3 install; move it or set AR3_DIR" >&2
-        exit 1
-      }
-      rm -rf "$AR3_DIR"
+    # The clone is made beside the install and moved in whole, so the install
+    # is never half a clone: a clone that fails leaves it as it was. A release
+    # unpack that the clone replaces stays beside it as $AR3_DIR.prev, as a
+    # tarball update keeps it, so an automatic update can still roll back.
+    if [ -e "$AR3_DIR" ] && [ ! -f "$AR3_DIR/.ar3-release" ]; then
+      echo "ar3: $AR3_DIR exists and is not an ar3 install; move it or set AR3_DIR" >&2
+      exit 1
     fi
     echo "Installing ar3 into $AR3_DIR"
     if [ -n "$AR3_VERSION" ]; then
-      git clone --depth 1 --branch "$AR3_VERSION" "$AR3_REPO" "$AR3_DIR"
+      set -- --branch "$AR3_VERSION"
     else
-      git clone --depth 1 "$AR3_REPO" "$AR3_DIR"
+      set --
     fi
+    tmp="$AR3_DIR.new.$$"
+    rm -rf "$tmp"
+    git clone --depth 1 "$@" "$AR3_REPO" "$tmp" || {
+      rm -rf "$tmp"
+      exit 1
+    }
+    unpacked=0
+    if [ -e "$AR3_DIR" ]; then
+      rm -rf "$AR3_DIR.prev"
+      mv "$AR3_DIR" "$AR3_DIR.prev"
+      unpacked=1
+    fi
+    mv "$tmp" "$AR3_DIR" || {
+      [ "$unpacked" = 0 ] || mv "$AR3_DIR.prev" "$AR3_DIR"
+      exit 1
+    }
     AR3_CHANGED=1
   fi
 }
@@ -281,8 +304,16 @@ _install_tarball() {
     curl --proto '=https' --tlsv1.2 -fsSL "$base/archive/refs/tags/$tag.tar.gz" \
       | tar -xz -C "$tmp" --strip-components=1
     printf '%s\n' "$tag" > "$tmp/.ar3-release"
-    rm -rf "$AR3_DIR"
-    mv "$tmp" "$AR3_DIR"
+    # The old tree stays beside the new one as $AR3_DIR.prev, the one thing an
+    # automatic update rolls back to when the new release does not come up.
+    rm -rf "$AR3_DIR.prev"
+    if [ -e "$AR3_DIR" ]; then
+      mv "$AR3_DIR" "$AR3_DIR.prev"
+    fi
+    mv "$tmp" "$AR3_DIR" || {
+      [ ! -e "$AR3_DIR.prev" ] || mv "$AR3_DIR.prev" "$AR3_DIR"
+      exit 1
+    }
     AR3_CHANGED=1
   fi
 }
@@ -306,12 +337,24 @@ _link_system_shims() {
 
 _restart_nodes_if_needed() {
   [ "$AR3_CHANGED" = 1 ] || return 0
+  [ "${AR3_NO_RESTART:-}" != 1 ] || return 0
   a8s="$AR3_DIR/a8s"
   [ -f "$a8s" ] || return 0
   nodes="$("$a8s" ps -q 2>/dev/null || true)"
   [ -n "$nodes" ] || return 0
   echo "Restarting running a8s nodes so handlers pick up the update…"
   "$a8s" update
+}
+
+# A per-user install turns nightly auto-update on, unless the operator said no
+# (AR3_AUTO_UPDATE=0, or `ar3 update --auto off` earlier), and ends any
+# recovery an unfinished nightly run left, so no later run undoes this one. A
+# machine-wide install is updated by whoever owns it. The nightly run itself
+# pulls with AR3_NO_RESTART=1 and arms nothing.
+_arm_auto_update() {
+  [ -z "$AR3_BIN" ] || return 0
+  [ "${AR3_NO_RESTART:-}" != 1 ] || return 0
+  "$AR3_DIR/ar3" update --auto ensure || true
 }
 
 main "$@"

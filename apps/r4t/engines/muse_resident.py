@@ -18,7 +18,7 @@ from engines.acp import ParsedFrame, rpc
 from engines.held_input import submission_text
 from engines.muse import _uuid7
 from engines.run import RunError
-from rig import MCP_SERVER_NAME, _mcp_command, _mcp_server_env
+from rig import MCP_SERVER_NAME, _mcp_command, _mcp_server_env, merge_env
 
 TELL_TOOL = "mcp__a8s__tell"
 HUMAN_AXES = {"filesystem": "sandboxed", "network": "off",
@@ -508,8 +508,7 @@ class MuseSession:
 def probe_muse(argv, cwd, env, timeout=20.0):
     """Verify native session policy without submitting a turn."""
     from engines.resident import stop_engine
-    session_env = dict(os.environ)
-    session_env.update(env)
+    session_env = merge_env(os.environ, env)
     session = MuseSession(argv, cwd, session_env)
     frames = queue.Queue()
     result = {}

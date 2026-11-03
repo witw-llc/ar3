@@ -2021,3 +2021,158 @@ def test_playwright_cli_doctor_row_shows_a_version_that_is_not_the_pinned_one(mo
     check = {c.name: c for c in ar3.CHECKS}["playwright-cli"]
     assert not check.core
     assert " ".join(playwright_cli.INSTALL_COMMAND) in check.hint
+
+
+# ---------- get.sh: the pieces the nightly auto-update leans on ----------
+
+def _get_sh_function(name):
+    import re
+
+    found = re.search(rf"^{name}\(\) \{{\n(.*?)^\}}\n", _GET_SH.read_text(), re.S | re.M)
+    assert found, name
+    return f"{name}() {{\n{found.group(1)}}}\n"
+
+
+def _run_get_sh_function(tmp_path, name, env, setup=""):
+    script = tmp_path / f"{name}.sh"
+    script.write_text(f"set -eu\n{setup}\n{_get_sh_function(name)}\n{name}\n")
+    return _REAL_RUN(
+        ["sh", str(script)], env={**os.environ, **env}, capture_output=True, text=True
+    )
+
+
+def _fake_a8s(install):
+    log = install.parent / "a8s.log"
+    install.mkdir(exist_ok=True)
+    shim = install / "a8s"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = ps ]; then echo seat-a; else echo "$@" >> "{log}"; fi\n'
+    )
+    shim.chmod(0o755)
+    return log
+
+
+def test_installer_restarts_running_nodes_after_a_change(tmp_path):
+    install = tmp_path / "ar3"
+    log = _fake_a8s(install)
+    run = _run_get_sh_function(
+        tmp_path, "_restart_nodes_if_needed", {"AR3_DIR": str(install)}, "AR3_CHANGED=1\n" f"AR3_DIR='{install}'"
+    )
+    assert run.returncode == 0, run.stderr
+    assert log.read_text().strip() == "update"
+
+
+def test_installer_with_no_restart_leaves_nodes_on_their_code(tmp_path):
+    install = tmp_path / "ar3"
+    log = _fake_a8s(install)
+    run = _run_get_sh_function(
+        tmp_path, "_restart_nodes_if_needed", {"AR3_NO_RESTART": "1"},
+        "AR3_CHANGED=1\n" f"AR3_DIR='{install}'",
+    )
+    assert run.returncode == 0, run.stderr
+    assert not log.exists()
+
+
+def _fake_tarball_curl(tmp_path, version):
+    import io
+    import tarfile
+
+    payload = tmp_path / "payload.tar.gz"
+    with tarfile.open(payload, "w:gz") as tar:
+        data = f"{version}\n".encode()
+        info = tarfile.TarInfo(f"ar3-{version}/VERSION")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    curl = bin_dir / "curl"
+    curl.write_text(f'#!/bin/sh\ncat "{payload}"\n')
+    curl.chmod(0o755)
+    return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+
+def _install_tarball(tmp_path, install, tag):
+    env = _fake_tarball_curl(tmp_path, tag.lstrip("v"))
+    env.update({"AR3_DIR": str(install), "AR3_VERSION": tag, "AR3_REPO": "https://example.invalid/x/ar3.git",
+                "AR3_CHANNEL": "stable"})
+    return _run_get_sh_function(
+        tmp_path, "_install_tarball", env,
+        f"AR3_DIR='{install}'\nAR3_VERSION='{tag}'\nAR3_REPO='https://example.invalid/x/ar3.git'\nAR3_CHANNEL=stable\nAR3_CHANGED=0",
+    )
+
+
+def test_tarball_update_keeps_the_old_tree_beside_the_new_one(tmp_path):
+    install = tmp_path / "ar3"
+    install.mkdir()
+    (install / "VERSION").write_text("0.0.1\n")
+    (install / ".ar3-release").write_text("v0.0.1\n")
+    run = _install_tarball(tmp_path, install, "v0.0.2")
+    assert run.returncode == 0, run.stderr
+    assert (install / "VERSION").read_text() == "0.0.2\n"
+    assert (install / ".ar3-release").read_text().strip() == "v0.0.2"
+    prev = tmp_path / "ar3.prev"
+    assert (prev / "VERSION").read_text() == "0.0.1\n"
+    assert (prev / ".ar3-release").read_text().strip() == "v0.0.1"
+
+
+def test_tarball_update_keeps_only_the_latest_previous_tree(tmp_path):
+    install = tmp_path / "ar3"
+    install.mkdir()
+    (install / "VERSION").write_text("0.0.1\n")
+    (install / ".ar3-release").write_text("v0.0.1\n")
+    assert _install_tarball(tmp_path, install, "v0.0.2").returncode == 0
+    assert _install_tarball(tmp_path, install, "v0.0.3").returncode == 0
+    assert (tmp_path / "ar3.prev" / "VERSION").read_text() == "0.0.2\n"
+    assert (install / "VERSION").read_text() == "0.0.3\n"
+
+
+def test_tarball_install_that_is_already_current_moves_nothing(tmp_path):
+    install = tmp_path / "ar3"
+    install.mkdir()
+    (install / "VERSION").write_text("0.0.2\n")
+    (install / ".ar3-release").write_text("v0.0.2\n")
+    assert _install_tarball(tmp_path, install, "v0.0.2").returncode == 0
+    assert not (tmp_path / "ar3.prev").exists()
+
+
+def _fake_ar3_shim(install):
+    log = install.parent / "ar3.log"
+    install.mkdir(exist_ok=True)
+    shim = install / "ar3"
+    shim.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexit 7\n')
+    shim.chmod(0o755)
+    return log
+
+
+def test_installer_arms_auto_update_and_ignores_its_failure(tmp_path):
+    install = tmp_path / "ar3"
+    log = _fake_ar3_shim(install)
+    run = _run_get_sh_function(
+        tmp_path, "_arm_auto_update", {}, f"AR3_DIR='{install}'\nAR3_BIN=''"
+    )
+    assert run.returncode == 0, run.stderr
+    assert log.read_text().strip() == "update --auto ensure"
+
+
+def test_installer_does_not_arm_a_machine_wide_install(tmp_path):
+    install = tmp_path / "ar3"
+    log = _fake_ar3_shim(install)
+    run = _run_get_sh_function(
+        tmp_path, "_arm_auto_update", {}, f"AR3_DIR='{install}'\nAR3_BIN='/usr/local/bin'"
+    )
+    assert run.returncode == 0 and not log.exists()
+
+
+def test_the_nightly_pull_arms_nothing(tmp_path):
+    install = tmp_path / "ar3"
+    log = _fake_ar3_shim(install)
+    run = _run_get_sh_function(
+        tmp_path, "_arm_auto_update", {"AR3_NO_RESTART": "1"}, f"AR3_DIR='{install}'\nAR3_BIN=''"
+    )
+    assert run.returncode == 0 and not log.exists()
+
+
+def test_the_installer_arms_after_it_restarts_nodes():
+    text = _GET_SH.read_text()
+    assert text.index("\n  _restart_nodes_if_needed\n  _arm_auto_update\n") > 0

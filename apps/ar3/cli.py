@@ -7,9 +7,10 @@ prerequisites — there is no `ar3 tell`, no `ar3 dispatch`, no passthrough:
 every action belongs to the CLI that owns it, and ar3's job is to tell you
 which command that is. `ar3 tool` is the one exception: it drives a bundled
 a8s tool node on this machine, with its reply printed instead of sent, and
-writes no a8s state. Beyond it, `ar3 deps` fetches on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`:
-that directory is substrate ar3 itself owns, not product state, and it is the
-only thing ar3 ever writes.
+writes no a8s state. Beyond it, `ar3 deps` fetches on-demand heavy dependencies (boto3, textual) into `~/.local/share/ar3/deps`,
+and `ar3 update --auto` keeps the install's nightly auto-update state under
+`~/.config/ar3/update` and one scheduler entry: those are substrate ar3 itself
+owns, not product state, and they are all ar3 ever writes.
 
 Home resolution imports the same `ar3.home.app_home` resolver the products
 themselves call (A8S_HOME / R4T_HOME / K7E_HOME), so ar3's reporting can
@@ -61,6 +62,26 @@ from ar3.fsio import read_text_retry  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _load_autoupdate():
+    """The auto-update modules beside this file. A script run by path has its
+    own directory on `sys.path`; a copy loaded by path from elsewhere does
+    not, and putting this directory first there would shadow other apps'
+    `cli` modules, so it rides the end of `sys.path` for the import only."""
+    here = str(Path(__file__).resolve().parent)
+    added = here not in sys.path
+    if added:
+        sys.path.append(here)
+    try:
+        import autoupdate
+    finally:
+        if added:
+            sys.path.remove(here)
+    return autoupdate
+
+
+autoupdate = _load_autoupdate()
 IS_WINDOWS = os.name == "nt"
 
 WORDMARK = ("A R K", "8 4 7", "S T E")
@@ -293,6 +314,8 @@ def cmd_default(_args: argparse.Namespace) -> int:
         print()
         print(f"{name} — {blurb}  ({home()})")
         _print_rows(rows_fn())
+    print()
+    print(autoupdate.status_line(sys.modules[__name__]))
     print()
     print("next: ar3 doctor — probe the harnesses and tools the suite runs on")
     return 0
@@ -569,6 +592,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     # The only probe pointed at the suite itself. It reaches the public mirror,
     # so it is here and not in bare `ar3`, which must stay offline and instant.
     print(f"suite: {update_note()}")
+    print(autoupdate.status_line(sys.modules[__name__]))
     for group in (HARNESS, SERVICES, TOOLING):
         print()
         print(group)
@@ -1384,7 +1408,31 @@ def _update_everything(args: argparse.Namespace, script: Path) -> int:
     return suite_rc or engine_rc or restart_rc
 
 
+def _arm_after_update() -> None:
+    """A manual update arms nightly auto-update on an install that has no say
+    yet. Never fails the update."""
+    try:
+        done = autoupdate.ensure(REPO_ROOT)
+    except Exception as e:  # the update itself succeeded; arming is a courtesy
+        print(f"ar3 update: auto-update not armed: {e}", file=sys.stderr)
+        return
+    if done == "armed":
+        print(
+            f"ar3 update: nightly auto-update is on ({autoupdate.load(REPO_ROOT).get('window')} local, "
+            f"only when every seat is idle); `ar3 update --auto` shows it, `--auto off` stops it"
+        )
+
+
 def cmd_update(args: argparse.Namespace) -> int:
+    if getattr(args, "auto", None):
+        return autoupdate.cmd_auto(args, sys.modules[__name__])
+    for flag, spelled in (
+        ("window", "--window"), ("tell", "--tell"), ("tell_from", "--from"), ("now", "--now"),
+        ("json", "--json"), ("state_home", "--state-home"), ("install_root", "--install"),
+    ):
+        if getattr(args, flag, None):
+            print(f"ar3 update: {spelled} goes with --auto", file=sys.stderr)
+            return 2
     if args.all_engines and args.engines:
         print(
             "ar3 update: --engine and --all-engines contradict — pick one",
@@ -1406,9 +1454,18 @@ def cmd_update(args: argparse.Namespace) -> int:
     if args.wait < 0:
         print("ar3 update: --wait takes a number of seconds, 0 or more", file=sys.stderr)
         return 2
-    if args.all_engines or args.engines:
-        return _update_everything(args, script)
-    return _update_suite(script, args.wait)
+    try:
+        with autoupdate.manual_update(REPO_ROOT):
+            if args.all_engines or args.engines:
+                rc = _update_everything(args, script)
+            else:
+                rc = _update_suite(script, args.wait)
+            if rc == 0:
+                _arm_after_update()
+    except autoupdate.HandoffError as e:
+        print(f"ar3 update: {e}", file=sys.stderr)
+        return 1
+    return rc
 
 
 # ---------- tool ----------
@@ -1915,6 +1972,28 @@ def main(argv: list[str] | None = None) -> int:
         help="How long to wait for busy nodes before the restart "
         f"(default {UPDATE_WAIT_S:g}); a node still busy is left running and named.",
     )
+    update.add_argument(
+        "--auto",
+        nargs="?",
+        const="status",
+        choices=("status", "on", "off", "ensure", "run"),
+        metavar="ACTION",
+        help="Nightly auto-update of this install, only when every seat is "
+        "idle. Alone it shows the state; on or off turns it on or off.",
+    )
+    update.add_argument("--window", metavar="HH:MM-HH:MM",
+                        help="With --auto: when the night's try may start, in local time (default 02:00-05:00).")
+    update.add_argument("--tell", metavar="NAME",
+                        help="With --auto: a seat to tell what happened, or none.")
+    update.add_argument("--from", dest="tell_from", metavar="NODE",
+                        help="With --tell: the registered node that sends the message.")
+    update.add_argument("--now", action="store_true",
+                        help="With --auto run: skip the window; a busy seat still holds the update.")
+    update.add_argument("--json", action="store_true", help="With --auto: print the state as JSON.")
+    # The auto-update launcher's own invocation: the ar3 home that armed it,
+    # and the install it runs for (it may run the copy at <install>.prev).
+    update.add_argument("--state-home", dest="state_home", metavar="DIR", help=argparse.SUPPRESS)
+    update.add_argument("--install", dest="install_root", metavar="DIR", help=argparse.SUPPRESS)
     update.set_defaults(func=cmd_update)
     raw = sys.argv[1:] if argv is None else list(argv)
     if raw[:1] == ["tool"]:

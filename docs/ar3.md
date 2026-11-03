@@ -13,8 +13,9 @@ substrate instead. It reads a8s/r4t/k7e state and probes prerequisites, and it
 never runs another product's commands for you (`ar3 tool` is the one exception: it drives a tool node on this machine, below) — when something is missing,
 `ar3` names the real command to fix it. What `ar3` writes is its own substrate
 and never a product's state: `ar3 deps` fetches on-demand heavy dependencies
-into `~/.local/share/ar3/deps`, and `ar3 update` maintains the suite install
-itself. The verb that creates the need installs the dependency on its
+into `~/.local/share/ar3/deps`, `ar3 update` maintains the suite install
+itself, and `ar3 update --auto` keeps its state under `~/.config/ar3/update`
+and one scheduler entry. The verb that creates the need installs the dependency on its
 own — `a8s storage mybucket s3://my-bucket` fetches boto3 the moment that
 service is registered; `ar3 deps` is the explicit form, for scripts and for
 `ar3 doctor`.
@@ -23,6 +24,7 @@ service is registered; `ar3 deps` is the explicit form, for scripts and for
 ar3            # where the suite stands right now
 ar3 doctor     # are the harnesses and tools it runs on actually working?
 ar3 update     # pull this install forward to the latest release
+ar3 update --auto # nightly auto-update: show it; `on` and `off` turn it on and off
 ar3 tool command-shell --node mac-terminal  # drive a tool node from this terminal
 ar3 deps       # list on-demand heavy dependency groups and their status
 ar3 deps a8s-s3 # fetch one group by hand (here, boto3 for a8s's S3 storage)
@@ -194,8 +196,9 @@ installed/missing status for the running interpreter. `ar3 deps <group>`
 fetches that one group with `uv pip install --target` (or plain `pip` when
 `uv` is not on PATH) into `~/.local/share/ar3/deps/<interpreter>/<group>` —
 one directory per Python build, so an interpreter upgrade or a machine move
-never half-loads an incompatible install. Outside the install tree itself,
-this is the only directory `ar3` ever writes to.
+never half-loads an incompatible install. Besides the install tree itself and
+the auto-update state and scheduler entry (below), this is the only place `ar3`
+ever writes.
 
 ## `ar3 update`
 
@@ -260,6 +263,106 @@ a pull or a checkout by itself, naming the path, when an incoming file would
 land on one. The installer never forces a checkout, so that stop holds on a
 pinned update too.
 
+## Auto-update
+
+A per-user install updates itself at night, and only when no seat is busy.
+`ar3 update --auto on` is the switch; a fresh install and the first manual
+`ar3 update` turn it on, `ar3 update --auto off` turns it off for good, and
+`AR3_AUTO_UPDATE=0` at install time records it off. A machine-wide install
+(`AR3_SYSTEM=1`), or any tree this account cannot write, is never armed: the
+account that owns it updates it. `ar3` and `ar3 doctor` print `auto-update: not
+armed` until it is on.
+
+```
+ar3 update --auto                  # on or off, window, trigger, tonight's slot, last result, next try
+ar3 update --auto --json           # the same, for scripts
+ar3 update --auto on|off           # arm or remove the scheduler entry
+ar3 update --auto --window 01:00-04:00   # when a night's try may start, local time (default 02:00-05:00)
+ar3 update --auto --tell owner --from lead   # tell a seat what happened (--tell none stops it)
+ar3 update --auto run --now        # one attempt now, outside the window
+```
+
+**The trigger** is one entry per install that runs every few minutes: a cron
+line on Linux (it shares the account crontab lock with `a8s` autostart), a
+LaunchAgent on macOS (with no graphical login the status says it arms at next
+login), a scheduled task with an interactive token on Windows. macOS and
+Windows run it only while the user is logged in. The entry starts a small
+launcher kept in the ar3 home (`~/.config/ar3/update/<id>.launch.py`), outside
+the install, so a tick still starts when an unfinished update left the install
+moved aside as `<install>.prev`. The launcher names the install and the ar3
+home that armed it, and the run uses the `PATH`, proxy settings and suite homes
+(`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `A8S_HOME`, `R4T_HOME`, `K7E_HOME`) of the
+shell that armed it, because a scheduler starts it with almost no environment.
+Re-arm with `ar3 update --auto on` after you change one of them.
+
+**Each tick decides in code.** Outside the window, before tonight's slot (a
+start spread by install and night, so a fleet does not fetch at once) or after
+the night is done, a tick exits without touching the network. After the slot,
+every tick retries until the window closes; no attempt starts after it, and a
+running one finishes. A second tick while one runs exits at once.
+
+**It skips, and says why.** `ar3 update --auto` shows the last result: `noop`
+(already current), `skip-busy` (a seat is not idle, or shares a handler with
+one that is), `skip-unknown` (no `a8s`, `a8s ps` cannot say, the current
+commit or release tag cannot be read, or the tree is not one auto-update
+made), `skip-network` (also when the remote's commit cannot be read), `skip-refused`
+(a working checkout, as for `ar3 update`), `skip-pinned` (an `AR3_VERSION` pin),
+`skip-channel` (a beta clone: auto-update follows the public releases only),
+`skip-bad-release`, and `skip-input` (the pull asked for a password, a key or a
+host check, or hung; it runs with no terminal and no prompts, so run `ar3
+update` by hand once). The log is `~/.config/ar3/update/<id>.log`, one line per
+change; the installer's output is `<id>.last-run.txt`.
+
+**It records before it changes anything.** Before the installer runs, the
+run saves the current commit or release tag, the commit the remote is at (or
+the release tag it tells the installer to fetch), and the seats that are
+running. When the installer fails or hangs after it has changed the tree, or
+the run ends under it, the tree is put back from that record (the seats never
+left the old code). Every tick reads the tree on disk first and finishes what
+an earlier run left (putting a tree back, a restart, a rollback) before it
+checks the network or installs anything. It changes only a tree that is
+exactly one it recorded: the same commit with no change to a tracked file, or
+the same release tag. Any other tree, such as a commit a person made at the
+same version, is never put back: the record is dropped, the result is
+`skip-unknown`, and nothing changes. Right before each step that changes the
+install or restarts seats onto it, both trees are read again: the install must
+still be exactly the recorded tree, and a put-back or rollback runs only when
+the tree it restores (the recorded commit, or `<install>.prev` with the
+recorded tag and VERSION) is exactly the one recorded; otherwise nothing
+changes. For a rollback that is `rollback-blocked` (the recorded commit is
+missing, or `<install>.prev` is missing or holds another release): the seats
+may still be on the failed release, so `ar3 update --auto`, `ar3` and `ar3
+doctor` say so, and `--tell` sends it once a night until a person runs `ar3
+update`. Anything else is `skip-unknown`. Nothing is put back, restarted or rolled
+back while a seat is busy or cannot be asked about. A manual `ar3 update`
+waits for a running tick and ends the record before it starts, so even an
+interrupted one is never undone. When it cannot take the lock, or cannot read
+or write the state in `~/.config/ar3/update`, it changes nothing, exits
+nonzero and names the file: fix its permissions, or remove it to discard
+auto-update recovery. A tick never writes over a state it cannot read, and
+`ar3` and `ar3 doctor` say so; `get.sh` run by hand ends it when it
+finishes.
+
+**It checks its own work.** The pull leaves the seats on their old code. The
+restart is `a8s update --wait 0` from the new tree, which looks at each handler
+group again; a seat that turned busy in between stays on its old code
+(`partial`) and a later idle tick restarts it. Then `ar3`, `a8s`, `r4t` and
+`k7e` must each answer `--version` with the new version and every seat that was
+running before the update must be running again (polled for 90 seconds); a
+later tick checks the same seats. If not, the old tree is
+restored (a git install resets to the recorded commit; a release unpack swaps
+back `<install>.prev`, also when git has replaced a release unpack with a
+clone), the seats restart onto it, the release is skipped from then on, and the
+result is `rolled-back` (or `rollback-failed`). A rollback that waits for a busy
+seat, or whose restart failed or left a busy seat on the failed release, is
+`rollback-partial`: no busy seat is stopped, and the next idle tick finishes
+it before anything else. The health
+check is local; it asks no remote service.
+
+**`--tell`** sends one line on `updated`, `rolled-back`, `rollback-partial`,
+`rollback-failed`, `rollback-blocked` (once a night), `failed` and `skip-input`, from the registered node `--from`. A message that
+cannot be sent is logged and changes nothing else.
+
 ## What `ar3` is not
 
 `ar3` does not wrap, alias, or pass through the products' own verbs: sending a
@@ -267,7 +370,7 @@ message is still `tell`, running a roster is still `r4t dispatch`, storing
 knowledge is still `k7e`. Those commands appear in `ar3` output only as hints
 pointing you at the tool that owns them. `ar3 deps` and `ar3 update` are the
 exceptions to "AR3 never mutates", and only in the same narrow way: they write
-`ar3`'s own substrate — the dependency cache and the install tree — never a
-product's state. `ar3 update` runs the suite's own installer; it does not
+`ar3`'s own substrate — the dependency cache, the install tree, and the
+auto-update state and scheduler entry — never a product's state. `ar3 update` runs the suite's own installer; it does not
 reimplement it, and it is not a wrapper around `a8s update`, which means
 something else entirely (restart running nodes so handlers re-exec).

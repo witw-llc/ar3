@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import launch_for
+
 import engines
 from engines import run as engine_run
 from r4t import main as r4t_main
@@ -504,6 +506,11 @@ def drive_engine(monkeypatch, tmp_path: Path, name: str) -> Path:
             """
         ),
     )
+    # The recorder is the whole preset binary: a feature probe of it would be
+    # recorded as a turn. These tests are about argv, not the usage flag.
+    from engines import copilot as copilot_engine
+
+    monkeypatch.setattr(copilot_engine, "supports_usage_file", lambda *a: False)
     real = rig_module.HARNESS_PRESETS[name]
     monkeypatch.setitem(
         rig_module.HARNESS_PRESETS, name, {**real, "invoke": [str(script), *real["invoke"][1:]]}
@@ -1188,7 +1195,10 @@ class TestExecuteAndSpawn:
 
     def test_spawn_failure_is_a_run_error(self, tmp_path):
         with pytest.raises(engine_run.RunError, match="failed to spawn"):
-            engine_run._spawn(["/no/such/binary-r4t-engine"], tmp_path, 5)
+            engine_run._spawn(
+                launch_for("/no/such/binary-r4t-engine", cwd=tmp_path),
+                ["/no/such/binary-r4t-engine"], 5,
+            )
 
     def test_spawn_failure_names_the_path_searched(self, tmp_path):
         # #243: a bare, unresolvable name goes through PATH, and the operator
@@ -1196,7 +1206,10 @@ class TestExecuteAndSpawn:
         # matches the shell's own PATH, not the wake's.
         env = {"PATH": str(tmp_path / "empty-bin")}
         with pytest.raises(engine_run.RunError) as exc:
-            engine_run._spawn(["no-such-engine-binary-r4t"], tmp_path, 5, env=env)
+            engine_run._spawn(
+                launch_for("no-such-engine-binary-r4t", env, cwd=tmp_path),
+                ["no-such-engine-binary-r4t"], 5,
+            )
         assert "no-such-engine-binary-r4t" in str(exc.value)
         assert str(tmp_path / "empty-bin") in str(exc.value)
 
@@ -1715,16 +1728,23 @@ class TestArgv0IsResolvedBeforeExec:
             def wait(self, timeout=None):
                 return 0
 
+        import rig as rig_module
+
         monkeypatch.setattr(
-            engine_run, "_proc_spawn",
-            lambda argv, cwd, env=None: (seen.append(list(argv)), _Proc())[1],
+            rig_module.subprocess, "Popen",
+            lambda argv, **kw: (seen.append(list(argv)), _Proc())[1],
         )
-        monkeypatch.setattr(
-            engine_run.shutil, "which",
-            lambda name: f"/resolved/{name}.CMD" if name == "codex" else None,
+        # The launch finds the shim on the child's PATH by its own PATHEXT
+        # lookup (Windows puts `.CMD` on it) and the spawn starts that exact path.
+        monkeypatch.setattr(sys, "platform", "win32")
+        shim = tmp_path / "bin" / "codex.CMD"
+        shim.parent.mkdir()
+        shim.write_text("x", encoding="utf-8")
+        launch = rig_module.resolve_launch(
+            "codex", {"PATH": str(shim.parent), "PATHEXT": ".EXE;.CMD"}, cwd=tmp_path
         )
-        engine_run._spawn(["codex", "--version"], tmp_path, 5)
-        assert seen == [["/resolved/codex.CMD", "--version"]]
+        engine_run._spawn(launch, ["codex", "--version"], 5)
+        assert seen == [[str(shim), "--version"]]
 
 
     def test_the_wake_routing_env_stops_at_the_turn(self, tmp_path, monkeypatch):
@@ -1733,7 +1753,7 @@ class TestArgv0IsResolvedBeforeExec:
         seen: list[dict] = []
         monkeypatch.setattr(
             engine_run, "_spawn",
-            lambda argv, cwd, timeout, env=None: (seen.append(dict(env or {})), 0)[1],
+            lambda launch, argv, timeout: (seen.append(dict(launch.env)), 0)[1],
         )
         env = {"PATH": os.environ.get("PATH", ""), "A8S_TURN_RECIPIENT": "nodea",
                "A8S_TURN_ENVELOPES": "[]", "TELL_OUTBOX_DIR": str(tmp_path)}
@@ -1785,7 +1805,7 @@ class TestGitIdentity:
         seen: list[dict] = []
         monkeypatch.setattr(
             engine_run, "_spawn",
-            lambda argv, cwd, timeout, env=None: (seen.append(dict(env or {})), 0)[1],
+            lambda launch, argv, timeout: (seen.append(dict(launch.env)), 0)[1],
         )
         return seen
 

@@ -10,6 +10,209 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.126
+
+An install updates itself at night, only when every seat is idle, and puts the old release back when the new one does not come up.
+
+### Added
+
+- Nightly auto-update. `ar3 update --auto on` arms one scheduler entry per
+  install (a cron line, a LaunchAgent or a scheduled task) that runs every few
+  minutes; each tick decides in code, so most touch nothing. The first try of a
+  night is spread by install inside a window (`--window`, default 02:00-05:00
+  local) and retries until the window closes. It never touches a seat that is
+  busy or whose status cannot be read, never a working checkout, a pinned
+  install or a beta clone, and a pull that would ask for a password or a key
+  ends as `skip-input` instead of hanging. `ar3 update --auto` shows the state
+  (`--json` for scripts); `--auto off` turns it off for good;
+  `--tell NAME --from NODE` sends one line when it updated, failed, rolled back
+  or could not roll back. Closes #374.
+- A fresh install and the first manual `ar3 update` turn auto-update on,
+  except for a machine-wide install, a tree the account cannot write, and
+  `AR3_AUTO_UPDATE=0`. `ar3` and `ar3 doctor` print `auto-update: not armed`
+  until it is on.
+- After the restart the new tree must pass a local health check: `ar3`, `a8s`,
+  `r4t` and `k7e` answer `--version` with the new version and every seat that
+  was running is running again. If not, the old tree is restored (a git
+  install resets to the recorded commit; a release unpack swaps back
+  `<install>.prev`), the seats restart onto it, and that release is skipped from
+  then on. A rollback whose restart fails or leaves a busy seat on the failed
+  release is `rollback-partial`, and the next idle tick finishes it.
+- Before the installer runs, the current commit or release tag, the commit
+  the remote is at (or the release tag the installer is told to fetch) and the
+  running seats are saved. An installer that fails, hangs or is ended after it
+  changed the tree has the tree put back. Every later tick finishes what an
+  earlier run left (a put-back, a restart, a rollback) before it checks the
+  network or installs anything, checks the same seats, and changes only a tree
+  that is exactly the commit or tag it recorded with no change to a tracked
+  file. Any other tree, such as a commit a person made at the same version, is
+  `skip-unknown`: nothing changes. Both trees are read again right before each
+  step that changes the install or restarts seats: a put-back or rollback runs
+  only when the install is still the recorded tree and the commit or
+  `<install>.prev` it restores is exactly the recorded one. A rollback that
+  cannot restore its tree is `rollback-blocked`: `ar3 update --auto`, `ar3`
+  and `ar3 doctor` show it, and `--tell` sends it once a night. Nothing is put
+  back, restarted or rolled back while a seat is busy or cannot be asked
+  about. A manual `ar3 update` ends what auto-update had pending before it
+  starts, so even an interrupted one is never undone. When it cannot take the
+  lock, or cannot read or write the auto-update state, it refuses before it
+  changes anything and names the file to fix or remove. `get.sh` run by hand
+  ends it when it finishes.
+- The scheduler entry starts a launcher kept in the ar3 home, outside the
+  install, so a tick still starts when an unfinished update left the install
+  at `<install>.prev`. It names the install and the ar3 home that armed it, and
+  the run uses that shell's `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `A8S_HOME`,
+  `R4T_HOME` and `K7E_HOME`, so it reads the same state and asks the same seats.
+- `get.sh` takes `AR3_NO_RESTART=1` (pull or unpack only) and `AR3_AUTO_UPDATE=0`,
+  and a release unpack keeps the old tree as `<install>.prev` instead of
+  deleting it, also when git turns it into a clone. That clone is made beside
+  the install and moved in whole, so a clone that fails or is ended leaves the
+  unpack where it was.
+- Engine access knobs. `add_dirs`, `allow_tools` and `deny_tools` are set per
+  rig (`r4t rig set`, `## Rigs` keys `Add dirs:` / `Allow tools:` / `Deny tools:`,
+  and `Engine:` flags), per invocation (`--add-dir`, `--allow-tool`,
+  `--deny-tool` on `engine run|check` and `rig run`), or by the a8s vars
+  `ADD_DIRS`, `ALLOW_TOOLS` and `DENY_TOOLS`, which the 22 non-resident
+  `engine-*.json` definitions now pass to `r4t engine <id> run` with no edit.
+  One table spells them in each CLI's own flags: claude `--add-dir`,
+  `--allowedTools`, `--disallowedTools`; copilot 1.0.105 `--add-dir`,
+  `--allow-tool`, `--deny-tool` (URLs are `url(...)` rules); codex, cursor and
+  agy `--add-dir`. An engine with no flag for a knob fails the turn before it
+  starts, with the reason and the engines that take it. A list splits on commas
+  outside parentheses and is never shell-expanded; unbalanced parentheses, a
+  control character and a leading `-` are refused. Values are unioned across
+  layers and a deny always wins. A reserved `deny_floor` key in `rigs.json`
+  adds deny rules to every turn of an engine on the node, including inline
+  members, wrappers and `engine run`; a runbook cannot drop it, a runbook rig
+  that shadows a machine rig keeps that rig's denies, and `--resident` refuses
+  when a floor applies. A runbook may set `add_dirs` and `allow_tools` only on
+  a node whose ceiling is `bypass`. A turn with a knob records the resolved
+  binary and its `--version`; an older build refuses the knobs, a newer one
+  runs as `unverified`. r4t writes no copilot settings or hook files.
+- The deny floor now reaches every launch, not only the turn. Knowledge
+  distill and compile (the default rig and a named `Knowledge:` rig), the
+  engine-memory writer (a rig with or without a preset, or a bare engine), the
+  judge and a lab judge all build their command with the node floor, the
+  rig's denies, and its `add_dirs` and `allow_tools`. A rig the floor cannot be
+  carried into is refused and logged (`DREAM-SKIP`), never run bare. The
+  memory writer of `engine run --rig-config` reads that config, not the
+  default one.
+- Unreadable policy is no policy no longer. A rig config, runbook, roster or
+  org config that exists but cannot be read (a closed folder above it, no read
+  bit, a directory in its place) is refused with a line that names the path and
+  the fix. Python 3.14 answered "absent" for these and 3.12 crashed; both now
+  refuse. Only a genuinely missing file is no file. `rig add` and `rig set`
+  never lay a fresh config over an unreadable one.
+- The build record is for the binary that runs. The `--version` probe runs the
+  executable the selected pool variant spawns (an absolute path in the invoke
+  wins over `claude` on PATH). A launcher such as `ollama launch` is recorded
+  `unverified launcher` and never labelled verified.
+- A check now sees what the launch sees. A distill or compile command carries
+  the rig's `env` inside it (as `export` lines), so the PATH and HOME its
+  build record and `add_dirs` were checked against are the ones the model
+  runs with; the lab judge meets the same version gate as every other launch
+  that carries a deny, and refuses a rig `env` it does not apply. The copilot
+  usage-flag probe, the `agy models` list and the un-park probe also use the
+  rig's PATH and environment, and the usage probe is cached per executable.
+- Trust and lookup hardening. Below `bypass` a checked-in runbook `Env:` may
+  set only the names on one allowlist (`rig.IN_REPO_ENV_SAFE`, today
+  `ENABLE_PROMPT_CACHING_1H`) and the names the operator lists in the machine
+  `rigs.json` under `env_allow`; the check runs when the rig is resolved, before
+  any probe, and covers every engine with one rule. Variables that pick an
+  executable, runtime or loader (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`), a home,
+  a shell wrapper (`CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_ENV_FILE`), an endpoint,
+  proxy or certificate (`*_BASE_URL`, `HTTPS_PROXY`, `SSL_CERT_FILE`), a
+  credential (`GH_TOKEN`, `*_API_KEY`) or a permission are refused. This is a
+  tightening: an in-repo `Env: GH_TOKEN=...` or any other name now moves to the
+  machine rig. The docs example `Env: GH_TOKEN=${GH_TOKEN}` became
+  `Env: ENABLE_PROMPT_CACHING_1H=1`. Names match exactly: on Linux and macOS
+  environment names are case-sensitive, so a grant of `node_options` does not
+  admit `NODE_OPTIONS`, and `enable_prompt_caching_1h` is not the safe name;
+  on Windows, where names are case-insensitive, a grant matches in any case,
+  and every rig `env` name is stored upper case at load (two names in one rig
+  that differ only by case are refused). Every final environment (the
+  launch, the memory writer, the judge, the quota and fuel reads, the resident
+  sessions) is built by one helper, `rig.merge_env`, so a later layer replaces an
+  earlier one whatever the case and the result holds one key per variable; an
+  admitted `copilot_home` or `Path` now selects the rig's home, token, cache and
+  PATH, not the router's. POSIX names are never renamed.
+  In every rig a
+  `PATH` entry must be absolute and a state home must be an absolute path with
+  no `~`. The deny floor follows the binary: an unknown preset is refused at
+  load, a node with a floor refuses a rig with no preset and any rig whose pool
+  variant is a launcher or another engine, and a runbook rig shadowing an invalid
+  machine rig is refused. A dangling symlink on a config file or one of its
+  folders refuses instead of reading as absent. With knobs or a floor, a binary
+  not named like the engine's CLI is refused. `sudo` and `docker` are absolute
+  paths from the router's own env. A bare name is found by `ar3.proc.
+  find_executable` on the child's PATH and PATHEXT (on Windows `shutil.which`
+  searched the current directory first). `engine check` runs through the same
+  launch and version gate as `engine run`. The test-run home guard warns, and
+  fails only under `CI` or `AR3_TESTS_STRICT_HOME=1`.
+- A launch is resolved once (`rig.Launch`): the absolute executable of the
+  selected pool variant, the child's complete environment and its working
+  directory. A relative executable or PATH entry (an empty one is the cwd) is
+  read against the child's cwd, never the router's; the judge spawns with the
+  rig's `env` it was probed with; an isolated or unresolved launch makes no
+  host call (an isolated agy refuses its model list instead of asking the host's
+  `agy`). A file replaced at the pinned path after the probe is not closed. The version gate, the
+  copilot usage-flag probe, the `agy models` list, the park check and the
+  spawn itself take that one object, so a probe can no longer vouch for a
+  copilot on PATH while the rig runs another. An isolated launch (`run_as` or a
+  container) has no host path and stays `unverified isolated`. The distill and
+  compile commands read the prompt before the rig's `env` applies and give the
+  `env` to the CLI process alone, so a rig PATH that holds only the CLI folder
+  still delivers the prompt; an empty prompt exits 66 before any launch.
+- The quota cache is keyed by the account, not the home: a hash of the
+  credential the rig resolves (never the token itself). A rig that names its
+  own account but has no readable credential caches nothing and is served no
+  snapshot.
+- `rig fuel` reads the rig's own account. A rig with `env.COPILOT_HOME` or a
+  token variable is asked with that environment: the router's `gh` login and
+  stored token are not used, and the cached reading is kept per account. A
+  claude or codex rig with its own config home says in `note` that the figure
+  is the router's.
+- One resolver for an engine's state home (`COPILOT_HOME`, `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME`, else the child's `HOME`), read from the environment the turn is
+  spawned with. A pinned copilot session, the copilot quota token and the cache
+  probe look in the home the child uses. There is no default per-seat
+  `COPILOT_HOME`; a seat opts in with `env.COPILOT_HOME`.
+- Copilot denials are no longer silent. After each copilot turn r4t reads the
+  session's `events.jsonl` (in the home the child used) and reports
+  `denied: 0 (complete)`, `denied: at least 2 (incomplete: no-shutdown)` or
+  `denied: unknown (<reason>)` in the a8s log, the node day log and
+  `rig run --json` (`denials`; a roster member keeps it as `last_denials`).
+  Both denial shapes of copilot 1.0.105 are counted, once per tool call: the
+  no-approval-rule fallback and a deny rule, which writes no `permission.*`
+  record. The record is bounded metadata (counts, a fixed tool set, a kind slug,
+  at most ten event ids, a count of the deny rules named and which fixed tools
+  they were for) and holds no argument, command, path, URL, rule text or message
+  text. A denial with no usable correlation id still counts (at least one) and
+  lowers coverage to "at least"; a malformed permission or shutdown record
+  defeats "complete". It says "complete" only on a positive proof decided in
+  one place: the events file read on one non-blocking descriptor and still the
+  file the path names (created by this turn, no partial line, read in full and not grown
+  during the read),
+  every record on an ignorable list or strictly validated with consistent ids
+  (contradictory ids lower the count to a safe bound and the coverage to "at
+  least"), one valid shutdown, at most 1000 denials, the verified 1.0.105
+  build; a resumed pin, an
+  unverified build, a run under `run_as` or a container, a missing or
+  unreadable file are `at least N` or `unknown`, never a zero. It is a
+  diagnostic: it never changes an exit code and is never told to the owner. It
+  is collected on every exit path of a turn (a spawn failure or an interrupt
+  included) and never changes the exit code or the exception in flight. A
+  copilot turn without a pin now passes a minted `--session-id` so its events
+  file is known before the CLI starts. Part of #382.
+
+### Changed
+
+- The account crontab lock and the guarded crontab rewrite that `a8s` autostart
+  used moved to `lib/ar3/crontab.py`, so autostart and auto-update edit the one
+  crontab under the one lock. `a8s` behavior is unchanged.
+- `ar3` now also writes its auto-update state (`~/.config/ar3/update`) and one
+  scheduler entry per install, besides the dependency cache and the install tree.
+
 ## 0.1.125
 
 Bug fixes: Windows stop and kill, updates that no longer stop a busy seat, and the broker tests on Ubuntu 26.04. Messages can carry a subject.

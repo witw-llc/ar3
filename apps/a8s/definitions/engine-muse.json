@@ -15,6 +15,9 @@
     "--model=$MODEL?",
     "--git-name=$GIT_NAME?",
     "--git-email=$GIT_EMAIL?",
+    "--add-dir=$ADD_DIRS?",
+    "--allow-tool=$ALLOW_TOOLS?",
+    "--deny-tool=$DENY_TOOLS?",
     "--agent",
     "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
@@ -36,6 +39,9 @@
       "--model=$MODEL?",
       "--git-name=$GIT_NAME?",
       "--git-email=$GIT_EMAIL?",
+      "--add-dir=$ADD_DIRS?",
+      "--allow-tool=$ALLOW_TOOLS?",
+      "--deny-tool=$DENY_TOOLS?",
       "--agent",
       "$RECIPIENT"
     ]
@@ -57,6 +63,9 @@
       "--model=$MODEL?",
       "--git-name=$GIT_NAME?",
       "--git-email=$GIT_EMAIL?",
+      "--add-dir=$ADD_DIRS?",
+      "--allow-tool=$ALLOW_TOOLS?",
+      "--deny-tool=$DENY_TOOLS?",
       "--idle",
       "--agent",
       "$RECIPIENT"

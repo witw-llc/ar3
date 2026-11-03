@@ -4,6 +4,7 @@ LLM is ever invoked; the fake judge (deterministic) drives the pipeline."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -382,12 +383,22 @@ def _cloud_config(tmp_path, invoke, name="cloud", preset="opencode") -> Path:
     return path
 
 
+def _installed(tmp_path, monkeypatch, name) -> Path:
+    """A real executable called `name` first on PATH: the launch resolver looks
+    at the file system, not at a patched `which`."""
+    from conftest import write_path_executable
+
+    path = write_path_executable(tmp_path / "installed-bin", name, "pass\n")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'installed-bin'}{os.pathsep}{os.environ['PATH']}")
+    return path
+
+
 def test_non_ollama_rig_resolves_environment(tmp_path, monkeypatch):
     config = _cloud_config(
         tmp_path,
         ["opencode", "run", "-m", "opencode/nemotron-3-ultra-free", "--auto", "{prompt}"],
     )
-    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    _installed(tmp_path, monkeypatch, "opencode")
     monkeypatch.setattr(lab, "_binary_version", lambda b: ("opencode 1.17.0", None))
     manifest = lab.load_manifest(E0)  # pin qwen3.6
     info = lab.resolve_role(manifest, "judge", "cloud", config)
@@ -402,18 +413,18 @@ def test_non_ollama_rig_resolves_environment(tmp_path, monkeypatch):
 def test_non_ollama_rig_without_version_notes_it(tmp_path, monkeypatch):
     config = _cloud_config(tmp_path, ["mycli", "--model", "some/model", "{prompt}"],
                            preset="codex")
-    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    mycli = _installed(tmp_path, monkeypatch, "mycli")
     monkeypatch.setattr(lab, "_binary_version",
                         lambda b: (None, f"{b} has no usable --version"))
     manifest = lab.load_manifest(E0)
     info = lab.resolve_role(manifest, "judge", "cloud", config)
     assert info["harness_version"] is None
-    assert info["harness_version_note"] == "mycli has no usable --version"
+    assert info["harness_version_note"] == f"{mycli} has no usable --version"
 
 
 def test_non_ollama_rig_without_model_refuses(tmp_path, monkeypatch):
     config = _cloud_config(tmp_path, ["opencode", "run", "--auto", "{prompt}"])
-    monkeypatch.setattr(lab.shutil, "which", lambda b: f"/usr/bin/{b}")
+    _installed(tmp_path, monkeypatch, "opencode")
     manifest = lab.load_manifest(E0)
     with pytest.raises(lab.LabError, match="declares no model"):
         lab.resolve_role(manifest, "judge", "cloud", config)

@@ -155,9 +155,12 @@ here shadows a machine rig of the same name **whole** — never field-merged.
 |---|---|---|---|---|
 | `Engine:` | an engine line (below) — required | — | `- **Engine:** claude --model sonnet` | The CLI this rig drives, and its model, stance, allowlist and timeout. |
 | `Allowed tools:` | the engine's own allowlist string | the preset's own | `- **Allowed tools:** Bash Read Edit Write Glob Grep` | Replaces the preset's tool allowlist for every turn. Conflicts with `Engine: --allowed-tools`. |
+| `Add dirs:` | comma list of absolute directories, or `~/` paths | none | `- **Add dirs:** /srv/repos/shared-lib` | Extra directories the engine may reach. Only on a node whose ceiling is `bypass`. Conflicts with `Engine: --add-dir`. |
+| `Allow tools:` | comma list of the engine's own approval rules | none | `- **Allow tools:** url(example.org)` | Extra approval rules, appended to the preset's. Not an exclusive allowlist. Only on a node whose ceiling is `bypass`. Conflicts with `Engine: --allow-tool`. |
+| `Deny tools:` | comma list of the engine's own deny rules | none | `- **Deny tools:** shell(git push)` | Deny rules. A deny always wins and is always welcome. Conflicts with `Engine: --deny-tool`. |
 | `Rig budget:` | `<n> per hour, max <n>` | unset — no rig-wide gate | `- **Rig budget:** 20 per hour, max 20` | The machine-global bucket every member on this rig shares. |
 | `Member budget:` | `<n> per hour, max <n>` | `4 per hour, max 8` | `- **Member budget:** 8 per hour, max 16` | The per-member spend bucket. One turn costs one unit. |
-| `Env:` | `NAME=value` — the one repeatable key | none | `- **Env:** GH_TOKEN=${GH_TOKEN}` | One environment variable for the turn. Repeat the line per variable. |
+| `Env:` | `NAME=value` — the one repeatable key | none | `- **Env:** ENABLE_PROMPT_CACHING_1H=1` | One environment variable for the turn. Repeat the line per variable. Below `bypass` a checked-in file may set only the names on the allowlist (see [rigs](r4t-rigs.md)); anything else, a token included, goes on the machine rig. |
 | `MCP:` | boolean | by preset | `- **MCP:** off` | Members send with the `a8s_tell` tool instead of the `tell` shell command. |
 | `Echo:` | boolean | `off` | `- **Echo:** on` | Stage cleaned stdout as the one reply and drop the messaging scaffolding. |
 | `Echo max:` | a number of characters | `1500` | `- **Echo max:** 4000` | Where an echoed body is truncated and attached instead. |
@@ -165,6 +168,11 @@ here shadows a machine rig of the same name **whole** — never field-merged.
 | `History:` | a number of bytes | by preset tier — 50000 for `claude`/`codex`/`agy`/`devin`/`muse`, 25000 for `cursor`/`opencode`/`copilot`, 8192 for the `ollama` variants | `- **History:** 25000` | The rolling history budget in the turn prompt. |
 
 Numbers are read as integers, so `1500.0` and `1500` are the same value.
+
+The three access keys read as `adddirs`, `allowtools` and `denytools` once case,
+spaces and underscores are dropped, so `Add dirs:`, `add_dirs` and `adddirs` are
+one key. They take the same lists as the machine rig's
+[access knobs](r4t-rigs.md#access-knobs-add_dirs-allow_tools-deny_tools).
 
 A rig block sets its permission stance and its timeout through `Engine:` flags,
 not through keys of their own, and it takes no `Framing:` — that default lives
@@ -196,12 +204,20 @@ flag set is closed.
 - **Engine:** claude --model opus --permissions auto --timeout 1800
 ```
 
+The three list flags (`--add-dir`, `--allow-tool`, `--deny-tool`) repeat. Each
+value is split on commas outside parentheses, so `shell(a,b)` is one rule; a
+leading `-`, unbalanced parentheses and control characters are refused. See
+[Access knobs](r4t-rigs.md#access-knobs-add_dirs-allow_tools-deny_tools).
+
 | Flag | Values | Default | Sample | What it sets |
 |---|---|---|---|---|
 | `--model` | an engine-specific model id | the preset's own | `--model sonnet` | The model this rig runs. |
 | `--permissions` | `ask` / `auto` / `bypass` | the preset's own flags | `--permissions auto` | The permission stance, translated into the engine's flags. Capped by the machine ceiling. |
 | `--allowed-tools` | the engine's allowlist string | the preset's own | `--allowed-tools "Bash Read Edit"` | The tool allowlist. Conflicts with a `Allowed tools:` key on the same rig. |
 | `--timeout` | seconds, a number | `900` | `--timeout 1800` | How long one turn may run. |
+| `--add-dir` | an absolute directory, or `~/` | none | `--add-dir /srv/repos/shared-lib` | One more directory the engine may reach. Repeatable; a comma list works too. Needs a node whose ceiling is `bypass`. |
+| `--allow-tool` | one rule in the engine's syntax | none | `--allow-tool 'url(example.org)'` | One more approval rule. Repeatable. Needs a node whose ceiling is `bypass`. |
+| `--deny-tool` | one rule in the engine's syntax | none | `--deny-tool 'shell(git push)'` | One more deny rule. Repeatable. |
 
 Engines: `agy`, `claude`, `codex`, `copilot`, `cursor`, `ollama`,
 `ollama-claude`, `ollama-codex`, `ollama-copilot`, `ollama-opencode`,
@@ -228,7 +244,7 @@ merging, so a resolved runbook carries none of it.
 |---|---|---|---|
 | `${VAR}` | hard error naming the remedy | empty string | `- **Workdir:** ${SERVICE_DIR}` |
 | `${VAR:-default}` | the default | the default | `- **Rig:** ${TIER:-worker}` |
-| `${VAR:?message}` | hard error carrying your message | empty string | `- **Env:** TOKEN=${GH_TOKEN:?set a token first}` |
+| `${VAR:?message}` | hard error carrying your message | empty string | `- **Env:** ENABLE_PROMPT_CACHING_1H=${CACHE:?set CACHE first}` |
 
 - Reaches **field values and prose only** — never a heading, never frontmatter.
 - A node var named `MISSION` becomes the `## Mission` section at the highest
@@ -284,7 +300,9 @@ it should have come from. `r4t runbook check` prints them all at once.
 | `a rig block needs an Engine: line` | a rig with no engine | add one |
 | `the rig sets Allowed tools: and Engine: --allowed-tools — delete one` | the allowlist written twice | keep either spelling |
 | `is not an engine — choose one of:` | an unknown engine id | the message lists all thirteen |
-| `Engine: unknown flag` | a flag outside the closed four | use `--model`, `--permissions`, `--allowed-tools`, `--timeout` |
+| `Engine: unknown flag` | a flag outside the closed set | use `--model`, `--permissions`, `--allowed-tools`, `--timeout`, `--add-dir`, `--allow-tool`, `--deny-tool` |
+| `add_dirs widens access` / `allow_tools widens access` | a checked-in file asks for a directory or a rule on a node below `bypass` | `r4t add <dir> --trust`, or set it on the machine rig with `r4t rig set` |
+| `the rig sets adddirs and an Engine: flag for the same list — delete one` | a list written twice | keep either spelling |
 | `Engine: takes no --continue` | continuation written on the rig | put `Continue:` on the member |
 | `is not a stance — one of: ask, auto, bypass` | a bad `--permissions` value | pick one of the three |
 | `is not a number of seconds` | a bad `--timeout` value | give a number |

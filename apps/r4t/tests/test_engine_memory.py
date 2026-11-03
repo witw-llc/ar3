@@ -8,6 +8,8 @@ import time
 
 import pytest
 
+from conftest import launch_for
+
 import engine_memory as memory
 import knowledge
 from engines import run
@@ -122,10 +124,10 @@ def test_capture_excludes_injection_and_failed_turns_are_not_queued(isolated):
 
 
 def test_spawn_preserves_bytes_exit_and_partial_output(isolated, capfd):
-    code, output = memory.spawn([sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'h\\xc3\\xa9llo\\n');sys.stdout.flush();sys.exit(7)"], isolated, 10, None)
+    code, output = memory.spawn(launch_for(sys.executable, cwd=isolated), [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'h\\xc3\\xa9llo\\n');sys.stdout.flush();sys.exit(7)"], 10)
     assert (code, output) == (7, "héllo\n")
     assert capfd.readouterr().out == output
-    code, output = memory.spawn([sys.executable, "-c", "import sys,time;sys.stdout.buffer.write(b'partial\\n');sys.stdout.flush();time.sleep(10)"], isolated, 0.1, None)
+    code, output = memory.spawn(launch_for(sys.executable, cwd=isolated), [sys.executable, "-c", "import sys,time;sys.stdout.buffer.write(b'partial\\n');sys.stdout.flush();time.sleep(10)"], 0.1)
     assert code == 124
     assert output == "partial\n"
 
@@ -398,7 +400,7 @@ def test_windows_batch_launchers_refuse_multiline_memory(isolated):
     launcher = isolated / "unsafe.cmd"
     launcher.write_text("@echo off\r\necho truncated\r\n")
     with pytest.raises(OSError, match="native engine executable"):
-        memory.spawn([str(launcher), "header\nimportant payload"], isolated, 10, None)
+        memory.spawn(launch_for(str(launcher), cwd=isolated), [str(launcher), "header\nimportant payload"], 10)
 
 
 @pytest.mark.parametrize("attempts", [memory.JOB_ATTEMPTS, memory.JOB_ATTEMPTS + 1])

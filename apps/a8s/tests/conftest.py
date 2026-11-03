@@ -28,6 +28,30 @@ sys.path.insert(0, str(_PKG_DIR.parent.parent / "lib"))
 
 from mqtt_cluster import mqtt_broker  # noqa: E402 — re-export for pytest
 
+from ar3 import homeguard  # noqa: E402
+from ar3.homeguard import HomeGuard  # noqa: E402
+
+# The A8S_HOME floor below keeps a8s's own state out of the live tree; this
+# guard watches the sibling apps' trees, which an a8s test has no business in.
+_HOME_GUARD = HomeGuard(("r4t", "k7e"))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _HOME_GUARD.finish(session)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_sibling_homes(tmp_path_factory, monkeypatch):
+    """a8s tests that wake an r4t or k7e node must not reach the developer's
+    live ones, and no inherited override may survive fixture setup. Every home
+    variable is floored per test except XDG_CONFIG_HOME, which
+    `_no_ambient_xdg` removes, and A8S_HOME, which the session floor and
+    `set_home` manage."""
+    root = tmp_path_factory.mktemp("sibling-homes")
+    for name, value in homeguard.throwaway_homes(root).items():
+        if name not in ("XDG_CONFIG_HOME", "A8S_HOME"):
+            monkeypatch.setenv(name, value)
+
 
 @pytest.fixture
 def zone(monkeypatch):

@@ -52,7 +52,10 @@ from pathlib import Path
 from ar3.proc import launch_options
 
 import state
-from rig import RigConfig, resolve_framing, resolve_knowledge_bytes
+from rig import (
+    RigConfig, RigError, merge_env, resolve_framing, resolve_knowledge_bytes,
+    resolve_launch,
+)
 
 K7E_ENTRY = Path(__file__).resolve().parent.parent / "k7e" / "k7e.py"
 SEARCH_LIMIT = 8
@@ -155,10 +158,7 @@ def store_home(node: str, name: str) -> Path:
 def _run_k7e(
     home: Path, *args: str, timeout: float = 60, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env["K7E_HOME"] = str(home)
-    if extra_env:
-        env.update(extra_env)
+    env = merge_env(os.environ, {"K7E_HOME": str(home)}, extra_env)
     return subprocess.run(
         [sys.executable, str(K7E_ENTRY), *args],
         capture_output=True,
@@ -553,7 +553,13 @@ def resolve_distill_rig(member, config: RigConfig):
             return None, f"Knowledge distill rig {name!r} not found in {config.path}"
         if rig.error:
             return None, f"Knowledge distill rig {name!r} is invalid: {rig.error}"
-        return rig, None
+        # A named override is still a launch on this node: the node's deny
+        # floor joins its denies exactly as it does for a turn, and a rig the
+        # floor cannot be carried into is refused here, never run bare.
+        effective, problem = config.effective_rig(rig)
+        if effective is None:
+            return None, f"Knowledge distill rig {name!r} is invalid: {problem}"
+        return effective, None
     return config.rig_for(member)[:2]
 
 
@@ -608,10 +614,30 @@ def _bridge_env(ctx, m, distill_rig) -> dict[str, str]:
     # cage deliberately excludes. The member's own workdir is what a turn
     # gives it; store I/O stays router-side in k7e, which never enters the
     # cage — only the model call does.
-    from dispatch import resolve_workdir
+    from dispatch import _access_for_turn, resolve_workdir
 
+    # One launch for the build record, the `add_dirs` check and the command:
+    # the executable of the rig's first pool variant, on the environment the
+    # command will give it (the router's with the rig's `env` over it). Under
+    # `run_as` it is isolated: no host path is guessed for a file in the caged
+    # user's home.
+    pool = distill_rig.pool()
+    workdir = resolve_workdir(ctx, m)
+    launch = resolve_launch(
+        pool[0][0] if pool else "",
+        merge_env(os.environ, distill_rig.env),
+        cwd=workdir,
+        isolated=bool(ctx.isolation.run_as),
+    )
+    # The same preconditions a turn meets: add_dirs normalized in the child's
+    # view, a build older than the flags refused. A refusal raises, and the
+    # caller logs it as the DREAM-SKIP reason, so a rig whose access rules
+    # cannot be carried never distills bare.
+    dirs, _access, refusal = _access_for_turn(distill_rig, launch, ctx.isolation, None)
+    if refusal:
+        raise RigError(refusal)
     cmd = distill_rig.distill_command(
-        resolve_workdir(ctx, m), run_as=ctx.isolation.run_as
+        workdir, run_as=ctx.isolation.run_as, access_dirs=dirs, launch=launch,
     )
     return {"K7E_DISTILL_COMMAND": cmd, "K7E_COMPILE_COMMAND": cmd} if cmd else {}
 
@@ -685,7 +711,17 @@ def _distill_fresh(
             f"{len(fresh)} capture(s) wait",
         )
         return False
-    extra_env = _bridge_env(ctx, m, distill_rig)
+    try:
+        extra_env = _bridge_env(ctx, m, distill_rig)
+    except (RuntimeError, RigError) as e:
+        # The rig's access rules (or the node's deny floor) cannot be carried
+        # into the command: skip loudly, never distill bare.
+        state.append_log(
+            ctx.node,
+            f"r4t: DREAM-SKIP {m.name.lower()} {e}; "
+            f"{len(fresh)} capture(s) wait",
+        )
+        return False
     # One capture per call, with the watermark advancing after each. The batch
     # is counted in captures but the cost is in bytes: a 58KB capture measured
     # ~102s against a small VM's model, and five of them together ran past the

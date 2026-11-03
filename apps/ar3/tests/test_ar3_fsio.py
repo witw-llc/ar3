@@ -206,3 +206,105 @@ def test_read_text_retry_does_not_retry_other_errors(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         read_text_retry(tmp_path / "absent")
     assert len(calls) == 1
+
+
+class TestAbsentIsNotUnreadable:
+    """Policy files: only a genuinely absent path reads as "no file"."""
+
+    def test_absent_is_none_and_not_present(self, tmp_path):
+        from ar3.fsio import is_present, read_text_if_present
+
+        assert read_text_if_present(tmp_path / "nope") is None
+        assert is_present(tmp_path / "nope") is False
+
+    def test_a_file_where_a_folder_should_be_is_absent(self, tmp_path):
+        from ar3.fsio import is_present, read_text_if_present
+
+        (tmp_path / "blocker").write_text("x", encoding="utf-8")
+        assert read_text_if_present(tmp_path / "blocker" / "f") is None
+        assert is_present(tmp_path / "blocker" / "f") is False
+
+    def test_present_text_is_returned(self, tmp_path):
+        from ar3.fsio import read_text_if_present
+
+        (tmp_path / "f").write_text("héllo", encoding="utf-8")
+        assert read_text_if_present(tmp_path / "f") == "héllo"
+
+    def test_a_directory_in_the_files_place_is_unreadable_not_absent(self, tmp_path):
+        from ar3.fsio import is_present, read_text_if_present
+
+        (tmp_path / "d").mkdir()
+        assert is_present(tmp_path / "d") is True
+        with pytest.raises(OSError):
+            read_text_if_present(tmp_path / "d")
+
+    @pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="posix non-root")
+    def test_a_closed_folder_is_unreadable_not_absent(self, tmp_path):
+        from ar3.fsio import is_present, read_text_if_present
+
+        folder = tmp_path / "private"
+        folder.mkdir()
+        (folder / "f").write_text("x", encoding="utf-8")
+        folder.chmod(0)
+        try:
+            assert is_present(folder / "f") is True
+            with pytest.raises(PermissionError):
+                read_text_if_present(folder / "f")
+        finally:
+            folder.chmod(0o700)
+
+    def test_undecodable_bytes_raise_not_empty(self, tmp_path):
+        from ar3.fsio import read_text_if_present
+
+        (tmp_path / "f").write_bytes(b"\xff\xfe\x00bad")
+        with pytest.raises(UnicodeDecodeError):
+            read_text_if_present(tmp_path / "f")
+
+
+class TestDanglingLinks:
+    """A link that leads nowhere is something configured and unreachable, not
+    nothing configured."""
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks")
+    def test_a_dangling_file_link_is_not_absent(self, tmp_path):
+        from ar3.fsio import DanglingLink, is_present, read_text_if_present
+
+        link = tmp_path / "rigs.json"
+        link.symlink_to(tmp_path / "unmounted" / "rigs.json")
+        assert is_present(link) is True
+        with pytest.raises(DanglingLink):
+            read_text_if_present(link)
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks")
+    def test_a_dangling_parent_link_is_not_absent(self, tmp_path):
+        from ar3.fsio import DanglingLink, read_text_if_present
+
+        (tmp_path / "parent").symlink_to(tmp_path / "offline")
+        with pytest.raises(DanglingLink):
+            read_text_if_present(tmp_path / "parent" / "rigs.json")
+
+    @pytest.mark.skipif(os.name == "nt", reason="symlinks")
+    def test_a_live_link_reads_and_a_plain_miss_is_absent(self, tmp_path):
+        from ar3.fsio import read_text_if_present
+
+        (tmp_path / "real").mkdir()
+        (tmp_path / "real" / "f").write_text("x", encoding="utf-8")
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        assert read_text_if_present(tmp_path / "link" / "f") == "x"
+        assert read_text_if_present(tmp_path / "real" / "none") is None
+
+
+class TestFindExecutable:
+    @pytest.mark.skipif(os.name == "nt", reason="posix modes")
+    def test_it_reads_the_childs_path_and_cwd_only(self, tmp_path, monkeypatch):
+        from ar3.proc import find_executable
+
+        (tmp_path / "bin").mkdir()
+        tool = tmp_path / "bin" / "t"
+        tool.write_text("x", encoding="utf-8")
+        tool.chmod(0o755)
+        monkeypatch.setenv("PATH", "/nonexistent")
+        monkeypatch.chdir("/")
+        assert find_executable("t", "bin", tmp_path) == str(tool)
+        assert find_executable("t", os.pathsep + "/x", tmp_path / "bin") == str(tool)
+        assert find_executable("t", "bin", "/") is None

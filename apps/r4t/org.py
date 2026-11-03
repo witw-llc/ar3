@@ -60,6 +60,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ar3.fsio import read_text_if_present
 from isolate import Isolation
 from schedule import DEFAULT_PRIORITY_SENDERS
 
@@ -104,10 +105,15 @@ def _runbook_settings(root: Path) -> dict | None:
     """The runbook's frontmatter in `r4t-org.json`'s vocabulary, or None when
     the node carries no runbook. `workdir:` is the old `repo`, and `"."` means
     the node dir is also the workplace — the in-repo default, stated rather
-    than inferred from an absent key."""
-    from runbook import org_settings
+    than inferred from an absent key. A runbook that is there and cannot be
+    read raises OrgError: its frontmatter holds the isolation, and "no
+    runbook" would run the turns un-isolated."""
+    from runbook import RunbookError, org_settings
 
-    data = org_settings(root)
+    try:
+        data = org_settings(root)
+    except RunbookError as e:
+        raise OrgError(str(e)) from e
     if data is None:
         return None
     out = {k: v for k, v in data.items() if k not in ("name", "workdir")}
@@ -122,11 +128,18 @@ def _read_config(root: Path) -> dict:
     if settings is not None:
         return settings
     cfg = org_config_path(root)
-    if not cfg.is_file():
+    try:
+        text = read_text_if_present(cfg)
+    except (OSError, ValueError) as e:
+        raise OrgError(
+            f"cannot read org config {cfg}: {e} - it holds the node's "
+            f"isolation; fix the permissions on it and on the folders above it"
+        ) from e
+    if text is None:
         return {}
     try:
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
         raise OrgError(f"cannot read org config {cfg}: {e}") from e
     if not isinstance(data, dict):
         raise OrgError(f"org config {cfg} must be a JSON object")
@@ -229,15 +242,18 @@ def load_org(root: Path) -> Org:
     instead of vanishing, so a caller that dispatches on this can still say so
     out loud. `check_org` re-derives the same problems for `roster check` /
     `runbook check`, which treat them as blocking; a live dispatch does not."""
+    read_errors: list[str] = []
     try:
         data = _read_config(root)
-    except OrgError:
+    except OrgError as e:
         data = {}
+        read_errors.append(str(e))
     try:
         repo = _resolve_repo(root, data)
     except (OSError, ValueError):
         repo = None
     settings, errors = _parse_settings(data)
+    errors = [*read_errors, *errors]
     return Org(dir=root, workplace=repo or root, errors=errors, **settings)
 
 

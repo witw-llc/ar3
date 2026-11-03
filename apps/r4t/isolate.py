@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ar3.proc import launch_options
+from ar3.proc import find_executable, launch_options
 
 if sys.platform != "win32":
     import pwd
@@ -129,6 +129,35 @@ def a8s_client_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+# ---------- the wrapper tools ----------
+
+def trusted_tool(name: str) -> str:
+    """The absolute path of a boundary tool (`sudo`, `docker`), found ONCE from
+    the ROUTER's own environment and working directory. The boundary is the
+    router's to build: a rig's `env` PATH, or a file in the member's directory,
+    never picks the program that wraps the member. Probes and the spawn use
+    this same path. Raises IsolationError when the router itself has none."""
+    found = find_executable(
+        name, os.environ.get("PATH"), os.getcwd(), pathext=os.environ.get("PATHEXT")
+    )
+    if found is None:
+        raise IsolationError(
+            f"{name} was not found on the router's PATH - the isolation "
+            f"boundary needs it (see docs/r4t-isolation.md)"
+        )
+    return found
+
+
+def _tool_or_name(name: str) -> str:
+    """For the read-only probes, which already run in the router's own view:
+    the trusted path when there is one, else the bare name so the probe fails
+    with its usual message."""
+    try:
+        return trusted_tool(name)
+    except IsolationError:
+        return name
+
+
 # ---------- run_as ----------
 
 def wrap_run_as(
@@ -145,7 +174,7 @@ def wrap_run_as(
     _require_posix_isolation()
     pairs = [f"{k}={v}" for k, v in (env_pass or {}).items()]
     return [
-        "sudo", "-u", user, "bash", "--login", "-c",
+        trusted_tool("sudo"), "-u", user, "bash", "--login", "-c",
         _RUN_AS_BOOTSTRAP, "_", str(staging_dir), str(workplace),
         str(len(pairs)), *pairs, *argv,
     ]
@@ -172,7 +201,7 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
     if sys.platform == "win32":
         return _POSIX_HOST_REQUIRED
     try:
-        grant = _run_probe(["sudo", "-n", "-u", user, "true"])
+        grant = _run_probe([_tool_or_name("sudo"), "-n", "-u", user, "true"])
     except (OSError, subprocess.TimeoutExpired) as e:
         return (
             f"cannot probe sudo to {user!r}: {e} "
@@ -190,7 +219,7 @@ def probe_run_as(user: str, workplace: str | Path) -> str | None:
     probe = f".r4t-write-probe.{os.getpid()}.{time.time_ns()}"
     try:
         write = _run_probe([
-            "sudo", "-n", "-u", user, "bash", "--login", "-c",
+            _tool_or_name("sudo"), "-n", "-u", user, "bash", "--login", "-c",
             'f="$1/$2"; touch "$f" && rm -f "$f"', "_", str(workplace), probe,
         ])
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -219,7 +248,7 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
     args = [str(p) for p in paths]
     try:
         probe = _run_probe([
-            "sudo", "-n", "-u", user, "bash", "--login", "-c",
+            _tool_or_name("sudo"), "-n", "-u", user, "bash", "--login", "-c",
             'for p; do [ -r "$p" ] || { echo "$p"; exit 1; }; done', "_", *args,
         ])
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -235,6 +264,38 @@ def probe_readable_as(user: str, paths: list[str | Path]) -> str | None:
     return None
 
 
+_DIRS_SCRIPT = (
+    r'for p; do case "$p" in "~/"*) p="$HOME/${p:2}";; esac; '
+    r'[ -d "$p" ] || { printf "%s\n" "$p"; exit 1; }; printf "%s\n" "$p"; done'
+)
+
+
+def resolve_dirs_as(
+    user: str, entries: list[str]
+) -> tuple[list[str], str | None]:
+    """The directories `user` can see for these `add_dirs` entries: a leading
+    `~/` expands against the agent user's own HOME (the member's login shell
+    expands it, not the router), and each must be a directory in that user's
+    view. Returns (paths, None), or ([], why) naming the first entry that is
+    not a directory there. Relative entries are the caller's to refuse."""
+    if not entries:
+        return [], None
+    if sys.platform == "win32":
+        return [], _POSIX_HOST_REQUIRED
+    try:
+        probe = _run_probe([
+            _tool_or_name("sudo"), "-n", "-u", user, "bash", "--login", "-c", _DIRS_SCRIPT, "_",
+            *entries,
+        ])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [], f"cannot probe add_dirs as {user!r}: {e}"
+    lines = (probe.stdout or "").splitlines()
+    if probe.returncode != 0:
+        bad = lines[-1] if lines else entries[0]
+        return [], f"add_dirs entry {bad!r} is not a directory user {user!r} can see"
+    return lines, None
+
+
 # A file in the agent user's OWN home, reached through the grant `run_as`
 # already requires. `$HOME` is expanded by the member's login shell rather than
 # the router's — sudoers `env_reset` drops the router's environment, which is
@@ -246,7 +307,7 @@ _HOME_FILE_WRITE = 'p="$HOME/$1"; mkdir -p "$(dirname "$p")" && cat > "$p"'
 
 def _home_file_argv(user: str, script: str, relpath: str) -> list[str]:
     return [
-        "sudo", "-n", "-u", user, "bash", "--login", "-c", script, "_", relpath,
+        _tool_or_name("sudo"), "-n", "-u", user, "bash", "--login", "-c", script, "_", relpath,
     ]
 
 
@@ -366,7 +427,7 @@ def build_container_argv(
     _require_posix_isolation()
     client = Path(client_dir) if client_dir is not None else a8s_client_dir()
     cmd = [
-        "docker", "run", "--rm", "--name", name,
+        trusted_tool("docker"), "run", "--rm", "--name", name,
         "-v", f"{workplace}:{workplace}",
         "-w", str(workplace),
         "-v", f"{staging_dir}:{staging_dir}",
@@ -392,7 +453,7 @@ def kill_container(name: str) -> None:
     it. Never raises — the turn already failed."""
     try:
         subprocess.run(
-            ["docker", "kill", name],
+            [_tool_or_name("docker"), "kill", name],
             capture_output=True,
             text=True,
             timeout=PROBE_TIMEOUT_SECONDS,

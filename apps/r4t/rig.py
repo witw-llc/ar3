@@ -95,15 +95,18 @@ notes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from ar3.proc import launch_options
+from ar3.fsio import is_present, read_text_if_present
+from ar3.proc import find_executable, launch_options
 
 
 try:
@@ -137,6 +140,8 @@ RESERVED_CONFIG_KEYS = frozenset({
     "cell_budget_max",
     "cell_budget_earn_per_hour",
     "log_retention_days",
+    "deny_floor",
+    "env_allow",
 })
 
 # `continue_argv` is present only where the CLI's own `--help` was read and the
@@ -1050,6 +1055,638 @@ def apply_allowed_tools(
     return out
 
 
+# --- the access knobs: add_dirs, allow_tools, deny_tools, deny_floor ---------
+#
+# Three per-invocation lists that widen or narrow what an engine may touch,
+# in each CLI's own spelling, from one table. They are not an OS sandbox and
+# they are not a neutral policy language: a rule is opaque text in the
+# engine's syntax, and r4t checks only the transport grammar (below) and
+# whether the engine has a direct flag for it. An engine with none fails the
+# turn before spawn, naming the reason and the engines that do. Settings-file
+# and environment adapters are a later batch.
+#
+# `deny_floor` is the node-wide half: a reserved `rigs.json` key mapping an
+# engine to deny rules that apply to every turn of that engine on the node,
+# whatever rig, inline member or wrapper runs it.
+
+ACCESS_KNOBS = ("add_dirs", "allow_tools", "deny_tools")
+_ACCESS_DEFERRED = (
+    "no supported direct flag translation in this batch; its config adapter "
+    "is deferred"
+)
+
+
+@dataclass(frozen=True)
+class EngineAccess:
+    """One engine's direct flags for the three knobs. `wrapped` is the CLI
+    that enforces them (an `ollama-*` launcher drives another CLI behind its
+    anchor); `joined` marks the claude shape, where allow and deny ride one
+    comma-joined element of a variadic flag; `equals` is copilot's `--flag=v`
+    form; `verified` is the lowest CLI version whose `--help` was read."""
+
+    wrapped: str
+    anchor: str | None
+    add_dir: str | None = None
+    allow_tool: str | None = None
+    deny_tool: str | None = None
+    joined: bool = False
+    equals: bool = False
+    verified: str | None = None
+    binary: str | None = None
+    reason: str = _ACCESS_DEFERRED
+
+
+_CLAUDE_ACCESS = dict(
+    add_dir="--add-dir",
+    allow_tool="--allowedTools",
+    deny_tool="--disallowedTools",
+    joined=True,
+    verified="2.1.316",
+    binary="claude",
+)
+_CODEX_ACCESS = dict(add_dir="--add-dir", verified="0.163.0", binary="codex")
+_COPILOT_ACCESS = dict(
+    add_dir="--add-dir",
+    allow_tool="--allow-tool",
+    deny_tool="--deny-tool",
+    equals=True,
+    verified="1.0.105",
+    binary="copilot",
+)
+_OPENCODE_ACCESS_REASON = (
+    "opencode takes a directory only through `run --dir` and its rules only "
+    "through OPENCODE_PERMISSION / OPENCODE_CONFIG_CONTENT; that adapter is "
+    "deferred"
+)
+
+ACCESS_TRANSLATION: dict[str, EngineAccess] = {
+    "claude": EngineAccess(wrapped="claude", anchor=None, **_CLAUDE_ACCESS),
+    "codex": EngineAccess(wrapped="codex", anchor="exec", **_CODEX_ACCESS),
+    "cursor": EngineAccess(
+        wrapped="cursor", anchor=None, add_dir="--add-dir",
+        verified="2026.10.22", binary="agent",
+    ),
+    "copilot": EngineAccess(wrapped="copilot", anchor=None, **_COPILOT_ACCESS),
+    "agy": EngineAccess(
+        wrapped="agy", anchor=None, add_dir="--add-dir",
+        verified="1.4.12", binary="agy",
+    ),
+    "opencode": EngineAccess(
+        wrapped="opencode", anchor="run", reason=_OPENCODE_ACCESS_REASON
+    ),
+    "devin": EngineAccess(wrapped="devin", anchor=None),
+    "muse": EngineAccess(
+        wrapped="muse", anchor="exec",
+        reason=(
+            "muse takes one --workspace and its rules only from a permission "
+            "profile; that adapter is deferred"
+        ),
+    ),
+    "ollama": EngineAccess(
+        wrapped="ollama", anchor=None,
+        reason="bare `ollama run` has no tool use and no directory access at all",
+    ),
+    # The launchers carry the wrapped engine's flags after the anchor, so they
+    # take its rules; only where the tokens go differs.
+    "ollama-claude": EngineAccess(wrapped="claude", anchor="--", **_CLAUDE_ACCESS),
+    "ollama-codex": EngineAccess(wrapped="codex", anchor="exec", **_CODEX_ACCESS),
+    "ollama-copilot": EngineAccess(wrapped="copilot", anchor="--", **_COPILOT_ACCESS),
+    "ollama-opencode": EngineAccess(
+        wrapped="opencode", anchor="run", reason=_OPENCODE_ACCESS_REASON
+    ),
+}
+
+_ACCESS_FLAG_LABEL = {
+    "add_dirs": "--add-dir",
+    "allow_tools": "--allow-tool",
+    "deny_tools": "--deny-tool",
+}
+_ACCESS_ATTR = {"add_dirs": "add_dir", "allow_tools": "allow_tool", "deny_tools": "deny_tool"}
+
+_CODEX_CONTINUE_REFUSAL = (
+    "codex's `exec resume` parser rejects --add-dir, so a codex turn cannot "
+    "both add a directory and continue"
+)
+
+_CONTROL_CHARS = frozenset(chr(c) for c in range(32)) | {"\x7f"}
+
+
+def access_engine(preset: str | None) -> str | None:
+    """The CLI that enforces the access flags for `preset`: the wrapped engine
+    behind an `ollama-*` launcher, else the preset itself. None for a rig with
+    no preset."""
+    entry = ACCESS_TRANSLATION.get(preset or "")
+    return entry.wrapped if entry else None
+
+
+def access_supports(preset: str | None, knob: str) -> bool:
+    entry = ACCESS_TRANSLATION.get(preset or "")
+    return bool(entry and getattr(entry, _ACCESS_ATTR[knob]))
+
+
+def access_engines(knob: str) -> list[str]:
+    """Presets that take `knob` through a direct flag."""
+    return sorted(
+        name for name, entry in ACCESS_TRANSLATION.items()
+        if getattr(entry, _ACCESS_ATTR[knob])
+    )
+
+
+def parse_access_list(text: str, knob: str, *, where: str = "") -> list[str]:
+    """The entries of one access list. Split on commas outside parentheses,
+    trim, drop empties, keep the first of any duplicate; the value is never
+    shell-expanded. A top-level comma cannot be expressed. Refused, so
+    nothing is silently dropped: unbalanced parentheses, a C0 control
+    character or DEL anywhere, and an entry that starts with `-` (it would
+    read as a flag)."""
+    label = f"{where}{knob}"
+    for ch in text:
+        if ch in _CONTROL_CHARS:
+            raise RigError(
+                f"{label} holds a control character (U+{ord(ch):04X}) — "
+                f"list entries are plain printable text"
+            )
+    entries: list[str] = []
+    depth = 0
+    start = 0
+    for at, ch in enumerate(text + ","):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                raise RigError(f"{label} has an unbalanced ')' at position {at}")
+        elif ch == "," and depth == 0:
+            entries.append(text[start:at])
+            start = at + 1
+    if depth != 0:
+        raise RigError(f"{label} has an unbalanced '(' — close every parenthesis")
+    out: list[str] = []
+    for raw in entries:
+        entry = raw.strip()
+        if not entry:
+            continue
+        if entry.startswith("-"):
+            raise RigError(
+                f"{label} entry {entry!r} starts with '-' — it would read as "
+                f"a flag, not a value"
+            )
+        if entry not in out:
+            out.append(entry)
+    return out
+
+
+def parse_access_value(raw: object, knob: str, *, where: str = "") -> list[str]:
+    """`parse_access_list` for a value read from a file: a string, or a list
+    of strings each parsed on its own."""
+    if isinstance(raw, str):
+        return parse_access_list(raw, knob, where=where)
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return union_rules(*(parse_access_list(item, knob, where=where) for item in raw))
+    raise RigError(f"{where}{knob}: expected a string, got {raw!r}")
+
+
+def union_rules(*layers) -> list[str]:
+    """The layers in order with later repeats dropped."""
+    out: list[str] = []
+    for layer in layers:
+        for rule in layer or ():
+            if rule not in out:
+                out.append(rule)
+    return out
+
+
+def access_unsupported_reason(preset: str | None, knob: str) -> str:
+    entry = ACCESS_TRANSLATION.get(preset or "")
+    flag = _ACCESS_FLAG_LABEL[knob]
+    if entry is None:
+        return (
+            f"preset {preset or 'none'!r} takes no {flag}: the rig records no "
+            f"known preset, so there is no flag to translate it to "
+            f"(engines that do: {', '.join(access_engines(knob))})"
+        )
+    return (
+        f"preset {preset!r} takes no {flag}: {entry.reason} "
+        f"(engines that do: {', '.join(access_engines(knob))})"
+    )
+
+
+def check_access_support(
+    preset: str | None,
+    *,
+    add_dirs=(),
+    allow_tools=(),
+    deny_tools=(),
+    continue_conversation: bool = False,
+    where: str = "",
+) -> None:
+    """Refuse a knob the engine has no direct flag for, and the one pairing
+    that cannot work: codex's resume parser takes no --add-dir. Nothing is
+    dropped silently — an access rule that does not apply is a request unmet."""
+    for knob, values in (
+        ("add_dirs", add_dirs), ("allow_tools", allow_tools), ("deny_tools", deny_tools),
+    ):
+        if values and not access_supports(preset, knob):
+            raise RigError(f"{where}{access_unsupported_reason(preset, knob)}")
+    if continue_conversation and add_dirs and access_engine(preset) == "codex":
+        raise RigError(f"{where}{_CODEX_CONTINUE_REFUSAL}")
+
+
+def apply_access(
+    argv: list[str],
+    preset: str | None,
+    *,
+    add_dirs=(),
+    allow_tools=(),
+    deny_tools=(),
+    where: str = "",
+) -> list[str]:
+    """`argv` with the three lists spelled in the engine's own flags, at the
+    anchor the permission flags use. Claude's allow list is appended to its
+    `--allowedTools` element (the legacy list is resolved first and never
+    touches a deny flag); its deny list is one `--disallowedTools` element.
+    Copilot takes one `--flag=rule` per entry. `add_dirs` must already be
+    normalized — this function touches no filesystem."""
+    check_access_support(
+        preset, add_dirs=add_dirs, allow_tools=allow_tools, deny_tools=deny_tools,
+        where=where,
+    )
+    if not (add_dirs or allow_tools or deny_tools):
+        return list(argv)
+    entry = ACCESS_TRANSLATION[preset or ""]
+    out = list(argv)
+    at = _anchor_index(out, entry.anchor, preset or "", where)
+    spliced: list[str] = []
+
+    def one(flag: str, value: str) -> list[str]:
+        return [f"{flag}={value}"] if entry.equals else [flag, value]
+
+    for directory in add_dirs:
+        spliced += one(entry.add_dir, directory)
+    if allow_tools:
+        if entry.joined:
+            joined = ",".join(allow_tools)
+            if entry.allow_tool in out:
+                held = out.index(entry.allow_tool) + 1
+                out[held] = f"{out[held]},{joined}" if out[held].strip() else joined
+            else:
+                spliced += [entry.allow_tool, joined]
+        else:
+            for rule in allow_tools:
+                spliced += one(entry.allow_tool, rule)
+    if deny_tools:
+        if entry.joined:
+            spliced += [entry.deny_tool, ",".join(deny_tools)]
+        else:
+            for rule in deny_tools:
+                spliced += one(entry.deny_tool, rule)
+    out[at:at] = spliced
+    return out
+
+
+def normalize_add_dirs(
+    entries, *, home: str, is_dir=os.path.isdir, where: str = ""
+) -> list[str]:
+    """Absolute, normalized, existing directories, deduplicated after
+    normalization. A leading `~/` expands against `home` (the child's, not
+    this process's); a relative path is refused. A symlink is accepted when it
+    points at a directory."""
+    out: list[str] = []
+    for entry in entries:
+        path = entry
+        if path.startswith("~/"):
+            path = os.path.join(home, path[2:])
+        if not os.path.isabs(path):
+            raise RigError(
+                f"{where}add_dirs entry {entry!r} is a relative path — name it "
+                f"absolutely or start it with ~/ (the agent's home)"
+            )
+        path = os.path.normpath(path)
+        if not is_dir(path):
+            raise RigError(f"{where}add_dirs entry {entry!r} is not a directory")
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def child_home(child_env: dict | None = None) -> str:
+    """The HOME the child will see: the spawned environment's, else this
+    process's."""
+    env = merge_env(os.environ if child_env is None else child_env)
+    return env.get("HOME") or str(Path.home())
+
+
+# The one resolver for an engine's state root. A non-empty variable in the
+# SPAWNED environment wins; otherwise the child's HOME plus the engine's
+# default folder. Session lookup, the quota token and the transcript probe all
+# ask here, so none of them reads a different home than the turn runs in.
+ENGINE_HOME_ENV: dict[str, tuple[str, str]] = {
+    "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
+    "codex": ("CODEX_HOME", ".codex"),
+    "copilot": ("COPILOT_HOME", ".copilot"),
+}
+
+
+def home_value_problem(name: str, value: str) -> str | None:
+    """Why `value` cannot name an engine's state home, or None. A home is an
+    absolute path: a relative one means a different folder to the router and to
+    the child (which starts in the member's directory), and a `~` means the
+    router's home or the child's depending on who expands it. Refused rather
+    than resolved in the child's view."""
+    text = value.strip()
+    if not text:
+        return None
+    if text.startswith("~") or not os.path.isabs(text):
+        return (
+            f"{name}={value!r} is not an absolute path - a state home is written "
+            f"out in full (no `~`, no relative path)"
+        )
+    return None
+
+
+def home_env_problem(env: dict) -> str | None:
+    """The first state-home variable in `env` that is not an absolute path, or
+    None. Checked on a turn's final env before anything spawns, so
+    `engine_home` is never asked to read one."""
+    env = merge_env(env)
+    for variable, _default in ENGINE_HOME_ENV.values():
+        problem = home_value_problem(variable, env.get(variable) or "")
+        if problem:
+            return problem
+    return None
+
+
+def engine_home(engine: str, child_env: dict | None = None) -> Path:
+    variable, default = ENGINE_HOME_ENV[engine]
+    env = merge_env(os.environ if child_env is None else child_env)
+    named = (env.get(variable) or "").strip()
+    if named:
+        problem = home_value_problem(variable, named)
+        if problem:
+            raise RigError(problem)
+        return Path(named)
+    return Path(child_home(env)) / default
+
+
+def parse_version(text: str | None) -> tuple[int, ...] | None:
+    """The first dotted number in a `--version` line, as a tuple to compare."""
+    found = re.search(r"\d+(?:\.\d+)+", text or "")
+    return tuple(int(part) for part in found.group(0).split(".")) if found else None
+
+
+@dataclass(frozen=True)
+class Launch:
+    """One resolved launch, fixed once: the executable a turn will start, the
+    COMPLETE environment it starts with, and the directory it starts in. The
+    version gate, a feature probe, a models list, the park check and the spawn
+    itself all run through THIS object (`probe` and `start`), so none of them
+    can resolve a binary, read a PATH, or pick an environment or a cwd of its
+    own and certify something other than what runs.
+
+    `env` is final: every variable the turn owns (the caller's env, the rig's
+    `env`, the instruments' exporter path, the MCP idiom's file variable, the
+    working-directory pin) is in it before the Launch is built, and `start`
+    spawns with exactly this dict. Nothing may change it between the probe and
+    the spawn. `cwd` is absolute, and a relative executable or PATH entry
+    (an empty one means the cwd) is resolved against it, which is where the
+    child will look.
+
+    One object per selected pool variant and per child environment, never one
+    per engine. `binary` is the absolute path found, or None when nothing was
+    found, or when the launch is isolated (`run_as` or a container): the file
+    lives in another user's home or an image, and a host path would be a guess.
+    An unresolved or isolated launch makes NO host call: `probe` returns None
+    and `start` refuses (an isolated launch's wrapper, `sudo` or `docker`, is
+    the one thing it starts, by the argv it is handed).
+
+    Pinning an absolute pathname fixes which NAME is run; it does not stop a
+    file or symlink at that path being replaced after the probe. That race
+    stays open."""
+
+    argv0: str
+    binary: str | None
+    env: dict
+    cwd: str
+    isolated: bool = False
+
+    def pin(self, argv: list[str]) -> list[str]:
+        """`argv` with its executable replaced by the file that was probed.
+        An isolated or unresolved launch is left as it is."""
+        if self.isolated or not self.binary or not argv:
+            return list(argv)
+        return [self.binary, *argv[1:]]
+
+    def probe(
+        self, args: list[str], *, timeout: float = 15, strict: bool = False
+    ) -> subprocess.CompletedProcess | None:
+        """Run the probed file with `args` under this launch's cwd and env, or
+        None when there is no file to run (unresolved or isolated). Never a
+        bare-name lookup. A failure to run is None too, unless `strict`, which
+        lets the OSError or timeout through for a caller that reports it."""
+        if self.isolated or not self.binary:
+            return None
+        try:
+            return subprocess.run(
+                [self.binary, *args], capture_output=True, encoding="utf-8",
+                errors="replace", timeout=timeout, stdin=subprocess.DEVNULL,
+                cwd=self.cwd, env=dict(self.env), **launch_options(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if strict:
+                raise
+            return None
+
+    def start(
+        self, argv: list[str], *, new_session: bool = False, **popen
+    ) -> subprocess.Popen:
+        """The spawn: `argv` pinned, started in this launch's cwd with exactly
+        this launch's env. A direct launch with no resolved file raises
+        FileNotFoundError instead of letting the OS search a PATH of its own."""
+        if not self.isolated and not self.binary:
+            raise FileNotFoundError(self.argv0)
+        owned = {"creationflags", "startupinfo", "start_new_session", "process_group"}
+        if owned & popen.keys():
+            raise TypeError(
+                f"Launch.start owns {sorted(owned & popen.keys())}: pass new_session, "
+                "not launch_options"
+            )
+        # The launch policy is applied here, once, so no caller can start an
+        # engine without it; `new_session` is the one policy choice a caller makes.
+        return subprocess.Popen(
+            self.pin(argv), cwd=self.cwd, env=dict(self.env), **popen,
+            **launch_options(new_session=new_session),
+        )
+
+
+def resolve_launch(
+    argv0: str,
+    env: dict | None = None,
+    *,
+    cwd: str | os.PathLike,
+    isolated: bool = False,
+) -> Launch:
+    """The ONE place a launch's executable is found. `env` is the child's
+    final environment and `cwd` its working directory: a path with a separator
+    must be an executable file, and a bare name is looked up on `env`'s PATH,
+    both against `cwd` when relative (an empty PATH entry is `cwd`, exactly as
+    the child's own exec would read it). The lookup is `ar3.proc.find_executable`
+    on the child's PATH and PATHEXT: it never searches this process's cwd, which
+    `shutil.which` does first on Windows. The result is an absolute path or
+    None. Nothing in the launch probes may call `shutil.which`."""
+    child = merge_env(os.environ if env is None else env)
+    where = os.path.abspath(os.fspath(cwd))
+    if isolated or not argv0:
+        return Launch(argv0=argv0, binary=None, env=child, cwd=where, isolated=isolated)
+    pathext = child.get("PATHEXT")
+    if os.sep in argv0 or (os.altsep and os.altsep in argv0):
+        path = os.path.abspath(os.path.join(where, os.path.expanduser(argv0)))
+        found = find_executable(
+            os.path.basename(path), os.path.dirname(path), where, pathext=pathext
+        )
+    else:
+        found = find_executable(argv0, child.get("PATH", os.defpath), where, pathext=pathext)
+    return Launch(argv0=argv0, binary=found, env=child, cwd=where)
+
+
+def cli_stem(argv0: str) -> str:
+    """The file name of an executable with the Windows `.exe`/`.cmd`/`.bat`
+    suffix off and the case folded: `C:/Tools/Claude.EXE` -> `claude`."""
+    name = os.path.basename(argv0.replace("\\", "/"))
+    stem, ext = os.path.splitext(name)
+    return (stem if ext.lower() in (".exe", ".cmd", ".bat", ".com") else name).lower()
+
+
+def preset_cli(preset: str | None) -> str | None:
+    """The file name of the CLI a preset starts (`cursor` -> `agent`,
+    `ollama-claude` -> `ollama`), or None for no or an unknown preset."""
+    entry = HARNESS_PRESETS.get(preset or "")
+    return cli_stem(entry["invoke"][0]) if entry else None
+
+
+def variant_binary_problem(rig: "Rig") -> str | None:
+    """Why a rig that carries a floor or access rules cannot take them, because
+    one of its pool variants does not start the preset's own CLI by name, or
+    None. A launcher (`env`, `npx`, a wrapper script) hides which CLI runs, and
+    a variant of another engine would be handed this engine's flags. The
+    `ollama-*` presets are the known launchers: their own head is `ollama`,
+    which is what they must start, and their anchor says where the wrapped
+    engine's flags go."""
+    expected = preset_cli(rig.preset)
+    if expected is None:
+        return (
+            f"rig {rig.name!r} has no known preset, so the CLI its floor and "
+            f"access rules belong to cannot be named"
+        )
+    for number, argv in enumerate(rig.pool()):
+        started = cli_stem(argv[0]) if argv else ""
+        if started != expected:
+            return (
+                f"rig {rig.name!r} carries a deny floor or access rules for "
+                f"preset {rig.preset!r} ({expected}), but pool variant {number} "
+                f"starts {argv[0]!r}: a launcher or another engine would be "
+                f"handed flags that are not its own - start {expected} "
+                f"directly, or drop the rules"
+            )
+    return None
+
+
+_LAUNCH_VERSIONS: dict[tuple, tuple[int, ...] | None] = {}
+
+
+def launch_version(launch: Launch) -> tuple[int, ...] | None:
+    """The `--version` of the file `launch` starts, as a tuple, or None when
+    the launch is isolated or unresolved or the build cannot be read. It asks
+    the launch (`Launch.probe`: its file, cwd and env) and resolves nothing
+    itself. Cached on
+    the file's identity (path, mtime, size), so a turn pays for the probe once
+    per install and a replaced binary is read again."""
+    if launch.isolated or not launch.binary:
+        return None
+    try:
+        stat = os.stat(launch.binary)
+    except OSError:
+        return None
+    key = (launch.binary, stat.st_mtime_ns, stat.st_size)
+    if key not in _LAUNCH_VERSIONS:
+        done = launch.probe(["--version"])
+        raw = None
+        if done is not None and done.returncode == 0:
+            raw = next(
+                (line.strip() for line in (done.stdout or done.stderr or "").splitlines()
+                 if line.strip()),
+                None,
+            )
+        _LAUNCH_VERSIONS[key] = parse_version(raw)
+    return _LAUNCH_VERSIONS[key]
+
+
+def access_binary_state(
+    preset: str | None, launch: Launch, *, where: str = ""
+) -> dict:
+    """Which build a turn with access knobs will run: the resolved binary path
+    and its `--version`, and whether that build is one the flags were read
+    against. Older than verified refuses the knobs. Newer or unreadable runs,
+    recorded as `unverified <version>`. `--no-auto-update` stops an in-turn
+    self-update only, not another installer or a PATH change, which is why the
+    build is read at the turn.
+
+    `launch` is the resolved launch the turn will spawn. The probe runs THAT
+    file under THAT environment, never the preset's default name on PATH: a rig
+    can invoke another build, and a record for a different binary would
+    certify nothing. An isolated launch is `unverified isolated`. When the
+    executable is not the engine's own CLI (an `ollama launch` launcher, a
+    wrapper script), the CLI it starts cannot be named from here, so nothing is
+    probed and the record says `unverified launcher` rather than label an
+    unrelated binary verified."""
+    entry = ACCESS_TRANSLATION.get(preset or "")
+    if launch.isolated:
+        return {"binary": None, "version": None, "status": "unverified isolated"}
+    if entry is None or not entry.binary:
+        return {"binary": None, "version": None, "status": "unverified unknown"}
+    path = launch.binary
+    started = cli_stem(path or launch.argv0)
+    if started != entry.binary:
+        # Knobs or a floor are set (this runs only then). A file we cannot
+        # name as this engine's CLI is not run unverified: a renamed old build
+        # would carry the flags it cannot read. The preset's own launcher head
+        # (`ollama` for ollama-*) is the one known launcher, recorded as such.
+        if started == preset_cli(preset):
+            return {
+                "binary": path,
+                "version": None,
+                "status": f"unverified launcher {Path(launch.argv0).name}",
+            }
+        raise RigError(
+            f"{where}{path or launch.argv0} is not named like the {entry.binary} "
+            f"CLI, so its version cannot be read against the access knobs - "
+            f"start the CLI by its own file name, or drop add_dirs / "
+            f"allow_tools / deny_tools and the deny floor"
+        )
+    done = launch.probe(["--version"]) if path else None
+    raw = None
+    if done is not None and done.returncode == 0:
+        raw = next(
+            (line.strip() for line in (done.stdout or done.stderr or "").splitlines()
+             if line.strip()),
+            None,
+        )
+    seen = parse_version(raw)
+    floor = parse_version(entry.verified)
+    version = ".".join(str(part) for part in seen) if seen else None
+    if seen is not None and floor is not None and seen < floor:
+        raise RigError(
+            f"{where}{path} is {version}, older than {entry.verified}, "
+            f"the oldest {entry.binary} build whose flags were read for the "
+            f"access knobs — update it, or drop add_dirs / allow_tools / "
+            f"deny_tools"
+        )
+    if seen is not None and floor is not None and seen[: len(floor)] == floor:
+        status = "verified"
+    else:
+        status = f"unverified {version or 'unknown'}"
+    return {"binary": path, "version": version, "status": status}
+
+
 def splice_continue(
     argv: list[str],
     *,
@@ -1219,8 +1856,16 @@ class Rig:
     mcp: bool | None = None
     permissions: str | None = None
     allowed_tools: str | None = None
+    add_dirs: list[str] = field(default_factory=list)
+    allow_tools: list[str] = field(default_factory=list)
+    deny_tools: list[str] = field(default_factory=list)
+    deny_invalid: bool = False
     max_ai_credits: int | None = None
     env: dict[str, str] = field(default_factory=dict)
+    # Set only on a rig that came from a checked-in runbook: the trust ceiling
+    # of its node when it was loaded. A rig with this set may carry only the
+    # `env` names the machine allows (`RigConfig.repo_env_problem`).
+    repo_ceiling: str | None = None
     framing: FramingSpec | None = None
     error: str | None = None
 
@@ -1351,6 +1996,7 @@ class Rig:
         continue_conversation: bool = False,
         workdir: str | Path | None = None,
         session: str | None = None,
+        access_dirs: list[str] | None = None,
     ) -> list[str]:
         pool = self.pool()
         chosen = pool[index % len(pool)]
@@ -1361,6 +2007,18 @@ class Rig:
         # turn cannot raise here.
         chosen, _ = apply_permissions(chosen, self.preset, self.permissions)
         chosen = apply_allowed_tools(chosen, self.preset, self.allowed_tools)
+        # The access lists come after the legacy allowlist: `allowed_tools`
+        # replaces claude's list first, `allow_tools` is appended to it, and
+        # the deny set (floor and carried denies included, see
+        # `RigConfig.effective_rig`) is emitted once. `access_dirs` is the
+        # caller's normalized list; unset leaves the rig's entries as written.
+        chosen = apply_access(
+            chosen,
+            self.preset,
+            add_dirs=self.add_dirs if access_dirs is None else access_dirs,
+            allow_tools=self.allow_tools,
+            deny_tools=self.deny_tools,
+        )
         chosen = apply_effort(chosen, self.preset, self.effort)
         # The pin, before {workdir} is substituted, because the resume tokens
         # carry a `-C {workdir}` of their own. A member that has one is either
@@ -1391,7 +2049,12 @@ class Rig:
         return argv
 
     def distill_command(
-        self, workdir: str | Path, *, run_as: str | None = None
+        self,
+        workdir: str | Path,
+        *,
+        run_as: str | None = None,
+        access_dirs: list[str] | None = None,
+        launch: "Launch | None" = None,
     ) -> str | None:
         """A stdin->stdout shell command line for k7e's `K7E_DISTILL_COMMAND`,
         built from this rig's own invoke. k7e pipes the prompt to the
@@ -1416,24 +2079,71 @@ class Rig:
         pool = self.pool()
         if not pool:
             return None
-        argv = apply_effort(pool[0], self.preset, self.effort)
+        # The access lists ride this command exactly as they ride a turn's
+        # argv, deny floor included (the rig is the effective one, see
+        # `RigConfig.effective_rig`): a background model call is a launch on
+        # this node. An unsupported rule raises RigError to the caller.
+        argv = apply_access(
+            pool[0],
+            self.preset,
+            add_dirs=self.add_dirs if access_dirs is None else access_dirs,
+            allow_tools=self.allow_tools,
+            deny_tools=self.deny_tools,
+            where=f"rig {self.name!r}: ",
+        )
+        argv = apply_effort(argv, self.preset, self.effort)
         argv = [a.replace(WORKDIR_PLACEHOLDER, str(workdir)) for a in argv]
         if self.model_resolver == "agy-live":
             try:
-                resolved = resolve_agy_model(self.model or "", effort=self.effort)
+                resolved = resolve_agy_model(
+                    self.model or "", effort=self.effort, launch=launch
+                )
             except RigError:
                 return None
             argv = [resolved if a == "{model}" else a for a in argv]
-        inner = " ".join(
-            '"$(cat)"'.join(
+        if launch is not None:
+            if launch.binary is None and not launch.isolated:
+                raise RigError(
+                    f"rig {self.name!r}: {launch.argv0!r} was not found on the "
+                    f"PATH of its environment, so there is no file to start"
+                )
+            argv = launch.pin(argv)
+        # The prompt is read FIRST, by the parent shell, before any rig env
+        # exists: `cat` must not depend on the rig's PATH (a PATH holding only
+        # the CLI's folder has no `cat`). An empty read stops here with a
+        # nonzero exit, so a failed transport never launches a model call with
+        # an empty prompt. The rig's `env` then applies to the CLI process
+        # alone, through `env`, so the exec sees the PATH and HOME the build
+        # record and `add_dirs` were checked against; k7e's own environment,
+        # and so the store's identity, does not move.
+        words = " ".join(
+            '"$p"'.join(
                 shlex.quote(p) if p else "" for p in a.split(PROMPT_PLACEHOLDER)
             )
             for a in argv
         )
+        carried = "".join(
+            f"{shlex.quote(f'{name}={value}')} " for name, value in sorted(self.env.items())
+        )
+        launch_word = f"env {carried}" if carried else ""
+        # The command starts in the member's workdir, the directory its launch
+        # was resolved and probed in. (Under `run_as` the wrapper below has
+        # already moved there.)
+        move = "" if run_as else f"cd {shlex.quote(str(workdir))} && "
+        inner = f"{DISTILL_TRANSPORT}{move}{launch_word}{words}"
         if run_as:
             caged = f"cd {shlex.quote(str(workdir))} && exec bash --login -c {shlex.quote(inner)}"
             return f"sudo -u {shlex.quote(run_as)} sh -c {shlex.quote(caged)}"
         return f"sh -c {shlex.quote(inner)}"
+
+
+# The prompt read that opens every distill / compile command (see
+# `Rig.distill_command`): by the parent shell, before the rig's env applies,
+# and failing the command before the launch when nothing arrived.
+DISTILL_TRANSPORT = (
+    'p="$(cat)" && [ -n "$p" ] || '
+    "{ echo 'r4t: no prompt arrived on stdin' >&2; exit 66; }; "
+)
 
 
 @dataclass
@@ -1445,7 +2155,116 @@ class RigConfig:
     cell_budget_max: float = DEFAULT_CELL_BUDGET_MAX
     cell_budget_earn_per_hour: float = DEFAULT_CELL_BUDGET_EARN_PER_HOUR
     log_retention_days: int = DEFAULT_LOG_RETENTION_DAYS
+    deny_floor: dict[str, list[str]] = field(default_factory=dict)
+    env_allow: list[str] = field(default_factory=list)
+    env_allow_error: str | None = None
     missing: bool = False
+
+    def floor_for(self, preset: str | None) -> list[str]:
+        """The node's mandatory deny rules for the engine `preset` runs."""
+        engine = access_engine(preset)
+        return list(self.deny_floor.get(engine, [])) if engine else []
+
+    def repo_env_problem(self, rig: Rig) -> str | None:
+        """Why a checked-in runbook rig's `Env:` is refused, or None. Below
+        `bypass` it may carry only `IN_REPO_ENV_SAFE` names and the names the
+        MACHINE config grants in `env_allow`; a grant lets the repo choose that
+        variable's value. A machine config whose `env_allow` is unreadable or
+        malformed refuses every in-repo `Env:` rather than guess. Runs when the
+        rig is resolved, before any probe or spawn."""
+        if rig.repo_ceiling is None or not rig.env:
+            return None
+        if permission_rank(rig.repo_ceiling) >= permission_rank("bypass"):
+            return None
+        fix = (
+            f"set it in the machine rig (`r4t rig set {rig.name} env.NAME value`), "
+            f"or add it to the node's trusted env list (`env_allow` in rigs.json)"
+        )
+        if self.env_allow_error:
+            return (
+                f"Env: is refused because the machine config's "
+                f"env_allow is unusable ({self.env_allow_error}); fix it, or {fix}"
+            )
+        granted = {env_name_key(n) for n in self.env_allow}
+        refused = sorted(
+            n
+            for n in rig.env
+            if not in_repo_env_safe(n) and env_name_key(n) not in granted
+        )
+        if not refused:
+            return None
+        return (
+            f"Env: {', '.join(refused)} is not allowed in a "
+            f"checked-in runbook below bypass - {fix}"
+        )
+
+    def effective_rig(
+        self, rig: Rig, shadowed: Rig | None = None
+    ) -> tuple[Rig | None, str | None]:
+        """The rig a turn actually runs: its deny set is the node floor, the
+        denies of the machine rig it shadows, and its own, in that order. A
+        deny only narrows, so no layer a repo controls can remove one. Returns
+        (rig, None), or (None, why) when a mandatory deny has nowhere to go:
+        the engine has no deny flag, the rig records no preset to tell which
+        floor applies, or a same-name runbook rig runs a different engine than
+        the machine rig whose native denies it would carry."""
+        trust = self.repo_env_problem(rig)
+        if trust:
+            return None, trust
+        carried: list[str] = []
+        if shadowed is not None:
+            if shadowed.error:
+                # Whatever is wrong with the machine rig, its denies were
+                # either never parsed or cannot be vouched for; a repo rig
+                # that shadows it must not quietly drop them.
+                return None, (
+                    f"the machine rig {shadowed.name!r} that this rig shadows is "
+                    f"invalid ({shadowed.error}), so its denies cannot be "
+                    f"carried — fix it with `r4t rig get {shadowed.name}`"
+                )
+            if shadowed.deny_invalid:
+                return None, (
+                    f"the machine rig {shadowed.name!r} that this rig shadows "
+                    f"has a deny_tools list r4t cannot read, so its denies "
+                    f"cannot be carried — fix it with `r4t rig get {shadowed.name}`"
+                )
+            carried = list(shadowed.deny_tools)
+            if carried and access_engine(shadowed.preset) != access_engine(rig.preset):
+                return None, (
+                    f"this rig shadows the machine rig {shadowed.name!r}, whose "
+                    f"deny_tools are {access_engine(shadowed.preset) or 'unknown'} "
+                    f"rules, but it runs {access_engine(rig.preset) or 'unknown'}; "
+                    f"a deny is never translated or dropped — name the rig "
+                    f"differently, or run the same engine"
+                )
+        if rig.preset is None and self.deny_floor:
+            # The floor is keyed by engine, and a rig with no recorded preset
+            # does not say which engine it runs: its file name is a label, not
+            # a fact, so it is never matched against the floor.
+            return None, (
+                f"this node has a deny_floor and rig {rig.name!r} records no "
+                f"preset, so the floor cannot be applied to its argv - "
+                f"try: r4t rig swap {rig.name} <preset>"
+            )
+        floor = self.floor_for(rig.preset)
+        denies = union_rules(floor, carried, rig.deny_tools)
+        if denies or rig.add_dirs or rig.allow_tools or self.deny_floor:
+            # Flags and the floor belong to one CLI. Every pool variant must
+            # start that CLI by file name; a launcher or another engine in the
+            # pool would be handed flags that mean something else to it.
+            mismatch = variant_binary_problem(rig)
+            if mismatch:
+                return None, mismatch
+        if not denies:
+            return rig, None
+        if not access_supports(rig.preset, "deny_tools"):
+            return None, (
+                f"deny rules apply to this rig but "
+                f"{access_unsupported_reason(rig.preset, 'deny_tools')}"
+            )
+        if denies == rig.deny_tools:
+            return rig, None
+        return replace(rig, deny_tools=denies), None
 
     def rig_for(self, member: Member) -> tuple[Rig | None, str | None, bool]:
         """Resolve a member to a runnable rig. Returns (rig, error, pinned).
@@ -1480,8 +2299,11 @@ class RigConfig:
                 f"try: r4t rig add {rig_name} <preset>",
                 pinned,
             )
+        shadowed = None
         if rig is None:
             rig = self.rigs.get(rig_name.lower())
+        elif not self.missing:
+            shadowed = self.rigs.get(rig_name.lower())
         if rig is None:
             return (
                 None,
@@ -1491,6 +2313,11 @@ class RigConfig:
             )
         if rig.error:
             return None, f"rig {rig_name!r} is invalid: {rig.error}", pinned
+        rig, problem = self.effective_rig(rig, shadowed)
+        if rig is None:
+            return None, f"rig {rig_name!r} is invalid: {problem}", pinned
+        if member.continue_conversation and rig.add_dirs and access_engine(rig.preset) == "codex":
+            return None, f"rig {rig_name!r} is invalid: {_CODEX_CONTINUE_REFUSAL}", pinned
         if member.continue_conversation and not rig.supports_continue:
             return (
                 None,
@@ -1985,11 +2812,23 @@ def _mcp_splice_at(argv: list[str]) -> int:
     return argv.index("--") + 1 if "--" in argv else 1
 
 
+def mcp_env(rig: Rig, env: dict, cwd: Path) -> dict[str, str]:
+    """The environment variables the MCP idiom adds to a turn, computed without
+    writing anything, so a launch can carry them in its final env before the
+    turn is allowed to write the config file (`apply_mcp`). Only the
+    `opencode-env` idiom has one."""
+    if rig.mcp_idiom == "opencode-env":
+        path = _mcp_config_dir(env, cwd) / OPENCODE_CONFIG_BASENAME
+        return {"OPENCODE_CONFIG": str(path)}
+    return {}
+
+
 def apply_mcp(
     rig: Rig, argv: list[str], env: dict, cwd: Path, isolation: Isolation | None = None
 ) -> McpPlan:
     """Inject the a8s MCP server into one turn with the harness's own idiom.
-    `env` is updated in place and whatever config file the idiom needs is
+    `env` is READ, never changed (the variable an idiom adds is `mcp_env`'s, and
+    already in a launch's env); whatever config file the idiom needs is
     written; the returned plan carries the argv to run plus what the org's
     isolation boundary has to let through for the server to actually start."""
     idiom = rig.mcp_idiom
@@ -2026,7 +2865,6 @@ def apply_mcp(
         _write_if_changed(path, _mcp_opencode_config(env, command, isolated=isolated))
         # OPENCODE_CONFIG_CONTENT is not an option: `ollama launch` sets it for
         # provider+model and clobbers anything r4t puts there (measured).
-        env["OPENCODE_CONFIG"] = str(path)
         # The variable is the whole idiom: a boundary that resets the environment
         # must re-export it, and a container must be able to see the file.
         plan.env_pass["OPENCODE_CONFIG"] = str(path)
@@ -2388,18 +3226,28 @@ def fuzzy_match_model(query: str, names: list[str]) -> str:
     return scored[0][2]
 
 
-def agy_model_names(timeout: float = AGY_MODELS_TIMEOUT_SECONDS) -> list[str]:
+def agy_model_names(
+    timeout: float = AGY_MODELS_TIMEOUT_SECONDS, launch: Launch | None = None
+) -> list[str]:
     """The current `agy models` display names, one per line. Errors loudly —
-    never returns a partial or fabricated list."""
-    try:
-        proc = subprocess.run(
-            ["agy", "models"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            **launch_options(),
+    never returns a partial or fabricated list. The list comes from the file
+    `launch` resolved, under its cwd and env; with no resolved file (not
+    found, or an isolated launch whose agy lives in another user's home or an
+    image) it is refused, never read from a bare `agy` on the host."""
+    if launch is None or launch.binary is None or launch.isolated:
+        why = (
+            "an isolated launch's agy is not on this host"
+            if launch is not None and launch.isolated
+            else "no agy was resolved for this launch"
         )
-    except FileNotFoundError as e:
+        raise RigError(
+            f"cannot read `agy models` to resolve --model: {why}; the host's "
+            f"agy is not asked in its place (name the model the CLI itself "
+            f"takes, or fix the rig's invoke)"
+        )
+    try:
+        proc = launch.probe(["models"], timeout=timeout, strict=True)
+    except OSError as e:
         raise RigError(f"could not run `agy models` to resolve --model: {e}") from e
     except subprocess.TimeoutExpired as e:
         raise RigError(
@@ -2427,11 +3275,14 @@ def resolve_agy_model(
     timeout: float = AGY_MODELS_TIMEOUT_SECONDS,
     names: list[str] | None = None,
     effort: str | None = None,
+    launch: Launch | None = None,
 ) -> str:
     """Fuzzy-match `query` against the live `agy models` list. Nothing is cached:
-    the list is re-fetched per call so it stays current as agy ships versions."""
+    the list is re-fetched per call so it stays current as agy ships versions.
+    `launch` is the resolved launch the turn will spawn agy with: the list is
+    read from that executable under that environment, not the router's."""
     if names is None:
-        names = agy_model_names(timeout)
+        names = agy_model_names(timeout, launch)
     if effort is None:
         return fuzzy_match_model(query, names)
     apply_effort(HARNESS_PRESETS["agy"]["invoke"], "agy", effort)
@@ -2458,14 +3309,39 @@ def _validate_rig_name(name: str) -> str:
     return key
 
 
+def read_rig_config_text(path: Path) -> str | None:
+    """The text of the rig config, or None only when it is genuinely absent.
+    The file holds the node's rigs and its `deny_floor`, so a file that is
+    there but cannot be read (a closed folder above it, a directory in its
+    place, no read bit) refuses with the path and the fix: it is never read
+    as "no config", which would run every inline rig with no floor."""
+    try:
+        return read_text_if_present(path)
+    except (OSError, ValueError) as e:
+        raise RigError(
+            f"cannot read rig config {path}: {e} - the file exists but this "
+            f"user cannot read it, and its deny_floor is never skipped; fix "
+            f"the permissions on it and on the folders above it"
+        ) from e
+
+
+def rig_config_present(path: Path) -> bool:
+    """Whether a rig config is there to read: False only when it is genuinely
+    absent. A file that exists and cannot be read counts as present, so the
+    loader that follows names the real problem instead of "(missing)"."""
+    return is_present(path)
+
+
 def _load_config_payload(path: Path) -> dict:
     """A missing file is an EMPTY config, never a seeded one — seeding
     starter rigs here made a fresh `rig add leader ...` collide with a
-    phantom 'leader' the user never created."""
-    if path.is_file():
+    phantom 'leader' the user never created. A file that exists and cannot be
+    read refuses, so a write never lays a fresh config over it."""
+    text = read_rig_config_text(path)
+    if text is not None:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
             raise RigError(f"cannot load rig config {path}: {e}") from e
         if not isinstance(data, dict):
             raise RigError(f"rig config {path} must be a JSON object")
@@ -2523,6 +3399,30 @@ def add_preset_rig(
     return rig_key
 
 
+def _check_swap_access(existing: dict, preset_key: str, *, where: str) -> None:
+    """A swap keeps the access lists, so they are checked against the new
+    preset. Native rules (`allow_tools`, `deny_tools`) belong to one engine's
+    syntax: a swap to another wrapped engine is refused while any are saved,
+    never reinterpreted or omitted. `add_dirs` is revalidated against the new
+    preset's table."""
+    old_engine = access_engine(_entry_preset(existing))
+    new_engine = access_engine(preset_key)
+    for knob in ("allow_tools", "deny_tools"):
+        saved = existing.get(knob)
+        if saved and old_engine != new_engine:
+            raise RigError(
+                f"{where}saved {knob} are {old_engine or 'unknown'} rules and "
+                f"preset {preset_key!r} runs {new_engine or 'unknown'} — "
+                f"`r4t rig unset` {knob} first, then swap"
+            )
+    for knob in ACCESS_KNOBS:
+        saved = existing.get(knob)
+        if not saved:
+            continue
+        entries = parse_access_value(saved, knob, where=where)
+        check_access_support(preset_key, **{knob: entries}, where=where)
+
+
 def swap_preset_rig(
     path: Path,
     rig_name: str,
@@ -2557,6 +3457,7 @@ def swap_preset_rig(
     apply_allowed_tools(
         checked, preset_key, existing.get("allowed_tools"), where=f"rig {rig_key!r}: "
     )
+    _check_swap_access(existing, preset_key, where=f"rig {rig_key!r}: ")
     chosen_effort = resolve_override(effort, existing.get("effort"))
     apply_effort(invoke, preset_key, chosen_effort, where=f"rig {rig_key!r}: ")
     if chosen_effort is not None:
@@ -2620,11 +3521,115 @@ def _env_name_problem(name: str) -> str | None:
     """Why `name` cannot be a rig env entry, or None if it can."""
     if not _ENV_NAME_RE.match(name):
         return f"{name!r} is not a usable environment variable name"
-    if name in TURN_OWNED_ENV or name.startswith(TURN_OWNED_ENV_PREFIX):
+    key = env_name_key(name)
+    owned = {env_name_key(n) for n in TURN_OWNED_ENV}
+    if key in owned or key.startswith(env_name_key(TURN_OWNED_ENV_PREFIX)):
         return (
             f"{name} belongs to the turn, not the rig — r4t sets it per member "
             f"and a rig may not override it"
         )
+    return None
+
+
+# What a checked-in runbook's `Env:` may set below `bypass`: ONLY these names,
+# plus whatever the operator lists in the machine `rigs.json` under `env_allow`
+# (never settable from a repo). An allowlist, because an environment is open
+# ended: a denylist cannot name every variable that picks an executable
+# (`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`), a runtime or loader, a home, an
+# endpoint or proxy (`*_BASE_URL`, `HTTPS_PROXY`), a credential, a shell wrapper
+# (`CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_ENV_FILE`) or a permission
+# (`COPILOT_ALLOW_ALL`). Each entry here must pick none of those; the one-line
+# reason for each is in the access audit.
+#   ENABLE_PROMPT_CACHING_1H  claude: asks for the one-hour prompt-cache TTL.
+#                             Changes cost, not destination, code or access.
+IN_REPO_ENV_SAFE = frozenset({"ENABLE_PROMPT_CACHING_1H"})
+
+
+def env_name_key(name: str) -> str:
+    """The form an environment variable name is compared in. POSIX names are
+    case-sensitive (`node_options` and `NODE_OPTIONS` are two variables), so
+    there the name is its own key and a grant for one never admits the other.
+    Windows treats names as case-insensitive, so there the key is the casefold.
+    The platform is read at call time, not import time."""
+    if sys.platform == "win32":
+        return name.casefold()
+    return name
+
+
+def canonical_env_name(name: str) -> str:
+    """The one spelling a rig `env` name is stored and merged under. Windows
+    upper-cases environment names (Python's own `os.environ` does the same), so
+    there `copilot_home`, `Copilot_Home` and `COPILOT_HOME` are one variable and
+    its canonical name is the upper-case one. On POSIX names are case-sensitive
+    and kept as written. The platform is read at call time."""
+    if sys.platform == "win32":
+        return name.upper()
+    return name
+
+
+def merge_env(*layers: object) -> dict[str, str]:
+    """The ONE place environment layers are merged into a final environment, in
+    the order given (caller env or `os.environ`, rig `env`, instrument env, MCP
+    env, turn injections). A later layer replaces an earlier one; on Windows it
+    does so whatever the case of the name, and every key in the result is
+    canonical, so the result has one key per variable and the readers of the
+    effective environment (`engine_home`, `child_home`, the token variables, the
+    PATH and PATHEXT lookup, the account-cache key) can stay exact. A layer
+    that is not canonical (a caller's dict) is canonicalized here. On POSIX
+    nothing is renamed: `home` and `HOME` stay two variables. A layer of None
+    is skipped. Every merge that builds an environment a child will see goes
+    through here (`tests/test_env_merge.py` holds the list)."""
+    merged: dict[str, str] = {}
+    for layer in layers:
+        if not layer:
+            continue
+        for name, value in layer.items():  # type: ignore[attr-defined]
+            merged[canonical_env_name(name)] = value
+    return merged
+
+
+def in_repo_env_safe(name: str) -> bool:
+    if sys.platform == "win32":
+        return name.casefold() in {n.casefold() for n in IN_REPO_ENV_SAFE}
+    return name in IN_REPO_ENV_SAFE
+
+
+def parse_env_allow(raw: object) -> list[str]:
+    """The machine config's `env_allow`: a list of exact environment variable
+    names, nothing else. No wildcards, no prefixes, no comma string. Anything
+    else is an error: a malformed grant is never read as "none" or as "all"."""
+    if not isinstance(raw, list):
+        raise RigError('"env_allow" must be a list of environment variable names')
+    names: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not _ENV_NAME_RE.match(item):
+            raise RigError(
+                f'"env_allow" entry {item!r} is not an environment variable name '
+                f"(letters, digits and underscores; no wildcards)"
+            )
+        if env_name_key(item) not in {env_name_key(n) for n in names}:
+            names.append(item)
+    return names
+
+
+def env_value_problem(rig_name: str, name: str, value: str) -> str | None:
+    """Why a rig `env` value is refused at load, or None. PATH entries must be
+    absolute (a relative or empty entry means the member's directory to the
+    child and the router's to anything that checks, and an empty one is the
+    cwd); a state home must be absolute and carry no `~`."""
+    if env_name_key(name) == env_name_key("PATH"):
+        for entry in value.split(os.pathsep):
+            if not entry or not os.path.isabs(entry):
+                shown = entry if entry else "(empty)"
+                return (
+                    f"rig {rig_name!r}: env.PATH entry {shown!r} is not an "
+                    f"absolute folder - write every PATH entry out in full"
+                )
+    for variable, _default in ENGINE_HOME_ENV.values():
+        if env_name_key(name) == env_name_key(variable):
+            problem = home_value_problem(name, value)
+            if problem:
+                return f"rig {rig_name!r}: env.{problem}"
     return None
 
 
@@ -2649,6 +3654,9 @@ CONFIGURABLE_BOOL_KEYS = ("echo", "mcp")
 # against the preset's translation table; `effort` uses its accepted values;
 # `allowed_tools` is the engine's own syntax and stays opaque to r4t.
 CONFIGURABLE_STR_KEYS = ("permissions", "allowed_tools", "effort")
+# The access lists are strings in the list grammar (`parse_access_list`),
+# stored normalized.
+CONFIGURABLE_LIST_KEYS = ACCESS_KNOBS
 CONFIGURABLE_RIG_KEYS = (
     "rig_budget_max",
     "rig_budget_earn_per_hour",
@@ -2662,6 +3670,9 @@ CONFIGURABLE_RIG_KEYS = (
     "mcp",
     "permissions",
     "allowed_tools",
+    "add_dirs",
+    "allow_tools",
+    "deny_tools",
     "max_ai_credits",
 )
 
@@ -2764,6 +3775,10 @@ def permission_ceiling_note(preset: str | None, mode: str | None) -> str | None:
     return permission_rule(preset, mode).note
 
 
+def _list_text(raw: object) -> str:
+    return ",".join(raw) if isinstance(raw, list) else str(raw)
+
+
 def _entry_preset(entry: dict) -> str | None:
     preset = entry.get("preset")
     if isinstance(preset, str) and preset.strip():
@@ -2788,6 +3803,10 @@ def _resolve_setting(entry: dict, key: str) -> RigSetting:
             f"from preset {preset}" if preset else "built-in default",
             False,
         )
+    if key in CONFIGURABLE_LIST_KEYS:
+        if entry.get(key):
+            return RigSetting(key, _list_text(entry[key]), "explicit", True)
+        return RigSetting(key, None, "built-in default", False)
     if key in CONFIGURABLE_STR_KEYS:
         if entry.get(key):
             return RigSetting(key, str(entry[key]), "explicit", True)
@@ -2909,7 +3928,11 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
     if env_name is not None:
         text = str(value)
         _, entry, payload = _rig_entry(path, rig_name)
-        entry["env"] = {**_entry_env(entry), env_name: text}
+        entry["env"] = {
+            **{k: v for k, v in _entry_env(entry).items()
+               if canonical_env_name(k) != canonical_env_name(env_name)},
+            env_name: text,
+        }
         atomic_write_json(path, payload)
         return RigSetting(key, text, "explicit", True)
     rig_key = _validate_rig_name(rig_name)
@@ -2932,6 +3955,22 @@ def set_rig_value(path: Path, rig_name: str, key: str, value: object) -> RigSett
                 apply_effort(argv, preset, text, where=where)
             else:
                 apply_allowed_tools(argv, preset, text, where=where)
+        entry[key] = text
+        atomic_write_json(path, payload)
+        return RigSetting(key, text, "explicit", True)
+    if key in CONFIGURABLE_LIST_KEYS:
+        rig_key, entry, payload = _rig_entry(path, rig_name)
+        where = f"rig {rig_key!r}: "
+        entries = parse_access_value(value, key, where=where)
+        if not entries:
+            raise RigError(
+                f"{where}{key} is empty — use `r4t rig unset {rig_key} {key}` "
+                f"to clear it"
+            )
+        preset = _entry_preset(entry)
+        for argv in _entry_pool(entry):
+            apply_access(argv, preset, **{key: entries}, where=where)
+        text = ",".join(entries)
         entry[key] = text
         atomic_write_json(path, payload)
         return RigSetting(key, text, "explicit", True)
@@ -2965,9 +4004,11 @@ def unset_rig_value(path: Path, rig_name: str, key: str) -> bool:
     rig_key, entry, payload = _rig_entry(path, rig_name)
     if env_name is not None:
         env_map = _entry_env(entry)
-        if env_name not in env_map:
+        aliases = [k for k in env_map if canonical_env_name(k) == canonical_env_name(env_name)]
+        if not aliases:
             return False
-        del env_map[env_name]
+        for alias in aliases:
+            del env_map[alias]
         # An empty map is no map: nothing is inherited, so the key would only
         # sit in rigs.json saying nothing.
         if not env_map:
@@ -3040,6 +4081,14 @@ def _parse_rig(name: str, raw: object) -> Rig:
         return rig
     rig.invoke = invoke
     rig.preset = _entry_preset(raw)
+    if rig.preset is not None and rig.preset not in HARNESS_PRESETS:
+        # A label no preset table knows picks no flags and no floor: it would
+        # run its invoke with nothing applied.
+        rig.error = (
+            f"preset {rig.preset!r} is not a known preset "
+            f"(choose one of: {', '.join(preset_names())})"
+        )
+        return rig
 
     resolver = raw.get("model_resolver")
     if resolver is not None:
@@ -3165,6 +4214,33 @@ def _parse_rig(name: str, raw: object) -> Rig:
         rig.allowed_tools = None
         rig.effort = None
 
+    # The access lists parse before they translate, so a malformed list is
+    # named as such. A list the engine has no direct flag for fails the rig
+    # closed, never silently dropped. A rig whose deny list is unreadable
+    # keeps the marker: a runbook rig that shadows it must not carry nothing.
+    for knob in ACCESS_KNOBS:
+        raw_value = raw.get(knob)
+        if raw_value is None:
+            continue
+        try:
+            setattr(rig, knob, parse_access_value(raw_value, knob, where=where))
+        except RigError as exc:
+            problems.append(str(exc))
+            if knob == "deny_tools":
+                rig.deny_invalid = True
+    try:
+        for argv in rig.pool():
+            apply_access(
+                argv, rig.preset, add_dirs=rig.add_dirs,
+                allow_tools=rig.allow_tools, deny_tools=rig.deny_tools, where=where,
+            )
+    except RigError as exc:
+        problems.append(str(exc))
+        rig.add_dirs, rig.allow_tools = [], []
+        if rig.deny_tools:
+            rig.deny_invalid = True
+        rig.deny_tools = []
+
     # A rig env entry the turn owns, or a value that is not a plain string,
     # fails the rig closed here — the operator hears about it at `rig get` /
     # `roster check` / the first turn rather than losing the entry silently.
@@ -3173,14 +4249,25 @@ def _parse_rig(name: str, raw: object) -> Rig:
         if not isinstance(raw_env, dict):
             problems.append('env: expected an object of "NAME": "value" pairs')
         else:
+            seen: dict[str, str] = {}
             for name, value in raw_env.items():
                 problem = _env_name_problem(str(name))
-                if problem:
+                twin = seen.setdefault(canonical_env_name(str(name)), str(name))
+                if twin != str(name):
+                    problems.append(
+                        f"env: {twin} and {name} name the same variable on "
+                        f"Windows - keep one"
+                    )
+                elif problem:
                     problems.append(f"env: {problem}")
                 elif not isinstance(value, str):
                     problems.append(f"env.{name}: expected a string, got {value!r}")
                 else:
-                    rig.env[str(name)] = value
+                    value_problem = env_value_problem(rig.name, str(name), value)
+                    if value_problem:
+                        problems.append(value_problem)
+                    else:
+                        rig.env[canonical_env_name(str(name))] = value
 
     # The rig spend bucket is opt-in: absent leaves both None and the rig gate
     # off. If present, both knobs are required — a real subscription always
@@ -3235,12 +4322,58 @@ def rig_from_spec(name: str, spec: dict) -> Rig:
     return _parse_rig(name, spec)
 
 
+def _parse_deny_floor(raw: object) -> dict[str, list[str]]:
+    """The reserved `deny_floor` key: engine -> deny rules every turn of that
+    engine on this node carries. Refused when the file loads (not at the first
+    turn) for an engine with no deny flag, or one named through its launcher —
+    a floor is keyed by the CLI that enforces it."""
+    if not isinstance(raw, dict):
+        raise RigError('"deny_floor" must be an object of engine -> deny rules')
+    floor: dict[str, list[str]] = {}
+    for name, value in raw.items():
+        if str(name).startswith("_"):
+            continue
+        engine = str(name).strip().lower()
+        entry = ACCESS_TRANSLATION.get(engine)
+        if entry is None or entry.wrapped != engine:
+            wrapped = entry.wrapped if entry else None
+            hint = f" (name the engine it runs: {wrapped})" if wrapped else ""
+            raise RigError(f"deny_floor: {engine!r} is not an engine a floor can name{hint}")
+        if not entry.deny_tool:
+            raise RigError(
+                f"deny_floor: {access_unsupported_reason(engine, 'deny_tools')}"
+            )
+        rules = parse_access_value(value, "deny_floor", where=f"deny_floor.{engine}: ")
+        if rules:
+            floor[engine] = rules
+    return floor
+
+
+def load_deny_floor(path: Path) -> dict[str, list[str]]:
+    """Only the node's `deny_floor`, for a caller that runs no rig (`engine
+    run`). A missing file is no floor; one that cannot be read or parsed
+    refuses, because a floor that silently vanishes with its file is not
+    mandatory. Other rigs in the file are not validated here."""
+    text = read_rig_config_text(path)
+    if text is None:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RigError(f"cannot load rig config {path}: {e}") from e
+    if not isinstance(data, dict):
+        raise RigError(f"rig config {path} must be a JSON object")
+    raw = data.get("deny_floor")
+    return {} if raw is None else _parse_deny_floor(raw)
+
+
 def load_rig_config(path: Path) -> RigConfig:
-    if not path.is_file():
+    text = read_rig_config_text(path)
+    if text is None:
         return RigConfig(path=path, missing=True)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
         raise RigError(f"cannot load rig config {path}: {e}") from e
     if not isinstance(data, dict):
         raise RigError(f"rig config {path} must be a JSON object")
@@ -3259,6 +4392,15 @@ def load_rig_config(path: Path) -> RigConfig:
             continue
         if key == "throttle":
             config.throttle = _parse_throttle(value)
+            continue
+        if key == "deny_floor":
+            config.deny_floor = _parse_deny_floor(value)
+            continue
+        if key == "env_allow":
+            try:
+                config.env_allow = parse_env_allow(value)
+            except RigError as exc:
+                config.env_allow_error = str(exc)
             continue
         if key == "log_retention_days":
             config.log_retention_days = int(

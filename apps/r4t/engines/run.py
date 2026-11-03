@@ -46,14 +46,26 @@ from tempfile import TemporaryDirectory
 from engines import copilot as copilot_engine
 from rig import (
     DEFAULT_TIMEOUT_SECONDS,
+    merge_env,
     HARNESS_PRESETS,
     PERMISSION_MODES,
     Rig,
     RigError,
+    Launch,
+    access_binary_state,
+    home_env_problem,
+    mcp_env,
+    resolve_launch,
+    access_engine,
+    apply_access,
     apply_allowed_tools,
     apply_mcp,
     apply_permissions,
     build_preset_invoke,
+    check_access_support,
+    child_home,
+    normalize_add_dirs,
+    union_rules,
     continue_presets,
     continue_unsupported_reason,
     instrumented_presets,
@@ -81,7 +93,7 @@ except ImportError:
     def missing_interpreter(program: Path | str, path: str | None = None) -> str | None:
         return None
 
-from ar3.proc import spawn as _proc_spawn, terminate_group as _terminate_group
+from ar3.proc import terminate_group as _terminate_group
 
 __all__ = [
     "RUN_ENGINES",
@@ -499,7 +511,9 @@ def _splice_continue(engine: str, argv: list[str]) -> list[str]:
     )
 
 
-def _splice_session(engine: str, argv: list[str], session: str) -> list[str]:
+def _splice_session(
+    engine: str, argv: list[str], session: str, env: dict[str, str] | None = None
+) -> list[str]:
     """`argv` pinned to `session`. The founding turn names the id with
     `--session-id`, every later one drives `--resume=<id>` with the workdir
     forced — a resumed copilot session otherwise runs in the directory it was
@@ -510,6 +524,9 @@ def _splice_session(engine: str, argv: list[str], session: str) -> list[str]:
     copilot is the only preset with a pin, and the store it is looked up in is
     copilot's. A second pinned engine would want that lookup on the preset;
     with one, naming it here is the honest spelling.
+
+    `env` is the environment the CLI will be spawned with: the store is looked
+    up in the home that environment names, not this process's.
     """
     if not session_tokens(engine, resume=True):
         raise RunError(
@@ -519,7 +536,7 @@ def _splice_session(engine: str, argv: list[str], session: str) -> list[str]:
     return splice_session(
         argv,
         tokens=session_tokens(
-            engine, resume=copilot_engine.session_exists(session)
+            engine, resume=copilot_engine.session_exists(session, env)
         ),
         session=session,
     )
@@ -539,6 +556,12 @@ def _build_argv_template(
     instruments: copilot_engine.TurnInstruments | None = None,
     max_credits: int | None = None,
     resident: bool = False,
+    add_dirs: tuple[str, ...] | list[str] = (),
+    allow_tools: tuple[str, ...] | list[str] = (),
+    deny_tools: tuple[str, ...] | list[str] = (),
+    deny_floor: tuple[str, ...] | list[str] = (),
+    env: dict[str, str] | None = None,
+    launch: Launch | None = None,
 ) -> tuple[list[str], str | None]:
     """The final argv for one turn with `{prompt}` still unsubstituted, plus
     the one stderr note a requested permissions mode earns: the preset's own
@@ -575,6 +598,17 @@ def _build_argv_template(
                 "--resident cannot be combined with --continue or --session: "
                 "a resident session holds its own live conversation"
             )
+        if deny_floor:
+            raise RunError(
+                f"this node's deny_floor names {access_engine(engine)} and a "
+                f"resident session cannot carry it, so the launch is refused "
+                f"(run the turn without --resident)"
+            )
+        if add_dirs or allow_tools or deny_tools:
+            raise RunError(
+                "--resident takes no --add-dir, --allow-tool or --deny-tool: "
+                "a resident session is started once and cannot carry them"
+            )
     if resident and engine == "devin":
         from engines.devin_resident import build_template
 
@@ -588,18 +622,34 @@ def _build_argv_template(
         argv = build_preset_invoke(engine, model=model, effort=effort)
         argv, note = apply_permissions(argv, engine, permissions, where="r4t engine: ")
         argv = apply_allowed_tools(argv, engine, allowed_tools, where="r4t engine: ")
+        denies = union_rules(deny_floor, deny_tools)
+        check_access_support(
+            engine, add_dirs=add_dirs, allow_tools=allow_tools, deny_tools=denies,
+            continue_conversation=continue_conversation, where="r4t engine: ",
+        )
+        argv = apply_access(
+            argv,
+            engine,
+            add_dirs=(
+                normalize_add_dirs(add_dirs, home=child_home(env), where="r4t engine: ")
+                if add_dirs else ()
+            ),
+            allow_tools=allow_tools,
+            deny_tools=denies,
+            where="r4t engine: ",
+        )
     except RigError as exc:
         raise RunError(str(exc)) from exc
     if HARNESS_PRESETS[engine].get("model_resolver") == "agy-live" and "{model}" in argv:
         try:
-            resolved = resolve_agy_model(model or "", effort=effort)
+            resolved = resolve_agy_model(model or "", effort=effort, launch=launch)
         except RigError as exc:
             raise RunError(f"agy --model {model!r} did not resolve: {exc}") from exc
         argv = [resolved if a == "{model}" else a for a in argv]
     if continue_conversation:
         argv = _splice_continue(engine, argv)
     if session is not None:
-        argv = _splice_session(engine, argv, session)
+        argv = _splice_session(engine, argv, session, env)
     extras = _run_extras(engine, argv, timeout)
     if instruments is not None:
         extras += instruments.flags()
@@ -624,9 +674,16 @@ def build_argv(
     permissions: str | None = None,
     allowed_tools: str | None = None,
     session: str | None = None,
+    add_dirs: tuple[str, ...] | list[str] = (),
+    allow_tools: tuple[str, ...] | list[str] = (),
+    deny_tools: tuple[str, ...] | list[str] = (),
+    deny_floor: tuple[str, ...] | list[str] = (),
+    launch: Launch | None = None,
 ) -> list[str]:
     """The final, fully-substituted argv for one turn — `_build_argv_template`
-    plus `{prompt}` substitution."""
+    plus `{prompt}` substitution. A caller that launches an engine passes the
+    node's `deny_floor` for it (`RigConfig.floor_for`); a source test refuses
+    a call that leaves the keyword out."""
     template, _ = _build_argv_template(
         engine,
         model=model,
@@ -637,6 +694,11 @@ def build_argv(
         permissions=permissions,
         allowed_tools=allowed_tools,
         session=session,
+        add_dirs=add_dirs,
+        allow_tools=allow_tools,
+        deny_tools=deny_tools,
+        deny_floor=deny_floor,
+        launch=launch,
     )
     return [prompt if a == "{prompt}" else a for a in template]
 
@@ -703,18 +765,20 @@ def interpreter_gap(program: str, path: str | None = None) -> str | None:
     )
 
 
-def _spawn(
-    argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
-) -> int:
-    """Run `argv`, streaming its stdout/stderr through unchanged (no
-    capture — the caller's fds are inherited). On timeout, terminate the
-    whole process group (SIGTERM, a grace period, then SIGKILL): a harness
-    CLI commonly forks tool subprocesses that `proc.kill()` alone would
-    leak, and a grace period lets one that traps SIGTERM exit cleanly."""
+def _spawn(launch: Launch, argv: list[str], timeout: int) -> int:
+    """Run `argv` through `launch`, streaming its stdout/stderr through
+    unchanged (no capture — the caller's fds are inherited). The executable,
+    environment and working directory are the launch's and nothing else's. On
+    timeout, terminate the whole process group (SIGTERM, a grace period, then
+    SIGKILL): a harness CLI commonly forks tool subprocesses that `proc.kill()`
+    alone would leak, and a grace period lets one that traps SIGTERM exit
+    cleanly."""
     try:
-        proc = _proc_spawn(resolve_argv0(argv), cwd=cwd, env=env)
+        proc = launch.start(
+            argv, stdin=subprocess.DEVNULL, new_session=True,
+        )
     except FileNotFoundError as exc:
-        path = (env or os.environ).get("PATH", "")
+        path = launch.env.get("PATH", "")
         raise RunError(
             f"failed to spawn {argv[0]!r}: not on PATH ({path})"
         ) from exc
@@ -728,6 +792,21 @@ def _spawn(
         print(f"r4t engine: turn timed out after {timeout}s", file=sys.stderr)
         return TIMEOUT_EXIT_CODE
     return proc.returncode
+
+
+def _report_measurement(instruments, record: dict | None, *, finished: bool) -> None:
+    """What the turn measured, to stderr and the caller's record. Runs in a
+    `finally`, so it swallows its own failures (`Exception`, not a second
+    interrupt): a diagnostic never changes how a turn ends. A turn that did not
+    finish reports only denials."""
+    try:
+        measured, lines = instruments.measure(denials_only=not finished)
+        if record is not None:
+            record.update(measured)
+        for line in lines:
+            print(f"r4t engine: {line}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def execute(
@@ -759,6 +838,10 @@ def execute(
     git_name: str | None = None,
     git_email: str | None = None,
     resident: bool = False,
+    add_dirs: tuple[str, ...] | list[str] = (),
+    allow_tools: tuple[str, ...] | list[str] = (),
+    deny_tools: tuple[str, ...] | list[str] = (),
+    deny_floor: tuple[str, ...] | list[str] = (),
 ) -> int:
     """Compose the turn's prompt and argv, run it, and return the CLI's own
     exit code (or 124 on a timeout kill). `echo` prints the composed argv and
@@ -777,7 +860,12 @@ def execute(
     see `dispatch.run_harness`. `git_name` / `git_email` put the agent's git
     identity on the child's environment, over any inherited value (see
     `git_identity_env`); a bad value is refused before anything is touched.
-    With the scaffold on and an `agent` named, a turn whose engine takes the
+    `add_dirs`, `allow_tools` and `deny_tools` are the access lists in r4t's
+    grammar (already split); `deny_floor` is the node's mandatory deny rules
+    for this engine, unioned with `deny_tools` and never droppable. A turn
+    that carries any of them records the resolved binary and its version
+    under `record["access"]`. With the scaffold on and an `agent` named, a
+    turn whose engine takes the
     a8s MCP server by a flag (`RUN_MCP_IDIOMS`) gets it spliced in and is
     taught `a8s_tell`; every other engine is taught the shell `tell`. A scaffolded turn whose lessons
     are due for consolidation saves its copies first
@@ -798,6 +886,11 @@ def execute(
             session=session,
             max_credits=max_credits,
             resident=True,
+            add_dirs=add_dirs,
+            allow_tools=allow_tools,
+            deny_tools=deny_tools,
+            deny_floor=deny_floor,
+            env=env,
         )
         if note:
             # The one-shot note names exec's flag; a resident session rewrites
@@ -826,8 +919,7 @@ def execute(
                 else message
             )
             _print_echo(composed, boot_preview, identity)
-        child_env = dict(env if env is not None else os.environ)
-        child_env.update(identity)
+        child_env = merge_env(env if env is not None else os.environ, identity)
         return resident_mod.enqueue_or_start(
             engine,
             message,
@@ -890,9 +982,33 @@ def execute(
             if kind
             else dir_path
         )
+        # The wake's routing facts belong to this turn; a nested `r4t engine run`
+        # must key memory on its own --agent, not inherit this node's store.
+        # The launch is built ONCE, here, with the turn's FINAL environment: the
+        # caller's (minus those routing facts), the git identity, the
+        # instruments' exporter path and the MCP idiom's file variable. Nothing
+        # changes it afterwards; the instruments' feature probe, the access
+        # gate, the models list and the spawn all run through the launch, and
+        # the argv looks things up in the home this environment names (a
+        # pinned session's store, `~/` in add_dirs).
+        env = merge_env(
+            {k: v for k, v in (env if env is not None else os.environ).items()
+             if not k.startswith("A8S_TURN_")},
+            identity,
+            copilot_engine.instrument_env(kind, scratch),
+        )
+        if use_mcp:
+            env = merge_env(env, mcp_env(Rig(name=engine, preset=engine), env, dir_path))
+        bad_home = home_env_problem(env)
+        if bad_home:
+            raise RunError(bad_home)
+        launch = resolve_launch(
+            HARNESS_PRESETS[engine]["invoke"][0], env, cwd=dir_path
+        )
         instruments = stack.enter_context(
             copilot_engine.turn_instruments(
-                kind, scratch=scratch, max_credits=max_credits
+                kind, scratch=scratch, max_credits=max_credits, launch=launch,
+                session=session,
             )
         )
         template, note = _build_argv_template(
@@ -907,46 +1023,73 @@ def execute(
             session=session,
             instruments=instruments,
             max_credits=max_credits,
+            add_dirs=add_dirs,
+            allow_tools=allow_tools,
+            deny_tools=deny_tools,
+            deny_floor=deny_floor,
+            env=launch.env,
+            launch=launch,
         )
         if note:
             print(f"r4t engine: {note}", file=sys.stderr)
-        # The wake's routing facts belong to this turn; a nested `r4t engine run`
-        # must key memory on its own --agent, not inherit this node's store.
-        env = {k: v for k, v in (env if env is not None else os.environ).items()
-               if not k.startswith("A8S_TURN_")}
-        env.update(identity)
+        if template[0] != launch.argv0:
+            # Never vouch for a file the argv does not start.
+            launch = resolve_launch(template[0], launch.env, cwd=dir_path)
+        if add_dirs or allow_tools or deny_tools or deny_floor:
+            try:
+                access = access_binary_state(engine, launch, where="r4t engine: ")
+            except RigError as exc:
+                raise RunError(str(exc)) from exc
+            print(
+                f"r4t engine: access knobs on {access['binary'] or engine} "
+                f"{access['version'] or '?'} ({access['status']})",
+                file=sys.stderr,
+            )
+            if record is not None:
+                record["access"] = access
         if use_mcp:
             try:
-                template = apply_mcp(Rig(name=engine, preset=engine), template, env, dir_path).argv
+                template = apply_mcp(
+                    Rig(name=engine, preset=engine), template, launch.env, dir_path
+                ).argv
             except RigError as exc:
                 raise RunError(str(exc)) from exc
         if echo:
             _print_echo(template, prompt, identity)
-        argv = [prompt if a == "{prompt}" else a for a in template]
+        argv = launch.pin([prompt if a == "{prompt}" else a for a in template])
         if charge_hook is not None:
             charge_hook()
-        if memory_turn is None:
-            exit_code = _spawn(argv, dir_path, timeout, instruments.env_for(env))
-        else:
-            try:
-                exit_code, output = engine_memory.spawn(argv, dir_path, timeout, instruments.env_for(env))
-            except OSError as exc:
+        if instruments.denials is not None:
+            # The events file is read in the home the child will use. A bare
+            # `engine run` takes no lock on a pin, so a pinned turn here never
+            # reads as complete.
+            instruments.denials.bind(launch)
+        # The turn is measured on every exit path: an exception from the spawn
+        # or an interrupt leaves the denials the session already wrote, and the
+        # report below can neither raise nor replace the exit code or the
+        # exception in flight.
+        finished = False
+        try:
+            if memory_turn is None:
+                exit_code = _spawn(launch, argv, timeout)
+            else:
                 try:
-                    memory_turn.finish("", 1)
-                except (OSError, ValueError) as capture_error:
-                    engine_memory.note(f"failed turn capture unavailable: {capture_error}")
-                raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
-            try:
-                memory_turn.finish(output, exit_code)
-            except (OSError, ValueError) as exc:
-                engine_memory.note(f"capture or worker failed: {exc}")
-        if exit_code == 127:
-            gap = interpreter_gap(argv[0], env.get("PATH"))
-            if gap:
-                print(f"r4t engine: exit 127: {gap}", file=sys.stderr)
-        measured, lines = instruments.measure()
-        for line in lines:
-            print(f"r4t engine: {line}", file=sys.stderr)
-        if record is not None:
-            record.update(measured)
+                    exit_code, output = engine_memory.spawn(launch, argv, timeout)
+                except OSError as exc:
+                    try:
+                        memory_turn.finish("", 1)
+                    except (OSError, ValueError) as capture_error:
+                        engine_memory.note(f"failed turn capture unavailable: {capture_error}")
+                    raise RunError(f"failed to spawn {argv[0]!r}: {exc}") from exc
+                try:
+                    memory_turn.finish(output, exit_code)
+                except (OSError, ValueError) as exc:
+                    engine_memory.note(f"capture or worker failed: {exc}")
+            if exit_code == 127:
+                gap = interpreter_gap(argv[0], launch.env.get("PATH"))
+                if gap:
+                    print(f"r4t engine: exit 127: {gap}", file=sys.stderr)
+            finished = True
+        finally:
+            _report_measurement(instruments, record, finished=finished)
     return exit_code

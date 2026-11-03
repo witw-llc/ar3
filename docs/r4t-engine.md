@@ -21,6 +21,8 @@ r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--t
                      [--lessons-cap-bytes N]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
+                     [--add-dir DIR]... [--allow-tool RULE]... [--deny-tool RULE]...
+                     [--rig-config PATH]
                      [--git-name NAME] [--git-email EMAIL]
                      [--resident]
                      [--memory on|off|small|medium|large] [--memory-home DIR]
@@ -78,6 +80,10 @@ tool) plus this turn's own measurement flags (see
   and soft); see the same section.
 - `--continue`, `--permissions MODE`, `--allowed-tools SPEC` — the three
   translated parameters; see below.
+- `--add-dir DIR`, `--allow-tool RULE`, `--deny-tool RULE` — the access
+  knobs: one more directory, approval rule or deny rule in the engine's own
+  flags. Repeatable; a comma list works too; see [access knobs](#access-knobs).
+  `--rig-config` names the file whose `deny_floor` applies to the turn.
 - `--git-name NAME`, `--git-email EMAIL` — the author and committer of each
   new commit the turn makes; see [git identity](#git-identity).
 - `--resident` — keep one long-running session alive across arrivals
@@ -262,6 +268,21 @@ devin takes `permissions` maps in `.devin/config.json` and
 `~/.config/devin/config.json`, never per invocation; muse takes a named
 `--permission-profile` rather than a list).
 
+#### Access knobs
+
+`--add-dir`, `--allow-tool` and `--deny-tool` translate to each engine's own
+flags: claude `--add-dir` / `--allowedTools` / `--disallowedTools`; copilot
+`--add-dir=D` / `--allow-tool=R` / `--deny-tool=R` (URLs are `url(...)` rules);
+codex, cursor and agy take `--add-dir` only; `opencode`, `devin`, `muse` and
+bare `ollama` take none, and the turn fails before it starts, naming the
+engines that do. `ollama-claude`, `ollama-codex` and `ollama-copilot` use the
+wrapped engine's flags. A deny always wins; the node's `deny_floor` is added to
+the denies; `--resident` refuses the knobs and any applicable floor; codex
+refuses `--add-dir` with `--continue`. The full table, grammar, layers and the
+floor are in [Access knobs](r4t-rigs.md#access-knobs-add_dirs-allow_tools-deny_tools).
+The turn records the resolved binary and `--version` (`access` in the record);
+`check` proves the argv parses and nothing more.
+
 #### `--continue`
 
 Resumes the conversation the CLI already has in `--dir`, in the preset's own
@@ -372,6 +393,108 @@ fetched from the server after the variable is honoured, reconfigures the
 exporter to `otlp-http` before the SDK initialises; the spans go to the
 organisation's collector and no file appears. Accounting is built on the usage
 file, which is reliable; the exporter is a bonus that arrived.
+
+**Denials.** A headless copilot turn that touches a path, URL or tool it has
+no rule for is denied and carries on; the reply may not even say so. After each
+turn r4t reads the session's `events.jsonl` (under `COPILOT_HOME` as the child
+saw it, or the child's `HOME` plus `.copilot`) and reports one line:
+
+```
+r4t engine: denied: 0 (complete)
+r4t engine: denied: at least 2 (incomplete: no-shutdown)
+r4t engine: denied: unknown (home-unknown)
+```
+
+`rig run --json` carries the same data as `denials`; a roster turn writes the
+line to the node's day log and keeps the object as `last_denials` in the
+member's meta. It is a **diagnostic, never a gate**: it cannot change an exit
+code, a reader failure is `unknown` and the turn is untouched, and a denial is
+logged and **never told to the owner**. It is read on every exit path of the
+turn, a spawn failure or an interrupt included, and cannot change the exit code
+or the exception in flight.
+
+Copilot 1.0.105 writes a denial in two ways, and both are counted: the
+no-approval-rule fallback (`permission.completed` with a `denied-...` result
+and `unattended_fallback`, then a failed tool record), and a deny rule such as
+`--deny-tool=shell(touch)`, which writes **no** `permission.*` record at all,
+only a failed `tool.execution_complete` with `error.code` `denied`. One denial
+is counted once per tool call, whichever records it left.
+
+```json
+{"observed": 1, "complete": true, "reason": null,
+ "by_tool": {"read": 1},
+ "by_class": {"denied-no-approval-rule-and-could-not-request-from-user": 1},
+ "event_ids": ["..."], "rule_tools": [], "rules_omitted": 0,
+ "session": "<uuid>"}
+```
+
+The record is bounded metadata. `by_tool` uses a fixed set (`shell`, `read`,
+`write`, `url`, `mcp`, `memory`, `other`); `by_class` is the denial kind as a
+slug (`denied-by-rule` for a deny rule); `event_ids` holds at most ten
+validated ids. When a deny rule fired, `rule_tools` names the fixed tools its
+rules were for and `rules_omitted` counts the rules left out; the rule text,
+even a bare command name such as `touch`, is never kept. No argument, command,
+path, URL, rule, prompt or error message ever reaches stderr, a log, JSON or
+meta. `session` is the opaque UUID; no path is stored. Every field passes one
+gate before it leaves the reader; a summary that does not fit the vocabulary is
+replaced by `reader-error`.
+
+A denial record that lacks a usable correlation id (`toolCallId`, `requestId`)
+is still a denial. Uncorrelated records may describe a call already counted
+from the other record family, so they are never added to the correlated count:
+the figure is the number of distinct correlated calls, or 1 when only
+uncorrelated denials were seen, and coverage drops to `unknown-shape`
+(`at least N`).
+
+**When it says "complete".** "Complete" is a proof, decided in one place from a
+positive checklist; anything not proven is not complete. `denied: N (complete)`
+means the reader proved all of:
+
+- the file it read, on the one descriptor it opened (without blocking and
+  without following a link), has the identity it had before the turn (absent
+  then created, or the same device and inode and not shrunk), is still what
+  the path names after the read, was read in full, and did not grow while it
+  was read (a file that grew is `file-grew`, with the count read so far kept as
+  a lower bound; nothing is read again);
+- this turn minted the session (a UUID passed as `--session-id`) or founded the
+  pin under r4t's per-member lock;
+- the slice is at most 8 MiB with no partial last line, and at most 1000
+  distinct denials were found;
+- every line parsed, and every record is either an event kind on the explicit
+  ignorable list or is validated in full: a session start naming this session;
+  a tool start with a call id and a tool name, and an outcome for every start;
+  a tool outcome with a call id that matches a start (successes too), whose
+  failure code is a denial; a permission request that has its
+  `permissionRequest`, an `ownerSessionId` naming this session and an answer;
+  an answer that agrees with its request about the call and the verdict;
+- every id is consistent: no call is recorded with two outcomes, and no request
+  names one call while its answer names another;
+- exactly one `session.shutdown` with a known `shutdownType` is present;
+- the binary is copilot 1.0.105, the one build whose events have been read.
+
+Otherwise the line says `at least N` and the reason (`file-replaced`,
+`truncated`, `file-grew`, `oversize`, `partial-line`, `no-shutdown`, `unknown-shape`,
+`unverified-version`, `shared-pin`), or `unknown` when nothing could be read
+(`home-unknown`, `session-unknown`, `reader-error`, `not-started` for a turn
+refused or failed before its instruments existed, a refused state home
+included, and `not-armed` for a turn that had no denial probe: an unpinned turn
+on a build without the usage flag, or an unresolvable binary, whether the turn
+ran or was refused). Every copilot turn of a roster member writes exactly one
+`last_denials`, so a member's meta is never left as the previous turn's). An event kind that is not on the list, or a failed
+tool call whose code is not a denial, is `unknown-shape` until live evidence
+adds it: a turn is never called clean on a record the reader does not know. A
+resumed pin is always `shared-pin`: a native CLI could attach to it. A pin
+founded by `engine run` is `shared-pin` too, because only a roster turn holds
+the member's lock. A run
+under `run_as` or a container is `home-unknown`, because the child's home is
+not this process's. Past 1000 denials `observed` stays at 1000 with the reason
+`oversize`, and `by_tool` and `by_class` stop at the same 1000. "0, complete"
+means none observed in the proven slice, nothing more.
+
+A turn that is not pinned now gets a minted `--session-id` (on a build that
+takes `--usage-output-file`, 1.0.82 and later), so the events file is known
+before the CLI starts. `ollama-copilot` has no instruments and no denial
+record.
 
 #### `--session UUID` — the pin
 
@@ -986,6 +1109,22 @@ a8s add ada ~/agents/ada engine-claude --GIT_NAME="Ada (agent)" --GIT_EMAIL=ada@
 
 Unset drops the flag, and the node commits as git's own config says. Nothing
 is derived from the node's name: the owner sets each node's identity.
+
+The 22 non-resident definitions also carry `--add-dir=$ADD_DIRS?`,
+`--allow-tool=$ALLOW_TOOLS?` and `--deny-tool=$DENY_TOOLS?` on all three
+wakes, so a node's [access knobs](#access-knobs) are a8s vars with no
+definition edit. r4t reads the string, so the engine's own spelling stays in
+one table:
+
+```bash
+a8s vars ada set ADD_DIRS /srv/repos/shared-lib
+a8s vars ada set ALLOW_TOOLS 'url(dev.example.org),url(github.com)'
+a8s vars ada set DENY_TOOLS 'shell(git push),shell(rm)'
+a8s vars ada unset ADD_DIRS     # the element drops; an empty value gives no entries
+```
+
+An engine with no flag for a knob fails the turn with the reason. The resident
+definitions carry none of the three. Login tokens never go in vars.
 
 Each of the eleven also ships an `engine-<id>-unrestricted` variant: the same
 three wakes invoked with `--permissions bypass`. What that buys differs by

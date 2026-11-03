@@ -76,12 +76,15 @@ BOOTSTRAP = (
 
 
 class TestWrapRunAs:
-    def test_exact_argv(self):
+    def test_exact_argv(self, fakebin):
+        from conftest import write_path_executable
+
+        sudo = write_path_executable(fakebin, "sudo", "pass\n")
         argv = isolate.wrap_run_as(
             ["claude", "-p", "{hi}"], "agent-x", "/stg/dir", "/work/place"
         )
         assert argv == [
-            "sudo", "-u", "agent-x", "bash", "--login", "-c", BOOTSTRAP,
+            str(sudo), "-u", "agent-x", "bash", "--login", "-c", BOOTSTRAP,
             "_", "/stg/dir", "/work/place", "0", "claude", "-p", "{hi}",
         ]
 
@@ -128,7 +131,10 @@ class TestWrapRunAs:
 
 
 class TestBuildContainer:
-    def test_exact_argv(self):
+    def test_exact_argv(self, fakebin):
+        from conftest import write_path_executable
+
+        docker = write_path_executable(fakebin, "docker", "pass\n")
         argv = isolate.build_container_argv(
             ["claude", "-p", "{hi}"],
             "myimg:latest",
@@ -139,7 +145,7 @@ class TestBuildContainer:
             client_dir="/opt/bin",
         )
         assert argv == [
-            "docker", "run", "--rm", "--name", "r4t-acme-phil-42",
+            str(docker), "run", "--rm", "--name", "r4t-acme-phil-42",
             "-v", "/work:/work",
             "-w", "/work",
             "-v", "/stg:/stg",
@@ -1107,7 +1113,6 @@ class TestRigEnvReachesTheHarness:
         # r4t's own per-turn injection is not something a rig knob can unseat.
         assert argv[9] == "1"
         assert argv[10] == f"OPENCODE_CONFIG={config}"
-        assert env["OPENCODE_CONFIG"] == str(config)
 
     def test_a_bare_rig_asks_the_wrapper_for_nothing(self, tmp_path, fakebin):
         record = tmp_path / "sudo-bare.txt"

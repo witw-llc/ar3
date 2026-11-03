@@ -2080,3 +2080,75 @@ def test_bundled_engine_memory_all_wakes(engine_id, unrestricted, tmp_path):
         assert "--memory-home=/portable memory" in argv
         assert "--memory-people=operator-phone" in argv
         assert "--memory-writer=curator" in argv
+
+
+class TestEngineAccessVars:
+    """`ADD_DIRS`, `ALLOW_TOOLS` and `DENY_TOOLS` reach `r4t engine <id> run`
+    through the non-resident bundled definitions with no definition edit: an
+    unset var drops its element (`$NAME?`), a set one rides `--flag=value` and
+    r4t parses the string."""
+
+    VARIANTS = tuple(
+        f"engine-{engine_id}{suffix}"
+        for engine_id in RUN_ENGINE_IDS
+        for suffix in ("", "-unrestricted")
+    )
+    VARS = {
+        "ADD_DIRS": "/srv/repos/shared-lib",
+        "ALLOW_TOOLS": "url(example.org),url(example.net)",
+        "DENY_TOOLS": "shell(git push),shell(rm)",
+    }
+
+    @staticmethod
+    def _node_vars(name, extra=None):
+        base = {"MODEL": "qwen3.6"} if "ollama-" in name else {}
+        return {**base, **(extra or {})}
+
+    def _wakes(self, name, agent_root, node_vars):
+        from definitions import BatchEntry, build_batch_command, build_idle_command
+
+        defn = json.loads(default_definition_path(name).read_text(encoding="utf-8"))
+        entries = [
+            BatchEntry({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json")
+        ]
+        return {
+            "single": build_command(
+                defn, {"from": "a", "to": "node1", "content": "hi"}, agent_root,
+                vars=node_vars,
+            ),
+            "batch": build_batch_command(defn, "node1", entries, vars=node_vars),
+            "idle": build_idle_command(defn, "node1", vars=node_vars),
+        }
+
+    def test_there_are_twenty_two_definitions(self):
+        assert len(self.VARIANTS) == 22
+
+    @pytest.mark.parametrize("name", VARIANTS)
+    def test_set_vars_ride_all_three_wake_paths(self, name, tmp_path):
+        for wake, argv in self._wakes(
+            name, tmp_path, self._node_vars(name, self.VARS)
+        ).items():
+            assert "--add-dir=/srv/repos/shared-lib" in argv, wake
+            assert "--allow-tool=url(example.org),url(example.net)" in argv, wake
+            assert "--deny-tool=shell(git push),shell(rm)" in argv, wake
+
+    @pytest.mark.parametrize("name", VARIANTS)
+    def test_unset_vars_drop_their_elements(self, name, tmp_path):
+        for wake, argv in self._wakes(name, tmp_path, self._node_vars(name)).items():
+            assert not [a for a in argv if a.startswith(("--add-dir", "--allow-tool", "--deny-tool"))], wake
+
+    @pytest.mark.parametrize("name", VARIANTS)
+    def test_an_empty_var_is_an_empty_value_for_r4t_to_read_as_no_entries(self, name, tmp_path):
+        argv = self._wakes(name, tmp_path, self._node_vars(name, {"ADD_DIRS": ""}))["single"]
+        assert "--add-dir=" in argv
+
+    def test_the_resident_definitions_carry_no_knob(self):
+        # A resident session is started once and cannot take the lists.
+        from pathlib import Path
+
+        resident = sorted(
+            default_definition_path("engine-claude").parent.glob("engine-*-resident*.json")
+        )
+        assert resident
+        for path in resident:
+            assert "ADD_DIRS" not in path.read_text(encoding="utf-8"), path.name
