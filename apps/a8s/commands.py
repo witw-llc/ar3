@@ -4595,10 +4595,10 @@ def cmd_unstorage(args: list[str]) -> int:
     return 0
 
 
-def cmd_health() -> int:
-    """`a8s health` — test connectivity of all configured remotes and storage services."""
-    import tempfile
-    from network import configured_service_ids, load_remotes, load_services
+def _probe_remotes() -> int:
+    """Probe every configured remote once and print one line each. Machine-wide
+    and read-only: the probe clients consume nothing. Returns the FAIL count."""
+    from network import load_remotes
 
     errors = 0
 
@@ -4644,7 +4644,41 @@ def cmd_health() -> int:
         except Exception as e:
             print(f"remote {name}: FAIL ({e}){unknown}")
             errors += 1
+    return errors
 
+
+def _health_arguments(args: list[str]):
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="a8s health", allow_abbrev=False,
+        description="Test remotes and storage, or inspect one node.",
+    )
+    parser.add_argument(
+        "node", nargs="?",
+        help="Inspect this local node: definition, runtime, probes and live engine quota.",
+    )
+    try:
+        return parser.parse_args(args)
+    except SystemExit as exc:
+        return int(exc.code)
+
+
+def cmd_health(args: list[str] | None = None) -> int:
+    """`a8s health` — test connectivity of all configured remotes and storage
+    services. `a8s health <node>` inspects one node instead (node_health.py)."""
+    import tempfile
+    from network import configured_service_ids, load_services
+
+    options = _health_arguments(args or [])
+    if isinstance(options, int):
+        return options
+    if options.node is not None:
+        from node_health import cmd_node_health
+
+        return cmd_node_health(options.node)
+
+    errors = _probe_remotes()
     services = load_services()
     built_services = {svc.id for svc in services}
     skipped_services = [name for name in configured_service_ids() if name not in built_services]

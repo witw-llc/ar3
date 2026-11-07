@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import signal
+import subprocess
+import sys
 import textwrap
 import time
 from pathlib import Path
@@ -210,6 +214,29 @@ FAKE_SERVE = textwrap.dedent(
 
     def mint():
         time.sleep(DELAY)
+        completion = os.environ.get("FAKE_MUSE_COMPLETION")
+        if completion:
+            terminals = json.loads(completion)
+            if isinstance(terminals, dict):
+                terminals = [terminals]
+            for terminal in terminals:
+                emit({{"jsonrpc": "2.0", "method": "turn/completed",
+                      "params": terminal}})
+            return
+        if os.environ.get("FAKE_MUSE_UNRELATED_COMPLETION"):
+            for session, turn in (("other-session", "t1"), ("s1", "other-turn")):
+                emit({{"jsonrpc": "2.0", "method": "turn/completed",
+                      "params": {{"sessionId": session, "turnId": turn,
+                                 "terminal": "failed", "error": {{
+                                     "kind": "modelError", "quota": {{
+                                         "limitKind": "tierLimit",
+                                         "resetsAtMs": int(time.time() * 1000) + 3600000
+                                     }}
+                                 }} }} }})
+                emit({{"jsonrpc": "2.0", "method": "turn/completed",
+                      "params": {{"sessionId": session, "turnId": turn,
+                                 "terminal": "completed"}} }})
+            time.sleep(0.15)
         if not NEVER:
             # usage/changed deliberately arrives WITHOUT turn/completed —
             # the client must take the observation and cancel, not hold out
@@ -235,17 +262,22 @@ FAKE_SERVE = textwrap.dedent(
             emit({{"jsonrpc": "2.0", "id": rid,
                   "result": {{"session": {{"sessionId": "s1"}}, "viewCursor": "v:1"}}}})
         elif method == "turn/start":
+            if os.environ.get("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT"):
+                mint()
             emit({{"jsonrpc": "2.0", "id": rid,
                   "result": {{"commandId": msg["params"]["commandId"],
                               "status": "accepted", "turnId": "t1",
                               "disposition": "started", "startedNewTurn": True}}}})
-            threading.Thread(target=mint, daemon=True).start()
+            if not os.environ.get("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT"):
+                threading.Thread(target=mint, daemon=True).start()
         elif method == "turn/cancel":
             emit({{"jsonrpc": "2.0", "id": rid,
                   "result": {{"commandId": msg["params"]["commandId"],
                               "status": "accepted", "turnId": "t1"}}}})
+            late_completion = os.environ.get("FAKE_MUSE_CANCEL_COMPLETION")
             emit({{"jsonrpc": "2.0", "method": "turn/completed",
-                  "params": {{"sessionId": "s1", "turnId": "t1"}}}})
+                  "params": json.loads(late_completion) if late_completion else
+                            {{"sessionId": "s1", "turnId": "t1"}}}})
     """
 ).format(usage=FAKE_USAGE)
 
@@ -365,6 +397,211 @@ FRESH_SNAPSHOT = {
 }
 
 
+class TestProbeQuotaExhaustion:
+    def _completion(self, monkeypatch, *, detail=None, error=None):
+        if error is None:
+            error = {
+                "kind": "modelError",
+                "message": "private-provider-text-secret@example.invalid",
+                "quota": detail if detail is not None else {
+                    "limitKind": "tierLimit",
+                    "resetsAtMs": int(time.time() * 1000) + 3600000,
+                },
+            }
+        monkeypatch.setenv("FAKE_MUSE_COMPLETION", json.dumps({
+            "sessionId": "s1", "turnId": "t1", "terminal": "failed",
+            "error": error, "retryable": False,
+        }))
+
+    @pytest.mark.parametrize("as_json", [False, True])
+    @pytest.mark.parametrize("expired", [False, True])
+    def test_public_quota_replaces_positive_snapshot_with_zero(
+        self, fake_serve, r4t_home, monkeypatch, capsys, as_json, expired
+    ):
+        import r4t as r4t_mod
+
+        self._completion(monkeypatch)
+        snapshot = {**FRESH_SNAPSHOT, "buckets": [{
+            **FRESH_SNAPSHOT["buckets"][0],
+            "reset_time": "2000-01-01T00:00:00+00:00" if expired else
+                          "2099-01-01T00:00:00+00:00",
+        }]}
+        engines.save_snapshot("muse", snapshot)
+        assert r4t_mod.main(["engine", "muse", "quota"] +
+                            (["--json"] if as_json else [])) == 0
+        output = capsys.readouterr()
+        assert not output.err
+        assert "private-provider-text" not in output.out
+        assert "Subscription Limit" in output.out
+        if as_json:
+            payload = json.loads(output.out)
+            assert payload["origin"] == "live"
+            assert payload["buckets"] == [{
+                "label": "Subscription Limit", "remaining_fraction": 0.0,
+                "reset_time": payload["buckets"][0]["reset_time"],
+            }]
+            assert payload["buckets"][0]["reset_time"]
+        else:
+            assert "0%" in output.out
+        saved = engines.load_snapshot("muse")
+        assert saved["buckets"][0]["remaining_fraction"] == 0.0
+        report = engines.fuel("muse", model="muse-spark-1.2")
+        assert report["fuel"] == 0.0 and report["state"] == "gauged"
+        assert report["origin"] == "snapshot"
+        assert len([f for f in frames_of(fake_serve)
+                    if f.get("method") == "turn/start"]) == 1
+
+    @pytest.mark.parametrize("timing", ["before_receipt", "after_usage"])
+    def test_matching_exhaustion_survives_notification_order(
+        self, fake_serve, monkeypatch, timing
+    ):
+        self._completion(monkeypatch)
+        if timing == "before_receipt":
+            monkeypatch.setenv("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT", "1")
+        else:
+            monkeypatch.setenv("FAKE_MUSE_CANCEL_COMPLETION",
+                               os.environ["FAKE_MUSE_COMPLETION"])
+            monkeypatch.delenv("FAKE_MUSE_COMPLETION")
+        payload = muse_engine.quota()
+        assert payload["buckets"][0]["label"] == "Subscription Limit"
+        assert payload["buckets"][0]["remaining_fraction"] == 0.0
+
+    @pytest.mark.parametrize("before_receipt", [False, True])
+    @pytest.mark.parametrize("failure_first", [False, True])
+    def test_matching_exhaustion_survives_other_turns_and_conflicting_replays(
+        self, fake_serve, r4t_home, monkeypatch, before_receipt, failure_first
+    ):
+        self._completion(monkeypatch)
+        exhausted = json.loads(os.environ["FAKE_MUSE_COMPLETION"])
+        success = {"sessionId": "s1", "turnId": "t1", "terminal": "completed"}
+        others = [{"sessionId": "s1", "turnId": f"other-{i}",
+                   "terminal": "completed"} for i in range(3)]
+        terminals = ([exhausted, exhausted, success] + others if failure_first
+                     else others + [success, exhausted, exhausted])
+        monkeypatch.setenv("FAKE_MUSE_COMPLETION", json.dumps(terminals))
+        if before_receipt:
+            monkeypatch.setenv("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT", "1")
+        monkeypatch.setattr(muse_engine, "MINT_TIMEOUT_S", 0.5)
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        payload = engines.quota("muse", spend=True)
+        assert payload["origin"] == "live"
+        assert payload["buckets"][0]["remaining_fraction"] == 0.0
+
+    def test_pending_completion_overflow_invalidates_snapshot_without_guessing(
+        self, fake_serve, r4t_home, monkeypatch
+    ):
+        self._completion(monkeypatch)
+        terminals = [json.loads(os.environ["FAKE_MUSE_COMPLETION"])] + [
+            {"sessionId": "s1", "turnId": f"other-{i}", "terminal": "completed"}
+            for i in range(3)
+        ]
+        monkeypatch.setenv("FAKE_MUSE_COMPLETION", json.dumps(terminals))
+        monkeypatch.setenv("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT", "1")
+        monkeypatch.setattr(muse_engine, "PENDING_COMPLETIONS_LIMIT", 3)
+        monkeypatch.setattr(muse_engine, "MINT_TIMEOUT_S", 0.5)
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        with pytest.raises(engines.QuotaInvalidated, match="completion limit exceeded"):
+            engines.quota("muse", spend=True)
+        with pytest.raises(QuotaError, match="spends a provider turn"):
+            engines.fuel("muse", model="muse-spark-1.2")
+        assert engines.load_snapshot("muse") is None
+        assert len([f for f in frames_of(fake_serve)
+                    if f.get("method") == "turn/start"]) == 1
+
+    @pytest.mark.parametrize("detail", [
+        {"limitKind": "modelLimit", "resetsAtMs": 2000000000000},
+        {"limitKind": "tierLimit"},
+        {"limitKind": "tierLimit", "resetsAtMs": None},
+        {"limitKind": "tierLimit", "resetsAtMs": True},
+        {"limitKind": "tierLimit", "resetsAtMs": "2000000000000"},
+        {"limitKind": "tierLimit", "resetsAtMs": 1},
+        {"limitKind": "tierLimit", "resetsAtMs": 999999999999999999999},
+    ])
+    def test_ungaugeable_quota_refusal_cannot_resurrect_positive_snapshot(
+        self, fake_serve, r4t_home, monkeypatch, detail
+    ):
+        self._completion(monkeypatch, detail=detail)
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        with pytest.raises(engines.QuotaExhausted) as exc:
+            engines.quota("muse", spend=True)
+        assert "private-provider-text" not in str(exc.value)
+        assert "snapshot" not in str(exc.value)
+        with pytest.raises(QuotaError, match="spends a provider turn"):
+            engines.fuel("muse", model="muse-spark-1.2")
+        assert engines.load_snapshot("muse") is None
+        assert len([f for f in frames_of(fake_serve)
+                    if f.get("method") == "turn/start"]) == 1
+
+    def test_positive_reading_recovers_after_quota_invalidation(
+        self, fake_serve, r4t_home, monkeypatch
+    ):
+        self._completion(monkeypatch, detail={"limitKind": "tierLimit"})
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        with pytest.raises(engines.QuotaExhausted):
+            engines.quota("muse", spend=True)
+        monkeypatch.delenv("FAKE_MUSE_COMPLETION")
+        payload = engines.quota("muse", spend=True)
+        assert payload["origin"] == "live"
+        assert payload["buckets"][0]["remaining_fraction"] == 0.6
+        assert engines.load_snapshot("muse")["buckets"] == payload["buckets"]
+
+    def test_snapshot_invalidation_failure_is_explicit_and_safe(
+        self, fake_serve, r4t_home, monkeypatch
+    ):
+        self._completion(monkeypatch, detail={"limitKind": "tierLimit"})
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        real_unlink = Path.unlink
+        snapshot = engines.snapshot_path("muse")
+
+        def refuse_snapshot(path, *args, **kwargs):
+            if path == snapshot:
+                raise PermissionError("private-filesystem-detail")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", refuse_snapshot)
+        with pytest.raises(engines.QuotaInvalidated, match="saved quota invalidation failed") as exc:
+            engines.quota("muse", spend=True)
+        assert "private-filesystem-detail" not in str(exc.value)
+
+    def test_public_json_refuses_quota_with_unknown_reset_despite_snapshot(
+        self, fake_serve, r4t_home, monkeypatch, capsys
+    ):
+        import r4t as r4t_mod
+
+        self._completion(monkeypatch, detail={"limitKind": "tierLimit"})
+        engines.save_snapshot("muse", dict(FRESH_SNAPSHOT))
+        assert r4t_mod.main(["engine", "muse", "quota", "--json"]) == 1
+        output = capsys.readouterr()
+        assert not output.out
+        assert "subscription quota exhausted; reset time unavailable" in output.err
+        assert "private-provider-text" not in output.err
+
+    @pytest.mark.parametrize("error", [
+        {"kind": "modelError", "message": "429 quota exhausted private-token"},
+        {"kind": "modelError", "message": "private-token", "quota": None},
+        {"kind": "modelError", "message": "private-token", "quota": []},
+    ])
+    def test_untyped_failure_is_not_zero_and_does_not_publish_provider_text(
+        self, fake_serve, r4t_home, monkeypatch, error
+    ):
+        self._completion(monkeypatch, error=error)
+        with pytest.raises(QuotaError, match="probe turn failed without a quota observation") as exc:
+            engines.quota("muse", spend=True)
+        assert "private-token" not in str(exc.value)
+        assert engines.load_snapshot("muse") is None
+
+    @pytest.mark.parametrize("before_receipt", [False, True])
+    def test_other_session_or_turn_failure_does_not_override_probe_usage(
+        self, fake_serve, monkeypatch, before_receipt
+    ):
+        monkeypatch.setenv("FAKE_MUSE_UNRELATED_COMPLETION", "1")
+        if before_receipt:
+            monkeypatch.setenv("FAKE_MUSE_COMPLETION_BEFORE_RECEIPT", "1")
+        payload = muse_engine.quota()
+        assert payload["buckets"][0]["remaining_fraction"] == 0.6
+        assert payload["buckets"][0]["label"] == "Five Hour Limit"
+
+
 class TestSpendGate:
     """Muse declares `QUOTA_SPENDS_TURN`, so `engines.quota`/`fuel` must not
     invoke its checker unless the caller opted in. The case that bit:
@@ -444,3 +681,378 @@ class TestSpendGate:
         assert row.origin == "snapshot"
         assert not fake_serve.exists()
         assert not (tmp_path / "pid").exists()
+
+
+FAKE_USAGE_CLI = textwrap.dedent(
+    """\
+    #!/usr/bin/env python3
+    import json, os, subprocess, sys, time
+
+    mode = os.environ.get("FAKE_USAGE_MODE", "fresh")
+    with open(os.environ["FAKE_USAGE_LOG"], "a", encoding="utf-8") as f:
+        f.write(json.dumps({"argv": sys.argv[1:], "stdin_tty": sys.stdin.isatty(),
+                            "no_update": os.environ.get("MUSE_NO_AUTO_UPDATE")}) + "\\n")
+    if sys.argv[1:] == ["--version"]:
+        print("muse 1.4.12" if mode == "old" else "muse 1.4.14")
+        sys.exit(0)
+    if mode == "old":
+        print("TURN STARTED")
+        sys.exit(0)
+    if mode in ("fresh", "timeout"):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        with open(os.environ["FAKE_USAGE_CHILD"], "w", encoding="utf-8") as f:
+            f.write(str(child.pid))
+    if mode == "timeout":
+        time.sleep(60)
+    if mode == "unsupported":
+        print("error: unrecognized subcommand 'usage'", file=sys.stderr)
+        sys.exit(2)
+    if mode == "nonzero":
+        print("boom", file=sys.stderr)
+        sys.exit(3)
+    if mode == "badjson":
+        print("not json")
+        sys.exit(0)
+    now = int(time.time() * 1000)
+    as_of = {"stale": now - 600000, "future": now + 600000}.get(mode, now)
+    allowance = {
+        "source": "cache" if mode == "cache" else "mint",
+        "asOfMs": as_of, "tier": "fake-tier",
+        "window": {"usedPercent": 100 if mode == "exhausted" else 125 if mode == "overlimit" else 25,
+                   "resetsAtMs": now + 3600000},
+        "weekly": {"usedPercent": -1 if mode == "badpercent" else 40,
+                   "resetsAtMs": now + 86400000},
+    }
+    if mode == "null":
+        allowance = None
+    print(json.dumps({"schemaVersion": 1, "allowance": allowance,
+                      "reason": "no observation" if mode == "null" else None,
+                      "hint": None}))
+    """
+)
+
+
+@pytest.fixture
+def fake_usage(tmp_path, monkeypatch):
+    write_path_executable(tmp_path / "bin", "muse", FAKE_USAGE_CLI)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("FAKE_USAGE_LOG", str(tmp_path / "call.json"))
+    monkeypatch.setenv("FAKE_USAGE_CHILD", str(tmp_path / "child.pid"))
+
+    def mode(name):
+        monkeypatch.setenv("FAKE_USAGE_MODE", name)
+    mode("fresh")
+    fake_usage_state = type("S", (), {"mode": staticmethod(mode), "tmp": tmp_path})
+    return fake_usage_state
+
+
+def _gone(pid: int) -> bool:
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split(")")[-1].split()[0]
+            if state == "Z":
+                return True
+        except OSError:
+            pass
+        time.sleep(0.05)
+    return False
+
+
+class TestLiveUsage:
+    """`muse usage --json` is the free live read: fresh or unavailable, with
+    no turn, no session mint and no snapshot behind it."""
+
+    def test_fresh_allowance_is_a_live_answer_and_leaves_no_child(self, fake_usage):
+        payload = engines.quota("muse", live=True)
+        assert payload["origin"] == "live" and payload["engine"] == "muse"
+        assert payload["plan"] == "fake-tier"
+        assert [b["label"] for b in payload["buckets"]] == ["Window Limit", "Weekly Limit"]
+        assert payload["buckets"][0]["remaining_fraction"] == 0.75
+        assert payload["buckets"][1]["remaining_fraction"] == 0.6
+        assert payload["requested_at"] and "requested at" in payload["note"] and "no model turn" in payload["note"]
+        calls = [json.loads(l) for l in
+                 (fake_usage.tmp / "call.json").read_text(encoding="utf-8").splitlines()]
+        assert [c["argv"] for c in calls] == [["--version"], ["usage", "--json"]]
+        assert all(c["stdin_tty"] is False and c["no_update"] == "1" for c in calls)
+        pid = int((fake_usage.tmp / "child.pid").read_text(encoding="utf-8"))
+        assert _gone(pid)
+
+    @pytest.mark.parametrize("mode", ["exhausted", "overlimit"])
+    def test_exhausted_reads_as_zero_remaining(self, fake_usage, mode):
+        fake_usage.mode(mode)
+        assert engines.quota("muse", live=True)["buckets"][0]["remaining_fraction"] == 0.0
+
+    @pytest.mark.parametrize("mode, text", [
+        ("stale", "predates"),
+        ("future", "future"),
+        ("cache", "not a fresh"),
+        ("null", "no allowance"),
+        ("badjson", "non-JSON"),
+        ("badpercent", "usedPercent"),
+        ("nonzero", "exited 3"),
+        ("unsupported", "upgrade muse"),
+        ("old", "upgrade muse"),
+    ])
+    def test_anything_short_of_a_fresh_mint_is_unavailable(self, fake_usage, mode, text):
+        fake_usage.mode(mode)
+        with pytest.raises(QuotaError, match=text):
+            engines.quota("muse", live=True)
+
+    def test_timeout_is_bounded_and_the_process_group_is_ended(
+        self, fake_usage, monkeypatch
+    ):
+        monkeypatch.setattr(muse_engine, "LIVE_TIMEOUT_S", 1)
+        fake_usage.mode("timeout")
+        started = time.time()
+        with pytest.raises(QuotaError, match="did not answer in 1s"):
+            engines.quota("muse", live=True)
+        assert time.time() - started < 8
+        pid = int((fake_usage.tmp / "child.pid").read_text(encoding="utf-8"))
+        assert _gone(pid)
+
+    def test_sigterm_during_a_live_read_unwinds_and_ends_the_child_group(
+        self, fake_usage, monkeypatch
+    ):
+        import threading
+
+        import r4t as r4t_mod
+
+        fake_usage.mode("timeout")
+        before = signal.getsignal(signal.SIGTERM)
+        timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGTERM))
+        timer.start()
+        started = time.time()
+        try:
+            with pytest.raises(SystemExit) as caught:
+                r4t_mod.main(["engine", "muse", "quota", "--live", "--json"])
+        finally:
+            timer.cancel()
+        assert caught.value.code == 128 + signal.SIGTERM
+        assert time.time() - started < 8
+        assert signal.getsignal(signal.SIGTERM) == before
+        pid = int((fake_usage.tmp / "child.pid").read_text(encoding="utf-8"))
+        assert _gone(pid)
+
+    @pytest.mark.parametrize("patch", [
+        lambda a: a.update(schemaVersion=2),
+        lambda a: a["allowance"].update(asOfMs=True),
+        lambda a: a["allowance"]["window"].update(resetsAtMs=0),
+        lambda a: a["allowance"]["window"].update(usedPercent=float("nan")),
+        lambda a: a["allowance"]["weekly"].update(usedPercent=-1),
+        lambda a: a["allowance"].update(window=None, weekly=None),
+    ])
+    def test_parser_rejects_malformed_observations(self, patch):
+        now = int(time.time() * 1000)
+        data = {"schemaVersion": 1, "allowance": {
+            "source": "mint", "asOfMs": now, "tier": "t",
+            "window": {"usedPercent": 1, "resetsAtMs": now + 1000},
+            "weekly": {"usedPercent": 2, "resetsAtMs": now + 2000}}}
+        patch(data)
+        with pytest.raises(QuotaError):
+            muse_engine.parse_live_usage(json.dumps(data), now, now)
+
+    def test_old_binary_is_refused_without_calling_usage(self, fake_usage):
+        fake_usage.mode("old")
+        with pytest.raises(QuotaError, match="1.4.13"):
+            engines.quota("muse", live=True)
+        calls = (fake_usage.tmp / "call.json").read_text(encoding="utf-8").splitlines()
+        assert len(calls) == 1 and "--version" in calls[0]
+
+    def test_provider_stderr_and_odd_reasons_are_not_relayed(self, fake_usage):
+        fake_usage.mode("nonzero")
+        with pytest.raises(QuotaError) as exc:
+            engines.quota("muse", live=True)
+        assert "boom" not in str(exc.value)
+        data = {"schemaVersion": 1, "allowance": None, "reason": "no_allowance",
+                "hint": "sentinel-secret-7d41"}
+        with pytest.raises(QuotaError) as exc:
+            muse_engine.parse_live_usage(json.dumps(data), 0, 0)
+        assert "no_allowance" in str(exc.value) and "sentinel" not in str(exc.value)
+        data.update(reason="sentinel_reason", hint="login_again")
+        with pytest.raises(QuotaError) as exc:
+            muse_engine.parse_live_usage(json.dumps(data), 0, 0)
+        assert str(exc.value) == "muse usage reported no allowance"
+
+    def test_provider_tier_text_is_dropped_unless_plain(self):
+        now = int(time.time() * 1000)
+        data = {"schemaVersion": 1, "allowance": {
+            "source": "mint", "asOfMs": now, "tier": "bad\ntoken=sentinel/x",
+            "window": {"usedPercent": 1, "resetsAtMs": now + 1000}}}
+        assert muse_engine.parse_live_usage(json.dumps(data), now, now)["plan"] is None
+
+    def test_wait_keeps_the_leader_unreaped_until_the_group_is_ended(self, monkeypatch):
+        if not hasattr(os, "waitid"):
+            pytest.skip("no waitid")
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        seen = []
+        real = muse_engine.terminate_group
+        monkeypatch.setattr(muse_engine, "terminate_group", lambda p, **k: (
+            seen.append(proc.returncode), real(p, **k)))
+        muse_engine._wait_exit(proc, 5)
+        assert muse_engine._end_group(proc) == 0
+        assert seen == [None]
+
+    def test_waitid_path_ends_the_group_with_grace_before_a_bounded_reap(
+        self, monkeypatch
+    ):
+        if not hasattr(os, "waitid"):
+            pytest.skip("no waitid")
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        graces, waits = [], []
+        real_terminate, real_wait = muse_engine.terminate_group, proc.wait
+        monkeypatch.setattr(muse_engine, "terminate_group", lambda p, **k: (
+            graces.append(k.get("grace_seconds")), real_terminate(p, **k)))
+        monkeypatch.setattr(proc, "wait", lambda timeout=None: (
+            waits.append(timeout), real_wait(timeout))[1])
+        muse_engine._wait_exit(proc, 5)
+        muse_engine._end_group(proc)
+        assert graces == [0.5] and waits == [2]
+
+    def test_a_leader_that_will_not_be_reaped_is_bounded_not_waited_forever(
+        self, monkeypatch
+    ):
+        class Stuck:
+            pid, returncode = 1234567, None
+
+            def wait(self, timeout=None):
+                assert timeout == 2
+                raise subprocess.TimeoutExpired("muse", timeout)
+
+        monkeypatch.setattr(muse_engine, "terminate_group", lambda p, **k: None)
+        with pytest.raises(QuotaError, match="did not exit after teardown"):
+            muse_engine._end_group(Stuck())
+
+    @staticmethod
+    def _fake_kqueue(monkeypatch, *, register_error=None, events=()):
+        import types
+
+        log = {"control": [], "closed": 0}
+
+        class Queue:
+            def control(self, changes, n, timeout=None):
+                log["control"].append((changes, n, timeout))
+                if changes and register_error:
+                    raise register_error
+                return list(events) if not changes else []
+
+            def close(self):
+                log["closed"] += 1
+
+        monkeypatch.delattr(os, "waitid", raising=False)
+        for name, val in (("KQ_FILTER_PROC", -5), ("KQ_EV_ADD", 1), ("KQ_EV_ONESHOT", 16),
+                          ("KQ_NOTE_EXIT", 0x80000000), ("KQ_EV_ERROR", 0x4000)):
+            monkeypatch.setattr(select, name, val, raising=False)
+        monkeypatch.setattr(select, "kevent", lambda ident, **k: types.SimpleNamespace(ident=ident, **k), raising=False)
+        monkeypatch.setattr(select, "kqueue", Queue, raising=False)
+        return log
+
+    def test_forced_kqueue_normal_event_returns_without_reaping(self, monkeypatch):
+        import types
+
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        log = self._fake_kqueue(monkeypatch, events=[
+            types.SimpleNamespace(ident=proc.pid, fflags=0x80000000, flags=0)])
+        muse_engine._wait_exit(proc, 5)
+        assert proc.returncode is None and log["closed"] == 1
+        proc.wait()
+
+    def test_forced_kqueue_esrch_at_registration_means_exited(self, monkeypatch):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        log = self._fake_kqueue(monkeypatch, register_error=ProcessLookupError())
+        muse_engine._wait_exit(proc, 5)
+        assert proc.returncode is None and log["closed"] == 1
+        proc.wait()
+
+    def test_forced_kqueue_timeout_is_bounded_and_reregisters(self, monkeypatch):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                start_new_session=True)
+        try:
+            log = self._fake_kqueue(monkeypatch)
+            monkeypatch.setattr(muse_engine, "KQUEUE_SLICE_S", 0.01)
+            started = time.monotonic()
+            with pytest.raises(subprocess.TimeoutExpired):
+                muse_engine._wait_exit(proc, 0.05)
+            assert time.monotonic() - started < 2
+            registers = [c for c in log["control"] if c[0]]
+            assert len(registers) >= 2 and log["closed"] == 1
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_forced_neither_api_reaped_exit_signals_nothing(self, monkeypatch):
+        monkeypatch.delattr(os, "waitid", raising=False)
+        monkeypatch.delattr(select, "kqueue", raising=False)
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        muse_engine._wait_exit(proc, 5)
+        assert proc.returncode == 0
+        monkeypatch.setattr(muse_engine.os, "killpg", lambda *a: pytest.fail("killpg"))
+        monkeypatch.setattr(muse_engine.os, "kill", lambda *a: pytest.fail("kill(pid)"))
+        monkeypatch.setattr(muse_engine.os, "getpgid", lambda *a: pytest.fail("getpgid"))
+        monkeypatch.setattr(
+            muse_engine, "terminate_group", lambda *a, **k: pytest.fail("terminate_group")
+        )
+        assert muse_engine._end_group(proc) == 0
+
+    def test_foreign_reap_on_the_waitid_path_signals_nothing(self, monkeypatch):
+        if not hasattr(os, "waitid"):
+            pytest.skip("no waitid")
+        proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        proc.wait()  # reaped elsewhere: waitid now raises ChildProcessError
+        proc.returncode = None
+        monkeypatch.setattr(
+            muse_engine, "terminate_group", lambda *a, **k: pytest.fail("terminate_group")
+        )
+        muse_engine._wait_exit(proc, 5)
+        assert muse_engine._end_group(proc) is not None
+
+    def test_forced_windows_reaped_exit_runs_no_taskkill(self, monkeypatch):
+        import types
+
+        fake_os = types.SimpleNamespace(name="nt")
+        monkeypatch.setattr(muse_engine, "os", fake_os)
+        monkeypatch.setattr(
+            muse_engine, "terminate_group", lambda *a, **k: pytest.fail("taskkill")
+        )
+        monkeypatch.setattr(
+            muse_engine.subprocess, "run", lambda *a, **k: pytest.fail("taskkill")
+        )
+        reaped = types.SimpleNamespace(pid=4242, returncode=0)
+        assert muse_engine._end_group(reaped) == 0
+
+    @pytest.mark.parametrize("name, value", [
+        ("META_API_KEY", "sekret-9f3"), ("TBH_CREDENTIAL_BACKEND", "zz-backend-7"),
+        ("MUSE_AUTH_PATH", "/elsewhere/auth.json"),
+    ])
+    def test_unhonorable_account_context_makes_no_call(
+        self, fake_usage, monkeypatch, name, value
+    ):
+        monkeypatch.setenv(name, value)
+        with pytest.raises(QuotaError, match="account mismatch") as exc:
+            engines.quota("muse", live=True)
+        assert value not in str(exc.value)
+        assert not (fake_usage.tmp / "call.json").exists()
+
+    def test_auth_path_equal_to_the_binary_default_is_allowed(self, fake_usage, monkeypatch):
+        monkeypatch.setenv("HOME", str(fake_usage.tmp))
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setenv("MUSE_AUTH_PATH", str(fake_usage.tmp / ".config/muse/auth.json"))
+        monkeypatch.setattr(muse_engine.sys, "platform", "linux")
+        assert muse_engine.live_account_problem() is None
+
+    def test_default_quota_keeps_the_old_mint_path(self, fake_serve):
+        assert muse_engine.quota()["plan"] == "fake-tier"
+        assert any(f.get("method") == "turn/start" for f in frames_of(fake_serve))
+
+    def test_no_session_or_turn_is_ever_started(self, fake_usage, monkeypatch):
+        monkeypatch.setattr(muse_engine, "_rpc_usage", lambda: pytest.fail("served"))
+        engines.quota("muse", live=True)
+
+    def test_missing_binary_is_unavailable(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PATH", str(tmp_path))
+        with pytest.raises(QuotaError, match="not on PATH"):
+            engines.quota("muse", live=True)

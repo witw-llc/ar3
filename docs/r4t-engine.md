@@ -1274,6 +1274,14 @@ anywhere from a few seconds to over a minute when the queue is congested.
 On a terminal the wait announces itself and heartbeats every few seconds
 rather than sitting silent.
 
+A failed probe with structured subscription quota detail reports
+`Subscription Limit` at 0% remaining and the provider's reset time, even
+when no usage window arrives. This live reading replaces the snapshot.
+Typed quota refusals with an unknown scope or unusable reset report
+unavailable and remove the saved reading, so subsequent automatic fuel
+checks also refuse until a new reading succeeds. Missing usage or an
+untyped rate-limit error does not establish exhaustion.
+
 Because the live read spends, it runs only where a turn was asked for:
 `r4t engine muse quota` opts in, and nowhere else does — `rig detect` and
 `rig fuel` serve muse's last snapshot or report no reading, so automatic
@@ -1314,10 +1322,122 @@ This is every dial the account carries, raw. Each bucket's own reading is
 answer, keeps the buckets the rig's model burns, and reports the lowest of them
 as `fuel`.
 
+### `quota --live` — a reading taken now
+
+```bash
+r4t engine claude quota --live --json
+```
+
+`--live` answers from a query made during the call or not at all. It never
+loads a snapshot, never writes one, and accepts only an answer the adapter
+marks `"origin": "live"`. It never exits `3`. Any other action refuses the flag
+with exit `2`.
+
+Exit `0` prints the usual payload. Exit `1` with `--json` prints, on stdout:
+
+```json
+{"origin": "unavailable", "engine": "claude", "applicable": true, "reason": "..."}
+```
+
+`engine` is null for a name that is no engine or preset. `applicable` is false
+for such a name and for an engine with no subscription to read (`ollama`).
+
+`reason` is fixed text, never provider output. An adapter's ordinary failure
+may quote a provider body or stderr, so live mode replaces it with
+`<engine> live quota query failed — <login repair hint>, then retry`. Only a
+failure an adapter raises as the explicit safe subtype (`LiveQuotaError`: an
+account guard, a missing binary, a version or schema refusal) keeps its own
+fixed text. The plain `quota` path is unchanged.
+
+Adapters read the process's own environment and working directory; a caller
+that wants a node's account launches `r4t` under that environment. A context an
+adapter cannot honor is refused before any query, with a reason that starts
+`account mismatch` and names the variable, never its value:
+
+- `claude` reads `$HOME/.claude/.credentials.json` or the macOS Keychain. It
+  refuses a `CLAUDE_CONFIG_DIR` other than that folder, an API-key or cloud
+  mode (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`,
+  `_VERTEX`, `_FOUNDRY`), `CLAUDE_CODE_OAUTH_TOKEN` beside a stored login, and
+  on macOS a `HOME` that is not the user's home.
+- `codex`, `claude` and `copilot` refuse a state-home variable that is not an
+  absolute path; a caller `env` the adapter cannot read is refused.
+- `agy` runs `agy -p /usage` only. The machine-wide language-server lookup
+  cannot be tied to the requested account, so live mode neither falls back to it
+  nor reads a plan name from it.
+- `cursor` is unavailable in live mode (unsupported live binding): the plain
+  check takes the first login that answers across the IDE database, every WSL
+  Windows profile and the CLI's `auth.json`, so no reading can be tied to the
+  configured CLI account. Live mode makes no query and reads no credential.
+- `opencode` is unavailable in live mode: its providers' checks read separate
+  credentials from opencode's own, so no reading can be tied to its account.
+
+- `copilot` reads its own login and never `gh`: the token comes from
+  `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, then the login stored
+  under `COPILOT_HOME`, and the direct endpoint answers. `gh` signs in through
+  its own store and can be another account. With no readable token the reading
+  is unavailable and the repair is `copilot login` in the node's environment.
+- `claude` never runs `claude doctor` in live mode. An expired or rejected
+  stored login is unavailable with the fixed instruction to run `claude` once
+  to refresh it; a refresh rotates the login and can outlast the caller's bound.
+
+Residual: `devin` and `codex` follow `HOME`/XDG and the vendor CLI's
+own state; a differing macOS Keychain account is not detectable for them. Codex API-key billing overrides are not independently resolved by this quota read; the result is the CLI subscription account's allowance. Copilot credentials held only in an OS keychain are unavailable to the direct-token adapter.
+
+**Interruption and bounds.** `quota --live` turns SIGTERM into a normal exit
+(status 143) that unwinds the adapter's `finally`, so children started in their
+own sessions are ended, and restores the previous handler on the way out. A
+caller's grace after SIGTERM must cover the longest teardown, 2.5 seconds; a8s
+gives 3. Each engine's reading fits a caller's 60 second bound with its
+teardown: muse 35 (5 + 25 plus two teardowns), devin 43.5 (20 + 1 + 20 + 0.5 +
+2), agy 45, codex 15, claude 50 at worst with no refresh. A test asserts these.
+
+**Muse.** `--live` uses `muse usage --json` from the `muse` on `PATH`, which
+reports the subscription window, weekly block and tier with no model turn.
+It first runs `muse --version` (5 seconds) and requires 1.4.13 or later; an
+older or unidentifiable binary is unavailable with an upgrade hint, and
+`usage` is never called on it. Both calls run with stdin closed, in their own
+process group, with `MUSE_NO_AUTO_UPDATE=1` so the launcher starts no
+background updater. `usage` waits at most 25 seconds, and the group is ended
+when each call finishes. Provider stderr is never relayed.
+
+Live refuses, as `account mismatch`, `META_API_KEY`, `TBH_CREDENTIAL_BACKEND`,
+a `MUSE_AUTH_PATH` other than `$XDG_CONFIG_HOME/muse/auth.json` (default
+`$HOME/.config/muse/auth.json`; the binary ignores the variable), and on macOS
+a `HOME` that is not the user's home.
+
+The answer must be schema version 1, `source: "mint"`, with percentages from 0
+to 100, reset times in the future and a bounded distance away, and an `asOfMs`
+no earlier than this call's start (two seconds of skew) and no later than its
+finish. `asOfMs` is a local request stamp, so freshness rests on the `mint`
+source. Stale, cached, empty, malformed, timed-out or non-zero answers are
+unavailable; a reason names Muse's own `reason`/`hint` only when it is one of
+the verified codes (`no_allowance`, `server_sent_no_usage`) and omits anything
+else. A tier is kept as the plan only when it is plain letters, digits and
+`_.- `. The payload adds `requested_at` (the request stamp, not a provider
+observation time) and a note that no model turn was made.
+
+Each call ends with its group torn down: SIGTERM, a 0.5 second grace, SIGKILL,
+then a reap that waits at most 2 seconds. The leader is observed without being
+reaped, so its pid cannot be reused before the group is signalled: `waitid`
+with `WNOWAIT` (Linux, and macOS on Python 3.13 and later), else kqueue
+`NOTE_EXIT` (older macOS). Where neither exists the leader is reaped by an
+ordinary wait and nothing is signalled by its pid afterwards; descendants that
+outlive it are not reached. The same holds on Windows, where a leader that
+exited normally is not ended by pid at all; a timeout, where the leader is
+still running, ends the tree with `taskkill`. Nothing else may reap the child
+(no ignored `SIGCHLD`, no `waitpid(-1)`). A successful read may refresh
+Muse's own `auth.json`. The plain
+`r4t engine muse quota` path is unchanged.
+
+Live failure JSON also carries a fixed `code`: `account_mismatch`,
+`login_refresh_required`, `upgrade_required`, `unsupported_binding`,
+`not_applicable`, or `query_failed`. Callers can show repair hints without
+copying provider text.
+
 ## `models` and `efforts` — what `--model` and `--effort` accept
 
 ```
-r4t engine <id> efforts [--json]
+r4t engine <id> efforts [--model MODEL] [--json]
 r4t engine <id> models  [--json]
 ```
 
@@ -1335,7 +1455,27 @@ spends a turn. `r4t engine list` shows which engines answer which verb.
 | devin | `devin models list` ids; effort is part of each id | none |
 | muse | MSP `model/list` asked of `muse serve` (no session, no turn) | fixed list |
 | copilot | no list verb | fixed list |
-| codex, opencode | no list verb | any value |
+| codex | `model/list` asked of `codex app-server` (no thread, no turn) | the same catalog's `supportedReasoningEfforts` |
+| opencode | no list verb | any value |
+
+### Codex catalog
+
+`r4t engine codex models` lists each visible catalog entry's `model` string, the value
+`-m` takes. Hidden entries are excluded, and every page of the catalog is
+followed. `r4t engine codex efforts` lists the union of efforts across the catalog, with a
+note that support varies by model. `r4t engine codex efforts --model MODEL` lists exactly
+the efforts that model supports, and fails when the catalog does not list it.
+`--model` filters `efforts` for codex only; every other engine, and `models`,
+refuse it.
+
+The catalog is the installed Codex's own, which may be bundled or cached. A
+listed model is not proof that the account can use it, and `run` still passes
+`--model` and `--effort` through unvalidated. A missing CLI, RPC error, timeout,
+or malformed or empty catalog fails with exit 1 and no values, as does a
+missing or non-list `supportedReasoningEfforts`. An empty list is a fact: the
+union skips that model, `--model` returns no values with a note, and an
+all-empty union returns none with a note. Codex's stderr is discarded; protocol
+errors are still reported. `ollama-codex` keeps `ollama list` for its models.
 
 Each verb ends in one of three outcomes:
 

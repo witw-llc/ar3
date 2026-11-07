@@ -1,8 +1,14 @@
 """Ollama quota — local models have no cloud quota to run out of."""
 from __future__ import annotations
 
+from engines.base import QuotaNotApplicable
 
-def quota() -> dict:
+
+def quota(live: bool = False) -> dict:
+    if live:
+        raise QuotaNotApplicable(
+            "ollama runs local models and has no subscription quota to read"
+        )
     return {
         "origin": "live",
         "plan": "local",

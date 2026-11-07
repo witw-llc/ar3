@@ -511,6 +511,100 @@ class TestQuotaTransport:
         assert "secret-token-value" not in str(caught.value)
         assert "401" in str(caught.value)
 
+    def _clean_env(self, monkeypatch):
+        for name in copilot.TOKEN_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_live_uses_the_custom_home_token_and_never_gh(self, tmp_path, monkeypatch):
+        import engines
+
+        self._clean_env(monkeypatch)
+        home = tmp_path / "node-copilot"
+        home.mkdir()
+        (home / "config.json").write_text(
+            '// User settings\n{"copilotTokens": {"github.com": "tok-node"}}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("COPILOT_HOME", str(home))
+        monkeypatch.setattr(copilot.shutil, "which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr(
+            copilot, "_gh_user", lambda: pytest.fail("gh account was consulted")
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            copilot, "_direct_user", lambda auth: (seen.append(auth), USER_SAMPLE)[1]
+        )
+        payload = engines.quota("copilot", live=True)
+        assert payload["origin"] == "live" and payload["plan"] == "business"
+        assert seen == ["tok-node"]
+
+    def test_live_follows_copilots_env_token_precedence_over_the_stored_login(
+        self, tmp_path, monkeypatch
+    ):
+        self._clean_env(monkeypatch)
+        home = tmp_path / "h"
+        home.mkdir()
+        (home / "config.json").write_text(
+            '{"copilotTokens": "tok-stored"}', encoding="utf-8"
+        )
+        monkeypatch.setenv("COPILOT_HOME", str(home))
+        monkeypatch.setenv("GH_TOKEN", "tok-gh-env")
+        monkeypatch.setattr(copilot.shutil, "which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr(
+            copilot, "_gh_user", lambda: pytest.fail("gh account was consulted")
+        )
+        seen: list[str] = []
+        monkeypatch.setattr(
+            copilot, "_direct_user", lambda auth: (seen.append(auth), USER_SAMPLE)[1]
+        )
+        copilot.quota(live=True)
+        assert seen == ["tok-gh-env"]
+
+    def test_live_without_a_readable_token_is_unavailable_not_gh(
+        self, tmp_path, monkeypatch
+    ):
+        import engines
+
+        self._clean_env(monkeypatch)
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "empty"))
+        monkeypatch.setattr(copilot.shutil, "which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr(
+            copilot, "_gh_user", lambda: pytest.fail("gh account was consulted")
+        )
+        monkeypatch.setattr(
+            copilot, "_direct_user", lambda _t: pytest.fail("no token to send")
+        )
+        with pytest.raises(engines.LiveQuotaError) as caught:
+            engines.quota("copilot", live=True)
+        text = str(caught.value)
+        assert "copilot login" in text and "gh auth" not in text
+        assert str(tmp_path) not in text
+
+    def test_live_failure_text_names_copilot_login_not_gh(self, tmp_path, monkeypatch):
+        import engines
+
+        self._clean_env(monkeypatch)
+        monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "secret-token-value")
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+
+        def leak(_t):
+            raise copilot.QuotaError("body: secret-token-value")
+
+        monkeypatch.setattr(copilot, "_direct_user", leak)
+        with pytest.raises(engines.LiveQuotaError) as caught:
+            engines.quota("copilot", live=True)
+        text = str(caught.value)
+        assert "secret-token-value" not in text
+        assert "copilot login" in text and "gh auth" not in text
+
+    def test_the_default_read_still_prefers_gh(self, monkeypatch):
+        monkeypatch.setattr(copilot.shutil, "which", lambda _n: "/usr/bin/gh")
+        monkeypatch.setattr(copilot, "_gh_user", lambda: USER_SAMPLE)
+        monkeypatch.setattr(
+            copilot, "_direct_user", lambda _t: pytest.fail("gh was skipped")
+        )
+        assert copilot.quota()["plan"] == "business"
+
     def test_credits_used_is_a_number_beside_the_note(self):
         payload = copilot.parse_user(USER_SAMPLE)
         premium = next(

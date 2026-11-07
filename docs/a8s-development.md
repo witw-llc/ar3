@@ -11,6 +11,17 @@ accounting path. Completed turns stay completed if a later session step fails.
 
 ## Hard constraints when refactoring
 
+- **Named node health is one live inspection.** `a8s health <node>` shows its definition, variables, existing runtime/activity/failure facts and applicable engine quota, using the node's effective account/environment. Preserve bare health. Never dereference secret bindings for display or infer remote/current health from last-heard age. Use existing probes and quota adapters with bounded waits; no monitor, inbox consumption or restart. Validate every invoke, idle and batch launch before probing; wrapper detection must not discard environment or working-directory effects. Refuse an unbound launch context without displaying assignments. Always tear down and reap owned probe children within bounds on success, timeout and interrupted waits. Node-health quota must be live: a failed query is unavailable, never a snapshot or inferred zero. Other automatic quota callers retain their spend policy. Keep engine quota buckets distinct from rig fuel. Use Muse's no-turn live `usage --json` only after verifying a supporting version; require a fresh mint allowance and suppress launcher auto-update. Never start a model turn for node health. If that command is unsupported or fails, report unavailable with a repair hint rather than starting an implicit turn or serving cached usage.
+
+- **Reject unknown tell options before staging.** Before `--`, a token that
+  starts with ASCII `-` is an option, except the standalone stdin marker `-`.
+  Quotes do not escape that rule; use `--` or stdin for literal dash-leading
+  text. Preserve supported options before and after the recipient.
+- **Strict registry reads reject present non-object sections, including null.**
+  Missing sections stay empty. Update and ps JSON must report unknown state
+  before stopping or restarting a node.
+
+
 - **Keep bare ls unchanged.** Local registrations override remembered remote names case-insensitively. Local/remote and recency filters change only the view, never the address book. Read the persistent last-heard table, not retained transaction rows. Last-heard is not remote health; ps remains local process state. Both listing commands provide help and reject unknown options.
 
 - **a8s is best-effort messaging.** a8s is lightweight, best-effort messaging

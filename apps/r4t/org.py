@@ -75,6 +75,12 @@ class OrgError(Exception):
     pass
 
 
+class OrgUnreadable(OrgError):
+    """The org configuration exists and could not be read or decoded. Unlike
+    absence or malformed settings it cannot be defaulted: the unread file may
+    hold the isolation a dispatch is meant to run behind."""
+
+
 @dataclass
 class Org:
     dir: Path
@@ -88,9 +94,11 @@ class Org:
     isolation: Isolation = field(default_factory=Isolation)
     # Settings `_parse_settings` could not read, carried along rather than
     # discarded — a malformed `comms:`/`egress:` still degrades to the
-    # default here (dispatch has to proceed), but the caller can print these
+    # default here, but the caller can print these
     # rather than the operator finding out only by running `roster check`.
     errors: list[str] = field(default_factory=list)
+    # Set when the config exists but could not be read; dispatch refuses on it.
+    unreadable: str | None = None
 
     @property
     def is_portable(self) -> bool:
@@ -108,10 +116,15 @@ def _runbook_settings(root: Path) -> dict | None:
     than inferred from an absent key. A runbook that is there and cannot be
     read raises OrgError: its frontmatter holds the isolation, and "no
     runbook" would run the turns un-isolated."""
-    from runbook import RunbookError, org_settings
+    from runbook import RunbookError, RunbookUnreadable, org_settings
 
     try:
         data = org_settings(root)
+    except RunbookUnreadable as e:
+        raise OrgUnreadable(
+            f"{e} - it holds the node's isolation; fix the permissions on it "
+            f"and on the folders above it"
+        ) from e
     except RunbookError as e:
         raise OrgError(str(e)) from e
     if data is None:
@@ -131,7 +144,7 @@ def _read_config(root: Path) -> dict:
     try:
         text = read_text_if_present(cfg)
     except (OSError, ValueError) as e:
-        raise OrgError(
+        raise OrgUnreadable(
             f"cannot read org config {cfg}: {e} - it holds the node's "
             f"isolation; fix the permissions on it and on the folders above it"
         ) from e
@@ -236,25 +249,31 @@ def _parse_settings(data: dict) -> tuple[dict, list[str]]:
 
 
 def load_org(root: Path) -> Org:
-    """Resolve `root` to (org dir, workplace) and org settings for path building
-    and dispatch. Never raises — a malformed org config degrades to the in-repo
-    default with default settings, and the messages ride along on `Org.errors`
-    instead of vanishing, so a caller that dispatches on this can still say so
-    out loud. `check_org` re-derives the same problems for `roster check` /
-    `runbook check`, which treat them as blocking; a live dispatch does not."""
+    """Resolve org paths and settings without raising.
+
+    Unreadable configuration is flagged for dispatch to refuse. Malformed
+    configuration keeps defaults and diagnostics in `errors`; check_org
+    reports the same problems for the diagnostic commands.
+    """
     read_errors: list[str] = []
+    unreadable: str | None = None
     try:
         data = _read_config(root)
     except OrgError as e:
         data = {}
         read_errors.append(str(e))
+        if isinstance(e, OrgUnreadable):
+            unreadable = str(e)
     try:
         repo = _resolve_repo(root, data)
     except (OSError, ValueError):
         repo = None
     settings, errors = _parse_settings(data)
     errors = [*read_errors, *errors]
-    return Org(dir=root, workplace=repo or root, errors=errors, **settings)
+    return Org(
+        dir=root, workplace=repo or root, errors=errors,
+        unreadable=unreadable, **settings,
+    )
 
 
 def check_org(root: Path) -> list[str]:

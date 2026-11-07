@@ -4258,7 +4258,7 @@ class TestUpdateReadsAreStrict:
         assert seats["restarts"] == []
         assert pid_start_path("beta").exists()
 
-    @pytest.mark.parametrize("fault", ["eio", "garbage", "agents-not-an-object", "top-level-list"])
+    @pytest.mark.parametrize("fault", ["eio", "garbage", "agents-not-an-object", "agents-null", "aliases-null", "top-level-list"])
     def test_a_registry_that_cannot_be_read_restarts_nothing(self, seats, fault):
         from registry import registry_path
 
@@ -4268,10 +4268,20 @@ class TestUpdateReadsAreStrict:
             registry_path().write_text({
                 "garbage": "{ not json",
                 "agents-not-an-object": json.dumps({"agents": ["alpha", "beta"]}),
+                "agents-null": json.dumps({"agents": None}),
+                "aliases-null": json.dumps({"agents": {"alpha": {"root": "/r"}}, "aliases": None}),
                 "top-level-list": "[]",
             }[fault])
         assert self._update() == 1
         assert seats["restarts"] == []
+
+    def test_ps_json_refuses_a_registry_with_a_null_section(self, seats, capsys):
+        from registry import registry_path
+
+        registry_path().write_text(json.dumps({"agents": {"alpha": {"root": "/r"}}, "namespaces": None}), encoding="utf-8")
+        capsys.readouterr()
+        assert commands_mod.cmd_ps(["--json"]) == 1
+        assert capsys.readouterr().out == ""
 
     @pytest.mark.parametrize("fault", ["eio", "garbage", "claim"])
     def test_a_wake_record_that_cannot_be_read_or_is_a_claim_holds_its_node(self, seats, fault):

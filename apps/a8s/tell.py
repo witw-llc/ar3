@@ -421,6 +421,10 @@ def parse_tell_argv(
             raise TellHelp()
         elif arg == "--version":
             raise TellVersion()
+        elif _argv_looks_like_option(arg):
+            raise TellUsageError(
+                f"unknown option {arg.split('=', 1)[0]}; put -- before a recipient or text that starts with a dash"
+            )
         elif recipient is None:
             recipient = arg
         else:

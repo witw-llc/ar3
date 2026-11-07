@@ -1320,6 +1320,7 @@ WHICH_ALLOWED = {
     ("engines/codex.py", "quota"): "account quota reader, not a launch",
     ("engines/devin.py", "_usage_screen"): "account quota reader, not a launch",
     ("engines/muse.py", "quota"): "account quota reader, not a launch",
+    ("engines/muse.py", "live_quota"): "account quota reader, not a launch",
     ("engines/copilot.py", "quota"): "the gh transport of the quota reader, not a launch",
     ("engines/agy.py", "_listen_ports"): "`lsof` utility for the quota reader",
 }

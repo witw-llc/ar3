@@ -317,6 +317,52 @@ a8s ls --since 2026-10-27T12:00:00Z -q
 
 Last-heard time is an observation, not remote health. `ps` reports only running local processes and accepts `-q` and `--help`; remote and recency filters belong to `ls`. Unknown options return an error.
 
+### Node health
+
+Use `a8s health <node>` to inspect one node's configuration, runtime, activity,
+readiness and live engine quota. Bare `a8s health` tests remotes and storage.
+
+```bash
+a8s health alpha
+a8s health --help
+```
+
+The node view shows its definition and root, engine/model/effort, variables,
+process state, current activity, last wake, recent failures and message counts,
+pending inbox, readiness, remote reachability and quota buckets. Unknown facts
+stay unknown. An old last-sent time does not imply a stuck node. A stopped node
+is a state, not a finding: nodes can wake on demand.
+
+- **Configuration:** `MODEL`, `EFFORT`, `TIMEOUT` and `MEMORY` show values.
+  Other variables and environment entries show names only; inspect their values
+  deliberately with `a8s vars <node>`. Credentials and provider errors are not
+  displayed. Conflicting launch settings are identified rather than collapsed.
+- **Context:** probes use the configured launch environment that a wake started
+  from this shell would receive, in the node's root. This does not reconstruct
+  a running handler's inherited environment. Login-shell definitions, invocation
+  wrappers whose context is not established, and native binaries that cannot be
+  matched to the probe report unavailable. Readiness
+  checks r4t's default engine arguments; it does not validate every node option.
+- **Quota:** each live bucket retains its remaining allowance, measured credits
+  and reset time. Unknown remaining allowance stays unknown; no percentage or
+  aggregate is invented. Failed reads never fall back to snapshots. Muse uses
+  its supported free usage command with auto-update disabled and no model turn.
+  Account-binding limits and repair hints remain explicit; see
+  [live quota](r4t-engine.md).
+- **Scope:** remote reachability is machine-wide. Storage round-trips remain in
+  bare health. The node view consumes no inbox item, restarts nothing, reaps no
+  pid file and writes no registry or quota snapshot. Existing read helpers may
+  create an empty pid lock or SQLite sidecar; vendor reads may maintain their
+  own authentication state.
+
+Names match local nodes case-insensitively. A remembered remote name shows only
+last-heard observations and unavailable current runtime/quota. Aliases and
+unknown names fail. Exit 0 means no findings; exit 1 means a finding, unavailable
+fact or exhausted bucket; exit 2 means invalid arguments. Recognized non-engine
+and roster nodes with an established launch context show quota as not applicable. Probes are bounded: readiness at 40 seconds,
+quota at 60 seconds, plus bounded cleanup, including when Ctrl-C interrupts
+the wait.
+
 Remotes are git-shaped: an explicit list of places to fan messages out to. a8s only crosses cluster boundaries on `tell` / `prompt` — everything else (`a8s logs`, `a8s ls`, `a8s ps`) reads local state and nothing else. `a8s ls` naming remote nodes is not an exception: it reports who has reached *you*, read out of this machine's own address book, and asks nothing of the far side. Every arrival updates one row per name (folded by case, spelled the way the newest arrival spelled it) in `transactions.sqlite3`, beside the event log but outside its `txlog_max_rows` retention, so a name last heard from weeks ago still lists: the book records arrival, not liveness. If you want cross-cluster log access, register an a8s connector that turns inbound tells into local `a8s logs` calls; a8s itself just enables the message + invocation path.
 
 Each handler claims its own broker session: the MQTT client id is a hash of the machine, the handler's attached agent set, and the remote name, so several nodes share a host without evicting each other, and each one's queued messages survive a restart. `A8S_CLIENT_TAG` replaces the agent-set part, and a `client_id` option on the remote replaces the whole id. `a8s health` connects with a throwaway id and a clean session so a connectivity check never touches a node's queue, and reports `FAIL (not connected)` when the broker has not answered within the remote's `connect_timeout_s`.

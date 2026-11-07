@@ -124,6 +124,21 @@ class TestRegistryIO:
         with pytest.raises(RegistryUnreadable):
             load_registry()
 
+    @pytest.mark.parametrize("section", ["agents", "aliases", "namespaces", "namespace_options"])
+    @pytest.mark.parametrize("bad", [None, 3, "x", True, []])
+    def test_strict_rejects_any_present_non_object_section(self, fake_home, section, bad):
+        registry_path().write_text(json.dumps({section: bad}), encoding="utf-8")
+        with pytest.raises(RegistryUnreadable):
+            _load_raw_registry(strict=True)
+        raw = _load_raw_registry()
+        assert raw[section] == {}
+
+    def test_strict_reads_missing_and_object_sections(self, fake_home):
+        registry_path().write_text(json.dumps({"agents": {"A": {}}}), encoding="utf-8")
+        raw = _load_raw_registry(strict=True)
+        assert raw["agents"] == {"A": {}}
+        assert raw["aliases"] == {}
+
     def test_non_dict_top_level_is_unreadable(self, fake_home):
         registry_path().write_text("[1, 2, 3]")
         with pytest.raises(RegistryUnreadable):

@@ -133,6 +133,12 @@ Envelope shape:
 }
 ```
 
+Before `--`, `tell` refuses (exit 2, nothing staged) any argument that starts
+with `-` and is not a known option or the standalone `-` stdin marker, whether
+it comes before or after the recipient. Put a dash-leading recipient or body
+after `--`; a literal body can also come from stdin. Shell quotes do not reach
+`tell`. Known option values retain their existing rules.
+
 `tell --subject TEXT` (or `--subject=TEXT`) adds a top-level `"subject"`
 string: one line of at most 200 characters, refused with exit 2 when it holds
 a newline or is longer. With no `--subject` the key is absent. a8s carries it

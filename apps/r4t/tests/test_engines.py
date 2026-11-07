@@ -1267,3 +1267,489 @@ class TestClaudeTokenRefresh:
         with pytest.raises(QuotaError) as caught:
             claude._fetch_usage("t")
         assert str(caught.value) == "usage endpoint returned HTTP 502"
+
+
+class TestClaudeLiveNeverRefreshes:
+    """Live mode reports an expired or rejected stored login; it never runs
+    `claude doctor`, which rotates the login and can outlast the caller's
+    bound. The plain read keeps refreshing."""
+
+    HINT = "run `claude` once to refresh"
+    _wire = TestClaudeTokenRefresh._wire
+    _creds = staticmethod(TestClaudeTokenRefresh._creds)
+    OK = TestClaudeTokenRefresh.OK
+
+    def test_expired_stored_login_is_unavailable_without_doctor_or_request(
+        self, monkeypatch
+    ):
+        log = self._wire(monkeypatch, [self._creds("old", 1000)], [self.OK])
+        with pytest.raises(engines.LiveQuotaError, match=self.HINT):
+            claude.quota(live=True)
+        assert log["doctor"] == 0 and log["usage"] == []
+
+    def test_rejected_stored_login_is_unavailable_without_doctor_or_retry(
+        self, monkeypatch
+    ):
+        future = int((__import__("time").time() + 3600) * 1000)
+        log = self._wire(monkeypatch, [self._creds("stale", future)], [401, self.OK])
+        with pytest.raises(engines.LiveQuotaError, match=self.HINT):
+            claude.quota(live=True)
+        assert log["doctor"] == 0 and log["usage"] == ["stale"]
+
+    def test_through_the_engine_entry_the_instruction_is_the_fixed_one(
+        self, tmp_path, monkeypatch
+    ):
+        TestLiveQuota()._plant(tmp_path, monkeypatch, engine="claude")
+        log = self._wire(monkeypatch, [self._creds("old", 1000)], [self.OK])
+        with pytest.raises(engines.LiveQuotaError) as caught:
+            engines.quota("claude", live=True)
+        assert self.HINT in str(caught.value) and "doctor" not in str(caught.value)
+        assert log["doctor"] == 0
+
+    def test_valid_login_is_read_live_and_the_default_still_refreshes(
+        self, monkeypatch
+    ):
+        future = int((__import__("time").time() + 3600) * 1000)
+        log = self._wire(monkeypatch, [self._creds("good", future)], [self.OK])
+        assert claude.quota(live=True)["origin"] == "live"
+        assert log["doctor"] == 0
+        log = self._wire(
+            monkeypatch,
+            [self._creds("old", 1000), self._creds("new", 9_999_999_999_999)],
+            [self.OK],
+        )
+        assert claude.quota()["note"] == "token refreshed by claude doctor"
+        assert log["doctor"] == 1
+
+
+class TestLiveQuota:
+    """`engines.quota(..., live=True)` is a reading taken now or a failure: a
+    saved snapshot can never stand in for it, and a live success never
+    becomes one."""
+
+    LIVE = {"origin": "live", "plan": None, "note": None,
+            "buckets": [{"label": "Weekly", "remaining_fraction": 0.5,
+                         "reset_time": None}]}
+
+    def _plant(self, tmp_path, monkeypatch, engine="codex"):
+        home = tmp_path / "r4t-home"
+        monkeypatch.setenv("R4T_HOME", str(home))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "COPILOT_HOME",
+                     "CLAUDE_CODE_OAUTH_TOKEN", *claude.API_AUTH_VARS):
+            monkeypatch.delenv(name, raising=False)
+        path = home / "quota" / f"{engine}.json"
+        path.parent.mkdir(parents=True)
+        body = json.dumps({
+            "saved_at": __import__("time").time(),
+            "payload": {"engine": engine, "origin": "live",
+                        "buckets": [{"label": "Planted",
+                                     "remaining_fraction": 0.99}]},
+        })
+        path.write_text(body, encoding="utf-8")
+        return path, body
+
+    def _no_snapshot_io(self, monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("snapshot touched")
+        monkeypatch.setattr(engines, "load_snapshot", boom)
+        monkeypatch.setattr(engines, "save_snapshot", boom)
+
+    def test_failed_live_never_reads_the_planted_snapshot(self, tmp_path, monkeypatch):
+        path, body = self._plant(tmp_path, monkeypatch)
+        self._no_snapshot_io(monkeypatch)
+
+        def fail():
+            raise QuotaError("codex is not on PATH")
+        monkeypatch.setattr(codex, "quota", fail)
+        with pytest.raises(QuotaError, match="live quota query failed"):
+            engines.quota("codex", live=True)
+        assert path.read_text(encoding="utf-8") == body
+
+    def test_live_success_writes_no_snapshot(self, tmp_path, monkeypatch):
+        path, body = self._plant(tmp_path, monkeypatch)
+        self._no_snapshot_io(monkeypatch)
+        monkeypatch.setattr(codex, "quota", lambda: dict(self.LIVE))
+        payload = engines.quota("codex", live=True)
+        assert payload["engine"] == "codex" and payload["origin"] == "live"
+        assert path.read_text(encoding="utf-8") == body
+
+    def test_a_non_live_origin_is_refused(self, tmp_path, monkeypatch):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "quota", lambda: {**self.LIVE, "origin": "snapshot"})
+        with pytest.raises(QuotaError, match="no live observation"):
+            engines.quota("codex", live=True)
+
+    def test_unknown_and_ollama_are_not_applicable(self):
+        with pytest.raises(engines.QuotaNotApplicable):
+            engines.quota("emacs", live=True)
+        with pytest.raises(engines.QuotaNotApplicable):
+            engines.quota("ollama-claude", live=True)
+        assert engines.quota("ollama")["buckets"][0]["remaining_fraction"] == 1.0
+
+    def test_live_does_not_imply_spend_for_a_turn_minting_engine(self, monkeypatch):
+        class Minting:
+            QUOTA_SPENDS_TURN = True
+            calls = 0
+
+            @classmethod
+            def quota(cls):
+                cls.calls += 1
+                return TestLiveQuota.LIVE
+
+        monkeypatch.setitem(engines.MODULES, "muse", Minting)
+        with pytest.raises(QuotaError, match="no free live"):
+            engines.quota("muse", live=True)
+        assert Minting.calls == 0
+
+    def test_home_override_for_an_env_blind_adapter_refuses(self, tmp_path, monkeypatch):
+        self._plant(tmp_path, monkeypatch)
+
+        def never():
+            raise AssertionError("queried")
+        monkeypatch.setattr(codex, "quota", never)
+        with pytest.raises(QuotaError, match="account mismatch"):
+            engines.quota("codex", live=True, env={"CODEX_HOME": str(tmp_path / "other")})
+
+    def test_relative_state_home_refuses(self, tmp_path, monkeypatch):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setenv("CODEX_HOME", "relative/dir")
+        monkeypatch.setattr(codex, "quota", lambda: pytest.fail("queried"))
+        with pytest.raises(QuotaError, match="account mismatch"):
+            engines.quota("codex", live=True)
+
+    @pytest.mark.parametrize("name", [
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
+    ])
+    def test_claude_api_auth_mode_refuses_without_echoing_the_value(
+        self, tmp_path, monkeypatch, name
+    ):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setenv(name, "sk-sentinel-secret")
+        monkeypatch.setattr(claude, "quota", lambda: pytest.fail("queried"))
+        with pytest.raises(QuotaError, match="account mismatch") as exc:
+            engines.quota("claude", live=True)
+        assert name in str(exc.value) and "sentinel" not in str(exc.value)
+
+    def test_claude_custom_config_dir_refuses_but_the_default_passes(
+        self, tmp_path, monkeypatch
+    ):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setattr(claude, "_credentials", lambda: {})
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "elsewhere"))
+        assert "CLAUDE_CONFIG_DIR" in claude.live_account_problem()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "home" / ".claude"))
+        assert claude.live_account_problem() is None
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        assert claude.live_account_problem() is None
+
+    def test_claude_env_token_with_a_stored_login_is_ambiguous(
+        self, tmp_path, monkeypatch
+    ):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok-sentinel")
+        monkeypatch.setattr(
+            claude, "_credentials",
+            lambda: {"claudeAiOauth": {"accessToken": "stored"}},
+        )
+        problem = claude.live_account_problem()
+        assert "ambiguous" in problem and "sentinel" not in problem
+        monkeypatch.setattr(claude, "_credentials", lambda: {})
+        assert claude.live_account_problem() is None
+
+    def test_claude_keychain_account_follows_the_user_not_a_moved_home(
+        self, tmp_path, monkeypatch
+    ):
+        self._plant(tmp_path, monkeypatch)
+        monkeypatch.setattr(claude, "_credentials", lambda: {})
+        monkeypatch.setattr(claude.sys, "platform", "darwin")
+        monkeypatch.setattr(claude, "_passwd_home", lambda: str(tmp_path / "real"))
+        assert "Keychain" in claude.live_account_problem()
+
+    def test_agy_live_uses_usage_command_only(self, monkeypatch):
+        def local_api(*a, **k):
+            raise AssertionError("machine-wide language server consulted")
+        for name in ("_find_language_server", "_listen_ports", "_post_user_status",
+                     "_plan_from_local_api"):
+            monkeypatch.setattr(agy, name, local_api)
+        good = {"command": {"data": {"groups": [{"name": "Gemini Models", "buckets": [
+            {"window": "weekly", "remaining_fraction": 0.4, "reset_time": "2099-01-01T00:00:00+00:00"}]}]}}}
+        monkeypatch.setattr(agy, "_usage_command", lambda: good)
+        payload = engines.quota("agy", live=True)
+        assert payload["plan"] is None and payload["buckets"][0]["remaining_fraction"] == 0.4
+
+        def broken():
+            raise QuotaError("agy /usage exited 1")
+        monkeypatch.setattr(agy, "_usage_command", broken)
+        with pytest.raises(QuotaError, match="agy live quota query failed") as exc:
+            engines.quota("agy", live=True)
+        assert "exited 1" not in str(exc.value) and "local API" not in str(exc.value)
+
+    def test_opencode_live_is_unavailable_and_delegates_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        self._plant(tmp_path, monkeypatch)
+        for module in (claude, codex):
+            monkeypatch.setattr(module, "quota", lambda *a, **k: pytest.fail("delegated"))
+        with pytest.raises(QuotaError, match="unavailable"):
+            engines.quota("opencode", live=True)
+
+    def test_opencode_default_quota_still_delegates(self, monkeypatch, tmp_path):
+        from engines import opencode
+        auth = tmp_path / "auth.json"
+        auth.write_text(json.dumps({"anthropic": {"type": "oauth"}}), encoding="utf-8")
+        monkeypatch.setattr(opencode, "AUTH_PATH", auth)
+        monkeypatch.setattr(claude, "quota", lambda: dict(self.LIVE))
+        assert opencode.quota()["buckets"]
+
+
+class TestLiveErrorBoundary:
+    """An ordinary adapter QuotaError may quote a provider body or stderr; the
+    live path replaces it with fixed text, and only LiveQuotaError passes."""
+
+    SECRET = "sentinel-secret-7d41"
+
+    def _clean(self, tmp_path, monkeypatch):
+        TestLiveQuota()._plant(tmp_path, monkeypatch)
+        for name in ("R4T_CURSOR_STATE_DB",):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize("engine, module", [
+        ("codex", codex), ("claude", claude),
+    ])
+    def test_ordinary_error_is_replaced_by_fixed_engine_text(
+        self, tmp_path, monkeypatch, engine, module
+    ):
+        self._clean(tmp_path, monkeypatch)
+
+        def leaky():
+            raise QuotaError(f"HTTP 500 body: {self.SECRET}")
+        monkeypatch.setattr(module, "quota", leaky)
+        with pytest.raises(QuotaError) as exc:
+            engines.quota(engine, live=True)
+        text = str(exc.value)
+        assert self.SECRET not in text and text.startswith(f"{engine} live quota query failed")
+        assert isinstance(exc.value, engines.LiveQuotaError)
+
+    def test_unexpected_exception_is_also_replaced(self, tmp_path, monkeypatch):
+        self._clean(tmp_path, monkeypatch)
+
+        def boom():
+            raise ValueError(self.SECRET)
+        monkeypatch.setattr(codex, "quota", boom)
+        with pytest.raises(QuotaError) as exc:
+            engines.quota("codex", live=True)
+        assert self.SECRET not in str(exc.value)
+
+    def test_public_json_never_carries_provider_text(self, tmp_path, monkeypatch, capsys):
+        import r4t as r4t_mod
+        self._clean(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            codex, "quota", lambda: (_ for _ in ()).throw(QuotaError(self.SECRET))
+        )
+        rc = r4t_mod.main(["engine", "codex", "quota", "--live", "--json"])
+        out = capsys.readouterr()
+        assert rc == 1 and self.SECRET not in out.out + out.err
+
+    def test_safe_subtype_keeps_its_fixed_repair_text(self, tmp_path, monkeypatch):
+        self._clean(tmp_path, monkeypatch)
+
+        def safe():
+            raise engines.LiveQuotaError("codex needs an upgrade")
+        monkeypatch.setattr(codex, "quota", safe)
+        with pytest.raises(QuotaError, match="needs an upgrade"):
+            engines.quota("codex", live=True)
+
+    def test_default_path_keeps_the_adapter_text(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("R4T_HOME", str(tmp_path / "empty-r4t"))
+        monkeypatch.setattr(
+            codex, "quota", lambda: (_ for _ in ()).throw(QuotaError("raw detail"))
+        )
+        with pytest.raises(QuotaError, match="raw detail"):
+            engines.quota("codex")
+
+    def test_agy_error_text_is_not_relayed(self, tmp_path, monkeypatch):
+        self._clean(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            agy, "_usage_command",
+            lambda: (_ for _ in ()).throw(QuotaError(self.SECRET)),
+        )
+        with pytest.raises(QuotaError) as exc:
+            engines.quota("agy", live=True)
+        assert self.SECRET not in str(exc.value)
+
+    def test_account_guards_never_contain_values(self, tmp_path, monkeypatch):
+        self._clean(tmp_path, monkeypatch)
+        monkeypatch.setenv("CODEX_HOME", f"~/{self.SECRET}")
+        monkeypatch.setattr(codex, "quota", lambda: pytest.fail("queried"))
+        with pytest.raises(QuotaError, match="account mismatch") as exc:
+            engines.quota("codex", live=True)
+        assert "CODEX_HOME" in str(exc.value) and self.SECRET not in str(exc.value)
+
+    def test_cursor_live_is_unavailable_without_any_lookup(self, tmp_path, monkeypatch):
+        from engines import cursor
+        self._clean(tmp_path, monkeypatch)
+        for name in ("token_sources", "_token_sources", "_fetch_quota", "state_db",
+                     "state_db_candidates", "cli_auth_candidates"):
+            if hasattr(cursor, name):
+                monkeypatch.setattr(cursor, name, lambda *a, **k: pytest.fail("looked"))
+        monkeypatch.setattr(
+            cursor.urllib.request, "urlopen", lambda *a, **k: pytest.fail("queried")
+        )
+        with pytest.raises(QuotaError, match="live binding unsupported"):
+            engines.quota("cursor", live=True)
+
+
+class TestLiveQuotaCli:
+    def _run(self, argv, capsys):
+        import r4t as r4t_mod
+        rc = r4t_mod.main(argv)
+        out = capsys.readouterr()
+        return rc, out.out, out.err
+
+    def _fail(self, monkeypatch):
+        def fail():
+            raise QuotaError("codex is not on PATH")
+        monkeypatch.setattr(codex, "quota", fail)
+
+    def test_live_failure_exits_one_with_json_and_default_still_serves_stale(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import r4t as r4t_mod
+        path, _ = TestLiveQuota()._plant(tmp_path, monkeypatch)
+        self._fail(monkeypatch)
+        rc, out, _err = self._run(["engine", "codex", "quota", "--live", "--json"], capsys)
+        assert rc == 1
+        assert json.loads(out) == {
+            "origin": "unavailable", "engine": "codex", "applicable": True,
+            "code": "query_failed",
+            "reason": "codex live quota query failed — sign in with `codex login`, then retry",
+        }
+        assert "Planted" not in out
+        rc, out, _err = self._run(["engine", "codex", "quota", "--json"], capsys)
+        assert rc == r4t_mod.QUOTA_EXIT_STALE
+        assert json.loads(out)["origin"] == "snapshot"
+        assert path.is_file()
+
+    def test_live_success_prints_the_payload_and_exits_zero(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        path, body = TestLiveQuota()._plant(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "quota", lambda: dict(TestLiveQuota.LIVE))
+        rc, out, _err = self._run(["engine", "codex", "quota", "--live", "--json"], capsys)
+        assert rc == 0 and json.loads(out)["origin"] == "live"
+        assert path.read_text(encoding="utf-8") == body
+
+    def test_live_snapshot_origin_is_rejected(self, tmp_path, monkeypatch, capsys):
+        TestLiveQuota()._plant(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "quota", lambda: {**TestLiveQuota.LIVE, "origin": "snapshot"})
+        rc, out, _err = self._run(["engine", "codex", "quota", "--live", "--json"], capsys)
+        assert rc == 1 and json.loads(out)["origin"] == "unavailable"
+
+    def test_account_mismatch_makes_no_query(self, tmp_path, monkeypatch, capsys):
+        TestLiveQuota()._plant(tmp_path, monkeypatch)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "other"))
+        monkeypatch.setattr(claude, "_credentials", lambda: {})
+        monkeypatch.setattr(claude, "quota", lambda: pytest.fail("queried"))
+        rc, out, _err = self._run(["engine", "claude", "quota", "--live", "--json"], capsys)
+        data = json.loads(out)
+        assert rc == 1 and data["applicable"] is True
+        assert data["reason"].startswith("account mismatch")
+        assert data["code"] == "account_mismatch"
+
+    def test_unknown_and_local_engines_are_not_applicable(self, capsys):
+        rc, out, _err = self._run(["engine", "emacs", "quota", "--live", "--json"], capsys)
+        data = json.loads(out)
+        assert rc == 1 and data["applicable"] is False and data["engine"] is None
+        rc, out, _err = self._run(["engine", "ollama", "quota", "--live", "--json"], capsys)
+        data = json.loads(out)
+        assert rc == 1 and data["applicable"] is False and data["engine"] == "ollama"
+
+    def test_live_failure_without_json_goes_to_stderr(self, tmp_path, monkeypatch, capsys):
+        TestLiveQuota()._plant(tmp_path, monkeypatch)
+        self._fail(monkeypatch)
+        rc, out, err = self._run(["engine", "codex", "quota", "--live"], capsys)
+        assert rc == 1 and out == "" and "live quota query failed" in err and "not on PATH" not in err
+
+    @pytest.mark.parametrize("argv", [
+        ["engine", "codex", "run", "hi", "--live"],
+        ["engine", "codex", "check", "--live"],
+        ["engine", "check", "--live"],
+        ["engine", "list", "--live"],
+        ["engine", "codex", "models", "--live"],
+        ["engine", "codex", "--live"],
+    ])
+    def test_live_flag_rejects_other_actions(self, argv, capsys):
+        rc, _out, err = self._run(argv, capsys)
+        assert rc == 2 and "--live" in err
+
+    def test_help_documents_live(self, capsys):
+        import r4t as r4t_mod
+        with pytest.raises(SystemExit):
+            r4t_mod.main(["engine", "--help"])
+        assert "--live" in capsys.readouterr().out
+
+
+class TestLiveSigtermAndBudget:
+    OUTER_S = 60  # a8s's quota-read bound; its SIGTERM teardown grace is 3s
+    SIGTERM_GRACE_S = 3
+
+    def test_handler_raises_systemexit_and_the_previous_one_comes_back(
+        self, monkeypatch
+    ):
+        import signal
+
+        import r4t as r4t_mod
+
+        sentinel = lambda *a: None  # noqa: E731
+        previous = signal.signal(signal.SIGTERM, sentinel)
+        ran = []
+
+        def fake(name, live=False):
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                pytest.fail("SIGTERM did not interrupt the read")
+            finally:
+                ran.append("finally")
+
+        monkeypatch.setattr(engines, "quota", fake)
+        try:
+            with pytest.raises(SystemExit) as caught:
+                r4t_mod.main(["engine", "codex", "quota", "--live"])
+            assert caught.value.code == 128 + signal.SIGTERM
+            assert ran == ["finally"]
+            assert signal.getsignal(signal.SIGTERM) is sentinel
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+    def test_the_handler_is_restored_after_an_ordinary_failure_too(self, monkeypatch):
+        import signal
+
+        import r4t as r4t_mod
+
+        before = signal.getsignal(signal.SIGTERM)
+
+        def fail(name, live=False):
+            raise engines.QuotaError("x")
+
+        monkeypatch.setattr(engines, "quota", fail)
+        assert r4t_mod.main(["engine", "codex", "quota", "--live"]) == 1
+        assert signal.getsignal(signal.SIGTERM) == before
+
+    def test_inner_budgets_fit_the_outer_bound_with_room_for_teardown(self):
+        from engines import agy, codex, devin, muse
+
+        teardown = muse.TEARDOWN_GRACE_S + muse.REAP_TIMEOUT_S
+        budgets = {
+            "muse": (muse.VERSION_TIMEOUT_S + teardown)
+            + (muse.LIVE_TIMEOUT_S + teardown),
+            "devin": devin.BOOT_TIMEOUT_S + 1.0 + devin.USAGE_TIMEOUT_S + 0.5 + 2,
+            "agy": agy.USAGE_CMD_TIMEOUT_S,
+            "codex": codex.TIMEOUT_S,
+            # two version probes (10s each) around the usage and profile calls
+            "claude": 2 * 10 + 2 * claude.TIMEOUT_S,
+        }
+        for engine, seconds in budgets.items():
+            assert seconds < self.OUTER_S, (engine, seconds)
+        assert budgets["muse"] == 35
+        assert teardown <= self.SIGTERM_GRACE_S - 0.5

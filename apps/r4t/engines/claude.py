@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from ar3.proc import launch_options
 
-from engines.base import QuotaError
+from engines.base import LiveQuotaError, QuotaError
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
@@ -38,10 +39,21 @@ class _Rejected(Exception):
     pass
 
 
-def quota() -> dict:
+LIVE_REFRESH_HINT = (
+    "claude's stored login is expired or rejected — run `claude` once to "
+    "refresh it, then retry"
+)
+
+
+def quota(live: bool = False) -> dict:
+    """`live` is the node-health read: it never runs `claude doctor`. A refresh
+    rotates the login and can outlast the caller's bound, so an expired or
+    rejected stored login is reported, not repaired."""
     creds = _credentials()
     stored = bool(_stored_token(creds))
     refreshed = False
+    if live and stored and _token_expired(creds):
+        raise LiveQuotaError(LIVE_REFRESH_HINT, code="login_refresh_required")
     if stored and _token_expired(creds):
         _refresh_via_cli()
         refreshed = True
@@ -55,6 +67,8 @@ def quota() -> dict:
                 "usage endpoint rejected CLAUDE_CODE_OAUTH_TOKEN — set a fresh "
                 "CLAUDE_CODE_OAUTH_TOKEN"
             ) from exc
+        if live:
+            raise LiveQuotaError(LIVE_REFRESH_HINT, code="login_refresh_required") from None
         if refreshed:
             raise _rejected_after_refresh() from exc
         _refresh_via_cli()
@@ -72,6 +86,64 @@ def quota() -> dict:
     # mistakes whose buckets these are.
     result["plan"] = _workspace(token) or result["plan"]
     return result
+
+
+API_AUTH_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+)
+
+
+def live_account_problem(env: dict | None = None) -> str | None:
+    """Why this process's account context is not the one the check reads, or
+    None. The check reads the stored login under `$HOME/.claude` (or the
+    macOS Keychain) and cannot follow a config dir, an API-key mode or an
+    ambiguous token, so a live reading refuses rather than answer for a
+    different account. Names the variable, never its value."""
+    source = os.environ if env is None else env
+
+    def value(name: str) -> str:
+        return (source.get(name) or "").strip()
+
+    home = Path(value("HOME") or value("USERPROFILE") or Path.home())
+    for name in API_AUTH_VARS:
+        if value(name):
+            return (
+                f"{name} is set, so claude authenticates with it instead of "
+                f"the subscription login this check reads"
+            )
+    config = value("CLAUDE_CONFIG_DIR")
+    if config and os.path.realpath(config) != os.path.realpath(home / ".claude"):
+        return (
+            "CLAUDE_CONFIG_DIR names a different config home than "
+            "$HOME/.claude, which is the only credentials location this "
+            "check reads"
+        )
+    if value("CLAUDE_CODE_OAUTH_TOKEN") and _stored_token(_credentials()):
+        return (
+            "CLAUDE_CODE_OAUTH_TOKEN is set and a stored login also exists, "
+            "so the account is ambiguous"
+        )
+    if sys.platform == "darwin" and os.path.realpath(home) != os.path.realpath(
+        _passwd_home()
+    ):
+        return (
+            "HOME differs from the user's home directory, and the macOS "
+            "Keychain login belongs to the user, not to HOME"
+        )
+    return None
+
+
+def _passwd_home() -> str:
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError):
+        return str(Path.home())
 
 
 def _rejected_after_refresh() -> QuotaError:

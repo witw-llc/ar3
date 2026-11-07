@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import time
@@ -305,8 +307,13 @@ def _warn_org_errors(org: Org) -> None:
         print(f"warning: {message}", file=sys.stderr)
 
 
+class OrgRefused(Exception):
+    """A dispatching verb met an org config it cannot read."""
+
+
 def _context(
-    args: argparse.Namespace, node: str, *, ticker: bool = False
+    args: argparse.Namespace, node: str, *, ticker: bool = False,
+    strict: bool = False,
 ) -> DispatchContext:
     # The stamped node root IS the org dir — it is what dispatch resolved and
     # ran against. Observer surfaces (status, logs) must read the roster,
@@ -318,9 +325,24 @@ def _context(
     root = _resolve_root(args.root)
     if not getattr(args, "root", None):
         stamped = state.read_root(node)
-        if stamped is not None and stamped.is_dir():
-            root = stamped
+        if stamped is not None:
+            if strict:
+                try:
+                    use_stamped = stat.S_ISDIR(stamped.stat().st_mode)
+                except (FileNotFoundError, NotADirectoryError):
+                    use_stamped = False
+                except OSError as e:
+                    raise OrgRefused(
+                        f"cannot read org directory {stamped}: {e}; "
+                        "fix permissions on it and the folders above it"
+                    ) from e
+            else:
+                use_stamped = stamped.is_dir()
+            if use_stamped:
+                root = stamped
     org = load_org(root)
+    if strict and org.unreadable:
+        raise OrgRefused(org.unreadable)
     _warn_org_errors(org)
     roster_path = resolve_roster_path(org.dir, getattr(args, "roster", None), node)
     return DispatchContext(
@@ -615,7 +637,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         # a8s runs `dispatch` and `idle` as wake subprocesses and pumps their
         # stdout into the node's log, so these two verbs — and only these two —
         # narrate the ticker (`ctx.event`) that `a8s logs <node> -f` follows.
-        ctx = _context(args, node, ticker=True)
+        ctx = _context(args, node, ticker=True, strict=True)
         state.stamp_root(ctx.node, ctx.root)
         return handle_batch(
             ctx, args.batch, drain_after=not args.no_drain,
@@ -631,7 +653,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if not node:
         print("dispatch: --to must carry the node name", file=sys.stderr)
         return 2
-    ctx = _context(args, node.lower(), ticker=True)
+    ctx = _context(args, node.lower(), ticker=True, strict=True)
     state.stamp_root(ctx.node, ctx.root)
     return handle_message(
         ctx, args.from_agent, args.to, args.message,
@@ -660,7 +682,7 @@ def cmd_clear(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node)
+    ctx = _context(args, node, strict=True)
     summary = run_clear(ctx)
     orphaned = sum(count for _name, count in summary["dead_lettered"])
     print(
@@ -686,7 +708,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node)
+    ctx = _context(args, node, strict=True)
     try:
         roster = load_roster(ctx.roster_path, node=ctx.node)
     except RosterError as e:
@@ -765,7 +787,7 @@ def cmd_flush(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    ctx = _context(args, node)
+    ctx = _context(args, node, strict=True)
     try:
         roster = load_roster(ctx.roster_path, node=ctx.node)
         config = load_rig_config(ctx.config_path)
@@ -797,7 +819,7 @@ def cmd_idle(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node, ticker=True)
+    ctx = _context(args, node, ticker=True, strict=True)
     summary = run_idle(ctx)
     print(f"drained {summary['drained']} queued turn(s)")
     clear_summary = run_clear(ctx)
@@ -1402,7 +1424,7 @@ def cmd_tell(args: argparse.Namespace) -> int:
     node = _resolve_node(args.node)
     if node is None:
         return 2
-    ctx = _context(args, node, ticker=True)
+    ctx = _context(args, node, ticker=True, strict=True)
     _adopt_root(ctx)
     _ensure_tell_outbox(ctx)
     try:
@@ -1533,6 +1555,11 @@ def cmd_engine(args: argparse.Namespace) -> int:
     import engines
     from engines import values
 
+    if getattr(args, "live", False) and (
+        args.action != "quota" or args.target in ("check", "list")
+    ):
+        print("r4t engine: --live applies only to `<id> quota`", file=sys.stderr)
+        return 2
     if args.target == "check":
         return _cmd_engine_check(args, None)
     if args.target == "list":
@@ -1564,6 +1591,8 @@ def cmd_engine(args: argparse.Namespace) -> int:
         return _cmd_engine_stop(args)
     if args.action == "status":
         return _cmd_engine_status(args)
+    if args.live:
+        return _cmd_engine_quota_live(args)
     try:
         # The explicit quota command is the opt-in: engines whose live read
         # spends (muse) mint it here and nowhere else.
@@ -1585,6 +1614,53 @@ def cmd_engine(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_engine_quota_live(args: argparse.Namespace) -> int:
+    """`quota --live`: a reading taken now or a failure, never a snapshot and
+    never exit 3. The failure shape is the contract node health reads."""
+    import engines
+
+    # A caller's timeout sends SIGTERM first. Raising here unwinds the
+    # adapters' `finally` blocks, which end the children they started in their
+    # own sessions; with no handler those children outlive r4t. The caller's
+    # grace after SIGTERM must cover the longest teardown (about 2.5s).
+    installed = False
+    try:
+        previous = signal.signal(signal.SIGTERM, _live_sigterm)
+        installed = True
+    except ValueError:
+        pass
+    try:
+        payload = engines.quota(args.target, live=True)
+    except engines.QuotaError as exc:
+        applicable = not isinstance(exc, engines.QuotaNotApplicable)
+        if args.as_json:
+            print(json.dumps({
+                "origin": "unavailable",
+                "engine": engines.engine_for(args.target),
+                "applicable": applicable and engines.engine_for(args.target) is not None,
+                "reason": str(exc),
+                "code": getattr(exc, "code", "query_failed") if applicable else "not_applicable",
+            }, indent=2))
+        else:
+            print(f"r4t engine: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if installed:
+            signal.signal(
+                signal.SIGTERM,
+                signal.SIG_DFL if previous is None else previous,
+            )
+    if args.as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(engines.format_text(payload))
+    return 0
+
+
+def _live_sigterm(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def _cmd_engine_values(args: argparse.Namespace) -> int:
     """`r4t engine <id> models|efforts`: what `--model` / `--effort` accept.
     Values go to stdout one per line so the list pipes; the note goes to
@@ -1600,7 +1676,7 @@ def _cmd_engine_values(args: argparse.Namespace) -> int:
         return 2
     ask = values.models if args.action == "models" else values.efforts
     try:
-        found, note = ask(args.target)
+        found, note = ask(args.target, args.model)
     except values.ValuesError as exc:
         print(f"r4t engine: {exc}", file=sys.stderr)
         return 1
@@ -3427,7 +3503,8 @@ def build_parser() -> argparse.ArgumentParser:
         "Accepts an engine id or any rig preset id; `list` shows both, and "
         "bare `check` probes every run-capable engine. stop — end the "
         "agent's resident session now (see --resident). models / efforts — the "
-        "values --model and --effort accept, one per line, spending no turn.",
+        "values --model and --effort accept, one per line, spending no turn "
+        "(codex reads its own catalog; efforts --model M narrows to one model).",
     )
     _memory_options(engine_p)
     engine_p.add_argument(
@@ -3453,6 +3530,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="quota/models/efforts: machine-readable JSON instead of text lines.",
     )
     engine_p.add_argument(
+        "--live",
+        action="store_true",
+        help="quota: a reading taken now, never a saved snapshot; exits 1 "
+        "when none can be taken.",
+    )
+    engine_p.add_argument(
         "--dir",
         metavar="DIR",
         help="run: working directory for the turn (default: CWD).",
@@ -3465,7 +3548,8 @@ def build_parser() -> argparse.ArgumentParser:
     engine_p.add_argument(
         "--model",
         metavar="M",
-        help="run: model to pass through, in the preset's own flag pattern.",
+        help="run: model to pass through, in the preset's own flag pattern; "
+        "efforts (codex): list only that model's efforts.",
     )
     engine_p.add_argument(
         "--agent",
@@ -3871,7 +3955,11 @@ def main(argv: list[str] | None = None) -> int:
         extras = _adopt_stray_positionals(args, extras)
     if extras:
         parser.error(f"unrecognized arguments: {' '.join(extras)}")
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except OrgRefused as e:
+        print(f"{getattr(args, 'command', None) or 'r4t'}: refused: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

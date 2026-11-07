@@ -2,6 +2,13 @@
 
 ## Hard constraints
 
+- **Live quota must answer for the selected account.** `quota --live` never reads or writes snapshots and never starts a model turn. Refuse account contexts an adapter cannot bind. Keep ordinary quota and automatic fuel policies unchanged. Return fixed repair text for live failures; never forward provider error bodies or stderr. Bound probes and their cleanup.
+- **Typed quota exhaustion outranks a snapshot.** Muse's matching probe completion can establish subscription exhaustion from structured quota detail; never infer it from missing telemetry or an untyped rate-limit error. Use a zero bucket only for a known subscription scope with a valid future reset. Otherwise invalidate the saved reading and report unavailable, including for subsequent automatic fuel checks. Preserve matching exhaustion across reordered or replayed terminal events; a bounded pending-terminal overflow also invalidates the saved reading.
+
+- **Refuse dispatch when org configuration cannot be read.** Report the path
+  and a repair hint before launching a turn. Treat absent files as absent;
+  preserve existing malformed-setting diagnostics in this narrow read failure
+  check. Exercise unreadable files and parents on Python 3.12 and 3.14.
 - **Keep resident model probes bound to the session launch context.** Refuse an incompatible queued launch before replacing the spec or accepting the message. Compare with the live bridge generation’s founding context; missing or unreadable context refuses. Persist a fingerprint, never the raw environment. Preserve same-context serial reuse.
 
 - **Use the foundation process-launch helper for every subprocess.** Windows console policy lives only in `ar3.proc.launch_options`; background launches are hidden, intentional interactive launches declare that intent, and no consumer invents Windows creation flags. Preserve each caller’s I/O, environment, grouping and teardown contract.
@@ -95,6 +102,10 @@
   start token before clearing or replacing state. A live leader must match its
   token and group; an absent leader requires the same Linux boot id. Refuse
   missing, mismatched or cross-boot evidence. Keep process-group layout unchanged.
+- **Discover Codex model and effort values from its installed app-server catalog.**
+  Use `model/list` without starting a thread or turn; preserve model-specific
+  effort choices, follow pagination, and report discovery failures instead of
+  inventing values. Catalog membership does not prove account access.
 - **Resident adapters use the installed vendor protocol and verify effective policy before prompts.** Keep teardown settings per engine. Muse and Devin target modern installed versions; do not add older-version compatibility paths. A successful handshake or local echo turn does not prove model-driven tool replies or native Windows behavior.
 - **Accept Muse host shutdown only after locally initiated, settled EOF.** Require
   the completed handshake and no active or held turns. Unsolicited shutdown and

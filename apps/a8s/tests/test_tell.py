@@ -1730,3 +1730,49 @@ def test_tell_verbatim_with_check_is_refused(tmp_path):
     (tmp_path / ".outbox").mkdir()
     res = _run(tmp_path, "--check", "--verbatim")
     assert res.returncode == 2
+
+
+@pytest.mark.parametrize("args", [
+    ("--body-file=x.txt", "bob"),
+    ("--body-file", "x.txt", "bob"),
+    ("bob", "--body-file=x.txt"),
+    ("bob", "--body-file", "x.txt"),
+    ("--receipt-dir=r", "bob", "hi"),
+    ("bob", "--receipt-dir", "r", "hi"),
+    ("bob", "hi", "-x"),
+    ("-1", "hi"),
+])
+def test_tell_rejects_unknown_options_before_staging(tmp_path, args):
+    outbox = tmp_path / ".outbox"
+    outbox.mkdir()
+    res = _run(tmp_path, *args)
+    assert res.returncode == 2
+    assert "unknown option" in res.stderr
+    assert list(outbox.iterdir()) == []
+
+
+def test_tell_dash_leading_text_after_double_dash_is_literal(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "--", "bob", "--body-file", "-1")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["to"] == "bob"
+    assert msg["content"] == "--body-file -1"
+
+
+def test_tell_known_flags_keep_their_position_with_subject_and_attachment(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    (tmp_path / "x.txt").write_text("x", encoding="utf-8")
+    res = _run(tmp_path, "bob", "--verbatim", "--subject", "-s", "--attach", "x.txt", "hi")
+    assert res.returncode == 0, res.stderr
+    _name, msg = _read_outbox(tmp_path / ".outbox")
+    assert msg["content"] == "hi"
+    assert msg["subject"] == "-s"
+    _assert_staged_files(tmp_path / ".outbox", msg, ["x.txt"])
+
+
+def test_tell_attach_without_path_keeps_its_diagnostic(tmp_path):
+    (tmp_path / ".outbox").mkdir()
+    res = _run(tmp_path, "bob", "--attach", "--verbatim")
+    assert res.returncode == 2
+    assert "--attach requires a path" in res.stderr

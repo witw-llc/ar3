@@ -221,6 +221,10 @@ class RunbookError(Exception):
     pass
 
 
+class RunbookUnreadable(RunbookError):
+    """The runbook is there and its bytes could not be read or decoded."""
+
+
 # --- the file on disk --------------------------------------------------------
 
 
@@ -619,8 +623,8 @@ def _resolve_extends(spec: str, base_dir: Path, path: Path) -> Path:
 def _read(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise RunbookError(f"cannot read runbook {path}: {e}") from e
+    except (OSError, ValueError) as e:
+        raise RunbookUnreadable(f"cannot read runbook {path}: {e}") from e
 
 
 def _load_chain(path: Path, vars: NodeVars) -> list[RunbookFile]:

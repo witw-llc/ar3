@@ -1,5 +1,7 @@
 # AR3
 
+<img src="assets/ar3.png" alt="AR3 logo" width="192">
+
 AR3 is a set of command-line tools that turns the AI coding agents already on
 your machine into a team: you write the team down in one file, hand it work,
 and go do something else. Apache-2.0, macOS, pre-1.0. No account, no server,

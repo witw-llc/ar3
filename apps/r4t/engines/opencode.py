@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from engines.base import QuotaError
+from engines.base import LiveQuotaError, QuotaError
 
 AUTH_PATH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
 
@@ -21,7 +21,21 @@ DELEGATES = {
 }
 
 
-def quota() -> dict:
+def _live_quota() -> dict:
+    """Unavailable until an identity-bound adapter exists: the delegate checks
+    read their own provider credentials, not the ones in opencode's store, so
+    their answer cannot be tied to the account opencode would use."""
+    raise LiveQuotaError(
+        "opencode live quota is unavailable: its providers' checks read "
+        "separate credentials than opencode's own, so a reading cannot be "
+        "tied to the account opencode uses",
+        code="unsupported_binding",
+    )
+
+
+def quota(live: bool = False) -> dict:
+    if live:
+        return _live_quota()
     providers = _providers()
     if not providers:
         raise QuotaError(

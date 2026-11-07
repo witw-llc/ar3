@@ -40,7 +40,12 @@ _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
-def quota() -> dict:
+def quota(live: bool = False) -> dict:
+    if live:
+        # The language server found by process listing belongs to whichever
+        # account runs it on this machine; nothing binds it to the account
+        # the `/usage` command just answered for.
+        return parse_usage_command(_usage_command())
     try:
         result = parse_usage_command(_usage_command())
         result["plan"] = _plan_from_local_api()

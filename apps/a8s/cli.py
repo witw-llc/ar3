@@ -89,7 +89,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("storage",  "[<name> [<url> [--<k> <v> ...]]]",            "List, show, or set a cross-cluster file storage service."),
     ("unstorage","<name>",                    "Remove a configured storage service."),
     ("mcp",      "serve",                     "Run the MCP server exposing tell as a tool."),
-    ("health",   "",                          "Test connectivity of remotes and storage services."),
+    ("health",   "[<node>]",                  "Test remotes and storage, or inspect one node."),
 ]
 
 ALIASES = {"tx": "transactions"}
@@ -237,7 +237,7 @@ def dispatch(cmd: str, args: list[str], interval: float) -> int:
     if cmd == "unstorage":
         return cmd_unstorage(args)
     if cmd == "health":
-        return cmd_health()
+        return cmd_health(args)
     raise ValueError(f"unknown command: {cmd!r}")
 
 

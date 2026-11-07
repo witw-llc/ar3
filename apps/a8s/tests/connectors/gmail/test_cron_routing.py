@@ -10,6 +10,7 @@ in `.gmail-told` before its tell and is never told again."""
 from __future__ import annotations
 
 import sys
+import json
 from functools import partial
 from pathlib import Path
 from unittest.mock import patch
@@ -136,6 +137,7 @@ def test_happy_path_unread_to_tell(monkeypatch, windows):
         sys.executable,
         str(gmail_cron.A8S_PY),
         "tell",
+        "--",
         "NEIL",
         "thanks for the message",
     ]
@@ -357,3 +359,27 @@ def test_main_passes_from_to_run():
         rc = gmail_cron.main(["--from", "human@example.com"])
     assert rc == 0
     assert captured == ["human@example.com"]
+
+
+@pytest.mark.parametrize("body", ["- buy milk", "--help", "--subject forged", "-1 on that"])
+def test_dash_leading_email_body_reaches_real_tell_verbatim(tmp_path, monkeypatch, body):
+    outbox = tmp_path / "staged"
+    outbox.mkdir()
+    monkeypatch.setenv("TELL_OUTBOX_DIR", str(outbox))
+    full = _thread("T-LITERAL", "M-LITERAL", "Re: peer")
+    full["messages"][-1]["plain"] = body
+    bridge = _BridgeStub({
+        "gmail.search": {"messages": [{"id": "T-LITERAL"}], "count": 1},
+        "gmail.get": full,
+        "gmail.read": {"status": "marked_read", "thread_id": "T-LITERAL"},
+    })
+    monkeypatch.setattr(gmail_cron, "_bridge_post", bridge)
+    assert gmail_cron.run("human@example.com") == 0
+    envelopes = list(outbox.glob("*.json"))
+    assert len(envelopes) == 1
+    message = json.loads(envelopes[0].read_text(encoding="utf-8"))
+    assert message["to"] == "peer"
+    assert message["content"] == body
+    assert "subject" not in message
+    assert _told() == ["M-LITERAL"]
+    assert len(_calls_for(bridge, "gmail.read")) == 1

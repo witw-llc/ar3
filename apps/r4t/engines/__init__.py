@@ -40,17 +40,20 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from engines import agy, claude, codex, copilot, cursor, devin, muse, ollama, opencode, run
-from engines.base import QuotaError
-from rig import ENGINE_HOME_ENV, engine_home, merge_env
+from engines.base import LiveQuotaError, QuotaError, QuotaExhausted, QuotaInvalidated, QuotaNotApplicable
+from rig import ENGINE_HOME_ENV, engine_home, home_value_problem, merge_env
 from state import r4t_home
 
 __all__ = [
     "QuotaError",
+    "LiveQuotaError",
+    "QuotaNotApplicable",
     "MODULES",
     "engine_for",
     "quota",
@@ -226,10 +229,88 @@ def _home_override_note(engine: str, env: dict | None) -> str | None:
     )
 
 
-def quota(preset_or_engine: str, spend: bool = False, env: dict | None = None) -> dict:
+def live_context_problem(engine: str, env: dict | None) -> str | None:
+    """Why this process's account context is not one `engine`'s check can
+    honor, else None. The adapters read the process's own environment; a
+    context they cannot follow is refused before any query is made."""
+    effective = merge_env(os.environ if env is None else env)
+    if engine in ENGINE_HOME_ENV:
+        variable = ENGINE_HOME_ENV[engine][0]
+        if home_value_problem(variable, effective.get(variable) or ""):
+            return (
+                f"{variable} is not an absolute path - a state home is "
+                f"written out in full (no `~`, no relative path)"
+            )
+    hook = getattr(MODULES[engine], "live_account_problem", None)
+    return hook(effective) if hook else None
+
+
+LIVE_REPAIR = {
+    "claude": "sign in with `claude` (subscription login)",
+    "codex": "sign in with `codex login`",
+    "copilot": "sign in with `copilot login` in the node's environment",
+    "agy": "sign in with `agy`",
+    "devin": "sign in with `devin auth login`",
+    "muse": "sign in with `muse`",
+    "cursor": "sign in with the Cursor agent CLI",
+}
+
+
+def _generic_live_failure(engine: str) -> LiveQuotaError:
+    repair = LIVE_REPAIR.get(engine, "check its login and configuration")
+    return LiveQuotaError(
+        f"{engine} live quota query failed — {repair}, then retry"
+    )
+
+
+def _live_quota(engine: str, checker, env: dict | None) -> dict:
+    """One reading taken now under the process's own environment: no snapshot
+    is read or written, and only a payload the adapter marks live is
+    returned. The caller's `env` is not applied to adapters that take none —
+    a context they cannot read is refused instead.
+
+    An adapter's ordinary QuotaError may quote a provider body or stderr, so
+    it never leaves this function: only LiveQuotaError (fixed text) passes."""
+    params = inspect.signature(checker).parameters
+    problem = live_context_problem(engine, env)
+    if problem is None and "env" not in params:
+        problem = _home_override_note(engine, env)
+    if problem:
+        raise LiveQuotaError(f"account mismatch: {problem}", code="account_mismatch")
+    kwargs: dict = {}
+    if "env" in params:
+        kwargs["env"] = env
+    if "live" in params:
+        kwargs["live"] = True
+    elif getattr(MODULES[engine], "QUOTA_SPENDS_TURN", False):
+        raise LiveQuotaError(f"{engine} has no free live quota read")
+    try:
+        payload = checker(**kwargs)
+    except LiveQuotaError:
+        raise
+    except Exception:
+        raise _generic_live_failure(engine) from None
+    if not isinstance(payload, dict) or payload.get("origin") != "live":
+        raise LiveQuotaError(f"{engine} returned no live observation")
+    payload["engine"] = engine
+    return payload
+
+
+def quota(
+    preset_or_engine: str,
+    spend: bool = False,
+    env: dict | None = None,
+    live: bool = False,
+) -> dict:
     """Live check for the engine behind `preset_or_engine`, falling back to a
     snapshot young enough to still be true. Raises QuotaError when neither can
     answer.
+
+    `live` demands a reading taken now: no snapshot is loaded or saved, the
+    answer must be a live observation, and an engine whose only live read
+    costs a turn declares a free one (`quota(live=True)`) or is unavailable.
+    Raises QuotaNotApplicable when the name is no engine or the engine has no
+    subscription to read.
 
     `spend` opts in to a live read that is not free. When the engine declares
     `QUOTA_SPENDS_TURN` and the caller did not opt in, the check behaves as if
@@ -237,7 +318,7 @@ def quota(preset_or_engine: str, spend: bool = False, env: dict | None = None) -
     paid reading costs and which command takes one."""
     engine = engine_for(preset_or_engine)
     if engine is None:
-        raise QuotaError(
+        raise (QuotaNotApplicable if live else QuotaError)(
             f"unknown engine or preset '{preset_or_engine}' "
             f"(engines: {', '.join(sorted(MODULES))})"
         )
@@ -246,11 +327,13 @@ def quota(preset_or_engine: str, spend: bool = False, env: dict | None = None) -
     checker = capability(engine, "quota")
     if checker is None:
         answering = sorted(e for e in MODULES if capability(e, "quota"))
-        raise QuotaError(
+        raise (QuotaNotApplicable if live else QuotaError)(
             f"{engine} answers no quota verb — it exposes no usage surface to "
             f"read without spending a turn (engines that do: "
             f"{', '.join(answering)})"
         )
+    if live:
+        return _live_quota(engine, checker, env)
     takes_env = "env" in inspect.signature(checker).parameters
     scope = copilot.account_key(env) if engine == "copilot" else ""
     try:
@@ -260,6 +343,16 @@ def quota(preset_or_engine: str, spend: bool = False, env: dict | None = None) -
                 f"`r4t engine {engine} quota` mints a reading on demand"
             )
         payload = checker(env) if takes_env else checker()
+    except QuotaInvalidated as exc:
+        if scope is not None:
+            try:
+                snapshot_path(engine, scope).unlink(missing_ok=True)
+            except OSError:
+                raise QuotaInvalidated(
+                    f"{exc}; saved quota invalidation failed — remove the saved "
+                    f"{engine} quota before using automatic fuel readings"
+                ) from None
+        raise
     except QuotaError as exc:
         # No account identity (a rig that names its own account but whose
         # token cannot be read) means no cache: any snapshot could be another

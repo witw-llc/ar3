@@ -36,7 +36,7 @@ from pathlib import Path
 
 from ar3.proc import launch_options
 
-from engines.base import QuotaError
+from engines.base import LiveQuotaError, QuotaError
 from rig import (
     Launch, RigError, cli_stem, engine_home, launch_version, merge_env, preset_cli,
     resolve_launch,
@@ -211,7 +211,7 @@ def account_key(env: dict | None) -> str | None:
     return "-" + hashlib.sha256(f"copilot\0{credential}".encode()).hexdigest()[:16]
 
 
-def quota(env: dict | None = None) -> dict:
+def quota(env: dict | None = None, live: bool = False) -> dict:
     """(`engines.quota` hands a quota check that names an `env` parameter the
     spawned environment of the rig it asks about.)
 
@@ -228,7 +228,21 @@ def quota(env: dict | None = None) -> dict:
     the router is, is not asked: only the token that environment resolves
     answers, and none is an error naming the home, never a fallback to the
     router's account.
+
+    `live` is the node-health read: the account is the one copilot itself
+    resolves from this process's environment (`token(env)`: its own variable
+    precedence, then the login stored under its `COPILOT_HOME`), always over
+    the direct endpoint. `gh` is never asked, because it signs in through its
+    own store and can answer for another account than the CLI's.
     """
+    if live:
+        auth = token(env)
+        if auth is None:
+            raise LiveQuotaError(
+                "no Copilot token is readable in this environment — sign in "
+                "with `copilot login`, or set COPILOT_GITHUB_TOKEN"
+            )
+        return parse_user(_direct_user(auth))
     scoped = account_scoped(env)
     if not scoped and shutil.which("gh"):
         return parse_user(_gh_user())

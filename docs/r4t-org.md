@@ -110,6 +110,11 @@ that does not exist. **Graduation is trivial:** copy the two files into the repo
 and delete `r4t-org.json` — resolution falls back to the in-repo default with no
 other change.
 
+If the org configuration cannot be read or decoded, dispatch refuses with the
+path and a repair hint before accepting work. This applies to `r4t-org.json`
+and to a runbook supplying the org settings. Missing configuration keeps the
+default settings; malformed JSON or setting values retain their warnings.
+
 ## Org settings
 
 `r4t-org.json` also carries org-level settings that travel with the org, not the

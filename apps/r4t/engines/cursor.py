@@ -22,7 +22,7 @@ from pathlib import Path
 
 from ar3.proc import launch_options
 
-from engines.base import QuotaError
+from engines.base import LiveQuotaError, QuotaError
 
 
 def _path_checks():
@@ -162,7 +162,18 @@ def _fetch_quota(token: str, source: str) -> dict:
     return result
 
 
-def quota() -> dict:
+def quota(live: bool = False) -> dict:
+    if live:
+        # The default path hunts across the IDE database, every WSL Windows
+        # profile and the CLI auth file, and takes the first login that
+        # answers: nothing ties it to the CLI account the node runs as.
+        # Unsupported until the configured CLI account can be bound; no
+        # credential is read and no request is made.
+        raise LiveQuotaError(
+            "cursor live quota is unavailable: the configured CLI account "
+            "cannot be bound to a reading (live binding unsupported)",
+            code="unsupported_binding",
+        )
     rejected: list[str] = []
     found = False
     for token, source in _token_sources():

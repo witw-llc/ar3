@@ -10,6 +10,32 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.128
+
+### Added
+
+- Shared AR3 logo asset and repository branding.
+
+- `a8s health <node>` combines a node's configuration, runtime and activity
+  facts with live engine quota. Unavailable readings stay unavailable; Muse
+  uses its current no-turn allowance command (#386).
+
+### Fixed
+
+- `r4t engine muse quota` reports exhausted subscription quota from the
+  probe's structured failure, replacing stale positive readings with zero
+  and its reset time. Missing usage remains unknown; live usage above 100%
+  reports zero remaining (#391).
+- `r4t engine codex models` and `efforts` discover configuration values from
+  the installed Codex catalog without starting a model turn. Use
+  `efforts --model <id>` for a model's supported reasoning efforts (#389).
+- Dispatch refuses an unreadable org configuration with its path and a repair
+  hint, so requested isolation cannot silently disappear (#383).
+- `tell` rejects unsupported options before staging a message. Use `--` or
+  stdin for literal text beginning with a dash (#388).
+- Strict registry readers reject present null or non-object sections; update
+  refuses unknown node state before stopping or restarting anything (#376).
+
 ## 0.1.127
 
 ### Fixed

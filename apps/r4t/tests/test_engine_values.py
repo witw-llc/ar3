@@ -49,7 +49,7 @@ class TestEfforts:
         assert found == HARNESS_PRESETS[preset]["effort_values"]
         assert note is None
 
-    @pytest.mark.parametrize("preset", ["codex", "opencode", "ollama-codex", "ollama-opencode"])
+    @pytest.mark.parametrize("preset", ["opencode", "ollama-codex", "ollama-opencode"])
     def test_a_free_value_preset_answers_empty_with_a_note(self, preset):
         found, note = values.efforts(preset)
         assert found == []
@@ -117,7 +117,7 @@ class TestModels:
         fake_cli(monkeypatch, {("devin", "models", "list"): text})
         assert values.models("devin") == (["swe-2-high", "swe-2-max"], None)
 
-    @pytest.mark.parametrize("preset", ["codex", "copilot", "opencode"])
+    @pytest.mark.parametrize("preset", ["copilot", "opencode"])
     def test_a_list_less_engine_refuses_and_says_where_the_string_goes(self, preset):
         with pytest.raises(values.ValuesError, match=f"{preset} has no list verb; .*(passed through|checked by)"):
             values.models(preset)
@@ -303,7 +303,7 @@ class TestModels:
 class TestVerbs:
     def test_verbs_follow_the_effort_flag_and_the_list_source(self):
         assert values.verbs("claude") == ["efforts", "models"]
-        assert values.verbs("codex") == ["efforts"]
+        assert values.verbs("codex") == ["efforts", "models"]
         assert values.verbs("cursor") == ["models"]
         assert values.verbs("muse") == ["efforts", "models"]
 
@@ -332,10 +332,10 @@ class TestCli:
         }
 
     def test_the_note_goes_to_stderr_with_exit_zero(self, capsys):
-        assert r4t_main(["engine", "codex", "efforts"]) == 0
+        assert r4t_main(["engine", "opencode", "efforts"]) == 0
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert captured.err.startswith("r4t engine: engine 'codex' takes any")
+        assert captured.err.startswith("r4t engine: engine 'opencode' takes any")
 
     def test_a_refusal_is_exit_one_on_stderr(self, capsys):
         assert r4t_main(["engine", "cursor", "efforts"]) == 1

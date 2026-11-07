@@ -77,7 +77,7 @@ def _load_raw_registry(*, strict: bool = False) -> dict:
     raw = {}
     for section in _REGISTRY_SECTIONS:
         value = data.get(section)
-        if strict and value is not None and not isinstance(value, dict):
+        if strict and section in data and not isinstance(value, dict):
             raise RegistryUnreadable(f"registry unreadable: {p}: '{section}' is not an object")
         raw[section] = value if isinstance(value, dict) else {}
     return raw
