@@ -3089,15 +3089,17 @@ def cmd_config(args: list[str]) -> int:
 # ---------- convo ----------
 
 def cmd_convo(args: list[str]) -> int:
-    """`a8s convo <name> [--limit N] [-f|--follow] [--from NAME] [--since CURSOR]
-    [--json] [--glow [theme]] [--heading-out T] [--heading-in T]` — markdown
-    history of messages to or from an agent."""
+    """`a8s convo <name> [<peer>] [--limit N] [-f|--follow] [--with NAME]
+    [--from NAME] [--since CURSOR] [--json] [--glow [theme]] [--heading-out T]
+    [--heading-in T]` — markdown history of messages to or from an agent or
+    remembered/archived remote participant."""
     import argparse
 
     from convo import (
         DEFAULT_HEADING_IN,
         DEFAULT_HEADING_OUT,
         ConversationArchiveError,
+        archived_agent_name,
         convo_help_epilog,
         decode_template,
         follow_conversation,
@@ -3112,11 +3114,17 @@ def cmd_convo(args: list[str]) -> int:
     default_glow = os.environ.get("A8S_GLOW", "").strip() or None
     parser = argparse.ArgumentParser(
         prog="a8s convo",
-        description="Show markdown conversation history for an agent.",
+        description="Show markdown conversation history for a node or remote participant.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=convo_help_epilog(),
     )
-    parser.add_argument("name", help="registered agent name")
+    parser.add_argument("name", help="agent or remote participant name")
+    parser.add_argument(
+        "peer",
+        nargs="?",
+        default=None,
+        help="only messages exchanged with this participant (same as --with)",
+    )
     parser.add_argument(
         "-f",
         "--follow",
@@ -3130,6 +3138,13 @@ def cmd_convo(args: list[str]) -> int:
         metavar="N",
         help="number of recent messages to show (default: 10; with --since, "
         "the oldest N after the cursor, and unset drains every one of them)",
+    )
+    parser.add_argument(
+        "--with",
+        dest="peers",
+        action="append",
+        metavar="NAME",
+        help="only messages involving NAME as sender or recipient (repeat for several)",
     )
     parser.add_argument(
         "--from",
@@ -3204,11 +3219,28 @@ def cmd_convo(args: list[str]) -> int:
     )
     glow_theme = parsed.glow
 
+    peers = list(parsed.peers or [])
+    if parsed.peer is not None:
+        peers.append(parsed.peer)
+    peers_arg = peers or None
+
     match = resolve_recipient(parsed.name)
-    if match is None:
+    agent_name = match[0] if match is not None else None
+    if agent_name is None:
+        key = canonical_name(parsed.name)
+        for remote_name in last_heard():
+            if canonical_name(remote_name) == key:
+                agent_name = remote_name
+                break
+    if agent_name is None:
+        try:
+            agent_name = archived_agent_name(parsed.name)
+        except ConversationArchiveError as e:
+            print(f"a8s: {e}", file=sys.stderr)
+            return 1
+    if agent_name is None:
         print(f"no agent named {parsed.name!r}", file=sys.stderr)
         return 1
-    agent_name = match[0]
 
     # An unreadable archive is not an empty one. Exit 0 with nothing printed
     # has to keep meaning "no messages", so a sandbox that can read the
@@ -3223,6 +3255,7 @@ def cmd_convo(args: list[str]) -> int:
                 heading_in=heading_in,
                 glow_theme=glow_theme,
                 senders=parsed.senders,
+                peers=peers_arg,
             )
         except KeyboardInterrupt:
             pass
@@ -3237,6 +3270,7 @@ def cmd_convo(args: list[str]) -> int:
                 agent_name,
                 limit=limit,
                 senders=parsed.senders,
+                peers=peers_arg,
                 since=parsed.since,
             )
         except ValueError as e:
@@ -3257,12 +3291,16 @@ def cmd_convo(args: list[str]) -> int:
                     agent_name,
                     limit=limit,
                     senders=parsed.senders,
+                    peers=peers_arg,
                     since=parsed.since,
                 )
             ]
         else:
             rows = load_agent_entries(
-                agent_name, limit=limit, senders=parsed.senders
+                agent_name,
+                limit=limit,
+                senders=parsed.senders,
+                peers=peers_arg,
             )
     except ValueError as e:
         print(f"a8s convo: {e}", file=sys.stderr)

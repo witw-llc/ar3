@@ -226,6 +226,13 @@ def _select_tab(seat, index, run, verb):
     return selected
 
 
+def _resize(seat, args):
+    if len(args) != 2 or not all(re.fullmatch(r"[1-9][0-9]{0,3}", arg) for arg in args):
+        raise plc.BrowserError("usage: resize <width> <height> — whole pixels, 1 to 9999")
+    plc.run(seat, "resize", args[0], args[1])
+    return f"{args[0]}x{args[1]}"
+
+
 # What a URL parser drops from the head of a URL: the C0 controls and the space.
 URL_BLANKS = "".join(chr(code) for code in range(0x21))
 
@@ -650,6 +657,8 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         _need(args, 1, "scroll <dy>")
         plc.run(seat, "mousewheel", "0", args[0])
         return args[0]
+    if verb == "resize":
+        return _resize(seat, args)
     if verb == "find":
         _need(args, 1, "find <text>")
         return plc.result_or(plc.run(seat, "find", args[0]))
@@ -985,6 +994,11 @@ def _run_steps(seat, body, run, scrubber, allow_eval, epoch):
         steps = script_commands(body)
     except ScriptError as exc:
         steps = []
+        try:
+            session._check_session_binding(seat)
+        except plc.BrowserError as bind_exc:
+            run.fail(exc.line, str(bind_exc))
+            return
         run.fail(exc.line, str(exc))
     epoch0 = session.stop_epoch(seat) if epoch is None else epoch
     stopped = False
@@ -995,6 +1009,13 @@ def _run_steps(seat, body, run, scrubber, allow_eval, epoch):
             stopped = True
             break
         verb = line.split(None, 1)[0]
+        try:
+            if verb != "close":
+                session._check_session_binding(seat)
+        except plc.BrowserError as exc:
+            run.fail(line, str(exc))
+            stopped = True
+            break
         if verb in RAW_ARGS:
             args = line.split(None, 1)[1:]
         else:
@@ -1028,11 +1049,12 @@ def _run_steps(seat, body, run, scrubber, allow_eval, epoch):
             run.note(line, str(output or ""))
         except plc.BrowserError as exc:
             run.fail(line, str(exc), getattr(exc, "output", ""))
-            stopped = stopped or str(exc) == session.STOP_MESSAGE
+            stopped = stopped or str(exc) == session.STOP_MESSAGE or getattr(exc, "binding_mismatch", False)
             break
 
     if not run.ok and not stopped and run.capturing:
         try:
+            session._check_session_binding(seat)
             with scrubbed_outputs(seat, scrubber):
                 refuse_a_local_page(seat, run, "failure")
                 _write_snapshot(seat, run, "failure")

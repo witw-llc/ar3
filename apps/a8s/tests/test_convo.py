@@ -2008,3 +2008,243 @@ class TestJsonOutput:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert captured.err == ""
+
+
+class TestRemoteAndPeerFilter:
+    def test_convo_resolves_archived_remote_participant_without_local_registration(
+        self, fake_home, capsys
+    ):
+        record(
+            {
+                "id": "01JREM00000000000000000001",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "RemoteSeat",
+                "to": "LocalDesk",
+                "content": "hello from remote",
+            },
+            recipients=["LocalDesk"],
+        )
+        record(
+            {
+                "id": "01JREM00000000000000000002",
+                "date": "2026-06-18T10:01:00.000000Z",
+                "from": "LocalDesk",
+                "to": "RemoteSeat",
+                "content": "reply to remote",
+            },
+            recipients=["RemoteSeat"],
+            delivered=False,
+        )
+        assert cmd_convo(["remoteseat"]) == 0
+        out = capsys.readouterr().out
+        assert "## from RemoteSeat to LocalDesk" in out
+        assert "### from LocalDesk to RemoteSeat" in out
+        assert "hello from remote" in out
+        assert "reply to remote" in out
+
+    def test_convo_resolves_remembered_remote_from_last_heard(
+        self, fake_home, monkeypatch, capsys
+    ):
+        import commands
+
+        monkeypatch.setattr(commands, "last_heard", lambda: {"RemoteSeat": "2026-06-18T10:00:00.000Z"})
+        record(
+            {
+                "id": "01JREM00000000000000000003",
+                "date": "2026-06-18T10:02:00.000000Z",
+                "from": "Alice",
+                "to": "Bob",
+                "content": "other traffic",
+            },
+            recipients=["Bob"],
+        )
+        assert cmd_convo(["remoteseat"]) == 0
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_convo_reports_unreadable_archive_when_resolving_nonlocal_name(
+        self, fake_home, capsys
+    ):
+        from core import conversations_path
+
+        path = conversations_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not a sqlite database", encoding="utf-8")
+        assert cmd_convo(["remoteseat"]) == 1
+        err = capsys.readouterr().err
+        assert str(path) in err
+
+    def test_positional_peer_and_with_flag_filter_two_node_conversation(
+        self, fake_home, capsys
+    ):
+        record(
+            {
+                "id": "01JPEER0000000000000000001",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alpha",
+                "to": "Beta",
+                "content": "alpha to beta",
+            },
+            recipients=["Beta"],
+        )
+        record(
+            {
+                "id": "01JPEER0000000000000000002",
+                "date": "2026-06-18T10:01:00.000000Z",
+                "from": "Alpha",
+                "to": "Gamma",
+                "content": "alpha to gamma",
+            },
+            recipients=["Gamma"],
+        )
+        record(
+            {
+                "id": "01JPEER0000000000000000003",
+                "date": "2026-06-18T10:02:00.000000Z",
+                "from": "Beta",
+                "to": "Alpha",
+                "content": "beta to alpha",
+            },
+            recipients=["Alpha"],
+        )
+        record(
+            {
+                "id": "01JPEER0000000000000000004",
+                "date": "2026-06-18T10:03:00.000000Z",
+                "from": "Delta",
+                "to": "devs",
+                "content": "delta broadcast to alpha and beta",
+            },
+            recipients=["Alpha", "Beta"],
+        )
+
+        for argv in (["alpha", "beta"], ["alpha", "--with", "beta"], ["beta", "alpha"]):
+            assert cmd_convo([*argv, "--json"]) == 0
+            rows = [
+                json.loads(line)
+                for line in capsys.readouterr().out.splitlines()
+                if line.strip()
+            ]
+            assert [row["content"] for row in rows] == [
+                "alpha to beta",
+                "beta to alpha",
+            ]
+
+    def test_with_filter_counts_matches_toward_limit_and_composes_with_since(
+        self, fake_home, capsys
+    ):
+        first_id = "01JPEER0000000000000000010"
+        record(
+            {
+                "id": first_id,
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alpha",
+                "to": "Beta",
+                "content": "match-1",
+            },
+            recipients=["Beta"],
+        )
+        for index in range(5):
+            record(
+                {
+                    "id": f"01JPEER000000000000000002{index}",
+                    "date": f"2026-06-18T10:01:0{index}.000000Z",
+                    "from": "Alpha",
+                    "to": "Gamma",
+                    "content": f"noise-{index}",
+                },
+                recipients=["Gamma"],
+            )
+        record(
+            {
+                "id": "01JPEER0000000000000000030",
+                "date": "2026-06-18T10:02:00.000000Z",
+                "from": "Beta",
+                "to": "Alpha",
+                "content": "match-2",
+            },
+            recipients=["Alpha"],
+        )
+
+        assert cmd_convo(["alpha", "beta", "--limit", "2", "--json"]) == 0
+        rows = [
+            json.loads(line)
+            for line in capsys.readouterr().out.splitlines()
+            if line.strip()
+        ]
+        assert [row["content"] for row in rows] == ["match-1", "match-2"]
+
+        assert cmd_convo(["alpha", "--with", "beta", "--since", first_id, "--json"]) == 0
+        after = [
+            json.loads(line)
+            for line in capsys.readouterr().out.splitlines()
+            if line.strip()
+        ]
+        assert [row["content"] for row in after] == ["match-2"]
+
+    def test_self_peer_filter_matches_only_self_messages(self, fake_home, capsys):
+        record(
+            {
+                "id": "01JPEER0000000000000000040",
+                "date": "2026-06-18T10:00:00.000000Z",
+                "from": "Alpha",
+                "to": "Beta",
+                "content": "alpha to beta",
+            },
+            recipients=["Beta"],
+        )
+        record(
+            {
+                "id": "01JPEER0000000000000000041",
+                "date": "2026-06-18T10:01:00.000000Z",
+                "from": "Alpha",
+                "to": "Alpha",
+                "content": "note to self",
+            },
+            recipients=["Alpha"],
+        )
+        assert cmd_convo(["alpha", "alpha", "--json"]) == 0
+        rows = [
+            json.loads(line)
+            for line in capsys.readouterr().out.splitlines()
+            if line.strip()
+        ]
+        assert [row["content"] for row in rows] == ["note to self"]
+
+    def test_follow_filters_by_peer_in_backlog_and_live_poll(
+        self, fake_home, capsys, monkeypatch
+    ):
+        record(
+            {"id": "01JFPEER01", "from": "Alpha", "to": "Beta", "content": "backlog-beta"},
+            recipients=["Beta"],
+        )
+        record(
+            {"id": "01JFPEER02", "from": "Alpha", "to": "Gamma", "content": "backlog-gamma"},
+            recipients=["Gamma"],
+        )
+        sleeps = {"n": 0}
+
+        def fake_sleep(_interval: float) -> None:
+            sleeps["n"] += 1
+            if sleeps["n"] == 1:
+                record(
+                    {"id": "01JFPEER03", "from": "Gamma", "to": "Alpha", "content": "live-gamma"},
+                    recipients=["Alpha"],
+                )
+                record(
+                    {"id": "01JFPEER04", "from": "Beta", "to": "Alpha", "content": "live-beta"},
+                    recipients=["Alpha"],
+                )
+                return
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("convo.time.sleep", fake_sleep)
+        assert cmd_convo(["alpha", "beta", "-f", "--limit", "10"]) == 0
+        out = capsys.readouterr().out
+        assert "backlog-beta" in out
+        assert "live-beta" in out
+        assert "backlog-gamma" not in out
+        assert "live-gamma" not in out
+
+

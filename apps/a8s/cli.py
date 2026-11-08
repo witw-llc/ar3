@@ -80,7 +80,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("tells",    "[-f] [--timeout SEC] [--glow [theme]]", "Wait for inbound messages to this node."),
     ("drain",    "<name>",                   "Move local inbox to trash without invoking."),
     ("config",   "[get|set|unset ...]",      "List all knobs or edit ~/.config/a8s/settings.json."),
-    ("convo",    "<name> [--limit N] [-f] [--from NAME] [--glow [theme]]", "Show markdown conversation history for an agent."),
+    ("convo",    "<name> [<peer>] [--limit N] [-f] [--with NAME] [--from NAME] [--glow [theme]]", "Show markdown conversation history for a node."),
     ("transactions", "[--limit N] [-f] [--event E] [--from N] [--to N]", "Show recent routing events (alias: tx)."),
     ("trace",    "<ULID>",                   "Show transaction boundaries for one message."),
     ("logs",     "<name>... [-n N|all] [-f]", "Show the last 1000 lines of per-agent logs."),

@@ -96,16 +96,18 @@ class TestAddBuiltin:
         argv = definition["invoke"]
         assert "$ALLOW" in argv
         assert "$ALLOW?" not in argv
-        for flag in ("--allow-eval=$ALLOW_EVAL?", "--chrome=$CHROME?"):
+        for flag in ("--allow-eval=$ALLOW_EVAL?", "--chrome=$CHROME?", "--cdp=$CDP?", "--profile=$PROFILE?"):
             assert flag in argv
         assert not any("PORT" in arg for arg in argv)
         assert definition["max_wake_seconds"] == 600
         assert definition["stop"]["invoke"][2] == "close"
+        assert "--cdp=$CDP?" in definition["stop"]["invoke"]
+        assert "--profile=$PROFILE?" in definition["stop"]["invoke"]
         assert definition["idle"] == {
             "timeout": "$TIMEOUT?",
             "invoke": [
                 "$PYTHON", "$A8S_DIR/../tools/browser", "idle", "--seat", "$RECIPIENT",
-                "--timeout=$TIMEOUT?", "--chrome=$CHROME?",
+                "--timeout=$TIMEOUT?", "--chrome=$CHROME?", "--cdp=$CDP?", "--profile=$PROFILE?",
             ],
         }
 

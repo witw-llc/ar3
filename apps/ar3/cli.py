@@ -1610,7 +1610,12 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
         position = native.index("--") if "--" in native else len(native)
         native[position:position] = inject
         mappings = {
-            "browser": {"CHROME": "AR3_BROWSER_CHROME", "ALLOW_EVAL": "AR3_BROWSER_ALLOW_EVAL"},
+            "browser": {
+                "CHROME": "AR3_BROWSER_CHROME",
+                "ALLOW_EVAL": "AR3_BROWSER_ALLOW_EVAL",
+                "CDP": "AR3_BROWSER_CDP",
+                "PROFILE": "AR3_BROWSER_PROFILE",
+            },
             "vault": {"VAULT_DIR": "VAULT_DIR", "OPENSSL": "OPENSSL"},
         }
         for key, env_name in mappings.get(args.name, {}).items():

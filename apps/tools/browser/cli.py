@@ -99,6 +99,11 @@ def main():
     )
     parser.add_argument("-s", "--seat", help="seat name (default: $AR3_BROWSER_SEAT or 'browser')")
     parser.add_argument("--chrome", help="Chrome binary (default: found on PATH)")
+    parser.add_argument(
+        "--cdp",
+        help="attach to a running Chrome over CDP (channel such as 'chrome', profile dir, port, or ws/http URL)",
+    )
+    parser.add_argument("--profile", help="Chrome user-data directory (default: the seat's own profile)")
     sub = parser.add_subparsers(dest="command")
     # The same options after the verb, as a8s's definition passes them there.
     # SUPPRESS keeps a subparser from overwriting a value given before the verb.
@@ -106,6 +111,8 @@ def main():
     common.add_argument("--seat", default=argparse.SUPPRESS,
                         help=argparse.SUPPRESS if os.environ.get("AR3_TOOL_PROG") else None)
     common.add_argument("--chrome", default=argparse.SUPPRESS)
+    common.add_argument("--cdp", default=argparse.SUPPRESS)
+    common.add_argument("--profile", default=argparse.SUPPRESS)
 
     sub.add_parser("open", parents=[common], help="launch Chrome on this seat's profile and attach")
     sub.add_parser("close", parents=[common], help="save state and quit Chrome")
@@ -181,6 +188,17 @@ def main():
 
     if args.chrome:
         os.environ["AR3_BROWSER_CHROME"] = args.chrome
+    if args.cdp:
+        os.environ["AR3_BROWSER_CDP"] = args.cdp
+    if args.profile:
+        os.environ["AR3_BROWSER_PROFILE"] = args.profile
+    if os.environ.get("AR3_BROWSER_PROFILE", "").strip():
+        os.environ["AR3_BROWSER_PROFILE"] = session.custom_profile_dir()
+    if (
+        session._cdp_profile_dir() is not None
+        and not session._channel_user_data_dir(session.cdp_target() or "")
+    ):
+        os.environ["AR3_BROWSER_CDP"] = os.path.abspath(os.path.expanduser(session.cdp_target()))
     if args.command == "doctor":
         return doctor.report()
     seat = _seat(args)
@@ -327,7 +345,11 @@ def _status(seat):
     scrubber = _scrubber(seat)
     if scrubber is None:
         return 1
-    print(scrubber.scrub(session.status(seat)))
+    try:
+        print(scrubber.scrub(session.status(seat)))
+    except plc.BrowserError as exc:
+        print(f"{seat}: {scrubber.scrub(str(exc))}", file=sys.stderr)
+        return 1
     return 0
 
 

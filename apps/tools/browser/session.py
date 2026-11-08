@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 
 from ar3.locking import file_lock
-from ar3.proc import launch_options
+from ar3.proc import launch_options, process_start_token
 
 from . import plc
 
@@ -73,36 +73,46 @@ def secure_seat(seat):
     private_dir(os.path.join(seat_home(seat), "scratch"))
 
 
-def inside_state_root(path):
-    """True when `path` is the browser state root or anything under it. That root
-    holds every seat's home: its secret store, profile, cookies and state file.
-    The path counts as the system resolves it, so a symlink that leads in is in,
-    and so is a spelling of the root a case-insensitive file system accepts. A
-    `..` is read both as a URL reads it (before any link is followed) and as the
-    kernel reads it (after). A path that cannot be resolved counts as in."""
+def _inside_directory(path, directory):
+    root = os.path.realpath(directory)
     try:
-        root = os.path.realpath(state_root())
-        try:
-            root_stat = os.stat(root)
-        except OSError:
-            root_stat = None
-        for candidate in {os.path.realpath(path), os.path.realpath(os.path.normpath(path))}:
-            while True:
-                if candidate == root:
-                    return True
-                if root_stat is not None:
-                    try:
-                        if os.path.samestat(os.stat(candidate), root_stat):
-                            return True
-                    except OSError:
-                        pass
-                parent = os.path.dirname(candidate)
-                if parent == candidate:
-                    break
-                candidate = parent
+        root_stat = os.stat(root)
+    except OSError:
+        root_stat = None
+    for candidate in {os.path.realpath(path), os.path.realpath(os.path.normpath(path))}:
+        while True:
+            if candidate == root:
+                return True
+            if root_stat is not None:
+                try:
+                    if os.path.samestat(os.stat(candidate), root_stat):
+                        return True
+                except OSError:
+                    pass
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                break
+            candidate = parent
+    return False
+
+
+def inside_state_root(path):
+    """True when `path` is the browser state root (or an external profile or
+    CDP profile directory configured for or bound to a seat) or anything under
+    it. That root holds every seat's home: its secret store, profile, cookies
+    and state file. The path counts as the system resolves it, so a symlink
+    that leads in is in, and so is a spelling of the root a case-insensitive
+    file system accepts. A `..` is read both as a URL reads it (before any link
+    is followed) and as the kernel reads it (after). A path that cannot be
+    resolved counts as in."""
+    try:
+        roots = [state_root()]
+        for extra in (custom_profile_dir(), _cdp_profile_dir(), *_bound_profile_dirs()):
+            if extra:
+                roots.append(extra)
+        return any(_inside_directory(path, directory) for directory in roots)
     except ValueError:
         return True
-    return False
 
 
 STOP_MESSAGE = "seat closed by a8s stop"
@@ -174,8 +184,267 @@ def launch_lock(seat, blocking=True):
     return file_lock(Path(seat_home(seat)) / "launch-lock", blocking=blocking)
 
 
-def profile_dir(seat):
+CDP_CHANNELS = {
+    "Darwin": {
+        "chrome": ("Library", "Application Support", "Google", "Chrome"),
+        "chrome-beta": ("Library", "Application Support", "Google", "Chrome Beta"),
+        "chrome-dev": ("Library", "Application Support", "Google", "Chrome Dev"),
+        "chrome-canary": ("Library", "Application Support", "Google", "Chrome Canary"),
+    },
+    "Linux": {
+        "chrome": ("google-chrome",),
+        "chrome-beta": ("google-chrome-beta",),
+        "chrome-dev": ("google-chrome-unstable",),
+        "chrome-canary": ("google-chrome-canary",),
+    },
+}
+
+
+def cdp_target():
+    """The Chrome DevTools Protocol target to attach to (a channel name such as
+    `chrome`, a profile or DevToolsActivePort path, a port, or a `ws://` /
+    `http://` endpoint), or None when the seat launches its own Chrome."""
+    raw = (os.environ.get("AR3_BROWSER_CDP") or "").strip()
+    return raw or None
+
+
+def custom_profile_dir():
+    """An external Chrome `--user-data-dir` path configured for this seat, or
+    None when the seat uses its own `<seat_home>/chrome` profile."""
+    raw = (os.environ.get("AR3_BROWSER_PROFILE") or "").strip()
+    if not raw:
+        return None
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _default_profile_dir(seat):
     return os.path.join(seat_home(seat), "chrome")
+
+
+def session_binding_path(seat):
+    return os.path.join(seat_home(seat), "session.json")
+
+
+def _read_session_binding(seat):
+    """The persisted `{mode, cdp, cdp_profile, profile, owned_pids}` binding of
+    a live or last-started session on `seat`, or None."""
+    try:
+        with open(session_binding_path(seat), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _clear_session_binding(seat):
+    try:
+        os.remove(session_binding_path(seat))
+    except OSError:
+        pass
+
+
+def _pid_token(pid):
+    try:
+        return process_start_token(int(pid))
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_session_binding(seat):
+    """Persist the live session's mode, target/profile, and owned browser PIDs
+    so subsequent commands (including `close` or `idle` run without flags) know
+    how the seat was opened and which external-profile PIDs belong to this seat."""
+    private_dir(seat_home(seat))
+    target = cdp_target()
+    custom_profile = custom_profile_dir()
+    if target:
+        binding = {
+            "mode": "cdp",
+            "cdp": _normalize_cdp_target(target),
+            "cdp_profile": _cdp_profile_dir(target),
+        }
+    elif custom_profile:
+        owned = {}
+        for pid in _main_pids(seat):
+            tok = _pid_token(pid)
+            if isinstance(tok, str) and tok:
+                owned[str(pid)] = tok
+        binding = {
+            "mode": "profile",
+            "profile": custom_profile,
+            "owned_pids": owned,
+        }
+    else:
+        binding = {
+            "mode": "default",
+            "profile": _default_profile_dir(seat),
+        }
+    path = session_binding_path(seat)
+    aside = os.path.join(seat_home(seat), f".session.{os.getpid()}.{threading.get_ident()}.tmp")
+    descriptor = os.open(aside, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(binding, handle)
+    os.replace(aside, path)
+    return binding
+
+
+def _effective_mode(seat):
+    """The seat's active mode (`'cdp'`, `'profile'`, or `'default'`), preferring
+    a persisted session binding over the current invocation's environment."""
+    binding = _read_session_binding(seat)
+    if binding and binding.get("mode") in ("cdp", "profile", "default"):
+        return binding["mode"]
+    if cdp_target():
+        return "cdp"
+    if custom_profile_dir():
+        return "profile"
+    return "default"
+
+
+def _is_cdp_session(seat):
+    return _effective_mode(seat) == "cdp"
+
+
+def _is_external_profile(seat):
+    return _effective_mode(seat) == "profile"
+
+
+def _bound_or_current_cdp_target(seat):
+    binding = _read_session_binding(seat)
+    if binding and binding.get("mode") == "cdp" and binding.get("cdp"):
+        return binding["cdp"]
+    return cdp_target()
+
+
+def _bound_profile_dirs():
+    """All external profile and local CDP profile directories bound by seats
+    under `state_root()`, so `inside_state_root` protects a bound profile even
+    when a subsequent invocation omits or changes `AR3_BROWSER_PROFILE` / `AR3_BROWSER_CDP`."""
+    root = state_root()
+    try:
+        seats = os.listdir(root)
+    except OSError:
+        return ()
+    dirs = []
+    for name in seats:
+        try:
+            with open(os.path.join(root, name, "session.json"), encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            for key in ("profile", "cdp_profile"):
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    dirs.append(val)
+    return dirs
+
+
+def profile_dir(seat):
+    binding = _read_session_binding(seat)
+    if binding and binding.get("mode") in ("profile", "default"):
+        bound_profile = binding.get("profile")
+        if isinstance(bound_profile, str) and bound_profile:
+            return bound_profile
+    return custom_profile_dir() or _default_profile_dir(seat)
+
+
+def _channel_user_data_dir(channel):
+    system = platform.system()
+    parts = CDP_CHANNELS.get(system, {}).get(channel.lower())
+    if not parts:
+        return None
+    if system == "Linux":
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        return os.path.join(base, *parts)
+    return os.path.join(os.path.expanduser("~"), *parts)
+
+
+def _cdp_profile_dir(target=None):
+    """The local user-data directory when `target` (or `cdp_target()`) names a
+    Chrome channel or a local profile/DevToolsActivePort path; None for a port
+    or URL endpoint."""
+    raw = (target if target is not None else cdp_target()) or ""
+    raw = raw.strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if low.startswith(("ws://", "wss://", "http://", "https://")) or raw.isdigit():
+        return None
+    channel_dir = _channel_user_data_dir(low)
+    if channel_dir is not None:
+        return channel_dir
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if os.path.basename(expanded) == "DevToolsActivePort" or os.path.isfile(expanded):
+        return os.path.dirname(expanded)
+    return expanded
+
+
+def _read_devtools_active_port(port_file):
+    """Read Chrome's `DevToolsActivePort` file (port on line 1, `/devtools/...`
+    WebSocket path on line 2) and return its `ws://127.0.0.1:<port><path>` URL."""
+    try:
+        with open(port_file, encoding="utf-8") as handle:
+            lines = [line.strip() for line in handle.read().splitlines() if line.strip()]
+    except OSError as exc:
+        raise plc.BrowserError(
+            f"cannot read {port_file} ({exc.strerror or exc}) — open chrome://inspect/#remote-debugging "
+            "in that Chrome and enable remote debugging, or pass a ws:// / http:// CDP endpoint"
+        ) from None
+    if not lines or not lines[0].isdigit() or not (1 <= int(lines[0]) <= 65535):
+        raise plc.BrowserError(f"invalid port in {port_file}")
+    port = int(lines[0])
+    ws_path = lines[1] if len(lines) > 1 else "/devtools/browser"
+    if not ws_path.startswith("/devtools/") or any(ch.isspace() or ch in "?#" for ch in ws_path):
+        raise plc.BrowserError(f"invalid WebSocket path in {port_file}")
+    return f"ws://127.0.0.1:{port}{ws_path}"
+
+
+def _resolve_cdp_endpoint(target):
+    """Resolve a CDP target (`ws://`, `http://`, port number, channel name, or
+    profile/DevToolsActivePort path) to an endpoint URL for `playwright-cli attach`."""
+    raw = (target or "").strip()
+    if not raw:
+        raise plc.BrowserError("empty CDP target")
+    low = raw.lower()
+    if low.startswith(("ws://", "wss://", "http://", "https://")):
+        return raw
+    if raw.isdigit():
+        port = int(raw)
+        if not (1 <= port <= 65535):
+            raise plc.BrowserError(f"CDP port {raw!r} is not in 1..65535")
+        return f"http://127.0.0.1:{port}"
+    channel_dir = _channel_user_data_dir(low)
+    if channel_dir is not None:
+        return _read_devtools_active_port(os.path.join(channel_dir, "DevToolsActivePort"))
+    expanded = os.path.abspath(os.path.expanduser(raw))
+    if os.path.basename(expanded) == "DevToolsActivePort" or os.path.isfile(expanded):
+        return _read_devtools_active_port(expanded)
+    return _read_devtools_active_port(os.path.join(expanded, "DevToolsActivePort"))
+
+
+def _singleton_lock_alive(profile):
+    """True when Chrome's `SingletonLock` in `profile` names a live process on this host."""
+    lock = os.path.join(profile, "SingletonLock")
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        return False
+    _, sep, pid_text = target.rpartition("-")
+    if not sep or not pid_text.isdigit():
+        return False
+    pid = int(pid_text)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def artifacts_dir(seat):
@@ -322,9 +591,144 @@ def _main_pids(seat):
     return pids
 
 
+def _is_descendant_of(pid, roots):
+    cur = str(pid)
+    seen = set()
+    for _ in range(8):
+        if cur in roots:
+            return True
+        if cur in seen:
+            return False
+        seen.add(cur)
+        parent = _parent_pid(cur)
+        if not parent or parent in ("0", "1") or parent == cur:
+            return False
+        cur = str(parent)
+    return cur in roots
+
+
+def _owned_main_pids(seat):
+    """Browser main PIDs on `profile_dir(seat)` that this seat launched and owns.
+    On the seat's private default profile (`<seat_home>/chrome`), any Chrome on
+    that profile belongs to the seat. On an external `PROFILE` directory, a
+    Chrome PID belongs to the seat only when its parent is this seat's live
+    driver daemon or when it matches the PID and start token recorded in
+    `session.json` when this seat launched it."""
+    main = _main_pids(seat)
+    if not _is_external_profile(seat):
+        return main
+    daemons = set(_daemon_pids(seat))
+    binding = _read_session_binding(seat) or {}
+    bound_pids = binding.get("owned_pids")
+    if not isinstance(bound_pids, dict):
+        bound_pids = {}
+    owned = []
+    for pid in main:
+        if _parent_pid(pid) in daemons:
+            owned.append(pid)
+            continue
+        saved_token = bound_pids.get(pid)
+        if isinstance(saved_token, str) and saved_token and _pid_token(pid) == saved_token:
+            owned.append(pid)
+    return owned
+
+
+def _owned_profile_targets(seat, owned_main):
+    """Freeze `{pid: start_token}` for the seat's proven main browser PIDs and
+    any helper PIDs on the profile that are descendants of those main PIDs or
+    this seat's live driver daemon."""
+    roots = set(owned_main) | set(_daemon_pids(seat))
+    binding = _read_session_binding(seat) or {}
+    bound_pids = binding.get("owned_pids")
+    if not isinstance(bound_pids, dict):
+        bound_pids = {}
+    targets = {}
+    for pid in owned_main:
+        tok = _pid_token(pid)
+        if not (isinstance(tok, str) and tok):
+            saved = bound_pids.get(pid)
+            tok = saved if isinstance(saved, str) and saved else None
+        targets[pid] = tok
+    for pid in _profile_pids(seat):
+        if pid not in targets and _is_descendant_of(pid, roots):
+            tok = _pid_token(pid)
+            targets[pid] = tok if isinstance(tok, str) and tok else None
+    return targets
+
+
+def _session_alive(seat):
+    mode = _effective_mode(seat)
+    if mode == "cdp":
+        return bool(_daemon_pids(seat)) or plc.is_open(seat)
+    if mode == "profile":
+        return bool(_owned_main_pids(seat)) or bool(_daemon_pids(seat)) or plc.is_open(seat)
+    return bool(_profile_pids(seat)) or bool(_daemon_pids(seat)) or plc.is_open(seat)
+
+
+def _normalize_cdp_target(target):
+    raw = (target or "").strip()
+    if not raw:
+        return None
+    low = raw.lower()
+    if low.startswith(("ws://", "wss://", "http://", "https://")) or raw.isdigit():
+        return raw
+    if _channel_user_data_dir(low) is not None:
+        return low
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _binding_mismatch(message):
+    err = plc.BrowserError(message)
+    err.binding_mismatch = True
+    return err
+
+
+def _check_session_binding(seat):
+    """Refuse to reuse or overwrite a live seat session when the caller's
+    mode/target/profile differs from the bound session. Clear a stale binding
+    when the bound session is no longer running."""
+    target = cdp_target()
+    custom_profile = custom_profile_dir()
+    if target and custom_profile:
+        raise _binding_mismatch("cannot set both CDP and PROFILE on the same seat")
+    binding = _read_session_binding(seat)
+    if not binding:
+        if (target or custom_profile) and plc.is_open(seat):
+            raise _binding_mismatch(
+                f"seat {seat!r} is already open on its default profile — close it first"
+            )
+        return
+    if not _session_alive(seat):
+        _clear_session_binding(seat)
+        return
+    mode = binding.get("mode")
+    if mode == "cdp":
+        bound_cdp = binding.get("cdp")
+        if custom_profile or not target or _normalize_cdp_target(target) != _normalize_cdp_target(bound_cdp):
+            raise _binding_mismatch(
+                f"seat {seat!r} is already open in CDP mode ({bound_cdp}) — close it first"
+            )
+    elif mode == "profile":
+        bound_profile = binding.get("profile")
+        if target or not custom_profile or custom_profile != bound_profile:
+            raise _binding_mismatch(
+                f"seat {seat!r} is already open on profile {bound_profile} — close it first"
+            )
+    elif mode == "default":
+        if target or custom_profile:
+            raise _binding_mismatch(
+                f"seat {seat!r} is already open on its default profile — close it first"
+            )
+
+
 def chrome_running(seat):
-    """True when a Chrome holds this seat's profile, attached or not. One
-    pgrep; it starts nothing."""
+    """True when a Chrome owned by this seat holds its profile, attached or not
+    (or, in CDP mode, when the seat's driver session is attached). One check;
+    it starts nothing."""
+    if _is_cdp_session(seat):
+        return bool(_daemon_pids(seat)) or plc.is_open(seat)
+    if _is_external_profile(seat):
+        return bool(_owned_main_pids(seat)) or bool(_daemon_pids(seat)) or plc.is_open(seat)
     return bool(_profile_pids(seat))
 
 
@@ -351,17 +755,58 @@ def _terminate_profile(seat):
     """Nothing the seat owns gets to stay: SIGTERM the browser process, wait,
     then SIGKILL whatever is still holding the profile, and stop the seat's
     playwright daemon. A wedged Chrome is how a stray dock icon outlives its
-    seat — SIGTERM alone can stall behind a busy or dialog-blocked browser."""
-    for pid in _main_pids(seat):
-        _signal(pid, signal.SIGTERM)
-    for _ in range(20):
-        if not _profile_pids(seat):
-            break
-        time.sleep(0.25)
-    for pid in _profile_pids(seat):
-        _signal(pid, signal.SIGKILL)
-    for pid in _daemon_pids(seat):
-        _signal(pid, signal.SIGTERM)
+    seat — SIGTERM alone can stall behind a busy or dialog-blocked browser.
+    In CDP mode the browser belongs to the user, so only the seat's daemon is
+    stopped. On an external `PROFILE` directory, only browser processes proven
+    to belong to this seat are signaled."""
+    try:
+        if _is_cdp_session(seat):
+            for pid in _daemon_pids(seat):
+                _signal(pid, signal.SIGTERM)
+            for _ in range(20):
+                if not _daemon_pids(seat):
+                    break
+                time.sleep(0.25)
+            for pid in _daemon_pids(seat):
+                _signal(pid, signal.SIGKILL)
+            return
+        if _is_external_profile(seat):
+            owned_main = _owned_main_pids(seat)
+            if owned_main:
+                owned_targets = _owned_profile_targets(seat, owned_main)
+
+                def _still_owned(pid, frozen_token):
+                    if pid not in set(_profile_pids(seat)) and pid not in set(_main_pids(seat)):
+                        return False
+                    if isinstance(frozen_token, str) and frozen_token and _pid_token(pid) == frozen_token:
+                        return True
+                    live_daemons = set(_daemon_pids(seat))
+                    return bool(live_daemons) and _is_descendant_of(pid, live_daemons)
+
+                for pid in owned_main:
+                    _signal(pid, signal.SIGTERM)
+                for _ in range(20):
+                    if not [pid for pid, tok in owned_targets.items() if _still_owned(pid, tok)]:
+                        break
+                    time.sleep(0.25)
+                for pid, tok in owned_targets.items():
+                    if _still_owned(pid, tok):
+                        _signal(pid, signal.SIGKILL)
+            for pid in _daemon_pids(seat):
+                _signal(pid, signal.SIGTERM)
+            return
+        for pid in _main_pids(seat):
+            _signal(pid, signal.SIGTERM)
+        for _ in range(20):
+            if not _profile_pids(seat):
+                break
+            time.sleep(0.25)
+        for pid in _profile_pids(seat):
+            _signal(pid, signal.SIGKILL)
+        for pid in _daemon_pids(seat):
+            _signal(pid, signal.SIGTERM)
+    finally:
+        _clear_session_binding(seat)
 
 
 def _headless():
@@ -552,26 +997,41 @@ def _refuse_unsupported():
 
 
 def owned_by_driver(seat):
-    """True when exactly one browser process holds this seat's profile, and its parent is this seat's
-    playwright-cli daemon. The daemon holds the other end of Chrome's pipe; nothing else can drive it. Never true
-    on Windows, where no process of the seat can be found."""
+    """True when the seat's driver holds its browser: in CDP mode, the seat's
+    playwright-cli session is open; otherwise, exactly one browser process
+    holds this seat's profile and its parent is this seat's playwright-cli
+    daemon. The daemon holds the other end of Chrome's pipe; nothing else can
+    drive it. Never true on Windows, where no process of the seat can be found."""
     if platform.system() == "Windows":
         return False
+    if _is_cdp_session(seat):
+        return bool(_daemon_pids(seat)) or plc.is_open(seat)
     main = _main_pids(seat)
     return len(main) == 1 and _parent_pid(main[0]) in set(_daemon_pids(seat))
 
 
 def _launch_chrome(seat):
-    """Have playwright-cli launch the seat's Chrome. The daemon it starts runs in its own session, so a wake
-    killed at its time limit leaves the daemon, and the signed-in browser it holds, running; only `close`
-    ends them. Chrome lives as long as the daemon: its pipe closes with it."""
+    """Have playwright-cli launch the seat's Chrome (or attach over CDP when
+    `AR3_BROWSER_CDP` is set). The daemon it starts runs in its own session,
+    so a wake killed at its time limit leaves the daemon, and the signed-in
+    browser it holds, running; only `close` ends them. Chrome lives as long as
+    the daemon when launched: its pipe closes with it."""
     _refuse_unsupported()
+    target = cdp_target()
+    custom_profile = custom_profile_dir()
+    if target and custom_profile:
+        raise _binding_mismatch("cannot set both CDP and PROFILE on the same seat")
+    private_dir(seat_home(seat))
+    if target:
+        endpoint = _resolve_cdp_endpoint(target)
+        plc.run(seat, "attach", plc.Own(f"--cdp={endpoint}"), timeout=CHROME_START_SECONDS)
+        return
     binary = chrome_path()
     if not binary:
         raise plc.BrowserError("no Chrome found — set AR3_BROWSER_CHROME")
-    private_dir(seat_home(seat))
     os.makedirs(profile_dir(seat), exist_ok=True)
-    _set_password_preferences(seat)
+    if not custom_profile:
+        _set_password_preferences(seat)
     config = _write_launch_config(seat, binary)
     plc.run(seat, "open", plc.Own(f"--config={config}"), timeout=CHROME_START_SECONDS)
 
@@ -594,16 +1054,28 @@ def _route_downloads_js(seat, directory=None):
 
 
 def _start_chrome(seat):
-    """Launch Chrome through the driver when the seat has no session. True when this call launched it.
+    """Launch Chrome through the driver (or attach over CDP) when the seat has no session.
+    True when this call launched or attached it.
 
-    A Chrome that holds the profile with no session of the driver is no one's to drive (its pipe is gone), and
-    Chrome refuses a second instance on one profile, so it is ended first. A launch that does not leave exactly
-    the seat's own Chrome under the seat's own daemon is ended too."""
+    A Chrome that holds the seat's own profile with no session of the driver is no one's to drive
+    (its pipe is gone), and Chrome refuses a second instance on one profile, so it is ended first.
+    An external profile (`PROFILE`) that is already in use by a running Chrome is refused rather than
+    killed. A launch that does not leave the seat under its own driver is ended too."""
     _refuse_unsupported()
+    _check_session_binding(seat)
     if plc.is_open(seat):
         return False
-    if _profile_pids(seat):
-        _terminate_profile(seat)
+    if not cdp_target():
+        if custom_profile_dir():
+            if _owned_main_pids(seat):
+                _terminate_profile(seat)
+            if _profile_pids(seat) or _singleton_lock_alive(profile_dir(seat)):
+                raise plc.BrowserError(
+                    f"profile {profile_dir(seat)} is already in use by a running Chrome — "
+                    "close that browser or attach to it with CDP"
+                )
+        elif _profile_pids(seat):
+            _terminate_profile(seat)
     try:
         _launch_chrome(seat)
     except plc.BrowserError:
@@ -612,7 +1084,9 @@ def _start_chrome(seat):
     if not owned_by_driver(seat):
         _terminate_profile(seat)
         raise plc.BrowserError(f"Chrome for seat {seat!r} did not come up under the seat's driver")
-    check_launch_argv(seat)
+    _write_session_binding(seat)
+    if not cdp_target():
+        check_launch_argv(seat)
     return True
 
 
@@ -621,6 +1095,7 @@ def _attach(seat):
     try:
         plc.run_code(seat, _route_downloads_js(seat), timeout=15)
     except plc.BrowserError:
+        _clear_session_binding(seat)
         _terminate_profile(seat)
         raise
 
@@ -662,15 +1137,17 @@ def close_browser(seat):
         # Browser.close over the pipe quits exactly this Chrome instance with a
         # clean exit (profile flushes, no crash flag). osascript "tell application ... to quit"
         # is unscoped — it can take down a person's own browser running
-        # beside the seat's.
-        graceful(15, lambda t: plc.run_code(
-            seat,
-            plc.Own(
-                "const s = await page.context().browser().newBrowserCDPSession();"
-                " await s.send('Browser.close');"
-            ),
-            timeout=t,
-        ))
+        # beside the seat's. In CDP mode the browser belongs to the user, so
+        # closing the seat detaches the driver without quitting Chrome.
+        if not _is_cdp_session(seat):
+            graceful(15, lambda t: plc.run_code(
+                seat,
+                plc.Own(
+                    "const s = await page.context().browser().newBrowserCDPSession();"
+                    " await s.send('Browser.close');"
+                ),
+                timeout=t,
+            ))
         graceful(30, lambda t: plc.run(seat, "close", timeout=t))
 
     _terminate_profile(seat)
@@ -749,9 +1226,12 @@ def open_if_down(seat, epoch):
     epoch under the same lock, so it sees the new epoch. The lock is released
     before any page work. An epoch of None skips the check (tests only).
     """
+    _refuse_unsupported()
+    _check_session_binding(seat)
     if plc.is_open(seat):
         return
     with launch_lock(seat):
+        _check_session_binding(seat)
         if plc.is_open(seat):
             return
         if epoch is not None and stop_epoch(seat) != epoch:
@@ -763,6 +1243,7 @@ def open_if_down(seat, epoch):
         # bumped the epoch and scanned before this Chrome existed. Re-read it;
         # if it moved, end the Chrome we made.
         if epoch is not None and stop_epoch(seat) != epoch:
+            _clear_session_binding(seat)
             _terminate_profile(seat)
             raise plc.BrowserError(STOP_MESSAGE)
     if launched:
@@ -787,6 +1268,8 @@ def ensure_running(seat, script_epoch=None):
     dialog blocks the driver — so the failure falls through to the verb, which
     either handles the modal state or reports the real error.
     """
+    _refuse_unsupported()
+    _check_session_binding(seat)
     if not plc.is_open(seat):
         open_if_down(seat, script_epoch)
     try:
@@ -794,7 +1277,8 @@ def ensure_running(seat, script_epoch=None):
     except plc.BrowserError:
         return
     if page.get("window") is None:
-        _restart_browser(seat, page.get("url") or "", script_epoch)
+        if not _is_cdp_session(seat):
+            _restart_browser(seat, page.get("url") or "", script_epoch)
     elif page.get("state") == "minimized":
         _unminimise(seat, page["window"])
     elif page.get("visible") == "hidden":
@@ -1036,6 +1520,10 @@ def mark_swept(seat, stamp):
 
 
 def status(seat):
+    _check_session_binding(seat)
     if not plc.is_open(seat):
-        return f"{seat}: not attached (chrome {'running' if _main_pids(seat) else 'down'})"
+        if _is_cdp_session(seat):
+            return f"{seat}: not attached (cdp {_bound_or_current_cdp_target(seat)})"
+        running = _owned_main_pids(seat) if _is_external_profile(seat) else _main_pids(seat)
+        return f"{seat}: not attached (chrome {'running' if running else 'down'})"
     return f"{seat}: attached at {current_url(seat)}"

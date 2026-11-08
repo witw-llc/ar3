@@ -502,9 +502,30 @@ def test_the_text_a_verb_types_into_a_field_is_refused_when_it_is_a_stored_passw
 
 def test_a_script_that_does_not_name_a_value_is_untouched(monkeypatch, tmp_path):
     cli = _world(monkeypatch, tmp_path)
-    run = commands.run_script("seat", "fill #pw hello there\ntype typed text\npress Enter\nscroll 400\nfind Sign in")
+    run = commands.run_script(
+        "seat",
+        "fill #pw hello there\ntype typed text\npress Enter\nscroll 400\nresize 1440 900\nfind Sign in",
+    )
     assert run.ok, run.error
-    assert [cmd[2] for cmd in cli.calls if cmd[2] != "--raw"] == ["fill", "type", "press", "mousewheel", "find"]
+    assert [cmd[2] for cmd in cli.calls if cmd[2] != "--raw"] == [
+        "fill",
+        "type",
+        "press",
+        "mousewheel",
+        "resize",
+        "find",
+    ]
+
+
+def test_resize_refuses_a_dimension_that_matches_a_stored_short_secret(monkeypatch, tmp_path):
+    cli = _cli(monkeypatch, tmp_path)
+    secretstore.set_secret("seat", "PIN", "1440", [ORIGIN])
+    run = commands.run_script("seat", "resize 1440 900")
+    assert not run.ok
+    assert run.error == plc.COMMAND_REFUSED
+    assert run.steps[0]["command"] == "resize [secret:PIN] 900"
+    assert _calls(cli, "resize") == []
+    assert "1440" not in cli.argv_text()
 
 
 def test_the_refusal_names_the_failing_command_line_scrubbed(monkeypatch, tmp_path):
@@ -660,6 +681,7 @@ OWN_SITES = {
     ],
     "resolve.py": ['plc.run(seat, "eval", plc.Own("() => true"), ref, timeout=10)'],
     "session.py": [
+        'plc.run(seat, "attach", plc.Own(f"--cdp={endpoint}"), timeout=CHROME_START_SECONDS)',
         'plc.run(seat, "open", plc.Own(f"--config={config}"), timeout=CHROME_START_SECONDS)',
         "return plc.Own(",
         "plc.Own(",
@@ -743,6 +765,7 @@ PIN = "482916"
     ("video-chapter", f"e{PIN}"),
     ("find", f"e{PIN}"),
     ("mousewheel", "0", f"e{PIN}"),
+    ("resize", f"e{PIN}", "800"),
     ("upload", f"e{PIN}"),
     ("eval", f"e{PIN}"),
     ("click", "e5", f"e{PIN}"),

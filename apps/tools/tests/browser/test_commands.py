@@ -1912,3 +1912,65 @@ def test_the_recipe_verb_opens_no_browser_of_its_own_accord(monkeypatch, tmp_pat
     result = commands.run_script("seat", "recipe\nrecipe help")
     assert result.ok, result.error
     assert [step["output"] for step in result.steps] == ["no recipes", "no recipes"]
+
+
+# --- resize ------------------------------------------------------------------------------------------------
+
+
+def test_resize_passes_width_and_height_to_playwright_cli(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "")
+    result = commands.run_script("seat", "resize 1440 900\nresize 1 9999")
+    assert result.ok, result.error
+    assert calls == [["resize", "1440", "900"], ["resize", "1", "9999"]]
+    assert [step["output"] for step in result.steps] == ["1440x900", "1x9999"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "resize",
+        "resize 800",
+        "resize 800 600 1",
+        "resize 0 600",
+        "resize 800 0",
+        "resize 0800 600",
+        "resize -800 600",
+        "resize 10000 600",
+        "resize 800 10000",
+        "resize 800.5 600",
+        "resize wide tall",
+        "resize \u0668\u0660\u0660 600",
+    ],
+)
+def test_resize_refuses_bad_dimensions(monkeypatch, tmp_path, line):
+    _stub_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda *a, **k: pytest.fail("plc.run called"))
+    result = commands.run_script("seat", line)
+    assert not result.ok
+    assert result.error == "usage: resize <width> <height> — whole pixels, 1 to 9999"
+
+
+def test_resize_in_a_sensitive_step_hides_dimensions_and_output(monkeypatch, tmp_path):
+    from browser.recipe import Recipe
+    from fake_browser import static_library
+
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "")
+    rec = Recipe("shop", "A shop", origins=["https://example.com"])
+
+    @rec.verb("go", help="Resize inside a sensitive step.")
+    def go(page, args):
+        with page.sensitive("passcode", cleanup=lambda: True):
+            page.command("resize", 1440, 900)
+        return "done"
+
+    result = commands.run_script("seat", "recipe shop go", recipes=static_library(rec))
+    assert result.ok, result.error
+    assert calls == [["resize", "1440", "900"]]
+    assert [(step["command"], step["output"]) for step in result.steps] == [
+        ("recipe shop go", "  resize\ndone"),
+    ]
+

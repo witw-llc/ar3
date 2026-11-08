@@ -12,6 +12,8 @@
     "$ALLOW",
     "--allow-eval=$ALLOW_EVAL?",
     "--chrome=$CHROME?",
+    "--cdp=$CDP?",
+    "--profile=$PROFILE?",
     "--",
     "$MESSAGE"
   ],
@@ -25,7 +27,9 @@
       "--seat",
       "$RECIPIENT",
       "--timeout=$TIMEOUT?",
-      "--chrome=$CHROME?"
+      "--chrome=$CHROME?",
+      "--cdp=$CDP?",
+      "--profile=$PROFILE?"
     ]
   },
   "stop": {
@@ -35,7 +39,9 @@
       "close",
       "--seat",
       "$RECIPIENT",
-      "--chrome=$CHROME?"
+      "--chrome=$CHROME?",
+      "--cdp=$CDP?",
+      "--profile=$PROFILE?"
     ]
   }
 }

@@ -10,6 +10,28 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.129
+
+### Added
+
+- `tool-browser` adds `CDP` (`--cdp`, `AR3_BROWSER_CDP`) to attach a seat to a
+  running Chrome session over the Chrome DevTools Protocol (by channel name,
+  profile or `DevToolsActivePort` path, port, or `ws://` / `http://` URL) and
+  detach on `close`, `a8s stop`, or `idle` without quitting the user's browser,
+  plus `PROFILE` (`--profile`, `AR3_BROWSER_PROFILE`) to launch against an
+  existing Chrome `--user-data-dir` without overwriting its password preferences
+  or killing a browser that already holds the profile.
+- `tool-browser` adds `resize <width> <height>` (1 to 9999 pixels) to the
+  script command set, with local-file refusal, command-line secret checks and
+  sensitive-step transcript redaction.
+
+### Fixed
+
+- `a8s convo <name>` resolves remembered and archived remote participants in
+  addition to local registered nodes, and accepts `<peer>` or `--with NAME` to
+  filter the two-way conversation between two participants without including
+  outbound messages sent to other recipients.
+
 ## 0.1.128
 
 ### Added

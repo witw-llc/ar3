@@ -204,6 +204,7 @@ An invalid index or extra argument fails the command.
 | `text` | `text <selector>` | Inner text of the first match. |
 | `find` | `find <text>` | The rest of the line, without changes. |
 | `scroll` | `scroll <dy>` | Pixels. |
+| `resize` | `resize <width> <height>` | Sets the viewport size in pixels (1 to 9999). |
 | `wait` | `wait <seconds>` | A number over 300 is read as milliseconds. At most 300 seconds. |
 | `wait-for` | `wait-for <selector> [seconds]` | Waits for a visible match. Default 10. |
 | `wait-for-url` | `wait-for-url <substring> [seconds]` | Default 10. |
@@ -263,12 +264,36 @@ for a change that applies to one run.
 | `ALLOW` | Required | Lists permitted sender names. Separate names with commas or spaces. Names are not case-sensitive. Other senders get no reply. |
 | `ALLOW_EVAL` | Off | Set to `1` to permit `eval` and `run-code`. A seat with stored secrets refuses both commands. |
 | `CHROME` | Found on `PATH` | Selects the Chrome executable. |
-| `TIMEOUT` | Unset | Sets the idle time in seconds before Chrome closes. The next script opens Chrome. Without this setting, Chrome stays open until a stop. |
+| `CDP` | Unset | Attaches to a running Chrome over the Chrome DevTools Protocol instead of launching one. Accepts a channel name (`chrome`, `chrome-beta`, `chrome-dev`, `chrome-canary`), a profile directory or `DevToolsActivePort` path, a localhost port, or a `ws://` / `http://` endpoint. Cannot be combined with `PROFILE`. |
+| `PROFILE` | Seat profile | Uses an existing Chrome `--user-data-dir` path instead of `<seat_home>/chrome`. Leaves existing `Preferences` password settings unchanged and refuses to start if a running Chrome already holds that profile. Cannot be combined with `CDP`. |
+| `TIMEOUT` | Unset | Sets the idle time in seconds before Chrome closes (or detaches in `CDP` mode). The next script opens or attaches again. Without this setting, the session stays open until a stop. |
 
 ```bash
 a8s vars browser-seat set TIMEOUT 900
 ar3 tool browser --node browser-seat --var TIMEOUT=900 idle
 ```
+
+### Attaching to a running Chrome or existing profile
+
+To attach a seat to a running Chrome instance on the same machine, open
+`chrome://inspect/#remote-debugging` in that Chrome, enable remote debugging for
+that browser instance, and set `CDP`:
+
+```bash
+a8s vars browser-seat set CDP chrome
+ar3 tool browser --seat scratch --cdp chrome status
+```
+
+To attach over an SSH local port forward from another host, forward the remote
+debugging port or WebSocket endpoint to `127.0.0.1` and set `CDP` to that
+`ws://127.0.0.1:<port>/devtools/browser/<id>` or `http://127.0.0.1:<port>` URL.
+In `CDP` mode, `close`, `a8s stop`, and `idle` detach the seat's driver daemon
+without quitting or signaling the attached Chrome process.
+
+To launch Chrome on a separate existing `--user-data-dir` directory when Chrome
+is not already running on it, set `PROFILE` (or pass `--profile PATH`). Chrome
+136 and later refuse `--remote-debugging-pipe` on Chrome's default user data
+directory; use `CDP=chrome` to attach to the default profile instead.
 
 ## Local commands
 
@@ -297,9 +322,10 @@ ar3 tool browser --seat scratch do --help
 | `secret` | `set`, `list`, or `rm` | Manages local secrets. See Secrets. |
 
 Use `COMMAND --help` for that verb's options. Browser commands that use Chrome
-accept `--chrome PATH` after the verb. Put `--` before a script to use the
-message path explicitly. For example, `-- go URL` returns a message-style
-transcript; `go URL` uses the local browser command.
+accept `--chrome PATH`, `--cdp TARGET`, and `--profile DIR` before or after the
+verb. Put `--` before a script to use the message path explicitly. For example,
+`-- go URL` returns a message-style transcript; `go URL` uses the local browser
+command.
 
 To run an unregistered seat with a visible Linux window, set `DISPLAY` in the
 terminal's environment first. `--seat` does not load registered settings.
@@ -620,7 +646,11 @@ Routed wakes return 0 even for script failures. Read the reply for the result.
 
 ## Trust
 
-A sender on `ALLOW` acts as the account signed in to the profile. It can enter
-a stored secret into a field on any origin allowed for that secret. Keep the
-sender list and origin lists narrow. Leave `ALLOW_EVAL` off unless the task
-requires it. Use a separate OS user to restrict filesystem access.
+A sender on `ALLOW` acts as the account signed in to the profile. In `CDP` or
+`PROFILE` mode, that includes every active login and saved credential in the
+attached browser or profile, and any local process that can reach a forwarded
+CDP port can connect to that browser without `ALLOW` or `fill-secret` checks.
+A sender on `ALLOW` can also enter a stored secret into a field on any origin
+allowed for that secret. Keep the sender list and origin lists narrow. Leave
+`ALLOW_EVAL` off unless the task requires it. Use a separate OS user to
+restrict filesystem access.

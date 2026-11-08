@@ -11,13 +11,21 @@ from . import session
 
 
 def _checks():
-    chrome = session.chrome_path()
-    yield (
-        bool(chrome) and os.path.exists(chrome),
-        f"chrome: {chrome}"
-        if chrome
-        else "chrome: not found — install it, or set the CHROME var or AR3_BROWSER_CHROME",
-    )
+    target = session.cdp_target()
+    if target:
+        try:
+            endpoint = session._resolve_cdp_endpoint(target)
+            yield True, f"cdp: {target} ({endpoint})"
+        except plc.BrowserError as exc:
+            yield False, f"cdp: {exc}"
+    else:
+        chrome = session.chrome_path()
+        yield (
+            bool(chrome) and os.path.exists(chrome),
+            f"chrome: {chrome}"
+            if chrome
+            else "chrome: not found — install it, or set the CHROME var or AR3_BROWSER_CHROME",
+        )
     playwright = shutil.which("playwright-cli")
     yield (
         bool(playwright),

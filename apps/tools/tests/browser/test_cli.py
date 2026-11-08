@@ -1095,3 +1095,33 @@ def test_secret_set_refuses_input_that_is_not_utf8_without_quoting_it(monkeypatc
     assert _secret(monkeypatch, "set", "PASSWORD", "-", "--origin", ORIGIN, "--seat", "s") == 1
     err = _silent(capsys)
     assert "UTF-8" in err and VALUE not in err
+
+
+def test_cdp_and_profile_flags_export_env_and_resolve_relative_paths_before_chdir(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AR3_BROWSER_CDP", "")
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", "")
+    rel_profile = tmp_path / "rel-prof"
+    rel_profile.mkdir()
+    seen = []
+    monkeypatch.setattr(
+        session, "status",
+        lambda seat: seen.append((session.cdp_target(), session.custom_profile_dir())) or f"{seat}: ok",
+    )
+    monkeypatch.chdir(tmp_path)
+    assert _run(monkeypatch, "--cdp", "chrome", "status", "--seat", "s") == 0
+    monkeypatch.setenv("AR3_BROWSER_CDP", "")
+    monkeypatch.chdir(tmp_path)
+    assert _run(monkeypatch, "status", "--seat", "s", "--profile", "rel-prof") == 0
+    assert seen == [("chrome", None), (None, str(rel_profile))]
+    capsys.readouterr()
+
+
+def test_cli_status_reports_binding_mismatch_on_stderr_and_returns_one(monkeypatch, capsys):
+    def fail_status(seat):
+        raise cli.plc.BrowserError(f"seat {seat!r} is already open in CDP mode (chrome) — close it first")
+
+    monkeypatch.setattr(session, "status", fail_status)
+    assert _run(monkeypatch, "status", "--seat", "s") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "already open in CDP mode" in err

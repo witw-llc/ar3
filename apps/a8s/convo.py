@@ -27,6 +27,7 @@ __all__ = [
     "DEFAULT_HEADING_IN",
     "DEFAULT_HEADING_OUT",
     "HEADING_PLACEHOLDERS",
+    "archived_agent_name",
     "convo_help_epilog",
     "heading_help",
     "json_row",
@@ -39,6 +40,7 @@ __all__ = [
     "follow_conversation",
     "hold_open",
     "involves_agent",
+    "involves_peer",
     "load_agent_entries",
     "load_agent_records",
     "load_entries",
@@ -46,6 +48,7 @@ __all__ = [
     "open_glow_stdout",
     "parse_duration",
     "parse_stamp",
+    "peer_keys",
     "print_entries",
     "prune_conversations",
     "record",
@@ -127,6 +130,10 @@ def heading_help() -> str:
 
 def convo_help_epilog() -> str:
     return f"""filters:
+  --with NAME    show only messages involving NAME as sender or recipient (case-insensitive;
+                 repeat for several peers, or pass a single peer as the second positional
+                 argument: `a8s convo <name> <peer>`). The limit counts matching messages.
+
   --from NAME    show only messages sent by NAME (case-insensitive; repeat for several
                  senders). The limit counts matching messages, so --from bob --limit 10
                  shows bob's last ten however much other traffic sits between them.
@@ -146,8 +153,8 @@ def convo_help_epilog() -> str:
                  On its own --since drains: every row after the cursor, oldest first.
                  Add --limit N for the oldest N of them and continue from the newest
                  ulid you were handed -- either way nothing between the cursor and the
-                 window is skipped. Composes with --from. Nothing new prints nothing
-                 and exits 0.
+                 window is skipped. Composes with --with and --from. Nothing new prints
+                 nothing and exits 0.
 
 {heading_help()}
 
@@ -164,6 +171,8 @@ output:
 
 examples:
   a8s convo my-desktop -f --limit 10 --glow
+  a8s convo my-desktop iris --limit 20
+  a8s convo my-desktop -f --with iris
   a8s convo my-desktop -f --from iris
   a8s convo bob --heading-out '**{{from}}**' '→ {{to}}' --limit 5
   a8s convo bob --heading-in "### {{from}}\\n_{{timestamp}}_"
@@ -305,6 +314,72 @@ def sender_keys(senders: list[str] | None) -> set[str]:
 def sent_by(entry: dict[str, Any], keys: set[str]) -> bool:
     """True when no sender filter is active or the entry came from one of them."""
     return not keys or _name_key(entry.get("from", "")) in keys
+
+
+def peer_keys(peers: list[str] | None) -> set[str]:
+    return sender_keys(peers)
+
+
+def _recipient_keys(entry: dict[str, Any]) -> set[str]:
+    names = [entry.get("to", "")]
+    names.extend(entry.get("recipients") or [])
+    return {key for name in names if (key := _name_key(str(name)))}
+
+
+def involves_peer(entry: dict[str, Any], agent: str, keys: set[str]) -> bool:
+    """True when no peer filter is active or the entry is between `agent` and one of `keys`."""
+    if not keys:
+        return True
+    agent_key = _name_key(agent)
+    sender = _name_key(entry.get("from", ""))
+    recipients = _recipient_keys(entry)
+    if sender == agent_key and (recipients & keys):
+        return True
+    if sender in keys and agent_key in recipients:
+        return True
+    return False
+
+
+def archived_agent_name(query: str) -> str | None:
+    """Return the archived spelling for `query` if `message_agents` holds it.
+
+    Returns `None` when the conversation archive does not exist yet or holds no
+    row for `query`. Raises `ConversationArchiveError` when the archive file
+    exists on disk and cannot be opened or read.
+    """
+    key = _name_key(query)
+    if not key or not conversations_path().is_file():
+        return None
+    with closing(open_for_read()) as conn:
+        try:
+            row = conn.execute(
+                """
+                SELECT m.entry_json
+                FROM messages AS m
+                JOIN message_agents AS a ON a.seq = m.seq
+                WHERE a.agent_key = ?
+                ORDER BY m.seq DESC
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        except (OSError, sqlite3.Error) as e:
+            raise ConversationArchiveError(
+                f"cannot read {conversations_path()}: {e}"
+            ) from e
+    if row is None:
+        return None
+    entry = _decode_entry(str(row[0]))
+    if entry is not None:
+        for candidate in [
+            entry.get("from", ""),
+            entry.get("to", ""),
+            *(entry.get("recipients") or []),
+        ]:
+            text = str(candidate).strip()
+            if _name_key(text) == key:
+                return text
+    return query.strip()
 
 
 def _entry_agents(entry: dict[str, Any]) -> set[str]:
@@ -461,6 +536,7 @@ def _latest_agent_entries(
     seq_floor: int | None = None,
     date_floor: datetime | None = None,
     senders: list[str] | None = None,
+    peers: list[str] | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
     """Rows involving `agent`, oldest-first, capped at `limit` (None = no cap).
 
@@ -491,17 +567,22 @@ def _latest_agent_entries(
         ORDER BY m.seq {"ASC" if forward else "DESC"}
     """
     keys = sender_keys(senders)
-    # A sender filter, or a date floor decided row by row after decoding,
+    with_keys = peer_keys(peers)
+    # A sender/peer filter, or a date floor decided row by row after decoding,
     # walks the cursor lazily instead: the limit must count matches, not
     # rows scanned, so a SQL LIMIT here would cut the scan before either
     # filter had a chance to reject anything.
-    if limit is not None and not keys and date_floor is None:
+    if limit is not None and not keys and not with_keys and date_floor is None:
         sql += " LIMIT ?"
         params.append(limit)
     found: list[tuple[int, dict[str, Any]]] = []
     for seq, raw in conn.execute(sql, params):
         entry = _decode_entry(raw)
-        if entry is None or not sent_by(entry, keys):
+        if (
+            entry is None
+            or not sent_by(entry, keys)
+            or not involves_peer(entry, agent, with_keys)
+        ):
             continue
         if date_floor is not None:
             stamp = parse_stamp(entry.get("date") or "")
@@ -516,7 +597,11 @@ def _latest_agent_entries(
 
 
 def load_agent_entries(
-    agent: str, *, limit: int, senders: list[str] | None = None
+    agent: str,
+    *,
+    limit: int,
+    senders: list[str] | None = None,
+    peers: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if limit < 1:
         return []
@@ -525,7 +610,7 @@ def load_agent_entries(
             return [
                 entry
                 for _, entry in _latest_agent_entries(
-                    conn, agent, limit, senders=senders
+                    conn, agent, limit, senders=senders, peers=peers
                 )
             ]
     except (OSError, sqlite3.Error) as e:
@@ -625,6 +710,7 @@ def load_agent_records(
     *,
     limit: int | None,
     senders: list[str] | None = None,
+    peers: list[str] | None = None,
     since: str | None = None,
 ) -> list[tuple[int, dict[str, Any]]]:
     """Entries for `agent` in display (seq) order, each paired with its own
@@ -653,6 +739,7 @@ def load_agent_records(
                 agent,
                 limit,
                 senders=senders,
+                peers=peers,
                 seq_floor=seq_floor,
                 date_floor=date_floor,
             )
@@ -894,11 +981,12 @@ def format_conversation(
     heading_out: str = DEFAULT_HEADING_OUT,
     heading_in: str = DEFAULT_HEADING_IN,
     senders: list[str] | None = None,
+    peers: list[str] | None = None,
 ) -> str:
     """Return markdown for the last `limit` messages involving `agent`."""
     if limit < 1:
         return ""
-    rows = load_agent_entries(agent, limit=limit, senders=senders)
+    rows = load_agent_entries(agent, limit=limit, senders=senders, peers=peers)
     parts = [
         format_entry(agent, entry, heading_out=heading_out, heading_in=heading_in)
         for entry in rows
@@ -915,9 +1003,11 @@ def follow_conversation(
     poll_interval: float = 1.0,
     glow_theme: str | None = None,
     senders: list[str] | None = None,
+    peers: list[str] | None = None,
 ) -> None:
     """Print the last `limit` messages, then emit rows after a sequence cursor."""
     keys = sender_keys(senders)
+    with_keys = peer_keys(peers)
     glow_stream = None
     if glow_theme is not None:
         try:
@@ -932,7 +1022,12 @@ def follow_conversation(
                 conn.execute("SELECT COALESCE(MAX(seq), 0) FROM messages").fetchone()[0]
             )
             rows = _latest_agent_entries(
-                conn, agent, limit, through_seq=cursor, senders=senders
+                conn,
+                agent,
+                limit,
+                through_seq=cursor,
+                senders=senders,
+                peers=peers,
             )
             conn.commit()
         print_entries(
@@ -980,7 +1075,7 @@ def follow_conversation(
                     flush=True,
                 )
             for _, entry in _rows_to_entries(rows, agent):
-                if not sent_by(entry, keys):
+                if not sent_by(entry, keys) or not involves_peer(entry, agent, with_keys):
                     continue
                 print_entries(
                     agent,

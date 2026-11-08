@@ -240,11 +240,27 @@ def test_a_blank_page_is_no_local_file(browser):
 
 def test_every_step_that_uses_the_page_is_looked_at(browser):
     browser.url = PROTECTED
-    for line in ("url", "text body", "find x", "wait-for-url file", "press Enter", "scroll 10", "reload"):
+    for line in (
+        "url",
+        "text body",
+        "find x",
+        "wait-for-url file",
+        "press Enter",
+        "scroll 10",
+        "resize 1024 768",
+        "reload",
+    ):
         browser.url = PROTECTED
         result = run(line)
         assert not result.ok and LOCAL in result.error, line
         assert browser.url == "about:blank", line
+
+
+def test_a_resize_with_bad_arguments_still_leaves_a_local_page(browser):
+    browser.url = PROTECTED
+    result = run("resize 0 600")
+    assert not result.ok and LOCAL in result.error
+    assert browser.url == "about:blank"
 
 
 def test_a_step_that_does_not_use_the_page_asks_nothing_of_it(browser, monkeypatch):

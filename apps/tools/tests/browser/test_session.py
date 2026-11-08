@@ -1230,3 +1230,387 @@ def test_windows_starts_no_driver_and_no_browser(monkeypatch, tmp_path):
     assert started == []
     assert not os.path.exists(session.launch_config_path("seat"))
     assert session.owned_by_driver("seat") is False
+
+
+# --- CDP attach and custom PROFILE directory ---------------------------------------------
+
+
+def test_cdp_resolves_devtools_active_port_with_full_websocket_path(monkeypatch, tmp_path):
+    """Chrome's DevToolsActivePort file has the port on line 1 and the browser WebSocket path on line 2."""
+    profile = tmp_path / "chrome-profile"
+    profile.mkdir()
+    port_file = profile / "DevToolsActivePort"
+    port_file.write_text("41892\n/devtools/browser/75eae945-a64f-4484-aa48-8da603b6b33c\n")
+    assert session._resolve_cdp_endpoint(str(profile)) == (
+        "ws://127.0.0.1:41892/devtools/browser/75eae945-a64f-4484-aa48-8da603b6b33c"
+    )
+    assert session._resolve_cdp_endpoint(str(port_file)) == (
+        "ws://127.0.0.1:41892/devtools/browser/75eae945-a64f-4484-aa48-8da603b6b33c"
+    )
+    assert session._resolve_cdp_endpoint("9222") == "http://127.0.0.1:9222"
+    assert session._resolve_cdp_endpoint("ws://127.0.0.1:9222/devtools/browser/abc") == (
+        "ws://127.0.0.1:9222/devtools/browser/abc"
+    )
+    assert session._resolve_cdp_endpoint("http://127.0.0.1:9222") == "http://127.0.0.1:9222"
+
+
+def test_cdp_channel_resolves_default_chrome_user_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(session.platform, "system", lambda: "Darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    chrome_dir = tmp_path / "Library" / "Application Support" / "Google" / "Chrome"
+    chrome_dir.mkdir(parents=True)
+    (chrome_dir / "DevToolsActivePort").write_text("51234\n/devtools/browser/mac-uuid\n")
+    assert session._resolve_cdp_endpoint("chrome") == "ws://127.0.0.1:51234/devtools/browser/mac-uuid"
+
+
+def test_cdp_missing_or_invalid_devtools_active_port_raises_browser_error(tmp_path):
+    with pytest.raises(session.plc.BrowserError, match="chrome://inspect/#remote-debugging"):
+        session._resolve_cdp_endpoint(str(tmp_path / "missing"))
+    bad = tmp_path / "DevToolsActivePort"
+    bad.write_text("not-a-port\n/devtools/browser/x\n")
+    with pytest.raises(session.plc.BrowserError, match="invalid port"):
+        session._resolve_cdp_endpoint(str(bad))
+    bad.write_text("9222\nhttp://evil.example/\n")
+    with pytest.raises(session.plc.BrowserError, match="invalid WebSocket path"):
+        session._resolve_cdp_endpoint(str(bad))
+    with pytest.raises(session.plc.BrowserError, match="1..65535"):
+        session._resolve_cdp_endpoint("70000")
+
+
+def test_cdp_attach_runs_attach_without_launching_chrome_or_touching_preferences(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    profile = tmp_path / "user-chrome"
+    (profile / "Default").mkdir(parents=True)
+    prefs_file = profile / "Default" / "Preferences"
+    prefs_file.write_text('{"credentials_enable_service":true}')
+    (profile / "DevToolsActivePort").write_text("44111\n/devtools/browser/u-1\n")
+    monkeypatch.setenv("AR3_BROWSER_CDP", str(profile))
+    monkeypatch.setattr(session, "chrome_path", lambda: None)
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: False)
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: ["88"])
+    calls = []
+    monkeypatch.setattr(session.plc, "run", lambda seat, *a, **k: calls.append((seat, a)))
+    monkeypatch.setattr(session.plc, "run_code", lambda seat, body, **k: calls.append(("code", body)))
+    session.open_if_down("seat", None)
+    assert calls[0] == ("seat", ("attach", "--cdp=ws://127.0.0.1:44111/devtools/browser/u-1"))
+    assert json.loads(prefs_file.read_text()) == {"credentials_enable_service": True}
+    assert not os.path.exists(session.launch_config_path("seat"))
+
+
+def test_cdp_close_detaches_without_browser_close_or_signaling_chrome(monkeypatch, tmp_path):
+    """Closing an attached CDP seat stops only the seat's driver daemon and never quits or signals Chrome."""
+    import signal
+    real_terminate = session._terminate_profile
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("AR3_BROWSER_CDP", "ws://127.0.0.1:9222/devtools/browser/abc")
+    order = _fake_close(monkeypatch, per_step_seconds=0, budget=15)
+    session.close_browser("seat")
+    assert "browser-close" not in [n for n, _ in order]
+    assert [n for n, _ in order] == ["dialog-dismiss", "state-save", "video-stop", "close", "terminate"]
+
+    killed = []
+    monkeypatch.setattr(session, "_terminate_profile", real_terminate)
+    monkeypatch.setattr(session, "_main_pids", lambda seat: pytest.fail("_main_pids called in CDP mode"))
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: pytest.fail("_profile_pids called in CDP mode"))
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: ["99"])
+    monkeypatch.setattr(session.time, "sleep", lambda s: None)
+    monkeypatch.setattr(session, "_signal", lambda pid, sig: killed.append((pid, sig)))
+    session._terminate_profile("seat")
+    assert ("99", signal.SIGTERM) in killed
+
+
+def test_custom_profile_launches_with_user_data_dir_and_preserves_preferences(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    ext = tmp_path / "external-profile"
+    (ext / "Default").mkdir(parents=True)
+    prefs = ext / "Default" / "Preferences"
+    prefs.write_text('{"credentials_enable_service":true}')
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(ext))
+    launched = []
+    monkeypatch.setattr(session.plc, "run", _launched_args(launched))
+    session._launch_chrome("seat")
+    assert f"--user-data-dir={ext}" in launched[0]
+    assert json.loads(prefs.read_text()) == {"credentials_enable_service": True}
+    assert session.inside_state_root(str(ext / "Default" / "Cookies"))
+
+
+def test_custom_profile_refuses_when_already_locked_by_a_running_chrome(monkeypatch, tmp_path):
+    """An external profile already held by a running Chrome is refused rather than killed."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    ext = tmp_path / "external-profile"
+    ext.mkdir()
+    os.symlink(f"host-{os.getpid()}", ext / "SingletonLock")
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(ext))
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: False)
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: [])
+    monkeypatch.setattr(session, "_terminate_profile", lambda seat: pytest.fail("terminated running user Chrome"))
+    with pytest.raises(session.plc.BrowserError, match="already in use by a running Chrome"):
+        session.open_if_down("seat", None)
+
+
+def test_setting_both_cdp_and_profile_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setenv("AR3_BROWSER_CDP", "chrome")
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(tmp_path / "prof"))
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: False)
+    with pytest.raises(session.plc.BrowserError, match="cannot set both CDP and PROFILE"):
+        session.open_if_down("seat", None)
+
+
+def test_external_profile_close_idle_and_failed_launch_never_signal_unowned_chrome(monkeypatch, tmp_path):
+    """If an external profile is held by the user's own Chrome, refusing open and
+    then running close, idle, or launch-failure cleanup must never signal it."""
+    from browser import cli
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    ext = tmp_path / "external-profile"
+    ext.mkdir()
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(ext))
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: False)
+    monkeypatch.setattr(session, "_main_pids", lambda seat: ["4242"])
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: ["4242", "4243"])
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: [])
+    monkeypatch.setattr(session, "_parent_pid", lambda pid: "1")
+    monkeypatch.setattr(session.time, "sleep", lambda s: None)
+    killed = []
+    monkeypatch.setattr(session, "_signal", lambda pid, sig: killed.append((pid, sig)))
+
+    with pytest.raises(session.plc.BrowserError, match="already in use by a running Chrome"):
+        session.open_if_down("seat", None)
+    assert killed == []
+    assert session.chrome_running("seat") is False
+    assert cli._idle("seat", 1.0) == 0
+    assert killed == []
+
+    session.close_browser("seat")
+    assert killed == []
+
+    # Even if a race lets _launch_chrome run and fail while PID 4242 holds the profile,
+    # _terminate_profile must not signal the unowned PID 4242.
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: [])
+    monkeypatch.setattr(session, "_singleton_lock_alive", lambda path: False)
+
+    def fail_after_user_chrome_appears(seat):
+        monkeypatch.setattr(session, "_profile_pids", lambda s: ["4242", "4243"])
+        raise session.plc.BrowserError("launch failed")
+
+    monkeypatch.setattr(session, "_launch_chrome", fail_after_user_chrome_appears)
+    with pytest.raises(session.plc.BrowserError, match="launch failed"):
+        session._start_chrome("seat")
+    assert killed == []
+
+
+def test_external_profile_signals_seat_owned_chrome_even_when_closed_without_profile_flag(monkeypatch, tmp_path):
+    """When the seat itself launched Chrome on an external profile, session.json
+    binds that profile and PID start token so close (with or without --profile)
+    terminates the seat-owned Chrome and nothing else."""
+    import signal
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("AR3_BROWSER_CHROME", "/bin/chrome")
+    ext = tmp_path / "external-profile"
+    ext.mkdir()
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(ext))
+    is_open = {"v": False}
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: is_open["v"])
+    pids = {"main": [], "profile": [], "daemon": []}
+    monkeypatch.setattr(session, "_main_pids", lambda seat: list(pids["main"]))
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: list(pids["profile"]))
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: list(pids["daemon"]))
+    monkeypatch.setattr(session, "_parent_pid", lambda pid: "40" if pid == "5000" else "1")
+    tokens = {"5000": "tok-5000"}
+    monkeypatch.setattr(session, "_pid_token", lambda pid: tokens.get(str(pid)))
+    monkeypatch.setattr(session, "check_launch_argv", lambda seat: [])
+    monkeypatch.setattr(session.time, "sleep", lambda s: None)
+
+    def fake_run(seat, *args, **kw):
+        if args and args[0] == "open":
+            pids["main"] = ["5000"]
+            pids["profile"] = ["5000", "5001"]
+            pids["daemon"] = ["40"]
+            is_open["v"] = True
+        elif args and args[0] == "close":
+            pids["daemon"] = []
+            is_open["v"] = False
+        return ""
+
+    monkeypatch.setattr(session.plc, "run", fake_run)
+    monkeypatch.setattr(session.plc, "run_code", lambda *a, **k: "")
+    session.open_if_down("seat", None)
+    assert os.path.exists(session.session_binding_path("seat"))
+
+    # Clear AR3_BROWSER_PROFILE: bound profile is still protected and used by close_browser.
+    monkeypatch.delenv("AR3_BROWSER_PROFILE", raising=False)
+    assert session.profile_dir("seat") == str(ext)
+    assert session.inside_state_root(str(ext / "Default" / "Cookies"))
+
+    killed = []
+    monkeypatch.setattr(session, "_signal", lambda pid, sig: killed.append((pid, sig)))
+    session.close_browser("seat")
+    assert ("5000", signal.SIGTERM) in killed
+    assert ("5000", signal.SIGKILL) in killed
+    assert not os.path.exists(session.session_binding_path("seat"))
+
+    # If a stale session.json names PID 5000 but its start token changed (PID reuse), it is not signaled.
+    session._write_session_binding("seat")
+    with open(session.session_binding_path("seat"), "w", encoding="utf-8") as handle:
+        json.dump({"mode": "profile", "profile": str(ext), "owned_pids": {"5000": "old-token"}}, handle)
+    tokens["5000"] = "new-user-token"
+    killed.clear()
+    session.close_browser("seat")
+    assert killed == []
+
+    # Null or empty tokens in session.json or from _pid_token never establish saved ownership or permit SIGKILL.
+    for bad_saved in (None, ""):
+        tokens["5000"] = None
+        pids["main"] = ["5000"]
+        pids["profile"] = ["5000"]
+        pids["daemon"] = []
+        with open(session.session_binding_path("seat"), "w", encoding="utf-8") as handle:
+            json.dump({"mode": "profile", "profile": str(ext), "owned_pids": {"5000": bad_saved}}, handle)
+        assert session._owned_main_pids("seat") == []
+        killed.clear()
+        session.close_browser("seat")
+        assert killed == []
+
+    # If owned PID 5000 exits on SIGTERM and a new unowned Chrome (6000/6001) acquires
+    # the profile during cleanup, escalation must never SIGKILL 6000/6001.
+    pids["main"] = ["5000"]
+    pids["profile"] = ["5000"]
+    tokens["5000"] = "orig-token"
+    tokens["6000"] = "user-6000"
+    tokens["6001"] = "user-6001"
+    with open(session.session_binding_path("seat"), "w", encoding="utf-8") as handle:
+        json.dump({"mode": "profile", "profile": str(ext), "owned_pids": {"5000": "orig-token"}}, handle)
+
+    def sigterm_replaces_with_user_chrome(pid, sig):
+        killed.append((pid, sig))
+        if pid == "5000" and sig == signal.SIGTERM:
+            pids["main"] = ["6000"]
+            pids["profile"] = ["6000", "6001"]
+
+    killed.clear()
+    monkeypatch.setattr(session, "_signal", sigterm_replaces_with_user_chrome)
+    session.close_browser("seat")
+    assert killed == [("5000", signal.SIGTERM)]
+
+
+def test_cdp_binding_persists_so_close_without_cdp_flag_detaches_without_browser_close(monkeypatch, tmp_path):
+    """Opening with --cdp and then running close without --cdp must still detach
+    without sending Browser.close or signaling the user's Chrome."""
+    import signal
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    profile = tmp_path / "user-chrome"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("44111\n/devtools/browser/u-1\n")
+    monkeypatch.setenv("AR3_BROWSER_CDP", str(profile))
+    is_open = {"v": False}
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: is_open["v"])
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: ["88"])
+    calls = []
+
+    def fake_run(seat, *args, **kw):
+        calls.append(("run", args[0]))
+        if args[0] == "attach":
+            is_open["v"] = True
+        return ""
+
+    def fake_run_code(seat, body, **kw):
+        if "Browser.close" in body:
+            calls.append(("browser-close", body))
+        else:
+            calls.append(("code", body))
+        return ""
+
+    monkeypatch.setattr(session.plc, "run", fake_run)
+    monkeypatch.setattr(session.plc, "run_code", fake_run_code)
+    session.open_if_down("seat", None)
+    assert os.path.exists(session.session_binding_path("seat"))
+
+    # Drop AR3_BROWSER_CDP (simulating `browser --seat seat close` without `--cdp`).
+    monkeypatch.delenv("AR3_BROWSER_CDP", raising=False)
+    assert session.inside_state_root(str(profile / "Default" / "Login Data"))
+
+    killed = []
+    monkeypatch.setattr(session, "_main_pids", lambda seat: pytest.fail("_main_pids called on CDP close"))
+    monkeypatch.setattr(session, "_profile_pids", lambda seat: pytest.fail("_profile_pids called on CDP close"))
+    monkeypatch.setattr(session.time, "sleep", lambda s: None)
+    monkeypatch.setattr(session, "_signal", lambda pid, sig: killed.append((pid, sig)))
+    calls.clear()
+    session.close_browser("seat")
+    assert ("browser-close",) not in [c[:1] for c in calls]
+    assert ("88", signal.SIGTERM) in killed
+    assert not os.path.exists(session.session_binding_path("seat"))
+
+
+def test_session_binding_allows_same_mode_reuse_and_refuses_flag_or_var_mismatches(monkeypatch, tmp_path):
+    """A live session can be reused with matching settings, but changing or
+    dropping --cdp / --profile while the seat is open is refused without touching
+    or snapshotting the live browser."""
+    from browser import commands
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    profile = tmp_path / "user-chrome"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("44111\n/devtools/browser/u-1\n")
+    monkeypatch.setenv("AR3_BROWSER_CDP", str(profile))
+    is_open = {"v": False}
+    monkeypatch.setattr(session.plc, "is_open", lambda seat: is_open["v"])
+    monkeypatch.setattr(session, "_daemon_pids", lambda seat: ["88"] if is_open["v"] else [])
+    monkeypatch.setattr(
+        session.plc, "run",
+        lambda seat, *args, **kw: is_open.__setitem__("v", True) or "" if args and args[0] == "attach" else "",
+    )
+    monkeypatch.setattr(
+        session.plc, "run_code",
+        lambda seat, body, **kw: '### Result\n"{\\"url\\":\\"https://example.com/\\",\\"visible\\":\\"visible\\",\\"window\\":1,\\"state\\":\\"normal\\"}"',
+    )
+    monkeypatch.setattr(session, "current_url", lambda seat: "https://example.com/")
+    session.open_if_down("seat", None)
+
+    # Reusing with the same CDP target succeeds.
+    session.open_if_down("seat", None)
+    session.ensure_running("seat")
+    assert session.status("seat") == "seat: attached at https://example.com/"
+
+    # Dropping --cdp, changing --cdp, or switching to --profile while open is refused.
+    monkeypatch.delenv("AR3_BROWSER_CDP", raising=False)
+    for call in (
+        lambda: session.open_if_down("seat", None),
+        lambda: session.ensure_running("seat"),
+        lambda: session.status("seat"),
+    ):
+        with pytest.raises(session.plc.BrowserError, match="already open in CDP mode"):
+            call()
+
+    monkeypatch.setenv("AR3_BROWSER_CDP", "http://127.0.0.1:9333")
+    with pytest.raises(session.plc.BrowserError, match="already open in CDP mode"):
+        session.ensure_running("seat")
+
+    monkeypatch.delenv("AR3_BROWSER_CDP", raising=False)
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(tmp_path / "other-prof"))
+    monkeypatch.setattr(session, "snapshot", lambda seat: pytest.fail("snapshot called on mismatched session"))
+    monkeypatch.setattr(commands, "_write_snapshot", lambda *a, **k: pytest.fail("_write_snapshot called on mismatched session"))
+    monkeypatch.setattr(commands, "refuse_a_local_page", lambda *a, **k: pytest.fail("refuse_a_local_page called on mismatched session"))
+    for bad_script in (
+        "go https://example.com/",
+        "go <<EOF\nhttps://example.com/",
+        'click "unclosed',
+    ):
+        run = commands.run_script("seat", bad_script)
+        assert not run.ok
+        assert "already open in CDP mode" in run.error
+        assert run.files == []
+
+    # Setting both CDP and PROFILE is also rejected without touching or snapshotting the live session.
+    monkeypatch.setenv("AR3_BROWSER_CDP", str(profile))
+    monkeypatch.setenv("AR3_BROWSER_PROFILE", str(tmp_path / "other-prof"))
+    for bad_script in (
+        "go https://example.com/",
+        "go <<EOF\nhttps://example.com/",
+        'click "unclosed',
+    ):
+        run = commands.run_script("seat", bad_script)
+        assert not run.ok
+        assert "cannot set both CDP and PROFILE" in run.error
+        assert run.files == []
