@@ -579,8 +579,11 @@ def _main_pids(seat):
     execs a differently named binary, so the process name is not ours to know."""
     if platform.system() == "Windows":
         return []
+    # Darwin's -a includes ancestors; unlike procps, it does not print argv.
+    # We need argv to exclude --type= helpers from the browser ownership check.
+    full_command = "-fl" if platform.system() == "Darwin" else "-af"
     result = subprocess.run(
-        ["pgrep", "-af", "--", _profile_pattern(seat)], capture_output=True, text=True,
+        ["pgrep", full_command, "--", _profile_pattern(seat)], capture_output=True, text=True,
         **launch_options(),
     )
     pids = []

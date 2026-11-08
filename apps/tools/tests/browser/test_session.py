@@ -48,6 +48,25 @@ def _sibling_process(seat, helper=False):
     return proc
 
 
+@pytest.mark.parametrize("system,full_command", [("Darwin", "-fl"), ("Linux", "-af")])
+def test_main_pids_requests_full_command_lines_for_the_platform(monkeypatch, tmp_path, system, full_command):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(session.platform, "system", lambda: system)
+    profile = session.profile_dir("review-main")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert argv[:3] == ["pgrep", full_command, "--"]
+        return subprocess.CompletedProcess(argv, 0,
+            f"101 chrome --user-data-dir={profile} --remote-debugging-pipe\n"
+            f"102 chrome --type=renderer --user-data-dir={profile}\n", "")
+
+    monkeypatch.setattr(session.subprocess, "run", run)
+    assert session._main_pids("review-main") == ["101"]
+    assert len(calls) == 1
+
+
 @pytest.mark.skipif(shutil.which("pgrep") is None, reason="needs pgrep")
 def test_main_pids_is_the_profile_holder_without_a_type_flag(monkeypatch, tmp_path):
     """The binary name is never matched: a `google-chrome` wrapper execs
