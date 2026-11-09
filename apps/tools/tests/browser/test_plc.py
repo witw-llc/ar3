@@ -937,7 +937,10 @@ def test_a_runtime_directory_too_long_too_falls_back_to_the_system_temp_director
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / ("d" * 80)))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / ("r" * 80)))
     path = plc.ipc_dir()
-    assert path.startswith(tempfile.gettempdir()) and len(os.fsencode(path)) <= plc.IPC_DIR_MAX_BYTES
+    assert path.startswith((tempfile.gettempdir(), "/tmp")) and len(os.fsencode(path)) <= plc.IPC_DIR_MAX_BYTES
+    monkeypatch.setattr(plc.tempfile, "gettempdir", lambda: "/var/folders/xx/" + ("y" * 30) + "/T")
+    short = plc.ipc_dir()
+    assert short.startswith("/tmp/") and len(os.fsencode(short)) <= plc.IPC_DIR_MAX_BYTES
 
 
 @pytest.mark.skipif(os.name != "posix", reason="owners are POSIX here")

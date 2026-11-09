@@ -1614,3 +1614,40 @@ def test_session_binding_allows_same_mode_reuse_and_refuses_flag_or_var_mismatch
         assert not run.ok
         assert "cannot set both CDP and PROFILE" in run.error
         assert run.files == []
+
+
+def test_main_pids_uses_lf_on_darwin_and_falls_back_to_process_argv_when_cmdline_omitted(monkeypatch, tmp_path):
+    """macOS BSD `pgrep` uses `-lf` (not `-af`) to print the full command line;
+    if `pgrep` outputs only PIDs or short names without `--user-data-dir=`,
+    `_main_pids` falls back to `_process_argv` and still filters out `--type=`
+    helpers."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.setattr(session.platform, "system", lambda: "Darwin")
+    profile = session.profile_dir("atb")
+    seen_flags = []
+
+    def fake_pgrep_lf(argv, **kwargs):
+        seen_flags.append(argv[1])
+        stdout = (
+            f"101 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir={profile} about:blank\n"
+            f"102 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper.app --type=gpu-process --user-data-dir={profile}\n"
+            f"103 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper.app --type=renderer --user-data-dir={profile}\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(session.subprocess, "run", fake_pgrep_lf)
+    assert session._main_pids("atb") == ["101"]
+    assert seen_flags == ["-lf"]
+
+    # Fallback when pgrep prints bare PIDs (e.g., without command lines) or a process has exited.
+    monkeypatch.setattr(
+        session.subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout="101\n102\n104\n", stderr=""),
+    )
+    argv_map = {
+        "101": ["/Applications/Google Chrome", f"--user-data-dir={profile}", "about:blank"],
+        "102": ["/Applications/Google Chrome Helper", "--type=renderer", f"--user-data-dir={profile}"],
+        "104": None,
+    }
+    monkeypatch.setattr(session, "_process_argv", lambda pid: argv_map.get(pid))
+    assert session._main_pids("atb") == ["101"]

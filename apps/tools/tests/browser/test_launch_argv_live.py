@@ -31,10 +31,11 @@ def _need(condition, reason):
 def _browser_argv(profile):
     """The argument list of the seat's browser process (the one with the profile flag and no `--type=`), as `ps`
     prints it. None when no such process runs."""
-    out = subprocess.run(["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
+    flag = "-lf" if sys.platform == "darwin" else "-af"
+    out = subprocess.run(["pgrep", flag, "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
     for line in out.stdout.splitlines():
         _pid, _, command = line.partition(" ")
-        if " --type=" not in f" {command}":
+        if "--user-data-dir=" in command and " --type=" not in f" {command}":
             return command.split()
     return None
 

@@ -274,7 +274,7 @@ def ipc_dir():
         return home
     uid = os.geteuid() if hasattr(os, "geteuid") else 0
     digest = hashlib.sha256(os.fsencode(home)).hexdigest()[:12]
-    for base in (os.environ.get("XDG_RUNTIME_DIR"), tempfile.gettempdir()):
+    for base in (os.environ.get("XDG_RUNTIME_DIR"), tempfile.gettempdir(), "/tmp" if os.name == "posix" else None):
         if base:
             path = os.path.join(base, f"ar3-browser-{uid}", digest)
             if len(os.fsencode(path)) <= IPC_DIR_MAX_BYTES:

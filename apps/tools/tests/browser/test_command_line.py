@@ -44,11 +44,15 @@ class Spawns:
 
     def __init__(self, monkeypatch):
         self.argv = []
+        self._real_run = plc.subprocess.run
         monkeypatch.setattr(plc, "require", lambda: "playwright-cli")
         monkeypatch.setattr(plc.subprocess, "run", self.run)
 
     def run(self, cmd, **kwargs):
-        self.argv.append(list(cmd))
+        args = list(cmd)
+        if args and os.path.basename(str(args[0])) != "playwright-cli":
+            return self._real_run(cmd, **kwargs)
+        self.argv.append(args)
         return _Completed(0, "### Result\nok\n")
 
 

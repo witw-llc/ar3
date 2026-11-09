@@ -18,13 +18,14 @@ TOOL = Path(__file__).resolve().parents[2] / "browser"
 def _chrome_up(profile):
     """True when the browser process of `profile` runs: it carries the profile flag and no `--type=`. With the pipe
     transport Chrome writes no `DevToolsActivePort`, so the process is the sign it started."""
-    out = subprocess.run(["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
-    return any(" --type=" not in f" {line}" for line in out.stdout.splitlines())
+    flag = "-lf" if sys.platform == "darwin" else "-af"
+    out = subprocess.run(["pgrep", flag, "--", f"--user-data-dir={profile}"], capture_output=True, text=True)
+    return any("--user-data-dir=" in line and " --type=" not in f" {line}" for line in out.stdout.splitlines())
 
 
 def _profile_processes(profile):
     out = subprocess.run(
-        ["pgrep", "-af", "--", f"--user-data-dir={profile}"],
+        ["pgrep", "-f", "--", f"--user-data-dir={profile}"],
         capture_output=True, text=True,
     )
     return out.stdout.strip()

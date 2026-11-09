@@ -62,7 +62,7 @@ def _close(env, seat):
 
 def _running(profile):
     listing = subprocess.run(
-        ["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True
+        ["pgrep", "-f", "--", f"--user-data-dir={profile}"], capture_output=True, text=True
     ).stdout.strip()
     return bool(listing)
 

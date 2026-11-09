@@ -10,6 +10,17 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.130
+
+### Fixed
+
+- `tool-browser` uses `pgrep -lf` on macOS (falling back to `_process_argv`
+  when `pgrep` omits the command line) so `_main_pids` filters out Chrome
+  `--type=...` helper processes instead of failing `owned_by_driver` with
+  `Chrome for seat ... did not come up under the seat's driver`, and falls back
+  to `/tmp` for `ipc_dir` when macOS `TMPDIR` (`/var/folders/.../T`) exceeds
+  the 73-byte Unix socket path limit.
+
 ## 0.1.129
 
 ### Added

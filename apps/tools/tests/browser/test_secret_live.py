@@ -194,7 +194,7 @@ def _gone(profile, seconds=10):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         listing = subprocess.run(
-            ["pgrep", "-af", "--", f"--user-data-dir={profile}"], capture_output=True, text=True
+            ["pgrep", "-f", "--", f"--user-data-dir={profile}"], capture_output=True, text=True
         ).stdout.strip()
         if not listing:
             return True

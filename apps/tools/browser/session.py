@@ -572,6 +572,14 @@ def _profile_pids(seat):
     return result.stdout.split()
 
 
+def _pgrep_full_flag():
+    """The `pgrep` flag that prints each matching PID with its full command
+    line: `-lf` on macOS (where `-a` includes ancestor processes and omits the
+    command line without `-l`) and `-af` on Linux (where `-l` prints only the
+    process name)."""
+    return "-lf" if platform.system() == "Darwin" else "-af"
+
+
 def _main_pids(seat):
     """Just the browser process: it holds the seat's profile flag and carries
     no `--type=`. Helpers carry `--type=` and die on their own when the parent
@@ -580,13 +588,18 @@ def _main_pids(seat):
     if platform.system() == "Windows":
         return []
     result = subprocess.run(
-        ["pgrep", "-af", "--", _profile_pattern(seat)], capture_output=True, text=True,
+        ["pgrep", _pgrep_full_flag(), "--", _profile_pattern(seat)], capture_output=True, text=True,
         **launch_options(),
     )
     pids = []
     for line in result.stdout.splitlines():
         pid, _, cmdline = line.partition(" ")
-        if pid.isdigit() and " --type=" not in f" {cmdline}":
+        if not pid.isdigit():
+            continue
+        if "--user-data-dir=" not in cmdline:
+            argv = _process_argv(pid)
+            cmdline = " ".join(argv) if argv else ""
+        if "--user-data-dir=" in cmdline and " --type=" not in f" {cmdline}":
             pids.append(pid)
     return pids
 
