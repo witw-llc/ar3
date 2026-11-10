@@ -10,6 +10,26 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.131
+
+### Added
+
+- `r4t engine <id> run` and `r4t rig run <rig>` add `--protect-agents-md on|off`
+  (default `off`), `--lessons append|free|off` (default `append`), and
+  `--scaffold on|off` (default `on`), and all 34 bundled `engine-*.json`
+  definitions expose `PROTECT_AGENTS_MD`, `LESSONS`, `LESSONS_CAP`,
+  `LESSONS_CAP_BYTES`, and `SCAFFOLD` via `a8s vars`.
+
+### Changed
+
+- `r4t engine <id> run` omits `"Never edit AGENTS.md."` from the cold-boot
+  scaffold and resident wrap-up turn by default; set `--protect-agents-md on` or
+  `a8s vars <name> set PROTECT_AGENTS_MD on` to enforce the `AGENTS.md` edit
+  restriction.
+- Resident wrap-up step 1 (`wrapup_prompt`) instructs the agent to stop
+  temporary monitors or scratch processes started for the session while leaving
+  intentional long-running services or daemons running.
+
 ## 0.1.130
 
 ### Fixed

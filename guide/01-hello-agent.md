@@ -362,7 +362,7 @@ r4t engine echo: --- prompt ---
 Smart cold boot:
 1. Read /home/you/ar3/solo/STATUS.md, then /home/you/ar3/solo/AGENTS.md and /home/you/ar3/solo/LESSONS.md if present. Use these absolute paths even if your workspace root differs. They are the durable source of truth; you have no transcript memory.
 2. Stay idle and exit unless there is clear direction or active work. Never restart completed work. Be token-frugal; no wordy prose.
-3. Before exit, rewrite /home/you/ar3/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ar3/solo/LESSONS.md. Every line of it is one lesson, one short line each, with no sections, headings or tiers. Append; edit an existing line only when told to consolidate. Never edit AGENTS.md.
+3. Before exit, rewrite /home/you/ar3/solo/STATUS.md with sections: Current State, Important Context, Next Steps, Decisions (with rationale). Append genuinely new durable insights to /home/you/ar3/solo/LESSONS.md. Every line of it is one lesson, one short line each, with no sections, headings or tiers. Append; edit an existing line only when told to consolidate.
 
 Routed input:
 Say OK.

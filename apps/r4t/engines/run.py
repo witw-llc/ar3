@@ -105,11 +105,13 @@ __all__ = [
     "LESSONS_WARN_AT",
     "LESSONS_TARGET",
     "LESSONS_ARCHIVE_NAME",
+    "LESSONS_MODES",
     "MCP_TELL_STEP",
     "CODEX_MCP_TELL_STEP",
     "CLI_TELL_STEP",
     "mcp_tell_step",
     "DEFAULT_IDLE_PROMPT",
+    "default_idle_prompt",
     "RunError",
     "build_argv",
     "git_identity_env",
@@ -190,11 +192,29 @@ LESSON_LINE_RULE = (
     "consolidate."
 )
 
+LESSONS_MODES = ("append", "free", "off")
+
 DEFAULT_IDLE_PROMPT = (
     "Idle pass: reconcile STATUS.md with reality, then append any new "
     "durable lessons to LESSONS.md. Keep both tight. If nothing needs "
     "doing, exit."
 )
+
+
+def default_idle_prompt(lessons_mode: str = "append") -> str:
+    """The default prompt for `--idle` when no PROMPT positional is given."""
+    if lessons_mode == "off":
+        return (
+            "Idle pass: reconcile STATUS.md with reality. Keep it tight. If "
+            "nothing needs doing, exit."
+        )
+    if lessons_mode == "free":
+        return (
+            "Idle pass: reconcile STATUS.md with reality, then update "
+            "LESSONS.md with any new durable lessons. Keep both tight. If "
+            "nothing needs doing, exit."
+        )
+    return DEFAULT_IDLE_PROMPT
 
 
 class RunError(Exception):
@@ -241,6 +261,8 @@ def scaffold_prompt(
     lessons_cap: int = LESSONS_CAP_LINES,
     lessons_cap_bytes: int = LESSONS_CAP_BYTES,
     copies: list[Path] | None = None,
+    protect_agents_md: bool = False,
+    lessons_mode: str = "append",
 ) -> str:
     """The fixed cold-boot prelude, then this turn's LESSONS.md note, then the
     volatile `message` last. One prelude starts a one-shot turn and a resident
@@ -250,11 +272,20 @@ def scaffold_prompt(
     so it sits after the prelude: the consolidation `_lessons_note` composes
     from `copies`, when one is due. Only a named `agent` is on the network, so
     only it gets `tell_step`; a turn run at a terminal answers on stdout."""
+    if lessons_mode not in LESSONS_MODES:
+        raise RunError(
+            f"--lessons must be one of {', '.join(LESSONS_MODES)}; got {lessons_mode!r}"
+        )
     status = dir_path / "STATUS.md"
     agents_file = dir_path / "AGENTS.md"
     lessons = dir_path / "LESSONS.md"
+    read_files = (
+        f"{status}, then {agents_file} if present"
+        if lessons_mode == "off"
+        else f"{status}, then {agents_file} and {lessons} if present"
+    )
     steps = [
-        f"Read {status}, then {agents_file} and {lessons} if present. Use "
+        f"Read {read_files}. Use "
         "these absolute paths even if your workspace root differs. They are "
         "the durable source of truth; you have no transcript memory."
     ]
@@ -267,17 +298,26 @@ def scaffold_prompt(
     sections = (
         "Current State, Important Context, Next Steps, Decisions (with rationale)"
     )
+    protect = " Never edit AGENTS.md." if protect_agents_md else ""
     if resident_minutes is None:
         title = "Smart cold boot:"
         steps.append(
             "Stay idle and exit unless there is clear direction or active "
             "work. Never restart completed work. Be token-frugal; no wordy prose."
         )
-        steps.append(
-            f"Before exit, rewrite {status} with sections: {sections}. Append "
-            f"genuinely new durable insights to {lessons}. {LESSON_LINE_RULE} "
-            "Never edit AGENTS.md."
-        )
+        if lessons_mode == "append":
+            close = (
+                f"Before exit, rewrite {status} with sections: {sections}. Append "
+                f"genuinely new durable insights to {lessons}. {LESSON_LINE_RULE}"
+            )
+        elif lessons_mode == "free":
+            close = (
+                f"Before exit, rewrite {status} with sections: {sections}. Update "
+                f"{lessons} with genuinely new durable insights."
+            )
+        else:
+            close = f"Before exit, rewrite {status} with sections: {sections}."
+        steps.append(f"{close}{protect}")
     else:
         title = "Smart cold boot (resident session):"
         steps.append(
@@ -290,16 +330,32 @@ def scaffold_prompt(
             "turn so the next message can be delivered. Be token-frugal; no "
             "wordy prose."
         )
-        steps.append(
-            "When the session window expires, you will receive a wrap-up turn "
-            f"to rewrite {status} (sections: {sections}) and append genuinely "
-            f"new durable insights to {lessons}. {LESSON_LINE_RULE} Never edit "
-            "AGENTS.md."
-        )
+        if lessons_mode == "append":
+            close = (
+                "When the session window expires, you will receive a wrap-up turn "
+                f"to rewrite {status} (sections: {sections}) and append genuinely "
+                f"new durable insights to {lessons}. {LESSON_LINE_RULE}"
+            )
+        elif lessons_mode == "free":
+            close = (
+                "When the session window expires, you will receive a wrap-up turn "
+                f"to rewrite {status} (sections: {sections}) and update {lessons} "
+                "with genuinely new durable insights."
+            )
+        else:
+            close = (
+                "When the session window expires, you will receive a wrap-up turn "
+                f"to rewrite {status} (sections: {sections})."
+            )
+        steps.append(f"{close}{protect}")
     prelude = title + "\n" + "\n".join(
         f"{n}. {step}" for n, step in enumerate(steps, 1)
     )
-    note = _lessons_note(dir_path, lessons_cap, lessons_cap_bytes, copies)
+    note = (
+        _lessons_note(dir_path, lessons_cap, lessons_cap_bytes, copies)
+        if lessons_mode == "append"
+        else ""
+    )
     tail = f"\n\n{note}" if note else ""
     return f"{prelude}{tail}\n\nRouted input:\n{message}"
 
@@ -366,6 +422,7 @@ def prepare_lessons_copies(
     *,
     lessons_cap: int = LESSONS_CAP_LINES,
     lessons_cap_bytes: int = LESSONS_CAP_BYTES,
+    lessons_mode: str = "append",
 ) -> list[Path] | None:
     """Ready this turn's consolidation. When one is due (LESSONS.md past the
     warning line of either cap, or a spillover file with lines in it), save
@@ -377,7 +434,9 @@ def prepare_lessons_copies(
     instead of writing another. Only a file that does not exist is skipped.
     None when nothing is due, a file that exists cannot be read, or a copy
     could not be verified; the turn then gets no permission to edit."""
-    if not _consolidation_due(dir_path, lessons_cap, lessons_cap_bytes):
+    if lessons_mode != "append" or not _consolidation_due(
+        dir_path, lessons_cap, lessons_cap_bytes
+    ):
         return None
     copies: list[Path] = []
     folder = dir_path / LESSONS_COPY_DIR
@@ -822,6 +881,8 @@ def execute(
     echo: bool = False,
     lessons_cap: int = LESSONS_CAP_LINES,
     lessons_cap_bytes: int = LESSONS_CAP_BYTES,
+    protect_agents_md: bool = False,
+    lessons_mode: str = "append",
     continue_conversation: bool = False,
     permissions: str | None = None,
     allowed_tools: str | None = None,
@@ -870,6 +931,10 @@ def execute(
     taught `a8s_tell`; every other engine is taught the shell `tell`. A scaffolded turn whose lessons
     are due for consolidation saves its copies first
     (`prepare_lessons_copies`)."""
+    if lessons_mode not in LESSONS_MODES:
+        raise RunError(
+            f"--lessons must be one of {', '.join(LESSONS_MODES)}; got {lessons_mode!r}"
+        )
     identity = git_identity_env(git_name, git_email)
     if resident:
         from engines import resident as resident_mod
@@ -931,6 +996,8 @@ def execute(
                     resident_seconds=timeout,
                     lessons_cap=lessons_cap,
                     lessons_cap_bytes=lessons_cap_bytes,
+                    protect_agents_md=protect_agents_md,
+                    lessons_mode=lessons_mode,
                 )
                 if scaffold
                 else message
@@ -948,6 +1015,8 @@ def execute(
             scaffold=scaffold,
             lessons_cap=lessons_cap,
             lessons_cap_bytes=lessons_cap_bytes,
+            protect_agents_md=protect_agents_md,
+            lessons_mode=lessons_mode,
             env=child_env,
             charge_hook=charge_hook,
             memory=memory,
@@ -966,7 +1035,9 @@ def execute(
             message,
             agent=agent,
             tell_step=mcp_tell_step(engine) if use_mcp else CLI_TELL_STEP,
-            copies=prepare_lessons_copies(dir_path, **caps),
+            copies=prepare_lessons_copies(dir_path, lessons_mode=lessons_mode, **caps),
+            protect_agents_md=protect_agents_md,
+            lessons_mode=lessons_mode,
             **caps,
         )
     else:

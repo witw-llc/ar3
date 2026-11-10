@@ -53,7 +53,8 @@ from engines.held_input import QueuedText, submission_text
 from engines import devin_resident
 from engines.muse_resident import MuseSession, compose_muse_argv
 from engines.run import (
-    CLI_TELL_STEP, CODEX_MCP_TELL_STEP, LESSON_LINE_RULE, MCP_TELL_STEP, RunError,
+    CLI_TELL_STEP, CODEX_MCP_TELL_STEP, LESSON_LINE_RULE, LESSONS_MODES,
+    MCP_TELL_STEP, RunError,
 )
 from rig import (
     MCP_CLAUDE_TOOL, _mcp_codex_override, _mcp_command, _mcp_servers_json,
@@ -1637,6 +1638,8 @@ def resident_boot_prompt(
     lessons_cap: int,
     lessons_cap_bytes: int,
     copies: list[Path] | None = None,
+    protect_agents_md: bool = False,
+    lessons_mode: str = "append",
 ) -> str:
     """The cold-boot prompt for a resident session: the one-shot turn's
     startup, closed by the resident steps instead of the exit steps."""
@@ -1651,22 +1654,51 @@ def resident_boot_prompt(
         lessons_cap=lessons_cap,
         lessons_cap_bytes=lessons_cap_bytes,
         copies=copies,
+        protect_agents_md=protect_agents_md,
+        lessons_mode=lessons_mode,
     )
 
 
-def wrapup_prompt(dir_path: Path, resident_seconds: int) -> str:
+def wrapup_prompt(
+    dir_path: Path,
+    resident_seconds: int,
+    *,
+    protect_agents_md: bool = False,
+    lessons_mode: str = "append",
+) -> str:
+    if lessons_mode not in LESSONS_MODES:
+        raise RunError(
+            f"--lessons must be one of {', '.join(LESSONS_MODES)}; got {lessons_mode!r}"
+        )
     status = dir_path / "STATUS.md"
     lessons = dir_path / "LESSONS.md"
     minutes = max(1, round(resident_seconds / 60))
+    steps = [
+        "Stop any temporary monitors or scratch processes you started for "
+        "this session (leave intentional long-running services or daemons running).",
+        f"Rewrite {status} with sections: Current State, Important Context, "
+        "Next Steps, Decisions (with rationale).",
+    ]
+    protect = " Never edit AGENTS.md." if protect_agents_md else ""
+    if lessons_mode == "append":
+        steps.append(
+            f"Append any genuinely new durable insights from this session to "
+            f"{lessons}. {LESSON_LINE_RULE}{protect}"
+        )
+    elif lessons_mode == "free":
+        steps.append(
+            f"Update {lessons} with any genuinely new durable insights from "
+            f"this session.{protect}"
+        )
+    elif protect_agents_md:
+        steps.append("Never edit AGENTS.md.")
+    steps.append(
+        "When done, say so in your reply text only; send no message. "
+        "The session closes right after."
+    )
     return (
         f"[Resident session quiet for {minutes}m — wrap up and exit]\n"
-        "1. Stop any background tasks or monitors you started during this session.\n"
-        f"2. Rewrite {status} with sections: Current State, Important Context, "
-        "Next Steps, Decisions (with rationale).\n"
-        f"3. Append any genuinely new durable insights from this session to "
-        f"{lessons}. {LESSON_LINE_RULE} Never edit AGENTS.md.\n"
-        "4. When done, say so in your reply text only; send no message. "
-        "The session closes right after."
+        + "\n".join(f"{n}. {step}" for n, step in enumerate(steps, 1))
     )
 
 
@@ -1744,6 +1776,8 @@ def enqueue_or_start(
     scaffold: bool = True,
     lessons_cap: int = 200,
     lessons_cap_bytes: int = 35 * 1024,
+    protect_agents_md: bool = False,
+    lessons_mode: str = "append",
     env: dict[str, str] | None = None,
     charge_hook=None,
     memory: str = "off",
@@ -1776,6 +1810,8 @@ def enqueue_or_start(
         "scaffold": scaffold,
         "lessons_cap": lessons_cap,
         "lessons_cap_bytes": lessons_cap_bytes,
+        "protect_agents_md": protect_agents_md,
+        "lessons_mode": lessons_mode,
         "memory": memory,
         "memory_home": memory_home,
         "memory_writer": memory_writer,
@@ -2299,6 +2335,8 @@ def _run_session(
     scaffold = bool(spec.get("scaffold", True))
     lessons_cap = int(spec.get("lessons_cap") or 200)
     lessons_cap_bytes = int(spec.get("lessons_cap_bytes") or 35 * 1024)
+    protect_agents_md = bool(spec.get("protect_agents_md", False))
+    lessons_mode = spec.get("lessons_mode") or "append"
     memory_mode = spec.get("memory") or "off"
 
     if engine == "agy" and spec.get("launch_context") != _launch_context(dict(os.environ), dir_path):
@@ -2309,7 +2347,10 @@ def _run_session(
 
     copies = (
         prepare_lessons_copies(
-            dir_path, lessons_cap=lessons_cap, lessons_cap_bytes=lessons_cap_bytes
+            dir_path,
+            lessons_cap=lessons_cap,
+            lessons_cap_bytes=lessons_cap_bytes,
+            lessons_mode=lessons_mode,
         )
         if scaffold
         else None
@@ -2791,6 +2832,8 @@ def _run_session(
                             lessons_cap=lessons_cap,
                             lessons_cap_bytes=lessons_cap_bytes,
                             copies=copies,
+                            protect_agents_md=protect_agents_md,
+                            lessons_mode=lessons_mode,
                         )
                     else:
                         prompt_text = combined
@@ -2857,7 +2900,14 @@ def _run_session(
                 and scaffold
             ):
                 _log(f"resident quiet for {resident_seconds}s — sending wrap-up turn")
-                if send_user_turn(wrapup_prompt(dir_path, resident_seconds)):
+                if send_user_turn(
+                    wrapup_prompt(
+                        dir_path,
+                        resident_seconds,
+                        protect_agents_md=protect_agents_md,
+                        lessons_mode=lessons_mode,
+                    )
+                ):
                     if not wait_for_quiet(timeout_s=WRAPUP_TURN_SECONDS):
                         # A fatal, a stop, or the engine exiting also ends
                         # the wait. The deadline is only the clock running out.

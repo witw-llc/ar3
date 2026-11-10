@@ -1787,6 +1787,16 @@ def _memory_kwargs(args):
             ("memory", "memory_home", "memory_writer", "memory_people")}
 
 
+def _resolve_scaffold(args: argparse.Namespace, where: str) -> bool | None:
+    if args.no_scaffold and getattr(args, "scaffold", None) == "on":
+        print(
+            f"{where}: --scaffold on and --no-scaffold contradict",
+            file=sys.stderr,
+        )
+        return None
+    return not args.no_scaffold and getattr(args, "scaffold", None) != "off"
+
+
 def _turn_prompt(
     args: argparse.Namespace, dir_path: Path, where: str
 ) -> tuple[str | None, int]:
@@ -1807,7 +1817,11 @@ def _turn_prompt(
         if marker.exists() or getattr(args, "resident", False):
             return None, 0
         marker.touch()
-        prompt = args.prompt if args.prompt else engine_run.DEFAULT_IDLE_PROMPT
+        prompt = (
+            args.prompt
+            if args.prompt
+            else engine_run.default_idle_prompt(getattr(args, "lessons", "append"))
+        )
     else:
         marker.unlink(missing_ok=True)
         if not args.prompt:
@@ -1882,6 +1896,9 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    scaffold = _resolve_scaffold(args, "r4t engine run")
+    if scaffold is None:
+        return 2
 
     try:
         access = _access_options(args)
@@ -1912,10 +1929,12 @@ def _cmd_engine_run(args: argparse.Namespace) -> int:
                 else resident_mod.DEFAULT_RESIDENT_SECONDS if args.resident
                 else DEFAULT_TIMEOUT_SECONDS
             ),
-            scaffold=not args.no_scaffold,
+            scaffold=scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
             lessons_cap_bytes=args.lessons_cap_bytes,
+            protect_agents_md=args.protect_agents_md == "on",
+            lessons_mode=args.lessons,
             continue_conversation=args.continue_conversation,
             permissions=args.permissions,
             allowed_tools=args.allowed_tools,
@@ -2068,6 +2087,9 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    scaffold = _resolve_scaffold(args, "r4t rig run")
+    if scaffold is None:
+        return 2
 
     dir_path = _turn_dir(args)
     report: dict = {
@@ -2157,10 +2179,12 @@ def cmd_rig_run(args: argparse.Namespace) -> int:
                 else resident_mod.DEFAULT_RESIDENT_SECONDS if args.resident
                 else int(rig.timeout_seconds)
             ),
-            scaffold=not args.no_scaffold,
+            scaffold=scaffold,
             echo=args.echo,
             lessons_cap=args.lessons_cap,
             lessons_cap_bytes=args.lessons_cap_bytes,
+            protect_agents_md=args.protect_agents_md == "on",
+            lessons_mode=args.lessons,
             continue_conversation=args.continue_conversation,
             permissions=resolve_override(args.permissions, rig.permissions),
             allowed_tools=resolve_override(args.allowed_tools, rig.allowed_tools),
@@ -3144,7 +3168,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(roster_check_p, with_node=True)
     roster_check_p.set_defaults(func=cmd_roster_check)
 
-    from engines.run import LESSONS_CAP_BYTES, LESSONS_CAP_LINES
+    from engines.run import LESSONS_CAP_BYTES, LESSONS_CAP_LINES, LESSONS_MODES
 
     rig_p = sub.add_parser(
         "rig",
@@ -3267,6 +3291,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="no_scaffold",
         help="Send PROMPT unchanged, without the cold-boot scaffold.",
+    )
+    rig_run_p.add_argument(
+        "--scaffold",
+        metavar="MODE",
+        choices=["on", "off"],
+        default=None,
+        dest="scaffold",
+        help="Cold-boot scaffold and resident wrap-up: on (default) or off.",
+    )
+    rig_run_p.add_argument(
+        "--protect-agents-md",
+        metavar="MODE",
+        choices=["on", "off"],
+        default="off",
+        dest="protect_agents_md",
+        help="Forbid editing AGENTS.md in the scaffold: off (default) or on.",
+    )
+    rig_run_p.add_argument(
+        "--lessons",
+        metavar="MODE",
+        choices=list(LESSONS_MODES),
+        default="append",
+        dest="lessons",
+        help="LESSONS.md policy in the scaffold: append (default: one-line "
+        "append-only + consolidation), free (unrestricted updates, no "
+        "consolidation), or off (omit LESSONS.md).",
     )
     rig_run_p.add_argument(
         "--idle",
@@ -3569,6 +3619,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="no_scaffold",
         help="run: send PROMPT unchanged, without the cold-boot scaffold.",
+    )
+    engine_p.add_argument(
+        "--scaffold",
+        metavar="MODE",
+        choices=["on", "off"],
+        default=None,
+        dest="scaffold",
+        help="run: cold-boot scaffold and resident wrap-up: on (default) or off.",
+    )
+    engine_p.add_argument(
+        "--protect-agents-md",
+        metavar="MODE",
+        choices=["on", "off"],
+        default="off",
+        dest="protect_agents_md",
+        help="run: forbid editing AGENTS.md in the scaffold: off (default) or on.",
+    )
+    engine_p.add_argument(
+        "--lessons",
+        metavar="MODE",
+        choices=list(LESSONS_MODES),
+        default="append",
+        dest="lessons",
+        help="run: LESSONS.md policy in the scaffold: append (default: "
+        "one-line append-only + consolidation), free (unrestricted updates, "
+        "no consolidation), or off (omit LESSONS.md).",
     )
     engine_p.add_argument(
         "--idle",

@@ -17,6 +17,11 @@
     "--model=$MODEL?",
     "--git-name=$GIT_NAME?",
     "--git-email=$GIT_EMAIL?",
+    "--scaffold=$SCAFFOLD?",
+    "--protect-agents-md=$PROTECT_AGENTS_MD?",
+    "--lessons=$LESSONS?",
+    "--lessons-cap=$LESSONS_CAP?",
+    "--lessons-cap-bytes=$LESSONS_CAP_BYTES?",
     "--agent",
     "$RECIPIENT",
     "[$NOW] $SENDER tells $RECIPIENT ($AGE): $MESSAGE"
@@ -40,6 +45,11 @@
       "--model=$MODEL?",
       "--git-name=$GIT_NAME?",
       "--git-email=$GIT_EMAIL?",
+      "--scaffold=$SCAFFOLD?",
+      "--protect-agents-md=$PROTECT_AGENTS_MD?",
+      "--lessons=$LESSONS?",
+      "--lessons-cap=$LESSONS_CAP?",
+      "--lessons-cap-bytes=$LESSONS_CAP_BYTES?",
       "--agent",
       "$RECIPIENT"
     ]
@@ -63,6 +73,11 @@
       "--model=$MODEL?",
       "--git-name=$GIT_NAME?",
       "--git-email=$GIT_EMAIL?",
+      "--scaffold=$SCAFFOLD?",
+      "--protect-agents-md=$PROTECT_AGENTS_MD?",
+      "--lessons=$LESSONS?",
+      "--lessons-cap=$LESSONS_CAP?",
+      "--lessons-cap-bytes=$LESSONS_CAP_BYTES?",
       "--idle",
       "--agent",
       "$RECIPIENT"

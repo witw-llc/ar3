@@ -696,7 +696,57 @@ class TestResidentBootAndWrapupPrompts:
         assert engine_run.LESSON_LINE_RULE in prompt
         assert "wrap up and exit" in prompt
         assert "quiet for 45m" in prompt
-        assert "Never edit AGENTS.md." in prompt
+        assert "Stop any temporary monitors or scratch processes" in prompt
+        assert "leave intentional long-running services or daemons running" in prompt
+        assert "Never edit AGENTS.md." not in prompt
+        protected = resident_mod.wrapup_prompt(
+            tmp_path, 2700, protect_agents_md=True
+        )
+        assert "Never edit AGENTS.md." in protected
+
+    def test_wrapup_prompt_lessons_modes(self, tmp_path):
+        free = resident_mod.wrapup_prompt(tmp_path, 2700, lessons_mode="free")
+        assert f"3. Update {tmp_path / 'LESSONS.md'} with any genuinely new durable insights from this session." in free
+        assert engine_run.LESSON_LINE_RULE not in free
+        assert "Never edit AGENTS.md." not in free
+
+        free_protected = resident_mod.wrapup_prompt(
+            tmp_path, 2700, lessons_mode="free", protect_agents_md=True
+        )
+        assert "this session. Never edit AGENTS.md." in free_protected
+
+        off = resident_mod.wrapup_prompt(tmp_path, 2700, lessons_mode="off")
+        assert "LESSONS.md" not in off
+        assert "3. When done, say so in your reply text only; send no message." in off
+        assert "4." not in off
+
+        off_protected = resident_mod.wrapup_prompt(
+            tmp_path, 2700, lessons_mode="off", protect_agents_md=True
+        )
+        assert "LESSONS.md" not in off_protected
+        assert "3. Never edit AGENTS.md.\n4. When done" in off_protected
+
+    def test_resident_boot_prompt_forwards_protect_and_lessons_mode(self, tmp_path):
+        kwargs = dict(agent="bob", lessons_cap=200, lessons_cap_bytes=35840)
+        default_prompt = resident_mod.resident_boot_prompt(tmp_path, "hi", **kwargs)
+        assert "Never edit AGENTS.md." not in default_prompt
+        assert engine_run.LESSON_LINE_RULE in default_prompt
+
+        protected = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", protect_agents_md=True, **kwargs
+        )
+        assert "Never edit AGENTS.md." in protected
+
+        free = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", lessons_mode="free", **kwargs
+        )
+        assert engine_run.LESSON_LINE_RULE not in free
+        assert f"update {tmp_path / 'LESSONS.md'} with genuinely new durable insights." in free
+
+        off = resident_mod.resident_boot_prompt(
+            tmp_path, "hi", lessons_mode="off", **kwargs
+        )
+        assert "LESSONS.md" not in off
 
 
 class TestResidentLifecycle:

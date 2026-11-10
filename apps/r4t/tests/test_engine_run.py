@@ -449,6 +449,79 @@ class TestScaffold:
         assert str(tmp_path / "AGENTS.md") in text
         assert str(tmp_path / "LESSONS.md") in text
 
+    def test_protect_agents_md_is_off_by_default_and_on_when_requested(
+        self, tmp_path, turn
+    ):
+        for res in (None, 45):
+            default_text = engine_run.scaffold_prompt(
+                tmp_path, "hi", agent="bob", resident_minutes=res
+            )
+            protected_text = engine_run.scaffold_prompt(
+                tmp_path,
+                "hi",
+                agent="bob",
+                resident_minutes=res,
+                protect_agents_md=True,
+            )
+            assert "Never edit AGENTS.md." not in default_text
+            assert "Never edit AGENTS.md." in protected_text
+        assert "Never edit AGENTS.md." not in turn()
+        assert "Never edit AGENTS.md." not in turn("--protect-agents-md", "off")
+        assert "Never edit AGENTS.md." in turn("--protect-agents-md", "on")
+
+    def test_lessons_modes_free_and_off(self, tmp_path, turn):
+        seat = turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(181)])
+        write_spillover(seat, ["- old"])
+
+        free_prompt = turn("--lessons", "free")
+        prelude_free, note_free, _ = scaffold_parts(free_prompt)
+        assert str(seat / "LESSONS.md") in prelude_free
+        assert (
+            f"Update {seat / 'LESSONS.md'} with genuinely new durable insights."
+            in prelude_free
+        )
+        assert engine_run.LESSON_LINE_RULE not in prelude_free
+        assert note_free == ""
+        assert not (seat / "archive").exists()
+
+        off_prompt = turn("--lessons", "off")
+        prelude_off, note_off, _ = scaffold_parts(off_prompt)
+        assert "LESSONS.md" not in prelude_off
+        assert f"Read {seat / 'STATUS.md'}, then {seat / 'AGENTS.md'} if present." in prelude_off
+        assert note_off == ""
+        assert not (seat / "archive").exists()
+
+        idle_off = turn("--lessons", "off", "--idle", message="")
+        assert "LESSONS.md" not in idle_off
+        assert idle_off.endswith(
+            "Idle pass: reconcile STATUS.md with reality. Keep it tight. If nothing needs doing, exit."
+        )
+
+    def test_scaffold_flag_on_off_and_contradiction_with_no_scaffold(
+        self, turn, capsys
+    ):
+        seat = turn.seat
+        write_lessons(seat, [f"- lesson {i}" for i in range(181)])
+        assert turn("--scaffold", "off", message="raw prompt") == "raw prompt"
+        assert not (seat / "archive").exists()
+        on_prompt = turn("--scaffold", "on", message="wrapped")
+        assert on_prompt.startswith("Smart cold boot:\n")
+        assert len(copies_of(seat)) == 1
+
+        code = engine_cli(
+            "claude",
+            "run",
+            "--dir",
+            str(seat),
+            "--scaffold",
+            "on",
+            "--no-scaffold",
+            "hi",
+        )
+        assert code == 2
+        assert "--scaffold on and --no-scaffold contradict" in capsys.readouterr().err
+
 
 LESSON_DAY = "2026-10-17"
 

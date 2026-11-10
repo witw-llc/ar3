@@ -17,8 +17,9 @@ echo "long prompt piped in" | r4t engine agy run -
 
 ```
 r4t engine <id> run [--dir DIR] [--model M] [--effort LEVEL] [--agent NAME] [--timeout S]
-                     [--no-scaffold] [--idle] [--echo] [--lessons-cap N]
-                     [--lessons-cap-bytes N]
+                     [--scaffold on|off] [--no-scaffold] [--protect-agents-md on|off]
+                     [--lessons append|free|off] [--lessons-cap N] [--lessons-cap-bytes N]
+                     [--idle] [--echo]
                      [--continue] [--session UUID] [--max-credits N]
                      [--permissions MODE] [--allowed-tools SPEC]
                      [--add-dir DIR]... [--allow-tool RULE]... [--deny-tool RULE]...
@@ -71,9 +72,19 @@ tool) plus this turn's own measurement flags (see
 - `--echo` — before spawning, print the composed argv and the exact prompt
   (scaffold prelude included) to stderr; the turn still runs, stdout still
   carries only the engine's own reply stream.
-- `--lessons-cap N`, `--lessons-cap-bytes N` — the `LESSONS.md` caps for
-  this turn (default 200 lines and 35840 bytes, 35 KB); see
-  [`LESSONS.md` upkeep](#lessonsmd-upkeep).
+- `--scaffold on|off`, `--no-scaffold` — include the cold-boot scaffold and
+  resident wrap-up turn (`on`, default) or send `PROMPT` untouched (`off` /
+  `--no-scaffold`). Bundled a8s engine definitions expose `SCAFFOLD`.
+- `--protect-agents-md on|off` — forbid editing `AGENTS.md` in the scaffold and
+  resident wrap-up (`on`), or allow the agent to update its own `AGENTS.md`
+  (`off`, default). Bundled a8s engine definitions expose `PROTECT_AGENTS_MD`.
+- `--lessons append|free|off`, `--lessons-cap N`, `--lessons-cap-bytes N` —
+  the `LESSONS.md` policy (`append` by default: one lesson per line plus
+  consolidation at 90% of cap; `free`: unrestricted updates with no
+  consolidation; `off`: omit `LESSONS.md`) and caps (default 200 lines and
+  35840 bytes, 35 KB); see [`LESSONS.md` upkeep](#lessonsmd-upkeep). Bundled
+  a8s engine definitions expose `LESSONS`, `LESSONS_CAP`, and
+  `LESSONS_CAP_BYTES`.
 - `--session UUID` — pin this turn to one named conversation (copilot only);
   see [the copilot section](#copilot-officially-supported).
 - `--max-credits N` — cap this turn's AI credits (copilot only, minimum 30,
@@ -567,8 +578,9 @@ Smart cold boot:
    Important Context, Next Steps, Decisions (with rationale). Append
    genuinely new durable insights to <DIR>/LESSONS.md. Every line of it is
    one lesson, one short line each, with no sections, headings or tiers.
-   Append; edit an existing line only when told to consolidate. Never edit
-   AGENTS.md.
+   Append; edit an existing line only when told to consolidate.
+                                     [with --protect-agents-md on, appends
+                                      "Never edit AGENTS.md."]
 
 <LESSONS.md note>                    [only when a consolidation is due]
 

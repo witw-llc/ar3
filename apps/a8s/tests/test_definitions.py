@@ -2152,3 +2152,75 @@ class TestEngineAccessVars:
         assert resident
         for path in resident:
             assert "ADD_DIRS" not in path.read_text(encoding="utf-8"), path.name
+
+
+class TestEngineScaffoldAndLessonsVars:
+    """`SCAFFOLD`, `PROTECT_AGENTS_MD`, `LESSONS`, `LESSONS_CAP` and
+    `LESSONS_CAP_BYTES` reach `r4t engine <id> run` across all 34 bundled
+    engine definitions (stateless and resident, restricted and unrestricted)."""
+
+    SLOTS = (
+        "--scaffold=$SCAFFOLD?",
+        "--protect-agents-md=$PROTECT_AGENTS_MD?",
+        "--lessons=$LESSONS?",
+        "--lessons-cap=$LESSONS_CAP?",
+        "--lessons-cap-bytes=$LESSONS_CAP_BYTES?",
+    )
+    VARS = {
+        "SCAFFOLD": "off",
+        "PROTECT_AGENTS_MD": "on",
+        "LESSONS": "free",
+        "LESSONS_CAP": "120",
+        "LESSONS_CAP_BYTES": "16384",
+    }
+
+    @staticmethod
+    def _all_engine_definitions():
+        return sorted(
+            default_definition_path("engine-claude").parent.glob("engine-*.json")
+        )
+
+    def test_all_thirty_four_engine_definitions_carry_the_slots(self):
+        paths = self._all_engine_definitions()
+        assert len(paths) == 34
+        for path in paths:
+            defn = json.loads(path.read_text(encoding="utf-8"))
+            for block in (defn["invoke"], defn["batch"]["invoke"], defn["idle"]["invoke"]):
+                for slot in self.SLOTS:
+                    assert block.count(slot) == 1, (path.name, slot)
+                    assert block.index(slot) < block.index("--agent"), (path.name, slot)
+
+    def test_unset_vars_omit_all_five_flags_and_set_vars_expand_cleanly(self, tmp_path):
+        from definitions import BatchEntry, build_batch_command, build_idle_command
+
+        entries = [
+            BatchEntry({"from": "A", "date": "2026-04-28T14:30:00Z", "content": "hi"}, "a.json")
+        ]
+        prefixes = (
+            "--scaffold=",
+            "--protect-agents-md=",
+            "--lessons=",
+            "--lessons-cap=",
+            "--lessons-cap-bytes=",
+        )
+        for path in self._all_engine_definitions():
+            defn = json.loads(path.read_text(encoding="utf-8"))
+            base_vars = {"MODEL": "qwen3.6"} if "ollama-" in path.name else {}
+            for argv in (
+                build_command(defn, {"from": "a", "to": "n", "content": "hi"}, tmp_path, vars=base_vars),
+                build_batch_command(defn, "n", entries, vars=base_vars),
+                build_idle_command(defn, "n", vars=base_vars),
+            ):
+                assert not [a for a in argv if a.startswith(prefixes)], path.name
+
+            set_vars = {**base_vars, **self.VARS}
+            for argv in (
+                build_command(defn, {"from": "a", "to": "n", "content": "hi"}, tmp_path, vars=set_vars),
+                build_batch_command(defn, "n", entries, vars=set_vars),
+                build_idle_command(defn, "n", vars=set_vars),
+            ):
+                assert "--scaffold=off" in argv, path.name
+                assert "--protect-agents-md=on" in argv, path.name
+                assert "--lessons=free" in argv, path.name
+                assert "--lessons-cap=120" in argv, path.name
+                assert "--lessons-cap-bytes=16384" in argv, path.name
