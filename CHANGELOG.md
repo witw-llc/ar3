@@ -10,6 +10,42 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.132
+
+### Added
+
+- `tool-browser` adds `dblclick <target>`, multi-file `upload <path>...`,
+  numbered network inspection (`requests [--static] [--all] [--clear] [--filter <regex>]`
+  plus `request`, `request-headers`, `request-body`, `response-headers`, and
+  `response-body`), bounded/subtree snapshots (`snap [--depth <N>] [--boxes] [<target>]`),
+  `find [--regex] [--max-results <N>] <text>`, and `console [level] [--all] [--clear]`.
+
+### Changed
+
+- `ar3` and `tool-browser` install `@playwright/cli@latest` by default instead of
+  locking `@playwright/cli` to a pinned version, and `ar3 doctor` and
+  `ar3 tool browser doctor` report the installed `playwright-cli` version without
+  failing or warning on newer releases.
+- `tool-browser` sets `NO_UPDATE_NOTIFIER=1`, `PWTEST_CLI_GLOBAL_CONFIG` to the
+  private IPC directory, `timeouts.idle: 0`, and `webmcp: false` for
+  `playwright-cli` launches, checks `CHROME_USER_DATA_DIR` and
+  `CHROME_CONFIG_HOME` on Linux when resolving Chrome CDP channels, recognizes
+  `skillMode` timeout and modal-state error text, and accounts for Chrome's
+  headless Ozone and SwiftShader switches in launch-flag checks.
+
+### Fixed
+
+- `tool-browser` disables `playwright-cli` file-chooser interception outside
+  `click`, hides `fileChooser` modal state from non-`upload` commands, and
+  recovers an unhooked tab already wedged in `fileChooser` modal state through a
+  scratch tab so clicking `<input type="file">` in Chrome does not suppress the
+  native OS file picker or wedge `snap`, `shot`, `tabs`, `url`, and other verbs
+  in `does not handle the modal state`.
+- `tool-browser` detects plain `Error:` / `TimeoutError:` output on `--raw`
+  `playwright-cli` calls that exit `0`, validates `wait-for` JSON output, and
+  reports modal-state refusal on `tabs` and `shot` instead of masking it as
+  `tabs: could not read the browser's structured response`.
+
 ## 0.1.131
 
 ### Added

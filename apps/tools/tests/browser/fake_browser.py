@@ -70,6 +70,7 @@ class FakeBrowser:
         monkeypatch.setattr(plc, "fill_secret", self._fill_secret)
         monkeypatch.setattr(resolve, "click_target", lambda seat, argument: argument)
         monkeypatch.setattr(resolve, "fill_target", lambda seat, argument: argument)
+        monkeypatch.setattr(resolve, "element_target", lambda seat, argument, noun="snap": argument)
 
     @property
     def url(self):
@@ -126,8 +127,10 @@ class FakeBrowser:
         self.check_open()
         self.calls.append(("wait_for_selector", selector, seconds))
 
-    def _snapshot(self, seat):
+    def _snapshot(self, seat, target=None, depth=None, boxes=False):
         self.check_open()
+        if target is not None or depth is not None or boxes:
+            self.calls.append(("snapshot", target, depth, boxes))
         return self.snapshot_text() if callable(self.snapshot_text) else self.snapshot_text
 
     def _close_browser(self, seat):
@@ -147,7 +150,7 @@ class FakeBrowser:
         verb = args[0]
         if verb == "goto":
             self._land(args[1])
-        elif verb == "click" and args[1] in self.links:
+        elif verb in ("click", "dblclick") and args[1] in self.links:
             self._land(self.links[args[1]])
         elif verb == "go-back" and self.history.get(self.tab):
             self.url = self.history[self.tab].pop()

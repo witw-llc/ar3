@@ -30,7 +30,7 @@ CONTROL = "argv-control-9954"
 
 GUARD = (
     "eval and run-code are off on a seat that holds secrets; they could read a field a secret was "
-    "typed into. Remove the secrets (browser secret rm) or use a seat without them."
+    "typed into. Remove the secrets (ar3 tool browser --seat NAME secret rm SECRET) or use a seat without them."
 )
 
 PAGE = """<!doctype html>
@@ -345,7 +345,7 @@ def test_a_stored_secret_signs_in_and_its_value_reaches_nothing_but_the_store(tm
         assert missing.returncode == 1
         assert payload["steps"][0]["error"] == (
             f"secret NOPE is not set for seat {seat}; "
-            f"the operator sets it with `browser secret set NOPE --origin ORIGIN --seat {seat}`"
+            f"the operator sets it with `ar3 tool browser --node {seat} secret set NOPE - --origin ORIGIN`"
         )
 
         # A run closes a seat directory that an older run left open.

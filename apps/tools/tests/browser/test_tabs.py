@@ -191,6 +191,30 @@ def test_driver_failure_removes_provisional_image_and_withholds_text(monkeypatch
     assert not path.exists()
 
 
+def test_modal_state_driver_failure_reports_fixed_modal_error_without_page_text(monkeypatch, tmp_path):
+    path = tmp_path / "screen.png"
+
+    def driver(*a, **k):
+        path.write_bytes(b"provisional")
+        raise plc.BrowserError('Error: Tool "browser_run_code_unsafe" does not handle the modal state. encoded secret')
+
+    monkeypatch.setattr(plc, "run_code_file", driver)
+    with pytest.raises(plc.BrowserError, match="does not handle the modal state") as error:
+        session.tabs("seat")
+    assert "encoded secret" not in str(error.value)
+
+    with pytest.raises(plc.BrowserError, match="does not handle the modal state") as shot_error:
+        session.indexed_screenshot("seat", "A", str(path))
+    assert "encoded secret" not in str(shot_error.value)
+    assert not path.exists()
+
+    scrubber = secretstore.Scrubber({"PW": {"value": "synthetic-secret", "origins": ["https://example.com"]}})
+    with plc.protecting("seat", scrubber):
+        with pytest.raises(plc.BrowserError) as held:
+            session.tabs("seat")
+    assert str(held.value) == f"Error: {plc.DRIVER_MESSAGE_WITHHELD}"
+
+
 @pytest.mark.parametrize("scenario, captured, accepted", [
     ("safe", True, True), ("wrong-target", False, False),
     ("already-local", False, False), ("local-on-foreground", False, False), ("local-and-back", True, False),

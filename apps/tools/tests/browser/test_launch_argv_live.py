@@ -65,8 +65,11 @@ def test_the_chrome_a_seat_starts_has_no_flag_the_seat_did_not_ask_for(tmp_path,
         # Positive controls: this is the process we meant, and the two flags that matter are in it.
         assert "--test-type=webdriver" in flags, argv
         assert "--disable-blink-features=AutomationControlled" in flags, argv
-        asked = {a.split("=", 1)[0] for a in session._launch_args(seat) if a.startswith("--")}
-        allowed_exact = {"--disable-blink-features=AutomationControlled"}
+        launch = session._launch_args(seat)
+        asked = {a.split("=", 1)[0] for a in launch if a.startswith("--")}
+        allowed_exact = set(session.PLAYWRIGHT_ADDED_FLAGS)
+        if "--headless=new" in launch:
+            allowed_exact.update(session.CHROME_HEADLESS_ADDED_FLAGS)
         stray = [f for f in flags if f.split("=", 1)[0] not in asked and f not in allowed_exact]
         assert stray == [], argv
         assert "did not ask for" not in opened.stderr, opened.stderr

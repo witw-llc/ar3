@@ -181,12 +181,58 @@ def _claim_artifact(seat, source, name):
         return path
 
 
-def _write_snapshot(seat, run, label="snapshot"):
+def _write_snapshot(seat, run, label="snapshot", target=None, depth=None, boxes=False):
     path = artifact(seat, f"{label}.txt")
+    text = (
+        session.snapshot(seat)
+        if target is None and depth is None and not boxes
+        else session.snapshot(seat, target=target, depth=depth, boxes=boxes)
+    )
     with open(path, "w") as handle:
-        handle.write(run.clean(session.snapshot(seat)))
+        handle.write(run.clean(text))
     run.attach(path)
     return path
+
+
+def _snap(seat, args, run):
+    if not args:
+        return _write_snapshot(seat, run)
+    targets = []
+    depth = None
+    boxes = False
+    index = 0
+    usage = "usage: snap [--depth <N>] [--boxes] [<ref or selector>]"
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--boxes":
+            boxes = True
+        elif arg == "--depth":
+            if index >= len(args):
+                plc.refuse_protected(seat, arg)
+                raise plc.BrowserError(usage)
+            raw_depth = args[index]
+            index += 1
+            plc.refuse_protected(seat, raw_depth)
+            if not re.fullmatch(r"[0-9]{1,3}", raw_depth):
+                raise plc.BrowserError(f"{usage} — N is 0 to 999")
+            depth = raw_depth
+        elif arg.startswith("--depth="):
+            raw_depth = arg.split("=", 1)[1]
+            plc.refuse_protected(seat, raw_depth)
+            if not re.fullmatch(r"[0-9]{1,3}", raw_depth):
+                raise plc.BrowserError(f"{usage} — N is 0 to 999")
+            depth = raw_depth
+        elif arg.startswith("-"):
+            plc.refuse_protected(seat, arg)
+            raise plc.BrowserError(usage)
+        else:
+            targets.append(arg)
+    if len(targets) > 1:
+        plc.check_command(seat, ["snapshot", *targets])
+        raise plc.BrowserError(usage)
+    resolved = resolve.element_target(seat, targets[0], "snap") if targets else None
+    return _write_snapshot(seat, run, target=resolved, depth=depth, boxes=boxes)
 
 
 def _seconds(value):
@@ -271,6 +317,13 @@ def _click(seat, args):
     _need(args, 1, "click <text or selector>")
     target = resolve.click_target(seat, " ".join(args))
     plc.run(seat, "click", target)
+    return target
+
+
+def _dblclick(seat, args):
+    _need(args, 1, "dblclick <text or selector>")
+    target = resolve.click_target(seat, " ".join(args))
+    plc.run(seat, "dblclick", target)
     return target
 
 
@@ -364,13 +417,190 @@ def _assert_url(seat, args):
 
 def _console(seat, args, run):
     """Attach the page's console log; the transcript keeps a copy inline."""
-    argv = ["console", *args[:1]]
+    for arg in args:
+        plc.refuse_protected(seat, arg)
+    argv = ["console"]
+    levels = []
+    cleared = False
+    for arg in args:
+        if arg == "--all":
+            argv.append(plc.Own("--all"))
+        elif arg == "--clear":
+            argv.append(plc.Own("--clear"))
+            cleared = True
+        elif not arg.startswith("-") and not levels:
+            levels.append(arg)
+        else:
+            raise plc.BrowserError("usage: console [error|warning|info|debug] [--all] [--clear]")
+    if levels:
+        argv.append(levels[0])
     body = run.clean(plc.result_or(plc.run(seat, *argv)))
+    if cleared and not body:
+        return "cleared"
     path = artifact(seat, "console.log")
     with open(path, "w") as handle:
         handle.write(body + "\n")
     run.attach(path)
     return body or "(console is empty)"
+
+
+def _find(seat, args):
+    _need(args, 1, "find [--regex] [--max-results <N>] <text>")
+    rest = args[0]
+    plc.refuse_protected(seat, rest)
+    regex = False
+    max_results = None
+    usage = "usage: find [--regex] [--max-results <N>] <text>"
+    while True:
+        if rest == "--regex" or rest.startswith("--regex "):
+            regex = True
+            rest = rest[len("--regex"):].lstrip()
+            continue
+        match = re.match(r"^--max-results(?:=(\S+)|\s+(\S+))(?:\s+(.*))?$", rest, re.S)
+        if match:
+            raw_limit = match.group(1) or match.group(2)
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", raw_limit):
+                raise plc.BrowserError(f"{usage} — N is a positive integer")
+            max_results = raw_limit
+            rest = (match.group(3) or "").lstrip()
+            continue
+        if rest == "--max-results":
+            raise plc.BrowserError(usage)
+        break
+    if not rest:
+        raise plc.BrowserError(usage)
+    argv = ["find"]
+    if max_results is not None:
+        argv += [plc.Own("--max-results"), max_results]
+    if regex:
+        if rest.startswith("-"):
+            argv.append(f"--regex={rest}")
+        else:
+            argv += [plc.Own("--regex"), rest]
+    elif rest.startswith("-"):
+        argv += [plc.Own("--"), rest]
+    else:
+        argv.append(rest)
+    return plc.result_or(plc.run(seat, *argv))
+
+
+REQUEST_PART_VERBS = (
+    "request",
+    "request-headers",
+    "request-body",
+    "response-headers",
+    "response-body",
+)
+
+REQUEST_PART_OFF_WITH_SECRETS = (
+    "request details and bodies are off on a seat that holds secrets; a request or response can carry "
+    "a secret in an encoded form the scrub cannot find. Use `requests` to list URLs and status codes, "
+    "remove the secrets (ar3 tool browser --seat NAME secret rm SECRET), or use a seat without them."
+)
+REQUEST_PART_OFF_AFTER_HIDE = (
+    "request details and bodies are off in a script after a recipe has hidden a value in it; a request "
+    "or response can carry that value in an encoded form. Run them in a script of their own."
+)
+_HEADER_LINE_RE = re.compile(r"^([!#$%&'*+\-.^_`|~0-9A-Za-z]+):(?: (.*))?$")
+_INDENTED_HEADER_RE = re.compile(r"^    ([!#$%&'*+\-.^_`|~0-9A-Za-z]+):(?: (.*))?$")
+_REDACTED_HEADERS = frozenset({"cookie", "set-cookie", "authorization", "proxy-authorization"})
+
+
+def _redact_headers(body, indented=False):
+    """Replace credential header values (`Cookie`, `Set-Cookie`, `Authorization`, `Proxy-Authorization`),
+    including multi-line `Set-Cookie` continuations joined with `\\n`."""
+    lines = []
+    in_section = not indented
+    redacting = False
+    for line in body.splitlines():
+        if indented:
+            if line in ("  Request headers", "  Response headers"):
+                in_section = True
+                redacting = False
+                lines.append(line)
+                continue
+            if not line or (line.startswith("  ") and not line.startswith("    ")):
+                in_section = False
+                redacting = False
+                lines.append(line)
+                continue
+            if not in_section:
+                lines.append(line)
+                continue
+        match = (_INDENTED_HEADER_RE if indented else _HEADER_LINE_RE).match(line)
+        if match:
+            name = match.group(1)
+            redacting = name.lower() in _REDACTED_HEADERS
+            prefix = "    " if indented else ""
+            lines.append(f"{prefix}{name}: [redacted]" if redacting else line)
+        elif not redacting:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _requests(seat, args):
+    for arg in args:
+        plc.refuse_protected(seat, arg)
+    argv = ["requests"]
+    cleared = False
+    index = 0
+    usage = "usage: requests [--static] [--all] [--clear] [--filter <regex>]"
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--static":
+            argv.append(plc.Own("--static"))
+        elif arg == "--all":
+            argv.append(plc.Own("--all"))
+        elif arg == "--clear":
+            argv.append(plc.Own("--clear"))
+            cleared = True
+        elif arg == "--filter" or arg.startswith("--filter="):
+            if arg == "--filter":
+                if index >= len(args) or not args[index]:
+                    raise plc.BrowserError(usage)
+                pattern = args[index]
+                index += 1
+            else:
+                pattern = arg.split("=", 1)[1]
+                if not pattern:
+                    raise plc.BrowserError(usage)
+            if pattern.startswith("-"):
+                argv.append(f"--filter={pattern}")
+            else:
+                argv += [plc.Own("--filter"), pattern]
+        else:
+            raise plc.BrowserError(usage)
+    body = plc.result_or(plc.run(seat, *argv, timeout=60))
+    if cleared and not body:
+        return "cleared"
+    return body
+
+
+def _request_part(seat, verb, args, run):
+    for arg in args:
+        plc.refuse_protected(seat, arg)
+    if not run.capturing:
+        raise plc.BrowserError(f"{verb}: nothing of the page is captured while a sensitive step is open")
+    if run.scrubber:
+        raise plc.BrowserError(REQUEST_PART_OFF_WITH_SECRETS if run.scrubber.secrets else REQUEST_PART_OFF_AFTER_HIDE)
+    if len(args) != 1 or not re.fullmatch(r"[1-9][0-9]{0,8}", args[0]):
+        raise plc.BrowserError(f"usage: {verb} <N> — N is a 1-based request number from `requests`")
+    if verb == "response-body":
+        before = set(_cli_output_state(seat))
+        try:
+            body = plc.result_or(plc.run(seat, verb, args[0], timeout=60))
+        finally:
+            added = set(_cli_output_state(seat)) - before
+            for path in added:
+                _remove(path)
+        if added and body.strip().replace("\\", "/").startswith(".playwright-cli/"):
+            return "(binary response body)"
+        return body
+    body = plc.result_or(plc.run(seat, verb, args[0], timeout=60))
+    if verb in ("request", "request-headers", "response-headers"):
+        return _redact_headers(body, indented=(verb == "request"))
+    return body
 
 
 def _video_start(seat, args):
@@ -447,27 +677,15 @@ def _local_file(path, verb):
 
 
 def _upload(seat, args):
-    """Hand one file to a file chooser the page has already opened.
+    """Hand one or more files to a file chooser the page has already opened.
 
     playwright-cli's own `upload` is the only thing that answers a chooser: the
     modal belongs to the driver, not the DOM, so no amount of page JS reaches it.
-
-    One file, because that is what the command takes. Its help says "one or
-    multiple files" and calls the argument "the absolute paths", but the parser
-    accepts a single positional and rejects two before it touches the browser.
-    A second `upload` is not a workaround either: the first one answers the
-    chooser and closes it, so the rest go nowhere. Multi-file belongs to `drop`,
-    whose `--path` really does repeat.
     """
-    _need(args, 1, "upload <path>")
-    if len(args) > 1:
-        raise plc.BrowserError(
-            f"upload takes one file, not {len(args)} — the file chooser is answered "
-            "once and closes. Use `drop <target> <path> <path> ...` for several at a time"
-        )
-    path = _local_file(args[0], "upload")
-    plc.run(seat, "upload", path, timeout=120)
-    return os.path.basename(path)
+    _need(args, 1, "upload <path> [<path> ...]")
+    paths = [_local_file(arg, "upload") for arg in args]
+    plc.run(seat, "upload", *paths, timeout=120)
+    return ", ".join(os.path.basename(path) for path in paths)
 
 
 def _drop(seat, args):
@@ -618,6 +836,8 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         return _go(seat, args)
     if verb == "click":
         return _click(seat, args)
+    if verb == "dblclick":
+        return _dblclick(seat, args)
     if verb == "fill":
         return _fill(seat, args)
     if verb == "fill-secret":
@@ -660,8 +880,7 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
     if verb == "resize":
         return _resize(seat, args)
     if verb == "find":
-        _need(args, 1, "find <text>")
-        return plc.result_or(plc.run(seat, "find", args[0]))
+        return _find(seat, args)
     if verb == "select":
         _need(args, 2, "select <label or selector> <value>")
         target = resolve.fill_target(seat, args[0])
@@ -679,7 +898,9 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         plc.run(seat, "dialog-dismiss")
         return "dismissed"
     if verb == "requests":
-        return plc.result_or(plc.run(seat, "requests", timeout=60))
+        return _requests(seat, args)
+    if verb in REQUEST_PART_VERBS:
+        return _request_part(seat, verb, args, run)
     if verb == "console":
         return _console(seat, args, run)
     if verb == "video-start":
@@ -689,7 +910,7 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
     if verb == "video-chapter":
         return _video_chapter(seat, args)
     if verb == "snap":
-        return _write_snapshot(seat, run)
+        return _snap(seat, args, run)
     if verb == "shot":
         if args:
             selected = _select_tab(seat, _tab_index(args, verb), run, verb)

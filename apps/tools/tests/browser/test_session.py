@@ -212,7 +212,10 @@ def test_the_launch_config_is_the_seats_own_flags_over_the_pipe_and_private(monk
     if os.name != "nt":
         assert stat.S_IMODE(os.stat(configs[0]).st_mode) == 0o600
     with open(configs[0], encoding="utf-8") as handle:
-        browser = json.load(handle)["browser"]
+        payload = json.load(handle)
+    assert payload["timeouts"] == {"idle": 0}
+    assert payload["webmcp"] is False
+    browser = payload["browser"]
     options = browser["launchOptions"]
     assert browser["userDataDir"] == session.profile_dir("seat")
     assert browser["contextOptions"] == {"viewport": None}
@@ -247,11 +250,16 @@ def test_the_bar_off_flag_is_in_the_seats_args_and_why():
 
 
 def test_the_argv_a_real_launch_produces_has_no_unasked_flag(monkeypatch):
-    """The command line Chrome gets is ours, then playwright-cli's one addition. Nothing else may be in it."""
+    """The command line Chrome gets is ours, then playwright-cli's addition (and Chrome's own headless-shell
+    Ozone/SwiftShader additions only when `--headless=new` is active). Nothing else may be in it."""
     monkeypatch.setattr(session.platform, "system", lambda: "Linux")
     monkeypatch.delenv("DISPLAY", raising=False)
-    argv = session._launch_args("seat") + list(session.PLAYWRIGHT_ADDED_FLAGS)
+    argv = session._launch_args("seat") + list(session.PLAYWRIGHT_ADDED_FLAGS) + list(session.CHROME_HEADLESS_ADDED_FLAGS)
     assert session.unasked_flags("seat", argv) == []
+    monkeypatch.setenv("DISPLAY", ":0")
+    headed = session._launch_args("seat") + list(session.PLAYWRIGHT_ADDED_FLAGS)
+    assert session.unasked_flags("seat", headed) == []
+    assert session.unasked_flags("seat", headed + list(session.CHROME_HEADLESS_ADDED_FLAGS)) == list(session.CHROME_HEADLESS_ADDED_FLAGS)
 
 
 def test_flags_nobody_asked_for_are_named(monkeypatch):
@@ -1651,3 +1659,227 @@ def test_main_pids_uses_lf_on_darwin_and_falls_back_to_process_argv_when_cmdline
     }
     monkeypatch.setattr(session, "_process_argv", lambda pid: argv_map.get(pid))
     assert session._main_pids("atb") == ["101"]
+
+
+def test_route_downloads_js_hooks_file_chooser_modal_state_and_subscription(monkeypatch, tmp_path):
+    """`_route_downloads_js` disables unsolicited fileChooser interception outside `browser_click` and hides
+    `fileChooser` modal state from every tool except `browser_file_upload`."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("needs node")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    body = str(session._route_downloads_js("seat"))
+    harness = r"""
+const fs = require('fs');
+const body = fs.readFileSync(0, 'utf8');
+const tabSymbol = Symbol('tab');
+const subscriptions = [];
+const makePage = (label) => ({
+  label,
+  _channel: {
+    updateSubscription: async (params) => { subscriptions.push([label, params.event, params.enabled]); },
+  },
+  bringToFront: async () => {},
+  context: () => browserContext,
+});
+const cdp = { send: async () => {} };
+const browser = { newBrowserCDPSession: async () => cdp };
+const browserContext = { browser: () => browser };
+
+class Context {
+  constructor() {
+    this._tabs = [];
+    this._currentTab = undefined;
+    this._runningToolName = undefined;
+  }
+  tabs() { return this._tabs; }
+  currentTab() { return this._currentTab; }
+  _setCurrentTab(t) { this._currentTab = t; }
+  isRunningTool() { return this._runningToolName !== undefined; }
+  setRunningTool(name) { this._runningToolName = name; }
+  _onPageCreated(page, isolated) {
+    const t = new Tab(this, page, (closed) => this._onPageClosed(closed));
+    this._tabs.push(t);
+    if (!this._currentTab) this._currentTab = t;
+    return t;
+  }
+  _onPageClosed(tab) {
+    const idx = this._tabs.indexOf(tab);
+    if (idx === -1) return;
+    this._tabs.splice(idx, 1);
+    if (this._currentTab === tab)
+      this._setCurrentTab(this._tabs[Math.min(idx, this._tabs.length - 1)]);
+  }
+}
+
+class Tab {
+  constructor(context, page, onPageClose) {
+    this.context = context;
+    this.page = page;
+    this._onPageClose = onPageClose;
+    this._modalStates = [];
+    page[tabSymbol] = this;
+  }
+  modalStates() { return this._modalStates; }
+  setModalState(state) { this._modalStates.push(state); }
+  _onClose() { this._onPageClose(this); }
+  async waitForCompletion(cb) { return await cb(); }
+}
+
+const callTabTool = async (ctx, name, clearsModalState, cb) => {
+  ctx.setRunningTool(name);
+  try {
+    const tab = ctx.currentTab();
+    const states = tab.modalStates().map(s => s.type);
+    if (clearsModalState && !states.includes(clearsModalState))
+      throw new Error(`Error: The tool "${name}" can only be used when there is related modal state present.`);
+    if (!clearsModalState && states.length)
+      throw new Error(`Error: Tool "${name}" does not handle the modal state.`);
+    return await cb(tab);
+  } finally {
+    ctx.setRunningTool(undefined);
+  }
+};
+
+(async () => {
+  const ctx = new Context();
+  const page0 = makePage('p0');
+  const tab0 = ctx._onPageCreated(page0);
+  const page1 = makePage('p1');
+  const tab1 = ctx._onPageCreated(page1);
+  const pageOther = makePage('pOther');
+  const tabOther = ctx._onPageCreated(pageOther);
+  ctx._setCurrentTab(tab1);
+  // Pre-existing fileChoosers on both tab0 and tab1 while tab1 is selected: direct guarded call is refused.
+  tab0._modalStates = [{type: 'fileChooser'}];
+  tab1._modalStates = [{type: 'fileChooser'}];
+
+  const fn = eval('(async (page) => {' + body + '})');
+  const scratchFn = eval('(async (page) => { const _a8sRestoreIdx = 1;\n' + body + '})');
+  let directRefused = false;
+  try {
+    await callTabTool(ctx, 'browser_run_code_unsafe', undefined, (t) => fn(t.page));
+  } catch (e) {
+    directRefused = /does not handle the modal state/.test(e.message);
+  }
+
+  // Normal installation on a clean selected tab (with a background chooser on bg0) must not arm a future
+  // selection change when another background tab (bg2) is later closed.
+  const origModalStates = Tab.prototype.modalStates;
+  const origSetModalState = Tab.prototype.setModalState;
+  const origWaitForCompletion = Tab.prototype.waitForCompletion;
+  const origOnPageCreated = Context.prototype._onPageCreated;
+  const bgCtx = new Context();
+  const bg0 = bgCtx._onPageCreated(makePage('bg0'));
+  const sel1 = bgCtx._onPageCreated(makePage('sel1'));
+  const bg2 = bgCtx._onPageCreated(makePage('bg2'));
+  bg0._modalStates = [{type: 'fileChooser'}];
+  bgCtx._setCurrentTab(sel1);
+  await callTabTool(bgCtx, 'browser_run_code_unsafe', undefined, (t) => fn(t.page));
+  bg2._onClose();
+  const normalClosePreserved = bgCtx.currentTab().page.label;
+  Tab.prototype.modalStates = origModalStates;
+  Tab.prototype.setModalState = origSetModalState;
+  Tab.prototype.waitForCompletion = origWaitForCompletion;
+  Context.prototype._onPageCreated = origOnPageCreated;
+  delete Context.prototype.__a8sFileChooserHooked;
+  subscriptions.length = 0;
+
+  // Scratch-tab recovery (tab-new -> browser_run_code_unsafe with _a8sRestoreIdx -> tab-close) installs the hook,
+  // clears fileChooser on both tab0 and tab1 while keeping dialog, and restores tab1 (not tab0) when scratch closes.
+  tab0._modalStates = [{type: 'fileChooser'}];
+  tab1._modalStates = [{type: 'fileChooser'}, {type: 'dialog'}];
+  const scratchPage = makePage('scratch');
+  const scratchTab = ctx._onPageCreated(scratchPage);
+  ctx._setCurrentTab(scratchTab);
+  await callTabTool(ctx, 'browser_run_code_unsafe', undefined, (t) => scratchFn(t.page));
+  scratchTab._onClose();
+
+  const restoredCurrent = ctx.currentTab().page.label;
+  const tab0AfterAttach = tab0.modalStates().map(s => s.type);
+  const afterAttach = tab1.modalStates().map(s => s.type);
+
+  // Closing another tab after scratch recovery does not alter the selected tab1.
+  const extraTab = ctx._onPageCreated(makePage('extra'));
+  extraTab._onClose();
+  const afterExtraClose = ctx.currentTab().page.label;
+
+  // Human click outside a running tool is ignored.
+  tab1.setModalState({type: 'fileChooser'});
+  const afterHumanClick = tab1.modalStates().map(s => s.type);
+
+  // New tab created outside browser_click disables fileChooser subscription.
+  const page2 = makePage('p2');
+  ctx._onPageCreated(page2);
+
+  // Inside browser_click, waitForCompletion enables subscription before callback and disables on all tabs after.
+  tab1._modalStates = [];
+  let subsDuringClick = 0;
+  await callTabTool(ctx, 'browser_click', undefined, async (t) => {
+    await t.waitForCompletion(async () => {
+      subsDuringClick = subscriptions.length;
+      t.setModalState({type: 'fileChooser', description: 'first'});
+      t.setModalState({type: 'fileChooser', description: 'second'});
+    });
+  });
+
+  // Non-upload tools pass defineTabTool guard despite pending fileChooser, while browser_file_upload sees it.
+  const duringSnap = await callTabTool(ctx, 'browser_snapshot', undefined, (t) => t.modalStates().map(s => s.type));
+  const duringUpload = await callTabTool(ctx, 'browser_file_upload', 'fileChooser', (t) => t.modalStates().map(s => `${s.type}:${s.description || ''}`));
+
+  process.stdout.write(JSON.stringify({
+    directRefused,
+    normalClosePreserved,
+    restoredCurrent,
+    afterExtraClose,
+    tab0AfterAttach,
+    afterAttach,
+    afterHumanClick,
+    subsDuringClick,
+    subscriptions,
+    duringSnap,
+    duringUpload,
+  }));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+    done = subprocess.run([node, "-e", harness], input=body, text=True, capture_output=True, timeout=15)
+    assert done.returncode == 0, done.stderr
+    result = json.loads(done.stdout)
+    assert result["directRefused"] is True
+    assert result["normalClosePreserved"] == "sel1"
+    assert result["restoredCurrent"] == "p1"
+    assert result["afterExtraClose"] == "p1"
+    assert result["tab0AfterAttach"] == []
+    assert result["afterAttach"] == ["dialog"]
+    assert result["afterHumanClick"] == ["dialog"]
+    assert result["duringSnap"] == []
+    assert result["duringUpload"] == ["fileChooser:second"]
+    assert result["subscriptions"] == [
+        ["p0", "fileChooser", False],
+        ["p1", "fileChooser", False],
+        ["pOther", "fileChooser", False],
+        ["scratch", "fileChooser", False],
+        ["extra", "fileChooser", False],
+        ["p2", "fileChooser", False],
+        ["p1", "fileChooser", True],
+        ["p0", "fileChooser", False],
+        ["p1", "fileChooser", False],
+        ["pOther", "fileChooser", False],
+        ["p2", "fileChooser", False],
+    ]
+    assert result["subsDuringClick"] == 7
+
+
+def test_channel_user_data_dir_on_linux_prefers_chrome_env_vars_before_xdg_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(session.platform, "system", lambda: "Linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("CHROME_USER_DATA_DIR", raising=False)
+    monkeypatch.delenv("CHROME_CONFIG_HOME", raising=False)
+    assert session._channel_user_data_dir("chrome") == str(tmp_path / "xdg" / "google-chrome")
+
+    monkeypatch.setenv("CHROME_CONFIG_HOME", str(tmp_path / "chrome-cfg"))
+    assert session._channel_user_data_dir("chrome") == str(tmp_path / "chrome-cfg" / "google-chrome")
+    assert session._channel_user_data_dir("chrome-beta") == str(tmp_path / "chrome-cfg" / "google-chrome-beta")
+
+    monkeypatch.setenv("CHROME_USER_DATA_DIR", str(tmp_path / "direct-udd"))
+    assert session._channel_user_data_dir("chrome") == str(tmp_path / "direct-udd")

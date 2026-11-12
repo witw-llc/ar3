@@ -357,9 +357,42 @@ def _target(seat, argument, body_js, noun):
     return _pick(seat, argument, verdict, noun)
 
 
+ELEMENT_JS = r"""
+let selectorValid = true, selectorCount = 0, selectorTarget = '', selectorPlain = '', selectorEmbeds = [];
+try {
+  const matches = Array.from(document.querySelectorAll(arg));
+  selectorCount = matches.length;
+  const chosen = matches.find(isVisible) || matches[0];
+  if (chosen) {
+    selectorTarget = bestSelector(chosen);
+    selectorPlain = structuralPath(chosen);
+    selectorEmbeds = embedsOf(chosen);
+  }
+} catch (e) { selectorValid = false; }
+return { selectorValid, selectorCount, selectorTarget, selectorPlain, selectorEmbeds };
+"""
+
+
 def click_target(seat, argument):
     return _target(seat, argument, CLICK_JS, "click")
 
 
 def fill_target(seat, argument):
     return _target(seat, argument, FILL_JS, "fill")
+
+
+def element_target(seat, argument, noun="snap"):
+    """Resolve a snapshot ref or a CSS selector for an element-scoped read such as `snap`."""
+    if REF_RE.match(argument):
+        return _resolve_ref(seat, argument)
+    verdict = _classify(seat, argument, ELEMENT_JS)
+    if not verdict["selectorValid"] or verdict["selectorCount"] < 1:
+        raise BrowserError(
+            f"{noun}: selector {argument!r} matched no element — try `snap`, or pass a ref or CSS selector"
+        )
+    element = {
+        "selector": verdict["selectorTarget"] or argument,
+        "plain": verdict.get("selectorPlain"),
+        "embeds": verdict.get("selectorEmbeds"),
+    }
+    return _name(seat, element, noun)

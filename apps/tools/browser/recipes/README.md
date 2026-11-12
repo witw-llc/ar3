@@ -209,16 +209,16 @@ redacts its transcript, and applies the relevant origin checks.
 | Method | Function |
 |---|---|
 | `go(url)` | Opens a URL on the declared origins. |
-| `click(target)`, `fill(target, text)`, `press(key)`, `select(target, value)`, `check(target)`, `uncheck(target)`, `hover(target)` | Runs the corresponding browser command. Targets can be snapshot references, CSS selectors, or visible text. |
+| `click(target)`, `dblclick(target)`, `fill(target, text)`, `press(key)`, `select(target, value)`, `check(target)`, `uncheck(target)`, `hover(target)` | Runs the corresponding browser command. Targets can be snapshot references, CSS selectors, or visible text. |
 | `fill_secret(target, name)` | Types a declared stored secret. The secret's own origin restrictions also apply. |
 | `hide(name, value)` | Adds a protected value for this script. Redacts it as `[secret:NAME]`. Requires 4 to 4096 characters. |
 | `fill_hidden(target, text)` | Types a protected value without a command-line value or transcript value. Requires a field on a declared origin. |
 | `no_page_files()` | Deletes driver page files created inside its context, including on failure. |
 | `sensitive(name, cleanup)` | Disables capture while sensitive data is handled. Runs cleanup on exit. See Sensitive steps. |
 | `wait(seconds)`, `wait_for(selector, seconds=10)`, `wait_for_url(substring, seconds=10)` | Waits for time or a page condition. A stop interrupts the wait. |
-| `text(selector)`, `find(text)`, `url()`, `snapshot_text()` | Reads redacted page text or its URL. |
+| `text(selector)`, `find(text)`, `url()`, `snapshot_text(target=None, depth=None, boxes=False)` | Reads redacted page text or its URL. |
 | `screenshot(name, full_page=False)`, `download(target, seconds=30)` | Creates an attached file and returns its path. |
-| `upload(target, path)`, `drop(target, *paths)` | Supplies files to the page. Browser-state paths are refused. |
+| `upload(target, *paths)`, `drop(target, *paths)` | Supplies files to the page. Browser-state paths are refused. |
 | `back()`, `forward()`, `reload()` | Changes the page through browser history or reload. |
 | `evaluate(js, *values)` | Calls a JavaScript function with separate JSON arguments. Returns JSON data. |
 | `run_code(body, *values)` | Runs reviewed Playwright code with `page` and `values` in scope. |

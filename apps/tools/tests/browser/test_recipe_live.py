@@ -394,7 +394,10 @@ def test_a_recipe_types_values_it_holds_without_showing_them_and_shoots_the_whol
         done, payload = _do(env, seat, "recipe fixture enter --page /tall --into #locked\n", recipes)
         seen.append(done.stdout + done.stderr)
         assert done.returncode == 1
-        assert _error(payload) == "fill_hidden: TimeoutError: locator.fill: Timeout 5000ms exceeded."
+        assert _error(payload) == (
+            "fill_hidden: TimeoutError: the driver's message is withheld on a seat that holds secrets; "
+            "the failure snapshot is attached"
+        )
         assert "Call log" not in done.stdout + done.stderr
 
         # A page that does not hold the field: the resolver says so, and the value is not in the message.

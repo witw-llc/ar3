@@ -31,11 +31,13 @@ FILL_TIMEOUT_MS = 5000
 # playwright-cli opens a file: page only when its daemon starts with this variable set, and the daemon takes
 # the environment of the call that starts it. No call of this tool passes it on.
 FILE_ACCESS_ENV = "PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS"
-# The variables that move what the driver writes, or make it write more: its output directory, a config file that
-# can name another, its debug log (which holds the protocol, text typed into a field included) and the directories
-# its tests use. The sweep looks at `scratch/.playwright-cli`, so the driver writes there and nowhere else.
+# The variables that move what the driver writes, load outside scripts or configs, override idle or WebMCP
+# policy, or make it write more: its output directory, config files, init scripts/pages, secrets/storage files,
+# debug logs (which hold the protocol, text typed into a field included) and the directories its tests use. The
+# sweep looks at `scratch/.playwright-cli`, so the driver writes there and nowhere else.
 DRIVER_OUTPUT_ENV = re.compile(
-    r"(PLAYWRIGHT_MCP_(OUTPUT_DIR|CONFIG|SAVE_\w+)|PWTEST_(SOCKETS_DIR|DAEMON_SESSION_DIR)|DEBUG|DEBUG_FILE)",
+    r"(PLAYWRIGHT_MCP_(OUTPUT_DIR|CONFIG|SAVE_\w+|INIT_\w+|SECRETS_FILE|STORAGE_STATE|IDLE_TIMEOUT|WEBMCP)"
+    r"|PWTEST_(SOCKETS_DIR|DAEMON_SESSION_DIR|CLI_GLOBAL_CONFIG)|DEBUG|DEBUG_FILE)",
     re.IGNORECASE,
 )
 # What the driver, and the daemon it starts, may do to a file it makes: nothing for another user.
@@ -56,7 +58,8 @@ REF_SHAPE = re.compile(r"(f\d+)?e\d+")
 # A ref is exempt from the check of a command line only there. In any other place the same text is data (`type e482916`,
 # `fill #user e482916`), and it is the caller's: a stored PIN of 482916 is in it.
 TARGET_PLACES = {
-    "click": (0,), "hover": (0,), "check": (0,), "uncheck": (0,), "fill": (0,), "select": (0,), "drop": (0,), "eval": (1,),
+    "click": (0,), "dblclick": (0,), "hover": (0,), "check": (0,), "uncheck": (0,),
+    "fill": (0,), "select": (0,), "drop": (0,), "snapshot": (0,), "eval": (1,),
 }
 
 
@@ -131,6 +134,9 @@ def holds_secrets(seat):
     return guard is not None and bool(guard)
 
 
+_SKILL_TIMEOUT_RE = re.compile(r"(?:[A-Za-z0-9_.]+:\s+)?Timeout\s+[0-9]+ms\s+exceeded\b")
+
+
 def driver_error(seat, text):
     """The text of an error of the driver as the caller of `seat` may see it. On a seat that holds a secret no text of the
     driver stays. Playwright prints a preview of each element it names, with its text cut at 50 characters and its
@@ -146,7 +152,9 @@ def driver_error(seat, text):
     header = [lines.pop(0)] if lines and lines[0].strip() == "### Error" else []
     while lines and not lines[0].strip():
         lines.pop(0)
-    kind = "TimeoutError" if lines and lines[0].lstrip().startswith("TimeoutError") else "Error"
+    first = lines[0].lstrip() if lines else ""
+    is_timeout = first.startswith("TimeoutError") or bool(_SKILL_TIMEOUT_RE.match(first))
+    kind = "TimeoutError" if is_timeout else "Error"
     return "\n".join(header + [f"{kind}: {DRIVER_MESSAGE_WITHHELD}"])
 
 
@@ -254,6 +262,11 @@ def js_string(value):
 # The variable that names the directory of the daemon's socket. Unset, the driver puts it under
 # `<tmp>/pw-<hash of the user name>`, a name any local user can work out and make first.
 IPC_ENV = "PWTEST_SOCKETS_DIR"
+# The base directory where playwright-cli looks for `.playwright/cli.config.json`; pointing it at `ipc_dir`
+# keeps a user-wide `~/.playwright/cli.config.json` from overriding a seat's output directory or flags.
+GLOBAL_CONFIG_ENV = "PWTEST_CLI_GLOBAL_CONFIG"
+WEBMCP_ENV = "PLAYWRIGHT_MCP_WEBMCP"
+UPDATE_NOTIFIER_ENV = "NO_UPDATE_NOTIFIER"
 
 
 # The driver refuses a socket path longer than 103 bytes, and puts its sockets one level below the directory
@@ -314,13 +327,17 @@ def cli_env():
     process's, without the switch that lets the driver open local files, and without the variables that move or
     add to what the driver writes (`DRIVER_OUTPUT_ENV`). The tool opens no local file, and the files of the driver are
     where the sweep looks, so a node whose environment sets any of them does not change that for the seat's driver.
-    The socket directory is always `ipc_dir`, whatever the caller's environment says (on Windows the driver uses a
-    named pipe, and the variable only changes the pipe's name)."""
+    The socket directory and global-config lookup directory are always `ipc_dir`, whatever the caller's environment
+    says, WebMCP page probing is disabled, and playwright-cli's background npm update check is suppressed."""
     env = {
         name: value for name, value in os.environ.items()
         if name.upper() != FILE_ACCESS_ENV and not DRIVER_OUTPUT_ENV.fullmatch(name)
     }
-    env[IPC_ENV] = ipc_dir()
+    ipc = ipc_dir()
+    env[IPC_ENV] = ipc
+    env[GLOBAL_CONFIG_ENV] = ipc
+    env[WEBMCP_ENV] = "0"
+    env[UPDATE_NOTIFIER_ENV] = "1"
     return env
 
 
@@ -343,6 +360,21 @@ def session_name(seat):
     return f"{slug}-{hashlib.sha256(seat.encode('utf-8', 'surrogatepass')).hexdigest()[:12]}"
 
 
+def _is_modal_refusal(text):
+    return "does not handle the modal state" in text or "is blocked by an open " in text
+
+
+def _modal_error(seat, message, stdout=""):
+    err = BrowserError(driver_error(seat, message) or "playwright-cli reported an error")
+    modal = _section(stdout, "Modal state") or ""
+    err.modal_state = _is_modal_refusal(message) or _is_modal_refusal(stdout) or bool(modal.strip())
+    err.file_chooser = err.modal_state and (
+        "- [File chooser]:" in message
+        or any(line.strip().startswith("- [File chooser]:") for line in modal.splitlines())
+    )
+    return err
+
+
 def run(seat, *args, timeout=30):
     """Run one playwright-cli command against this seat's session.
 
@@ -356,12 +388,14 @@ def run(seat, *args, timeout=30):
     except subprocess.TimeoutExpired:
         raise BrowserError(f"playwright-cli timed out after {timeout}s") from None
     if result.returncode != 0:
-        raise BrowserError(driver_error(
-            seat, result.stderr.strip() or result.stdout.strip() or "playwright-cli failed"
-        ))
+        raise _modal_error(
+            seat, result.stderr.strip() or result.stdout.strip() or "playwright-cli failed", result.stdout
+        )
     failure = _section(result.stdout, "Error")
     if failure is not None:
-        raise BrowserError(driver_error(seat, failure) or "playwright-cli reported an error")
+        raise _modal_error(seat, failure, result.stdout)
+    if args and str(args[0]) == "--raw" and result.stdout.lstrip().startswith(("Error:", "TimeoutError:")):
+        raise _modal_error(seat, result.stdout.strip(), result.stdout)
     return result.stdout
 
 
@@ -445,6 +479,10 @@ def parse_json(payload, seat=None):
         raise BrowserError(f"expected JSON from the page, got {_shown(seat, payload)}") from err
 
 
+def _run_code_once(seat, body, text, timeout):
+    return run(seat, "run-code", Own(text) if isinstance(body, Own) else text, timeout=timeout)
+
+
 def run_code(seat, body, timeout=60):
     """Execute a statement body with the Playwright `page` in scope.
 
@@ -452,12 +490,39 @@ def run_code(seat, body, timeout=60):
     `//` comment would otherwise swallow the closing brace. The body is an argument of the
     command line: `Own` code stays `Own`, and any other body is looked at by `check_command`.
 
+    When an unhooked session's selected tab already holds a `fileChooser` modal state,
+    `browser_run_code_unsafe` refuses the call before `_route_downloads_js` can install its
+    prototype hook. Opening a temporary tab (`tab-new` uses `defineTool`, not `defineTabTool`)
+    lets the hook run there, clear the chooser across all tabs, close the scratch tab, and
+    retry `body` on the restored original tab.
+
     The wrapper is a convenience, not a sandbox — a body can close the
     function and keep writing, and running arbitrary code is the point of the
     verb. The seat's opt-in is the boundary; nothing here contains anything.
     """
     text = f"async function f(page) {{\n{body}\n}}"
-    return run(seat, "run-code", Own(text) if isinstance(body, Own) else text, timeout=timeout)
+    try:
+        return _run_code_once(seat, body, text, timeout)
+    except BrowserError as exc:
+        if not (
+            isinstance(body, Own)
+            and "__a8sFileChooserHooked" in body
+            and (getattr(exc, "file_chooser", False) or "- [File chooser]:" in str(exc))
+        ):
+            raise
+    listed = run(seat, "tab-list", timeout=timeout)
+    match = re.search(r"^- (\d+): \(current\) \[", listed, re.M)
+    restore_idx = int(match.group(1)) if match else -1
+    scratch_text = f"async function f(page) {{\nconst _a8sRestoreIdx = {restore_idx};\n{body}\n}}"
+    run(seat, "tab-new", timeout=timeout)
+    try:
+        _run_code_once(seat, body, scratch_text, timeout)
+    finally:
+        try:
+            run(seat, "tab-close", timeout=timeout)
+        except BrowserError:
+            pass
+    return _run_code_once(seat, body, text, timeout)
 
 
 class OriginRefused(BrowserError):
@@ -633,7 +698,7 @@ def wait_code(selector, timeout_ms):
 
 def wait_for_selector(seat, selector, seconds, directory):
     """Wait up to `seconds` for a visible match of the CSS selector, with the selector in a private file."""
-    _private_call(seat, wait_code(selector, int(seconds * 1000)), directory, seconds + 10)
+    result_json(_private_call(seat, wait_code(selector, int(seconds * 1000)), directory, seconds + 10))
 
 
 def screenshot(seat, path, timeout=60, full_page=False):

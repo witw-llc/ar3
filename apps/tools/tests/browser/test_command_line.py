@@ -395,6 +395,7 @@ def _hostile_page(cli):
     cli.verdicts = {
         "click": _verdict(exact=[element]),
         "fill": _verdict(exact=[field]),
+        "element": _verdict(selectorValid=True, selectorCount=1, selectorTarget=f"#{HOSTILE}", selectorPlain="body > button"),
     }
 
 
@@ -415,6 +416,7 @@ def test_the_chain_of_the_review_names_the_button_by_its_path_and_the_value_is_i
 
 @pytest.mark.parametrize("line, verb, kind", [
     ("click Continue", "click", "click"),
+    ("dblclick Continue", "dblclick", "click"),
     ("hover Continue", "hover", "click"),
     ("check Continue", "check", "click"),
     ("uncheck Continue", "uncheck", "click"),
@@ -433,6 +435,18 @@ def test_every_verb_that_names_an_element_by_the_page_uses_a_selector_free_of_th
     if verb:
         (call,) = _calls(cli, verb)
         assert call[1] == ("body > input" if kind == "fill" else "body > button")
+
+
+def test_snap_target_uses_a_selector_free_of_the_value(monkeypatch, tmp_path):
+    from test_commands import _REAL_SNAPSHOT
+
+    cli = _world(monkeypatch, tmp_path)
+    monkeypatch.setattr(session, "snapshot", _REAL_SNAPSHOT)
+    _hostile_page(cli)
+    run = commands.run_script("seat", "snap #panel")
+    assert run.ok, run.error
+    assert _calls(cli, "snapshot") == [["snapshot", "body > button"]]
+    assert HOSTILE not in cli.argv_text()
 
 
 def test_drop_names_its_target_the_same_way(monkeypatch, tmp_path):
@@ -471,6 +485,13 @@ def test_a_ref_of_the_last_snap_is_used_as_it_is(monkeypatch, tmp_path):
     (f"fill Continue say {HOSTILE} twice", "fill"),
     (f"select Continue {HOSTILE}", "select"),
     (f"find {HOSTILE}", "find"),
+    (f"find --regex {HOSTILE}", "find"),
+    (f"find --regex -{HOSTILE}", "find"),
+    (f"requests --filter {HOSTILE}", "requests"),
+    (f"requests --filter=-{HOSTILE}", "requests"),
+    (f"snap --depth {HOSTILE}", "snapshot"),
+    (f"request {HOSTILE}", "request"),
+    (f"response-body {HOSTILE}", "response-body"),
     (f"scroll {HOSTILE}", "mousewheel"),
     (f"dialog-accept {HOSTILE}", "dialog-accept"),
     (f"console {HOSTILE}", "console"),
@@ -490,10 +511,13 @@ def test_the_text_of_the_caller_that_holds_the_value_is_refused_and_the_driver_d
 
 def test_a_file_the_caller_names_with_the_value_in_its_path_is_refused_for_upload(monkeypatch, tmp_path):
     cli = _world(monkeypatch, tmp_path)
+    clean = tmp_path / "plain.txt"
+    clean.write_text("x")
     named = tmp_path / f"{HOSTILE}.txt"
     named.write_text("x")
-    run = commands.run_script("seat", f"upload {named}")
-    assert run.error == plc.COMMAND_REFUSED and _calls(cli, "upload") == []
+    for line in (f"upload {named}", f"upload {clean} {named}"):
+        run = commands.run_script("seat", line)
+        assert run.error == plc.COMMAND_REFUSED and _calls(cli, "upload") == []
 
 
 def test_the_text_a_verb_types_into_a_field_is_refused_when_it_is_a_stored_password_too(monkeypatch, tmp_path):
@@ -524,11 +548,12 @@ def test_a_script_that_does_not_name_a_value_is_untouched(monkeypatch, tmp_path)
 def test_resize_refuses_a_dimension_that_matches_a_stored_short_secret(monkeypatch, tmp_path):
     cli = _cli(monkeypatch, tmp_path)
     secretstore.set_secret("seat", "PIN", "1440", [ORIGIN])
-    run = commands.run_script("seat", "resize 1440 900")
-    assert not run.ok
-    assert run.error == plc.COMMAND_REFUSED
-    assert run.steps[0]["command"] == "resize [secret:PIN] 900"
-    assert _calls(cli, "resize") == []
+    for line in ("resize 1440 900", "find --max-results 1440 word", "snap --depth 1440", "request 1440"):
+        run = commands.run_script("seat", line)
+        assert not run.ok
+        assert run.error == plc.COMMAND_REFUSED
+        assert "[secret:PIN]" in run.steps[0]["command"]
+    assert _calls(cli, "resize") == [] and _calls(cli, "find") == [] and _calls(cli, "snapshot") == []
     assert "1440" not in cli.argv_text()
 
 
@@ -668,6 +693,15 @@ def test_the_cli_commands_that_print_a_page_start_the_driver_with_no_value_in_it
 OWN_SITES = {
     "commands.py": [
         'plc.run(seat, "tab-select", plc.Own(str(index)))',
+        'argv.append(plc.Own("--all"))',
+        'argv.append(plc.Own("--clear"))',
+        'argv += [plc.Own("--max-results"), max_results]',
+        'argv += [plc.Own("--regex"), rest]',
+        'argv += [plc.Own("--"), rest]',
+        'argv.append(plc.Own("--static"))',
+        'argv.append(plc.Own("--all"))',
+        'argv.append(plc.Own("--clear"))',
+        'argv += [plc.Own("--filter"), pattern]',
         'plc.run(seat, "video-start", plc.Own(path), plc.Own("--size"), plc.Own("1280x1024"))',
         'argv += [plc.Own("--path"), path]',
         'plc.run(seat, "goto", plc.Own("about:blank"), timeout=30)',
@@ -693,6 +727,8 @@ OWN_SITES = {
         "plc.Own(",
         "plc.Own(",
         'plc.run(seat, "state-save", plc.Own(path), timeout=timeout)',
+        'argv += [plc.Own("--depth"), str(depth)]',
+        'argv.append(plc.Own("--boxes"))',
         'return plc.evaluate(seat, plc.Own("window.location.href"))',
     ],
 }
@@ -773,9 +809,10 @@ PIN = "482916"
     ("upload", f"e{PIN}"),
     ("eval", f"e{PIN}"),
     ("click", "e5", f"e{PIN}"),
+    ("dblclick", "e5", f"e{PIN}"),
+    ("snapshot", "e5", f"e{PIN}"),
     ("tab-new", f"f1e{PIN}"),
     ("--raw", "type", f"e{PIN}"),
-    ("dblclick", f"e{PIN}"),
     ("drag", f"e{PIN}", "e5"),
 ])
 def test_text_that_looks_like_a_ref_and_holds_a_value_is_refused_where_it_is_data(monkeypatch, args):
@@ -790,11 +827,13 @@ def test_text_that_looks_like_a_ref_and_holds_a_value_is_refused_where_it_is_dat
 @pytest.mark.parametrize("args", [
     ("click", "e1234"),
     ("click", "f2e1234"),
+    ("dblclick", "e1234"),
     ("hover", "e1234"),
     ("check", "e1234"),
     ("uncheck", "e1234"),
     ("fill", "e1234", "some text"),
     ("select", "e1234", "one"),
+    ("snapshot", "e1234"),
     ("eval", plc.Own("() => true"), "e1234"),
     ("drop", "e1234", plc.Own("--path"), "/tmp/example.png"),
     ("--raw", "click", "e1234"),
@@ -822,9 +861,11 @@ def test_a_ref_that_is_a_target_does_not_make_the_text_after_it_a_target(monkeyp
 
 
 def test_the_table_of_places_lists_the_verbs_that_take_an_element_and_no_others():
-    """A verb in the table has its ref exempt in the places the table names. A verb the tool does not have (`dblclick`,
-    `drag`) is not in it: a ref there is data, and for a stored PIN it is the PIN."""
-    assert set(plc.TARGET_PLACES) == {"click", "hover", "check", "uncheck", "fill", "select", "drop", "eval"}
+    """A verb in the table has its ref exempt in the places the table names. A verb the tool does not have (`drag`)
+    is not in it: a ref there is data, and for a stored PIN it is the PIN."""
+    assert set(plc.TARGET_PLACES) == {
+        "click", "dblclick", "hover", "check", "uncheck", "fill", "select", "drop", "snapshot", "eval",
+    }
     assert plc.TARGET_PLACES["eval"] == (1,) and plc.TARGET_PLACES["fill"] == (0,)
 
 
@@ -841,18 +882,23 @@ def test_the_probe_of_the_review_fill_and_type_with_a_ref_shaped_pin_are_refused
 def test_the_verbs_of_the_tool_pass_the_ref_in_the_place_that_the_table_says(monkeypatch, tmp_path):
     """The table of places and the call sites of the tool agree: a ref of a script reaches the driver as the target of
     each verb, for a seat that holds a PIN that is in its number."""
+    from test_commands import _REAL_SNAPSHOT
+
     cli = _cli(monkeypatch, tmp_path)
+    monkeypatch.setattr(session, "snapshot", _REAL_SNAPSHOT)
     secretstore.set_secret("seat", "PIN", "1234", [ORIGIN])
     notes = tmp_path / "notes.txt"
     notes.write_text("a file to drop\n")
     script = "\n".join([
-        "click e1234", "fill e1234 hello", "select e1234 one", "hover e1234", "check e1234", "uncheck e1234",
-        f"drop e1234 {notes}",
+        "click e1234", "dblclick e1234", "fill e1234 hello", "select e1234 one", "hover e1234",
+        "check e1234", "uncheck e1234", "snap e1234", f"drop e1234 {notes}",
     ])
     run = commands.run_script("seat", script)
     assert run.ok, run.error
     assert _calls(cli, "drop") == [["drop", "e1234", "--path", str(notes)]]
     assert _calls(cli, "click") == [["click", "e1234"]]
+    assert _calls(cli, "dblclick") == [["dblclick", "e1234"]]
+    assert _calls(cli, "snapshot") == [["snapshot", "e1234"]]
     assert _calls(cli, "fill") == [["fill", "e1234", "hello"]]
     assert _calls(cli, "select") == [["select", "e1234", "one"]]
     for verb in ("hover", "check", "uncheck"):

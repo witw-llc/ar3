@@ -354,6 +354,7 @@ def arrange_tabs_other(b):
 NAVIGATIONS = [
     ("go", arrange_redirect, lambda p: p.go(f"{ORIGIN}/two")),
     ("click", arrange_click, lambda p: p.click("#out")),
+    ("dblclick", arrange_click, lambda p: p.dblclick("#out")),
     ("press", arrange_hook("press"), lambda p: p.press("Enter")),
     ("select", arrange_hook("select"), lambda p: p.select("#menu", "b")),
     ("check", arrange_hook("check"), lambda p: p.check("#box")),
@@ -403,7 +404,7 @@ def test_a_page_a_navigation_left_in_an_error_page_is_outside(browser):
 
 def test_the_calls_that_can_navigate_are_the_ones_that_check_where_the_page_ended():
     assert page_module.NAVIGATING == {
-        "go", "click", "press", "select", "check", "uncheck", "back", "forward", "reload",
+        "go", "click", "dblclick", "press", "select", "check", "uncheck", "back", "forward", "reload",
         "download", "upload", "drop",
     }
 
@@ -442,6 +443,7 @@ def file_to_upload(tmp_path):
 CALLS = {
     "go": lambda p, t: p.go(f"{ORIGIN}/a"),
     "click": lambda p, t: p.click("#a"),
+    "dblclick": lambda p, t: p.dblclick("#a"),
     "fill": lambda p, t: p.fill("#a", "text"),
     "fill_secret": lambda p, t: p.fill_secret("#a", "PASSWORD"),
     "press": lambda p, t: p.press("Enter"),
@@ -1309,14 +1311,22 @@ def test_the_snapshot_is_text_through_the_scrub(browser):
     browser.snapshot_text = f'- textbox "Password": {VALUE}'
     page, call, run = make_page(store=STORE)
     assert page.snapshot_text() == f'- textbox "Password": {MARK}'
+    assert page.snapshot_text(target="#form", depth=2, boxes=True) == f'- textbox "Password": {MARK}'
+    assert browser.calls[-1] == ("snapshot", "#form", "2", True)
+    with pytest.raises(plc.BrowserError, match="depth is 0 to 999"):
+        page.snapshot_text(depth=-1)
 
 
 def test_upload_clicks_the_target_then_hands_the_chooser_the_file(browser, tmp_path):
     page, call, run = make_page()
     path = file_to_upload(tmp_path)
-    page.upload("#choose", path)
+    second = tmp_path / "second.txt"
+    second.write_text("y")
+    page.upload("#choose", path, str(second))
     assert [c[0] for c in browser.calls] == ["click", "upload"]
-    assert browser.calls[1] == ("upload", path)
+    assert browser.calls[1] == ("upload", path, str(second))
+    with pytest.raises(plc.BrowserError, match="usage: upload"):
+        page.upload("#choose")
 
 
 def test_upload_and_drop_refuse_a_path_inside_the_state_directory_as_the_verbs_do(browser):

@@ -34,7 +34,7 @@ MICROSOFT_SIGN_IN_HOSTS = ("login.microsoftonline.com", "login.live.com")
 # A page whose address holds one of these is not a signed-in page.
 SIGN_IN_PATHS = ("/sign-in", "/sign_in", "/one-time-passcode")
 # What the driver says when a "leave this page?" prompt holds a navigation, or stands in front of it.
-PROMPT_SIGNS = ("timed out", "does not handle the modal state")
+PROMPT_SIGNS = ("timed out", "does not handle the modal state", "is blocked by an open ")
 SCREENSHOT_NAME = "newsletter-preview.png"
 DESIGN_NAME = "givebacks-design.json"
 PASSCODE_LENGTH = 6

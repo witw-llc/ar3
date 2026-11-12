@@ -47,14 +47,14 @@ from .recipe import NeedsPerson, SensitiveFailure, UsageError
 
 # Verbs after which the page may be somewhere else. A page outside the recipe's origins fails the call.
 NAVIGATING = frozenset({
-    "go", "click", "press", "select", "check", "uncheck", "back", "forward", "reload",
+    "go", "click", "dblclick", "press", "select", "check", "uncheck", "back", "forward", "reload",
     "download", "upload", "drop",
 })
 # Verbs whose first argument is the target they act on. A line of a sensitive step shows the verb and this one
 # argument, and no text the call was given after it.
 TARGETED = frozenset({
-    "click", "hover", "check", "uncheck", "fill", "fill-secret", "select", "drop", "download", "go", "wait-for",
-    "text", "upload",
+    "click", "dblclick", "hover", "check", "uncheck", "fill", "fill-secret", "select", "drop", "download", "go",
+    "wait-for", "text", "upload",
 })
 WAIT_SLICE_SECONDS = 0.25
 MAX_HTTP_BYTES = 8 * 1024 * 1024
@@ -315,6 +315,10 @@ class Page:
         """Click a snapshot ref, a CSS selector or visible text. Returns the selector it clicked."""
         return self.command("click", target)
 
+    def dblclick(self, target):
+        """Double-click a snapshot ref, a CSS selector or visible text. Returns the selector it clicked."""
+        return self.command("dblclick", target)
+
     def fill(self, target, text):
         """Put `text` in a field. The text is in the driver's command line: use `fill_secret` for a secret."""
         return self.command("fill", target, text)
@@ -536,10 +540,27 @@ class Page:
         self._tick()
         return self._clean(session.current_url(self._call.seat))
 
-    def snapshot_text(self):
+    def snapshot_text(self, target=None, depth=None, boxes=False):
         """The accessibility snapshot as text, scrubbed."""
+        self._tick()
+        if depth is not None:
+            plc.refuse_protected(self._call.seat, str(depth))
+            if isinstance(depth, bool) or not re.fullmatch(r"[0-9]{1,3}", str(depth)):
+                raise plc.BrowserError("snapshot: depth is 0 to 999")
+            depth = str(depth)
         self._say("snapshot")
-        return self._clean(self._drive(lambda: session.snapshot(self._call.seat)))
+        if target is None and depth is None and not boxes:
+            return self._clean(self._drive(lambda: session.snapshot(self._call.seat)))
+
+        def _take():
+            resolved = (
+                resolve.element_target(self._call.seat, str(target), "snapshot")
+                if target is not None
+                else None
+            )
+            return session.snapshot(self._call.seat, target=resolved, depth=depth, boxes=boxes)
+
+        return self._clean(self._drive(_take))
 
     def screenshot(self, name="screen", full_page=False):
         """Save a screenshot, attach it to the reply, and return its path. `name` gets .png unless
@@ -560,11 +581,14 @@ class Page:
         """Click `target`, wait for the file it downloads, attach it, and return its path."""
         return self.command("download", target, seconds)
 
-    def upload(self, target, path):
-        """Click `target`, which opens the page's file chooser, and hand the chooser the file at `path`
-        (an absolute path on this machine, outside the browser state directory)."""
+    def upload(self, target, *paths):
+        """Click `target`, which opens the page's file chooser, and hand the chooser the files at `paths`
+        (absolute paths on this machine, outside the browser state directory)."""
+        self._tick()
+        if not paths:
+            raise plc.BrowserError("usage: upload <path> [<path> ...]")
         self.click(target)
-        return self.command("upload", path)
+        return self.command("upload", *paths)
 
     def drop(self, target, *paths):
         """Drop files onto an element, as a person dragging them in would."""

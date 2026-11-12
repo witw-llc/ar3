@@ -2006,18 +2006,17 @@ def test_openssl_is_a_doctor_check():
     assert "openssl" in {check.name for check in ar3.CHECKS}
 
 
-def test_playwright_cli_doctor_row_shows_a_version_that_is_not_the_pinned_one(monkeypatch):
+def test_playwright_cli_doctor_row_shows_installed_version_without_pin_failure(monkeypatch):
     from ar3 import playwright_cli
     monkeypatch.setattr(ar3.shutil, "which", lambda name: "/bin/playwright-cli")
+    monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (0, "0.1.24\n"))
+    assert ar3._playwright_cli_probe() == ar3.Probe(True, "0.1.24  (/bin/playwright-cli)")
     monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (0, "9.9.9\n"))
-    probe = ar3._playwright_cli_probe()
-    assert not probe.ok
-    assert "9.9.9" in probe.detail and playwright_cli.PLAYWRIGHT_CLI_VERSION in probe.detail
-    assert probe.hint == " ".join(playwright_cli.INSTALL_COMMAND)
-    monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (0, playwright_cli.PLAYWRIGHT_CLI_VERSION + "\n"))
-    assert ar3._playwright_cli_probe() == ar3.Probe(True, "/bin/playwright-cli")
+    assert ar3._playwright_cli_probe() == ar3.Probe(True, "9.9.9  (/bin/playwright-cli)")
     monkeypatch.setattr(ar3, "_run", lambda argv, timeout: (None, ""))
-    assert ar3._playwright_cli_probe().ok
+    assert ar3._playwright_cli_probe() == ar3.Probe(True, "/bin/playwright-cli")
+    monkeypatch.setattr(ar3.shutil, "which", lambda name: None)
+    assert ar3._playwright_cli_probe() == ar3.Probe(False, "not on PATH")
     check = {c.name: c for c in ar3.CHECKS}["playwright-cli"]
     assert not check.core
     assert " ".join(playwright_cli.INSTALL_COMMAND) in check.hint

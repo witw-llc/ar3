@@ -123,14 +123,14 @@ def test_require_without_a_terminal_names_the_install_command(monkeypatch):
     monkeypatch.setattr(plc, "_asked", False)
     monkeypatch.setattr(plc.shutil, "which", lambda name: None)
     monkeypatch.setattr(plc, "_offer_install", lambda: False)
-    with pytest.raises(plc.BrowserError, match=r"npm install -g @playwright/cli@\d+\.\d+\.\d+"):
+    with pytest.raises(plc.BrowserError, match=r"npm install -g @playwright/cli@latest"):
         plc.require()
 
 
-def test_the_install_command_is_the_pinned_one():
-    from ar3.playwright_cli import INSTALL_COMMAND, PLAYWRIGHT_CLI_VERSION
+def test_the_install_command_uses_latest_by_default():
+    from ar3.playwright_cli import INSTALL_COMMAND
     assert plc.INSTALL_CMD == list(INSTALL_COMMAND)
-    assert plc.INSTALL_CMD[-1] == f"@playwright/cli@{PLAYWRIGHT_CLI_VERSION}"
+    assert plc.INSTALL_CMD[-1] == "@playwright/cli@latest"
 
 
 class _Completed:
@@ -497,14 +497,28 @@ def test_result_json_is_not_cut_by_a_character_that_python_calls_a_line_break(se
 
 @pytest.mark.parametrize("name", [
     "PLAYWRIGHT_MCP_OUTPUT_DIR", "playwright_mcp_output_dir", "PLAYWRIGHT_MCP_CONFIG", "PLAYWRIGHT_MCP_SAVE_SESSION",
-    "PLAYWRIGHT_MCP_SAVE_TRACE", "PLAYWRIGHT_MCP_SAVE_VIDEO", "PWTEST_SOCKETS_DIR", "PWTEST_DAEMON_SESSION_DIR",
-    "DEBUG", "DEBUG_FILE", "debug",
+    "PLAYWRIGHT_MCP_SAVE_TRACE", "PLAYWRIGHT_MCP_SAVE_VIDEO", "PLAYWRIGHT_MCP_INIT_SCRIPT", "PLAYWRIGHT_MCP_INIT_PAGE",
+    "PLAYWRIGHT_MCP_SECRETS_FILE", "PLAYWRIGHT_MCP_STORAGE_STATE", "PLAYWRIGHT_MCP_IDLE_TIMEOUT",
+    "PLAYWRIGHT_MCP_WEBMCP", "PWTEST_SOCKETS_DIR", "PWTEST_DAEMON_SESSION_DIR", "PWTEST_CLI_GLOBAL_CONFIG",
+    "pwtest_cli_global_config", "DEBUG", "DEBUG_FILE", "debug",
 ])
 def test_a_variable_that_moves_or_adds_to_what_the_driver_writes_is_not_passed_on(monkeypatch, name):
     monkeypatch.setenv(name, "/somewhere")
     monkeypatch.setenv("KEPT", "yes")
     env = plc.cli_env()
     assert env.get(name) != "/somewhere" and "KEPT" in env
+
+
+def test_cli_env_isolates_global_config_disables_webmcp_and_suppresses_update_notifier(monkeypatch, short_root):
+    monkeypatch.setenv("XDG_DATA_HOME", short_root)
+    monkeypatch.setenv("NO_UPDATE_NOTIFIER", "")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_WEBMCP", "1")
+    monkeypatch.setenv("PWTEST_CLI_GLOBAL_CONFIG", "/tmp/untrusted")
+    env = plc.cli_env()
+    expected_ipc = os.path.join(short_root, "ar3", "browser", "ipc")
+    assert env[plc.GLOBAL_CONFIG_ENV] == expected_ipc
+    assert env[plc.WEBMCP_ENV] == "0"
+    assert env[plc.UPDATE_NOTIFIER_ENV] == "1"
 
 
 @pytest.fixture
@@ -963,13 +977,12 @@ def test_a_short_directory_another_user_made_first_stops_the_driver(monkeypatch,
         shutil.rmtree(run)
 
 
-def test_the_browser_doctor_notes_a_playwright_cli_that_is_not_the_pinned_one(monkeypatch, capsys):
+def test_the_browser_doctor_reports_the_installed_playwright_cli_version(monkeypatch, capsys):
     from browser import doctor
-    from ar3.playwright_cli import PLAYWRIGHT_CLI_VERSION
 
     class Done:
         returncode = 0
-        stdout = "9.9.9\n"
+        stdout = "0.1.24\n"
 
     monkeypatch.setattr(doctor.shutil, "which", lambda name: "/bin/playwright-cli")
     monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: Done)
@@ -977,15 +990,130 @@ def test_the_browser_doctor_notes_a_playwright_cli_that_is_not_the_pinned_one(mo
     monkeypatch.setattr(doctor.os.path, "exists", lambda path: True)
     assert doctor.report() == 0
     out = capsys.readouterr().out
-    assert "9.9.9" in out and PLAYWRIGHT_CLI_VERSION in out and "@playwright/cli@" in out
-    Done.stdout = PLAYWRIGHT_CLI_VERSION + "\n"
-    assert doctor.report() == 0
-    assert "  note " not in capsys.readouterr().out
+    assert "playwright-cli: /bin/playwright-cli (0.1.24)" in out
+    assert "  note " not in out
 
 
-def test_the_docs_state_the_pinned_install_command():
+def test_the_docs_state_the_default_install_command():
     from pathlib import Path
     from ar3.playwright_cli import PLAYWRIGHT_CLI_PACKAGE
     repo = Path(__file__).resolve().parents[4]
     for page in ("apps/tools/browser/README.md", "docs/a8s.md"):
         assert f"npm install -g {PLAYWRIGHT_CLI_PACKAGE}" in (repo / page).read_text(encoding="utf-8"), page
+
+
+@pytest.mark.parametrize(
+    "raw_stdout, kind",
+    [
+        ('Error: Tool "browser_run_code_unsafe" does not handle the modal state.\n', "Error"),
+        ("TimeoutError: page.waitForSelector: Timeout 1000ms exceeded.\n", "TimeoutError"),
+    ],
+)
+def test_raw_error_without_section_header_fails_the_run_despite_exit_zero(monkeypatch, raw_stdout, kind):
+    """Under `--raw`, playwright-cli omits the `### Error` header and prints `Error:` / `TimeoutError:` directly;
+    versions that exit 0 on tool errors must still raise BrowserError and withhold details on secret-bearing seats."""
+    _driver_says(monkeypatch, raw_stdout, code=0)
+    with pytest.raises(plc.BrowserError) as plain:
+        plc.run("no-secret-seat", "--raw", "run-code", plc.Own("--filename=/tmp/code.js"))
+    assert str(plain.value) == raw_stdout.strip()
+
+    with plc.protecting(CHAIN_SEAT, _scrubber()):
+        with pytest.raises(plc.BrowserError) as held:
+            plc.run(CHAIN_SEAT, "--raw", "run-code", plc.Own("--filename=/tmp/code.js"))
+    assert str(held.value) == f"{kind}: {plc.DRIVER_MESSAGE_WITHHELD}"
+
+
+@pytest.mark.parametrize(
+    "stdout, match",
+    [
+        ('Error: Tool "browser_run_code_unsafe" does not handle the modal state.\n', "does not handle the modal state"),
+        ("not-json-at-all\n", "not JSON"),
+    ],
+)
+def test_wait_for_selector_rejects_raw_error_or_non_json_output(monkeypatch, tmp_path, stdout, match):
+    _spy_cli(monkeypatch, _Completed(0, stdout))
+    with pytest.raises(plc.BrowserError, match=match):
+        plc.wait_for_selector("seat", "html", 1, str(tmp_path))
+
+
+def test_run_code_recovers_preexisting_file_chooser_via_scratch_tab_and_preserves_dialog(monkeypatch):
+    """When an unhooked tab is already wedged in `fileChooser` modal state, `run_code` on `_route_downloads_js`
+    queries `tab-list` for the current tab index, opens a scratch tab (`tab-new`), installs the hook with
+    `_a8sRestoreIdx`, closes the scratch tab (`tab-close`), and retries on the original tab, including when the
+    seat holds secrets. A JS `dialog` modal state is not bypassed."""
+    chooser_refusal = (
+        '### Error\nError: Tool "browser_run_code_unsafe" does not handle the modal state.\n'
+        "### Modal state\n- [File chooser]: can be handled by upload\n"
+    )
+    calls = []
+    argvs = []
+    outcomes = iter([
+        _Completed(1, chooser_refusal),
+        _Completed(0, "### Result\n- 0: [](about:blank)\n- 1: (current) [](about:blank)\n- 2: [Page 2](about:blank)\n"),
+        _Completed(0, "### Result\n- 0: [](about:blank)\n- 1: [](about:blank)\n- 2: [Page 2](about:blank)\n- 3: (current) [](about:blank)\n"),
+        _Completed(0, ""),
+        _Completed(0, "### Result\n- 0: [Page 0](about:blank)\n- 1: (current) [Page 1](about:blank)\n- 2: [Page 2](about:blank)\n"),
+        _Completed(0, '### Result\n"ok"\n'),
+    ])
+    monkeypatch.setattr(plc, "require", lambda: "/usr/bin/playwright-cli")
+    monkeypatch.setattr(plc, "_driver_options", lambda: {})
+    monkeypatch.setattr(
+        plc.subprocess, "run", lambda cmd, **kw: (calls.append(cmd[2]), argvs.append(list(cmd)), next(outcomes))[2]
+    )
+
+    with plc.protecting(CHAIN_SEAT, _scrubber()):
+        out = plc.run_code(CHAIN_SEAT, plc.Own("/* __a8sFileChooserHooked */ return 'ok';"))
+    assert plc.result_of(out, CHAIN_SEAT) == "ok"
+    assert calls == ["run-code", "tab-list", "tab-new", "run-code", "tab-close", "run-code"]
+    assert "_a8sRestoreIdx" not in argvs[0][3]
+    assert "const _a8sRestoreIdx = 1;" in argvs[3][3]
+    assert "_a8sRestoreIdx" not in argvs[5][3]
+
+    dialog_refusal = (
+        '### Error\nError: Tool "browser_run_code_unsafe" does not handle the modal state.\n'
+        '### Modal state\n- ["alert" dialog with message "hold"]: can be handled by dialog-accept or dialog-dismiss\n'
+    )
+    dialog_calls = []
+    monkeypatch.setattr(
+        plc.subprocess, "run", lambda cmd, **kw: (dialog_calls.append(cmd[2]), _Completed(1, dialog_refusal))[1]
+    )
+    with pytest.raises(plc.BrowserError, match="does not handle the modal state"):
+        plc.run_code("no-secret-seat", plc.Own("/* __a8sFileChooserHooked */ return 'ok';"))
+    assert dialog_calls == ["run-code"]
+
+
+def test_driver_error_classifies_skill_mode_timeout_without_copying_driver_text():
+    with plc.protecting(CHAIN_SEAT, _scrubber()):
+        for headline in ("Timeout 5000ms exceeded.", "locator.click: Timeout 5000ms exceeded."):
+            skill_timeout = (
+                f"### Error\n{headline}\n"
+                "Call log:\n"
+                "  - waiting for locator('#b') with secret-preview\n"
+            )
+            assert plc.driver_error(CHAIN_SEAT, skill_timeout) == f"### Error\nTimeoutError: {plc.DRIVER_MESSAGE_WITHHELD}"
+        non_timeout = "### Error\nlocator.click: strict mode violation: secret-preview\n"
+        assert plc.driver_error(CHAIN_SEAT, non_timeout) == f"### Error\nError: {plc.DRIVER_MESSAGE_WITHHELD}"
+
+
+def test_run_code_recovers_skill_mode_file_chooser_modal_refusal(monkeypatch):
+    """@playwright/cli >= 0.1.20 formats modal refusals in skillMode as `<verb> is blocked by an open File chooser`."""
+    chooser_refusal = (
+        "### Error\nrun-code is blocked by an open File chooser; run upload first.\n"
+        "### Modal state\n- [File chooser]: can be handled by upload\n"
+    )
+    calls = []
+    outcomes = iter([
+        _Completed(1, chooser_refusal),
+        _Completed(0, "### Result\n- 0: (current) [](about:blank)\n"),
+        _Completed(0, "### Result\n- 0: [](about:blank)\n- 1: (current) [](about:blank)\n"),
+        _Completed(0, ""),
+        _Completed(0, "### Result\n- 0: (current) [](about:blank)\n"),
+        _Completed(0, '### Result\n"ok"\n'),
+    ])
+    monkeypatch.setattr(plc, "require", lambda: "/usr/bin/playwright-cli")
+    monkeypatch.setattr(plc, "_driver_options", lambda: {})
+    monkeypatch.setattr(plc.subprocess, "run", lambda cmd, **kw: (calls.append(cmd[2]), next(outcomes))[1])
+    with plc.protecting(CHAIN_SEAT, _scrubber()):
+        out = plc.run_code(CHAIN_SEAT, plc.Own("/* __a8sFileChooserHooked */ return 'ok';"))
+    assert plc.result_of(out, CHAIN_SEAT) == "ok"
+    assert calls == ["run-code", "tab-list", "tab-new", "run-code", "tab-close", "run-code"]

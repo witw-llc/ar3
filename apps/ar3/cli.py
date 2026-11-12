@@ -55,7 +55,7 @@ except ImportError:
 from ar3 import deps as ar3_deps  # noqa: E402
 from ar3 import nodes  # noqa: E402
 from ar3.home import app_home  # noqa: E402
-from ar3.playwright_cli import INSTALL_COMMAND as PLAYWRIGHT_INSTALL, version_note  # noqa: E402
+from ar3.playwright_cli import INSTALL_COMMAND as PLAYWRIGHT_INSTALL, installed_version  # noqa: E402
 from ar3.proc import pid_alive, process_start_token  # noqa: E402
 from ar3.envseam import UPDATE_WAIT_ENV  # noqa: E402
 from ar3.fsio import read_text_retry  # noqa: E402
@@ -437,9 +437,9 @@ def _playwright_cli_probe() -> Probe:
     if path is None:
         return Probe(False, "not on PATH")
     code, out = _run([path, "--version"], 5.0)
-    note = version_note(out) if code == 0 else None
-    if code == 0 and note:
-        return Probe(False, note, " ".join(PLAYWRIGHT_INSTALL))
+    version = installed_version(out) if code == 0 else None
+    if version:
+        return Probe(True, f"{version}  ({path})")
     return Probe(True, path)
 
 

@@ -1,17 +1,14 @@
-"""The playwright-cli release the browser tool is proven against, and the two places that read it."""
+"""The default playwright-cli install command and version reader shared by `ar3` and `tool-browser`."""
 from ar3 import playwright_cli
 
 
-def test_the_install_command_is_pinned_to_the_proven_version():
-    assert playwright_cli.PLAYWRIGHT_CLI_PACKAGE == f"@playwright/cli@{playwright_cli.PLAYWRIGHT_CLI_VERSION}"
-    assert playwright_cli.INSTALL_COMMAND == ("npm", "install", "-g", playwright_cli.PLAYWRIGHT_CLI_PACKAGE)
+def test_the_install_command_uses_latest_by_default():
+    assert playwright_cli.PLAYWRIGHT_CLI_PACKAGE == "@playwright/cli@latest"
+    assert playwright_cli.INSTALL_COMMAND == ("npm", "install", "-g", "@playwright/cli@latest")
 
 
-def test_a_version_is_read_from_the_output_and_compared():
-    pinned = playwright_cli.PLAYWRIGHT_CLI_VERSION
-    assert playwright_cli.installed_version(f"{pinned}\n") == pinned
-    assert playwright_cli.version_note(f"{pinned}\n") is None
-    note = playwright_cli.version_note("9.9.9\n")
-    assert "9.9.9" in note and pinned in note
-    assert "unreadable" in playwright_cli.version_note("no digits here")
-    assert "unreadable" in playwright_cli.version_note("")
+def test_installed_version_is_read_from_output():
+    assert playwright_cli.installed_version("0.1.24\n") == "0.1.24"
+    assert playwright_cli.installed_version("playwright-cli 1.2.0-rc.1\n") == "1.2.0-rc.1"
+    assert playwright_cli.installed_version("no digits here") is None
+    assert playwright_cli.installed_version("") is None

@@ -92,6 +92,61 @@ def test_indexed_screenshot_pixels_selection_secrets_and_local_file_refusal(tmp_
         assert "SYNTHETIC-LOCAL-MARKER" not in done.stdout + done.stderr
         done, payload = _do(env, seat, "tabs")
         assert done.returncode == 0 and "file:" not in payload["steps"][0]["output"], payload
+
+        # Starting from unhooked pending fileChoosers (both on tabs 0 and 1 with tab 1 selected, and on background
+        # tab 0 with clean tab 1 selected before closing background tab 2), recovery preserves tab 1 and hooked
+        # clicks work both without and with upload.
+        upload_file = tmp_path / "sample-upload.txt"
+        upload_file.write_text("upload payload")
+        unhook = (
+            "async (page) => {"
+            " const sym = Object.getOwnPropertySymbols(page).find((k) => page[k] && page[k].context && page[k].modalStates);"
+            " const tab = page[sym];"
+            " const ctx = tab.context;"
+            " const TabProto = Object.getPrototypeOf(tab);"
+            " const CtxProto = Object.getPrototypeOf(ctx);"
+            " TabProto.modalStates = function() { return this._modalStates; };"
+            " TabProto.setModalState = function(s) { this._modalStates.push(s); };"
+            " delete CtxProto.__a8sFileChooserHooked;"
+            " for (const t of ctx.tabs()) {"
+            '   await t.page.setContent(\'<input id="pick" type="file">\');'
+            "   await t.page._channel.updateSubscription({event: 'fileChooser', enabled: true});"
+            " }"
+            " }"
+        )
+        assert _cli(env, seat, "tab-new").returncode == 0
+        file_page = _cli(env, seat, "run-code", unhook)
+        assert file_page.returncode == 0 and "### Error" not in file_page.stdout, file_page.stdout + file_page.stderr
+        assert _cli(env, seat, "tab-select", "0").returncode == 0
+        wedged0 = _cli(env, seat, "click", "#pick")
+        assert "- [File chooser]: can be handled by upload" in wedged0.stdout, wedged0.stdout + wedged0.stderr
+        assert _cli(env, seat, "tab-select", "1").returncode == 0
+        wedged1 = _cli(env, seat, "click", "#pick")
+        assert "- [File chooser]: can be handled by upload" in wedged1.stdout, wedged1.stdout + wedged1.stderr
+        refused = _cli(env, seat, "snapshot")
+        assert (
+            'Error: Tool "browser_snapshot" does not handle the modal state.' in refused.stdout
+            or "snapshot is blocked by an open File chooser; run upload first." in refused.stdout
+        ), refused.stdout
+        done, payload = _do(env, seat, "snap\ntabs\n")
+        assert done.returncode == 0, json.dumps(payload)
+        assert payload["steps"][1]["output"].splitlines()[1].startswith("1 *: "), payload
+
+        re_unhook = _cli(env, seat, "run-code", unhook)
+        assert re_unhook.returncode == 0 and "### Error" not in re_unhook.stdout, re_unhook.stdout + re_unhook.stderr
+        assert _cli(env, seat, "tab-select", "0").returncode == 0
+        assert "- [File chooser]: can be handled by upload" in _cli(env, seat, "click", "#pick").stdout
+        assert _cli(env, seat, "tab-select", "1").returncode == 0
+        done, payload = _do(env, seat, "snap\ntabs\n")
+        assert done.returncode == 0, json.dumps(payload)
+        assert payload["steps"][1]["output"].splitlines()[1].startswith("1 *: "), payload
+        assert _cli(env, seat, "tab-close", "2").returncode == 0
+        done, payload = _do(
+            env, seat, f"tabs\nurl\nshot\nclick #pick\nsnap\nurl\ntabs\nshot\nclick #pick\nupload {upload_file}\n"
+        )
+        assert done.returncode == 0, json.dumps(payload)
+        assert payload["steps"][0]["output"].splitlines()[1].startswith("1 *: "), payload
+        assert payload["steps"][-1]["output"] == "sample-upload.txt"
     finally:
         site.stop()
         assert _tool(env, seat, "close").returncode == 0

@@ -387,14 +387,7 @@ def _stub_targets(monkeypatch):
 
 
 def _stub_real_argv(monkeypatch, answer=None):
-    """A playwright-cli stub that enforces its REAL argv contract.
-
-    A stub that accepts anything only proves this repo builds the argv it meant
-    to build. The installed CLI takes exactly one positional for `upload` — its
-    help says "one or multiple files" and names the argument "the absolute
-    paths", and the parser still rejects two before it opens a browser. Believing
-    the help shipped a broken verb, so the contract lives here now.
-    """
+    """A playwright-cli stub that enforces its REAL argv contract (`help.json`)."""
     seen = []
 
     def run(seat, *args, **kwargs):
@@ -402,10 +395,8 @@ def _stub_real_argv(monkeypatch, answer=None):
         verb, rest = args[0], list(args[1:])
         if verb == "upload":
             positional = [arg for arg in rest if not arg.startswith("-")]
-            if len(positional) != 1:
-                raise plc.BrowserError(
-                    f"too many arguments: expected 1, received {len(positional)}"
-                )
+            if len(positional) < 1 or any(arg.startswith("-") for arg in rest):
+                raise plc.BrowserError("upload expects one or more file paths")
         if verb == "drop":
             if not rest or rest[0].startswith("-"):
                 raise plc.BrowserError("drop needs a target")
@@ -443,18 +434,22 @@ def test_upload_hands_its_one_path_to_playwright(monkeypatch, tmp_path):
     assert run.steps[0]["output"] == "a.txt"
 
 
-def test_upload_refuses_several_files_and_names_drop(monkeypatch, tmp_path):
+def test_upload_hands_several_files_to_playwright_and_validates_all_before_running(monkeypatch, tmp_path):
     _stub_browser(monkeypatch, tmp_path)
-    _stub_real_argv(monkeypatch)
+    seen = _stub_real_argv(monkeypatch)
     one, two = tmp_path / "a.txt", tmp_path / "b.txt"
     one.write_text("a")
     two.write_text("b")
     run = commands.run_script("seat", f"upload {one} {two}\n")
-    # The chooser is answered once and closes, so a second upload goes nowhere.
-    # The refusal has to point at the verb that does take several.
-    assert not run.ok
-    assert "takes one file" in run.error
-    assert "drop" in run.error
+    assert run.ok, run.error
+    assert seen == [("upload", str(one), str(two))]
+    assert run.steps[0]["output"] == "a.txt, b.txt"
+
+    seen.clear()
+    bad = commands.run_script("seat", f"upload {one} relative.txt\n")
+    assert not bad.ok
+    assert "not an absolute path" in bad.error
+    assert seen == []
 
 
 def test_upload_never_sends_an_argv_the_real_cli_refuses(monkeypatch, tmp_path):
@@ -824,7 +819,7 @@ class FakeCli:
                 # The page-side pass that turns a target into a selector. Its function and its argument are in
                 # this file, so neither is in the command line.
                 self.classified.append(text)
-                kind = "fill" if "FILLABLE" in text else "click"
+                kind = "fill" if "FILLABLE" in text else ("click" if "normExact" in text else "element")
                 verdict = self.verdicts.get(kind) or self.verdict or {
                     "selectorValid": True, "selectorCount": 1, "selectorVisibleCount": 1,
                     "selectorTarget": self.selector, "selectorPlain": "body > input",
@@ -1973,4 +1968,178 @@ def test_resize_in_a_sensitive_step_hides_dimensions_and_output(monkeypatch, tmp
     assert [(step["command"], step["output"]) for step in result.steps] == [
         ("recipe shop go", "  resize\ndone"),
     ]
+
+
+# --- dblclick, snap, find, console, requests and request parts ---------------------------------------------
+
+_REAL_SNAPSHOT = commands.session.snapshot
+
+
+def test_dblclick_resolves_target_and_runs_driver_dblclick(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_targets(monkeypatch)
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "")
+    result = commands.run_script("seat", "dblclick e5\ndblclick Continue")
+    assert result.ok, result.error
+    assert calls == [["dblclick", "e5"], ["dblclick", "Continue"]]
+    assert [step["output"] for step in result.steps] == ["e5", "Continue"]
+
+
+def test_snap_supports_target_depth_and_boxes_and_rejects_invalid_options(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path, snapshot=_REAL_SNAPSHOT)
+    monkeypatch.setattr(commands.resolve, "element_target", lambda seat, arg, noun="snap": f"resolved:{arg}")
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "- button 'Go'")
+
+    result = commands.run_script("seat", "snap --boxes\nsnap --depth 2 e5\nsnap --depth=0 #panel")
+    assert result.ok, result.error
+    assert calls == [
+        ["snapshot", "--boxes"],
+        ["snapshot", "resolved:e5", "--depth", "2"],
+        ["snapshot", "resolved:#panel", "--depth", "0"],
+    ]
+    assert len(result.files) == 3
+
+    for bad in ("snap --depth", "snap --depth -1", "snap --depth 1000", "snap --nope", "snap e1 e2"):
+        bad_run = commands.run_script("seat", bad)
+        assert not bad_run.ok and "usage: snap" in bad_run.error, bad
+
+
+def test_find_supports_regex_max_results_and_leading_hyphen_queries(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "### Result\n- button 'Sign in'")
+
+    result = commands.run_script(
+        "seat",
+        "find Sign in\n"
+        "find --regex Sign|Log\n"
+        "find --max-results 5 --regex -item\n"
+        "find --max-results=3 -plain-dash",
+    )
+    assert result.ok, result.error
+    assert calls == [
+        ["find", "Sign in"],
+        ["find", "--regex", "Sign|Log"],
+        ["find", "--max-results", "5", "--regex=-item"],
+        ["find", "--max-results", "3", "--", "-plain-dash"],
+    ]
+
+    for bad in ("find --regex", "find --max-results", "find --max-results 0 hi", "find --max-results abc hi"):
+        bad_run = commands.run_script("seat", bad)
+        assert not bad_run.ok and "usage: find" in bad_run.error, bad
+
+
+def test_console_supports_level_all_and_clear(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "")
+
+    cleared = commands.run_script("seat", "console --clear")
+    assert cleared.ok, cleared.error
+    assert calls == [["console", "--clear"]]
+    assert cleared.steps[0]["output"] == "cleared"
+    assert cleared.files == []
+
+    calls.clear()
+    monkeypatch.setattr(plc, "run", lambda seat, *args, **kw: calls.append(list(args)) or "### Result\n[WARN] careful")
+    shown = commands.run_script("seat", "console warning --all")
+    assert shown.ok, shown.error
+    assert calls == [["console", "--all", "warning"]]
+    assert shown.steps[0]["output"] == "[WARN] careful"
+    assert len(shown.files) == 1
+
+    for bad in ("console warning error", "console --bogus"):
+        bad_run = commands.run_script("seat", bad)
+        assert not bad_run.ok and "usage: console" in bad_run.error, bad
+
+
+def test_requests_and_request_parts_redact_auth_headers_and_clean_binary_scratch(monkeypatch, tmp_path):
+    calls = []
+    _stub_browser(monkeypatch, tmp_path)
+
+    def fake_run(seat, *args, **kw):
+        calls.append(list(args))
+        verb = args[0]
+        if verb == "requests" and "--clear" in args:
+            return ""
+        if verb == "requests":
+            return "### Result\n1. [POST] https://example.com/api => [200]"
+        if verb == "request":
+            return (
+                "#1 [POST] https://example.com/api\n\n"
+                "  General\n    status:    [200] OK\n\n"
+                "  Request headers\n    authorization: Bearer top-secret-jwt\n    content-type: application/json\n\n"
+                "  Response headers\n    set-cookie: sid=secret1; HttpOnly\ncsrftoken=secret2; Expires=Wed, 21 Oct 2026 07:28:00 GMT\n    x-id: 9"
+            )
+        if verb == "request-headers":
+            return "cookie: sid=secret1\nAuthorization: Basic YWRtaW46cGFzcw==\naccept: */*"
+        if verb == "response-headers":
+            return "content-type: image/png\nSet-Cookie: sid=secret1\nsid2=secret2\ncache-control: no-store"
+        if verb == "request-body":
+            return '{"hello":"world"}'
+        if verb == "response-body" and args[1] == "1":
+            return '{"ok":true}'
+        if verb == "response-body" and args[1] == "2":
+            scratch = os.path.join(_cli_dir(), "response-1.png")
+            with open(scratch, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\nbinary")
+            return ".playwright-cli/response-1.png\n"
+        return ""
+
+    monkeypatch.setattr(plc, "run", fake_run)
+    result = commands.run_script(
+        "seat",
+        "requests --static --all --filter /api\n"
+        "requests --filter=-v1\n"
+        "requests --clear\n"
+        "request 1\n"
+        "request-headers 1\n"
+        "request-body 1\n"
+        "response-headers 1\n"
+        "response-body 1\n"
+        "response-body 2",
+    )
+    assert result.ok, result.error
+    assert calls[:3] == [
+        ["requests", "--static", "--all", "--filter", "/api"],
+        ["requests", "--filter=-v1"],
+        ["requests", "--clear"],
+    ]
+    assert result.steps[2]["output"] == "cleared"
+    detail = result.steps[3]["output"]
+    assert "    authorization: [redacted]" in detail and "top-secret-jwt" not in detail
+    assert "    set-cookie: [redacted]" in detail and "secret1" not in detail and "secret2" not in detail
+    assert "    x-id: 9" in detail
+    assert result.steps[4]["output"] == "cookie: [redacted]\nAuthorization: [redacted]\naccept: */*"
+    assert result.steps[5]["output"] == '{"hello":"world"}'
+    assert result.steps[6]["output"] == "content-type: image/png\nSet-Cookie: [redacted]\ncache-control: no-store"
+    assert result.steps[7]["output"] == '{"ok":true}'
+    assert result.steps[8]["output"] == "(binary response body)"
+    assert os.listdir(_cli_dir()) == []
+
+    for bad in ("requests --nope", "requests --filter", "requests --filter=", "request", "request 0", "response-body abc"):
+        bad_run = commands.run_script("seat", bad)
+        assert not bad_run.ok and "usage:" in bad_run.error, bad
+
+
+def test_request_parts_are_refused_on_seats_with_secrets_after_hide_and_during_sensitive_steps(monkeypatch, tmp_path):
+    _with_secret(monkeypatch, tmp_path)
+    monkeypatch.setattr(plc, "run", lambda *a, **k: pytest.fail("plc.run called"))
+    for verb in commands.REQUEST_PART_VERBS:
+        res = commands.run_script("seat", f"{verb} 1")
+        assert not res.ok and res.error == commands.REQUEST_PART_OFF_WITH_SECRETS
+
+    _stub_browser(monkeypatch, tmp_path)
+    run = commands.Run("seat")
+    run.hide("OTP", "482916")
+    with pytest.raises(plc.BrowserError) as after_hide:
+        commands._step("seat", "request-body", ["1"], run, False)
+    assert str(after_hide.value) == commands.REQUEST_PART_OFF_AFTER_HIDE
+
+    sensitive_run = commands.Run("seat")
+    sensitive_run.sensitive.append("passcode")
+    with pytest.raises(plc.BrowserError, match="nothing of the page is captured"):
+        commands._step("seat", "response-body", ["1"], sensitive_run, False)
 

@@ -355,7 +355,14 @@ def _channel_user_data_dir(channel):
     if not parts:
         return None
     if system == "Linux":
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        user_data = os.environ.get("CHROME_USER_DATA_DIR")
+        if user_data:
+            return user_data
+        base = (
+            os.environ.get("CHROME_CONFIG_HOME")
+            or os.environ.get("XDG_CONFIG_HOME")
+            or os.path.expanduser("~/.config")
+        )
         return os.path.join(base, *parts)
     return os.path.join(os.path.expanduser("~"), *parts)
 
@@ -892,6 +899,15 @@ def launch_config_path(seat):
 # `--test-type` is the switch that turns that bar off (ChromeDriver passes it for the same reason).
 BAR_OFF_FLAG = "--test-type=webdriver"
 PLAYWRIGHT_ADDED_FLAGS = ("--disable-blink-features=AutomationControlled",)
+# Chrome's own `--headless=new` launcher on Linux appends its internal headless-shell Ozone and SwiftShader
+# switches to the browser process command line after startup. None weaken the sandbox, cookie encryption or
+# `navigator.webdriver`; allow them only when the seat itself asked for `--headless=new`.
+CHROME_HEADLESS_ADDED_FLAGS = (
+    "--noerrdialogs",
+    "--ozone-platform=headless",
+    "--ozone-override-screen-size=800,600",
+    "--use-angle=swiftshader-webgl",
+)
 
 
 def _launch_args(seat):
@@ -920,10 +936,14 @@ def _flag_name(argument):
 
 def unasked_flags(seat, argv):
     """The flags in a Chrome's command line (`argv`, the binary left out) that neither `_launch_args` nor
-    playwright-cli's one known addition (with its value) accounts for, as they appear. Words that are not flags (the start page)
-    are not looked at."""
-    asked = {_flag_name(a) for a in _launch_args(seat) if a.startswith("--")}
-    return [a for a in argv if a.startswith("--") and _flag_name(a) not in asked and a not in PLAYWRIGHT_ADDED_FLAGS]
+    playwright-cli's / headless Chrome's known additions (with their values) account for, as they appear. Words that
+    are not flags (the start page) are not looked at."""
+    launch = _launch_args(seat)
+    asked = {_flag_name(a) for a in launch if a.startswith("--")}
+    allowed = set(PLAYWRIGHT_ADDED_FLAGS)
+    if "--headless=new" in launch:
+        allowed.update(CHROME_HEADLESS_ADDED_FLAGS)
+    return [a for a in argv if a.startswith("--") and _flag_name(a) not in asked and a not in allowed]
 
 
 def _process_argv(pid):
@@ -966,7 +986,9 @@ def check_launch_argv(seat):
 def _write_launch_config(seat, binary):
     """The playwright-cli config that launches this seat's Chrome, written 0600 in the seat's 0700 home. It holds
     paths and flags, nothing of a caller or a page. `viewport: null` leaves the window its own size, as a
-    person's Chrome has it."""
+    person's Chrome has it, `timeouts.idle: 0` keeps playwright-cli from closing a headless Chrome on its own
+    1-hour timer (the seat's `TIMEOUT` governs idle closure), and `webmcp: false` turns off page-supplied WebMCP
+    probing."""
     config = {
         "browser": {
             "browserName": "chromium",
@@ -980,6 +1002,8 @@ def _write_launch_config(seat, binary):
             },
             "contextOptions": {"viewport": None},
         },
+        "timeouts": {"idle": 0},
+        "webmcp": False,
     }
     target = launch_config_path(seat)
     aside = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -1050,12 +1074,19 @@ def _launch_chrome(seat):
 
 
 def _route_downloads_js(seat, directory=None):
-    """Page-less JS that points Chrome's downloads at the seat (or at `directory`, one of the seat's own).
+    """Page-less JS that points Chrome's downloads at the seat (or at `directory`, one of the seat's own)
+    and keeps playwright-cli's file-chooser listener from wedging the tab when a person clicks a file input.
 
     Playwright would save each download under a generated name in a temporary directory of its own. The
     Browser.setDownloadBehavior override replaces that, keeps the file's own name, and lasts only while the CDP
     session that set it stays attached, so one session is kept on the driver's Browser object for the life of
     the daemon and reused on every call.
+
+    playwright-cli's Tab subscribes every page to `filechooser` events, which enables CDP
+    `Page.setInterceptFileChooserDialog` in Chrome and pushes `fileChooser` onto `Tab._modalStates` with no
+    close event to clear it. Disabling that subscription outside `browser_click` lets the native OS file
+    picker work for a person driving the browser, and filtering `fileChooser` from `modalStates()` outside
+    `browser_file_upload` keeps a pending chooser from blocking `snap`, `shot`, `tabs`, `url`, or other verbs.
     """
     return plc.Own(
         "const br = page.context().browser();"
@@ -1063,6 +1094,81 @@ def _route_downloads_js(seat, directory=None):
         " await br.__a8sDownloads.send('Browser.setDownloadBehavior',"
         " {behavior: 'allow', downloadPath:"
         f" '{plc.js_string(directory or downloads_dir(seat))}'}});"
+        " const sym = Object.getOwnPropertySymbols(page).find((k) => page[k] && page[k].context && page[k].modalStates);"
+        " const tab = sym ? page[sym] : null;"
+        " if (tab) {"
+        " const ctx = tab.context;"
+        " const TabProto = Object.getPrototypeOf(tab);"
+        " const CtxProto = Object.getPrototypeOf(ctx);"
+        " if (typeof _a8sRestoreIdx === 'number') {"
+        " const hasChooser = (t) => t && t !== tab && t._modalStates.some((m) => m.type === 'fileChooser');"
+        " const cand = _a8sRestoreIdx >= 0 ? ctx.tabs()[_a8sRestoreIdx] : null;"
+        " const restore = hasChooser(cand) ? cand : ctx.tabs().find(hasChooser);"
+        " if (restore) {"
+        " if (typeof tab._onPageClose === 'function') {"
+        " const origClose = tab._onPageClose;"
+        " tab._onPageClose = function(closed) {"
+        " const r = origClose.call(this, closed);"
+        " if (closed === tab && ctx.tabs().includes(restore))"
+        " ctx._setCurrentTab?.(restore);"
+        " return r;"
+        " };"
+        " } else if (CtxProto._onPageClosed) {"
+        " const origClosed = ctx._onPageClosed || CtxProto._onPageClosed;"
+        " ctx._onPageClosed = function(closed) {"
+        " const r = origClosed.call(this, closed);"
+        " if (closed === tab) {"
+        " delete this._onPageClosed;"
+        " if (this.tabs().includes(restore))"
+        " this._setCurrentTab?.(restore);"
+        " }"
+        " return r;"
+        " };"
+        " }"
+        " }"
+        " }"
+        " if (!CtxProto.__a8sFileChooserHooked) {"
+        " const origModalStates = TabProto.modalStates;"
+        " TabProto.modalStates = function() {"
+        " const states = origModalStates.call(this);"
+        " return this.context._runningToolName === 'browser_file_upload'"
+        " ? states : states.filter((m) => m.type !== 'fileChooser');"
+        " };"
+        " const origSetModalState = TabProto.setModalState;"
+        " TabProto.setModalState = function(modalState) {"
+        " if (modalState && modalState.type === 'fileChooser') {"
+        " if (this.context._runningToolName !== 'browser_click') return;"
+        " this._modalStates = this._modalStates.filter((m) => m.type !== 'fileChooser');"
+        " }"
+        " return origSetModalState.call(this, modalState);"
+        " };"
+        " const origWait = TabProto.waitForCompletion;"
+        " TabProto.waitForCompletion = async function(cb) {"
+        " const intercept = this.context._runningToolName === 'browser_click';"
+        " if (intercept) await this.page._channel?.updateSubscription({event: 'fileChooser', enabled: true}).catch(() => {});"
+        " try { return await origWait.call(this, cb); }"
+        " finally {"
+        " if (intercept) {"
+        " for (const t of this.context.tabs())"
+        " await t.page._channel?.updateSubscription({event: 'fileChooser', enabled: false}).catch(() => {});"
+        " }"
+        " }"
+        " };"
+        " const origOnPageCreated = CtxProto._onPageCreated;"
+        " CtxProto._onPageCreated = function(...args) {"
+        " const p = args[0];"
+        " const r = origOnPageCreated.apply(this, args);"
+        " if (this._runningToolName !== 'browser_click')"
+        " p?._channel?.updateSubscription({event: 'fileChooser', enabled: false}).catch(() => {});"
+        " return r;"
+        " };"
+        " for (const t of ctx.tabs()) {"
+        " t._modalStates = t._modalStates.filter((m) => m.type !== 'fileChooser');"
+        " t.page._channel?.updateSubscription({event: 'fileChooser', enabled: false}).catch(() => {});"
+        " }"
+        " CtxProto.__a8sFileChooserHooked = true;"
+        " }"
+        " }"
     )
 
 
@@ -1326,8 +1432,18 @@ def save_state(seat, timeout=30):
     return path
 
 
-def snapshot(seat):
-    return plc.run(seat, "snapshot", timeout=30)
+def snapshot(seat, target=None, depth=None, boxes=False):
+    argv = ["snapshot"]
+    if target is not None:
+        argv.append(target)
+    if depth is not None:
+        plc.refuse_protected(seat, str(depth))
+        if isinstance(depth, bool) or not re.fullmatch(r"[0-9]{1,3}", str(depth)):
+            raise plc.BrowserError("snapshot: depth is 0 to 999")
+        argv += [plc.Own("--depth"), str(depth)]
+    if boxes:
+        argv.append(plc.Own("--boxes"))
+    return plc.run(seat, *argv, timeout=30)
 
 
 def current_url(seat):
@@ -1360,8 +1476,16 @@ def _browser_call(seat, body, timeout=15, strict=False):
     nonce = secrets.token_hex(16)
     try:
         answer = plc.result_json(plc.run_code_file(seat, _browser_call_code(nonce, body), scratch_dir(seat), timeout=timeout))
-    except (plc.BrowserError, OSError):
+    except (plc.BrowserError, OSError) as exc:
         if strict:
+            if isinstance(exc, plc.BrowserError) and (
+                getattr(exc, "modal_state", False)
+                or "does not handle the modal state" in str(exc)
+                or "is blocked by an open " in str(exc)
+            ):
+                raise plc.BrowserError(
+                    plc.driver_error(seat, 'Error: Tool "browser_run_code_unsafe" does not handle the modal state.')
+                ) from None
             raise plc.BrowserError("tabs: could not read the browser's structured response") from None
         return None
     if not isinstance(answer, dict) or set(answer) != {"nonce", "value"} or answer["nonce"] != nonce:

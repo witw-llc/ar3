@@ -10,14 +10,14 @@ See [Tool nodes](../../../docs/a8s-tools.md).
 
 ## Needs
 
-Use Linux or macOS. Install Chrome and Node. Install the Playwright CLI at the version the tool is proven against:
+Use Linux or macOS. Install Chrome and Node. Install the latest Playwright CLI:
 
 ```bash
-npm install -g @playwright/cli@0.1.22
+npm install -g @playwright/cli@latest
 ar3 tool browser doctor
 ```
 
-`doctor` notes a different installed version. The tool still runs.
+`doctor` reports the installed Playwright CLI path and version.
 
 The tool needs these executables on `PATH`. A routed wake does not load your
 shell startup files. If Node is in a version-manager directory, add that
@@ -195,6 +195,7 @@ An invalid index or extra argument fails the command.
 | `url` | `url` | The current URL. |
 | `go` | `go <url>` | `http`, `https` and `about` only. A `file:` URL is refused, in any spelling: the tool opens no local file as a page. |
 | `click` | `click <ref\|selector\|text>` | |
+| `dblclick` | `dblclick <ref\|selector\|text>` | Double-clicks the target. |
 | `fill` | `fill <label\|selector> <text>` | Quote text that has spaces. Refused, and nothing runs, when the text holds a stored secret. |
 | `fill-secret` | `fill-secret <label\|selector> <NAME>` | Types the stored secret `NAME` into the field, if the field's page is on an origin the secret allows. The reply names the secret and never shows its value. |
 | `select` | `select <label\|selector> <value>` | |
@@ -202,7 +203,7 @@ An invalid index or extra argument fails the command.
 | `type` | `type <text>` | The rest of the line, without changes. Refused, and nothing runs, when the text holds a stored secret. |
 | `check`, `uncheck`, `hover` | `<verb> <ref\|selector\|text>` | |
 | `text` | `text <selector>` | Inner text of the first match. |
-| `find` | `find <text>` | The rest of the line, without changes. |
+| `find` | `find [--regex] [--max-results <N>] <text>` | Searches the accessibility snapshot and returns matches with context. |
 | `scroll` | `scroll <dy>` | Pixels. |
 | `resize` | `resize <width> <height>` | Sets the viewport size in pixels (1 to 9999). |
 | `wait` | `wait <seconds>` | A number over 300 is read as milliseconds. At most 300 seconds. |
@@ -213,13 +214,15 @@ An invalid index or extra argument fails the command.
 | `back`, `forward`, `reload` | no arguments | Return the URL. |
 | `dialog-accept` | `dialog-accept [text]` | |
 | `dialog-dismiss` | no arguments | |
-| `requests` | no arguments | The network log. |
-| `console` | no arguments | The console log, inline and attached as `console.log`. |
-| `snap` | no arguments | Accessibility snapshot with refs. Attached as `snapshot.txt`. |
+| `requests` | `requests [--static] [--all] [--clear] [--filter <regex>]` | Lists numbered network requests, or clears the request list with `--clear`. |
+| `request` | `request <N>` | Returns status, headers (with cookie and auth headers redacted), and body hints for request `N` from `requests`. Refused on a seat that holds secrets. |
+| `request-headers`, `request-body`, `response-headers`, `response-body` | `<verb> <N>` | Returns that part of request `N` (with cookie and auth headers redacted; binary response bodies return `(binary response body)`). Refused on a seat that holds secrets. |
+| `console` | `console [error\|warning\|info\|debug] [--all] [--clear]` | Returns the console log inline and attaches `console.log`, or clears the log with `--clear`. |
+| `snap` | `snap [--depth <N>] [--boxes] [<ref\|selector>]` | Captures the accessibility snapshot with refs (optionally limited to a subtree, tree depth, or `[box=...]` bounds). Attached as `snapshot.txt`. |
 | `tabs` | no arguments | Lists zero-based tab indices and URLs. `*` marks the selected tab. |
 | `tab` | `tab N` | Selects tab N and returns its URL. |
 | `shot` | `shot [N]` | Selects tab N if given, then attaches a screenshot as `screen.png`. |
-| `upload` | `upload <abs path>` | Answers a file chooser the page has opened. One file. |
+| `upload` | `upload <abs path>...` | Answers an open file chooser with one or more files. |
 | `drop` | `drop <target> <abs path>...` | Drops files onto an element. Prefer it to `upload`. |
 | `download` | `download <target> [seconds]` | Clicks the target, waits for a finished file (default 30 seconds), attaches it. |
 | `video-start` | `video-start [slug]` | One recording at a time. A recipe's sensitive step does not open while a recording is on. |
@@ -551,9 +554,10 @@ patterns cannot be built is refused without revealing it.
   minimum, not a recommended secret strength. Use values that resist guessing.
 - A recipe's hidden value exists only for that script. A later script cannot
   redact that value from old console or network buffers unless it is stored.
-- A modified Playwright config can move driver output outside the scanned
-  scratch directory. The tool removes relevant environment overrides but
-  cannot remove the user's `~/.playwright/cli.config.json` file.
+- A modified workspace `.playwright/cli.config.json` inside a seat's scratch
+  directory could move driver output outside the scanned directory. The tool
+  removes relevant environment overrides and isolates global config lookup from
+  `~/.playwright/cli.config.json`.
 - More than four encoding layers are not recognized. Encoded letters or
   digits, such as `%53` for `S`, can evade detection. Truncated values under
   multiple encoding layers can also be missed.
