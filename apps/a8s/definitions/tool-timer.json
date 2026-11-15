@@ -1,0 +1,37 @@
+{
+  "description": "Deliver delayed callback messages back to their senders.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/timer",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--max-delay=$MAX_DELAY?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 60,
+  "idle": {
+    "timeout": "$IDLE_TIMEOUT?",
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../tools/timer",
+      "idle",
+      "--seat",
+      "$RECIPIENT"
+    ]
+  },
+  "stop": {
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../tools/timer",
+      "stop",
+      "--seat",
+      "$RECIPIENT"
+    ]
+  }
+}

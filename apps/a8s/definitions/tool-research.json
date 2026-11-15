@@ -1,0 +1,33 @@
+{
+  "description": "Run deep web research via the OpenAI Responses API and reply with a cited markdown report.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/research",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--model=$MODEL?",
+    "--planner-model=$PLANNER_MODEL?",
+    "--fanout=$FANOUT?",
+    "--job-timeout=$JOB_TIMEOUT?",
+    "--inline-max=$INLINE_MAX?",
+    "--api-url=$OPENAI_BASE_URL?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 2400,
+  "idle": {
+    "timeout": 60,
+    "invoke": [
+      "$PYTHON",
+      "$A8S_DIR/../tools/research",
+      "idle",
+      "--seat",
+      "$RECIPIENT"
+    ]
+  }
+}

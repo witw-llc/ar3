@@ -73,7 +73,8 @@ Use a bundled tool from the terminal:
 ar3 tool NAME [--node NAME | --seat NAME] [--from NAME] [--var KEY=VALUE]... [--attach PATH]... [--] [command... | -]
 ```
 
-Tool names are `browser`, `gemini-web`, `command-shell`, and `vault`.
+Tool names are `browser`, `gemini-web`, `timer`, `transcribe`, `research`,
+`command-shell`, and `vault`.
 Put wrapper options before the command. Use `ar3 tool NAME --help` for public
 commands and settings. Use `ar3 tool NAME COMMAND --help` for one local verb.
 Help performs no tool operation.
@@ -95,6 +96,9 @@ refuse that sender. Network access rules remain unchanged.
 |---|---|
 | `browser` | `doctor`, `open`, `close`, `status`, `go`, `snap`, `console`, `do`, `idle`, `secret` |
 | `gemini-web` | `sessions`, `forget` |
+| `timer` | `list`, `cancel`, `stop`, `idle` |
+| `transcribe` | `doctor`, `hint`, `replace` |
+| `research` | `secret`, `idle`, `resume` |
 | `vault` | `init`, `fingerprint`, `admin`, `voucher`, `seat`, `client` |
 | `command-shell` | Uses shell messages. Configure it with `a8s vars` or `--var`. |
 

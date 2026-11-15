@@ -59,6 +59,7 @@ from ar3.playwright_cli import INSTALL_COMMAND as PLAYWRIGHT_INSTALL, installed_
 from ar3.proc import pid_alive, process_start_token  # noqa: E402
 from ar3.envseam import UPDATE_WAIT_ENV  # noqa: E402
 from ar3.fsio import read_text_retry  # noqa: E402
+from ar3.wake_outcome import FILES_ENV  # noqa: E402
 from typing import Callable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1551,6 +1552,9 @@ _TOOL_VALUE_OPTIONS = ("--from", "--node", "--seat", "--var", "--attach")
 _LOCAL_COMMANDS = {
     "browser": ("open", "close", "status", "doctor", "go", "snap", "console", "do", "idle", "secret"),
     "gemini-web": ("sessions", "forget"),
+    "research": ("secret", "idle", "resume"),
+    "timer": ("list", "cancel", "stop", "idle"),
+    "transcribe": ("doctor", "hint", "replace"),
     "vault": ("init", "fingerprint", "admin", "voucher", "seat", "client"),
 }
 
@@ -1593,8 +1597,8 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
         if args.name == "browser" and any(word.split("=", 1)[0] == "--recipes" for word in option_words):
             print("ar3 tool: --recipes is not available. Put recipes in the registered node's recipes directory.", file=sys.stderr)
             return 2
-        if args.name == "browser" and words[0] == "secret":
-            if not args.node and not args.seat:
+        if args.name in ("browser", "research") and words[0] == "secret":
+            if args.name == "browser" and not args.node and not args.seat:
                 print("ar3 tool: secret needs --node NAME or --seat NAME.", file=sys.stderr)
                 return 2
             if len(words) < 2 or words[1] not in SECRET_VERBS:
@@ -1603,7 +1607,7 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
     native = list(words)
     if not help_only:
         inject = []
-        if args.name in ("browser", "gemini-web"):
+        if args.name in ("browser", "gemini-web", "research", "timer", "transcribe"):
             inject = ["--seat", node]
         elif args.name == "vault" and words[0] != "client":
             inject = ["--node", node]
@@ -1625,6 +1629,26 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
             if not any(word.split("=", 1)[0] == "--timeout" for word in option_words):
                 position = native.index("--") if "--" in native else len(native)
                 native[position:position] = ["--timeout", node_vars["TIMEOUT"]]
+        if args.name == "transcribe" and words[0] == "doctor":
+            for var_key, flag in (
+                ("ENGINE", "--engine"),
+                ("VISION_MODEL", "--vision-model"),
+                ("OLLAMA_URL", "--ollama-url"),
+            ):
+                if var_key in node_vars and not any(word.split("=", 1)[0] == flag for word in option_words):
+                    position = native.index("--") if "--" in native else len(native)
+                    native[position:position] = [flag, node_vars[var_key]]
+        if args.name == "research" and words[0] == "resume":
+            for var_key, flag in (
+                ("MODEL", "--model"),
+                ("PLANNER_MODEL", "--planner-model"),
+                ("JOB_TIMEOUT", "--job-timeout"),
+                ("INLINE_MAX", "--inline-max"),
+                ("OPENAI_BASE_URL", "--api-url"),
+            ):
+                if var_key in node_vars and not any(word.split("=", 1)[0] == flag for word in option_words):
+                    position = native.index("--") if "--" in native else len(native)
+                    native[position:position] = [flag, node_vars[var_key]]
     env["AR3_TOOL_PROG"] = f"ar3 tool {args.name}"
     argv = [sys.executable, str(REPO_ROOT / "apps" / "tools" / args.name.replace("-", "_")), *native]
     sys.stdout.flush()
@@ -1669,15 +1693,20 @@ def _tool_help(args, definition):
     return 0
 
 
-def _tool_run(argv, env, cwd, reply_dir) -> int:
+def _tool_run(argv, env, cwd, reply_dir, attached_files=()) -> int:
     """Run one wake argv and wait for it. Ctrl-C reaches the child too, since
     it shares the terminal's process group; ar3 notes it and keeps waiting."""
     sys.stdout.flush()
     sys.stderr.flush()
+    resolved_files = [str(Path(f).resolve()) for f in attached_files]
     try:
         proc = subprocess.Popen(
             argv,
-            env={**env, "AR3_TOOL_REPLY_DIR": str(reply_dir)},
+            env={
+                **env,
+                "AR3_TOOL_REPLY_DIR": str(reply_dir),
+                FILES_ENV: json.dumps(resolved_files),
+            },
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             **launch_options(interactive=True),
@@ -1781,7 +1810,7 @@ def cmd_tool(args: argparse.Namespace) -> int:
     if local and args.name == "vault" and local[0] == "client" and (args.node or args.seat):
         print("ar3 tool: vault client takes no --node or --seat. Run it from the sender's directory. Use --to for the vault name.", file=sys.stderr)
         return 2
-    session = not words
+    session = not words and not (args.name == "transcribe" and args.attach)
     if local is None and args.name in NO_SESSION and (args.node or session):
         print(
             f"ar3 tool: {args.name} takes no --node and no session. "
@@ -1836,9 +1865,9 @@ def cmd_tool(args: argparse.Namespace) -> int:
     if local is not None:
         return _tool_local(args, node, node_vars, env, cwd, local)
 
-    def run_message(message, reply_dir):
+    def run_message(message, reply_dir, attached_files=()):
         argv = _tool_argv(defs, definition, path, sender, node, node_vars, message)
-        return _tool_run(argv, env, cwd, reply_dir)
+        return _tool_run(argv, env, cwd, reply_dir, attached_files=attached_files)
 
     reply_root = Path(tempfile.mkdtemp(prefix="ar3-tool-"))
     if session:
@@ -1862,16 +1891,19 @@ def cmd_tool(args: argparse.Namespace) -> int:
 
     message = sys.stdin.read() if words == ["-"] else " ".join(words)
     attached = []
+    attached_paths = []
     for raw in args.attach:
         file = Path(raw).expanduser()
         if not file.is_file():
             print(f"ar3 tool: --attach is not a file: {raw}", file=sys.stderr)
             return 2
-        attached.append(f"ATTACHED FILE: {file.resolve()}")
+        resolved = file.resolve()
+        attached.append(f"ATTACHED FILE: {resolved}")
+        attached_paths.append(str(resolved))
     if attached:
         message = "\n".join([message, "", *attached])
     print(f"ar3 tool: attachments land in {reply_root}", file=sys.stderr)
-    return run_message(message, reply_root)
+    return run_message(message, reply_root, attached_files=attached_paths)
 
 
 # ---------- cli ----------

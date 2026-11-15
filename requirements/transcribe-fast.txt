@@ -1,0 +1,4 @@
+# Optional: tool-transcribe cross-platform STT engine (CTranslate2, no PyTorch).
+# PyAV 19.0 removed `metadata_errors` from `av.open()`, which faster-whisper<=1.2.1 passes.
+av>=11,<19
+faster-whisper>=1.0

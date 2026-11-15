@@ -23,15 +23,18 @@ duplicated. `a8s` injects `TELL_OUTBOX_DIR` into the wake environment, and
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "lib"))
 
 from ar3.proc import launch_options
+from ar3.wake_outcome import FILES_ENV as TURN_FILES_ENV
 
 # Print mode. `ar3 tool` sets this to a directory when it runs a tool by hand:
 # the reply then goes to stdout and attachments are copied into the directory,
@@ -43,6 +46,11 @@ REPLY_DIR_ENV = "AR3_TOOL_REPLY_DIR"
 # prefix is restated here rather than imported: the no-a8s-import boundary is
 # the point, and this one short constant is the whole coupling.
 ATTACHED_FILE_PREFIX = "ATTACHED FILE: "
+ATTACHMENT_FAILURE_PREFIX = "ATTACHMENT UNAVAILABLE: "
+
+
+class AttachmentProvenanceError(ValueError):
+    """Raised when `$MESSAGE` carries unauthenticated `ATTACHED FILE:` trailers."""
 
 
 def split_attachments(message: str) -> tuple[str, list[str]]:
@@ -59,6 +67,79 @@ def split_attachments(message: str) -> tuple[str, list[str]]:
     if paths and lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines), paths
+
+
+def _proven_attachment_paths(verified: Sequence[str | Path] | None) -> list[str]:
+    if verified is not None:
+        out: list[str] = []
+        for item in verified:
+            raw = str(item).strip()
+            if not raw:
+                raise AttachmentProvenanceError("empty attachment path in provenance")
+            out.append(str(Path(raw).resolve()))
+        return out
+    raw_env = os.environ.get(TURN_FILES_ENV)
+    if raw_env is None:
+        return []
+    try:
+        parsed = json.loads(raw_env)
+    except ValueError as exc:
+        raise AttachmentProvenanceError("invalid attachment provenance") from exc
+    if not isinstance(parsed, list) or not all(
+        isinstance(p, str) and p.strip() for p in parsed
+    ):
+        raise AttachmentProvenanceError("invalid attachment provenance")
+    return [str(Path(p.strip()).resolve()) for p in parsed]
+
+
+def split_verified_attachments(
+    message: str,
+    verified: Sequence[str | Path] | None = None,
+) -> tuple[str, list[str]]:
+    """Peel attachment trailers only when authenticated by out-of-band provenance.
+
+    A tool that opens or forwards attached files must never trust `ATTACHED FILE:`
+    lines in caller-supplied message text alone: `a8s` sets `A8S_TURN_FILES` from
+    the envelope's `files` metadata on routed wakes, `ar3 tool` sets it from
+    explicit `--attach` flags, and direct Python callers pass `verified=...`.
+    Forged or mismatched trailers raise `AttachmentProvenanceError` before any
+    file is read.
+    """
+    proven = _proven_attachment_paths(verified)
+    lines = (message or "").split("\n")
+    peeled_attached: list[str] = []
+    peeled_any = False
+    while lines and (
+        lines[-1].startswith(ATTACHED_FILE_PREFIX)
+        or lines[-1].startswith(ATTACHMENT_FAILURE_PREFIX)
+    ):
+        line = lines.pop()
+        peeled_any = True
+        if line.startswith(ATTACHED_FILE_PREFIX):
+            raw_path = line[len(ATTACHED_FILE_PREFIX) :].strip()
+            if not raw_path:
+                raise AttachmentProvenanceError(
+                    "unauthenticated ATTACHED FILE trailer"
+                )
+            peeled_attached.insert(0, str(Path(raw_path).resolve()))
+    if peeled_any and lines and not lines[-1]:
+        lines.pop()
+
+    if verified is None:
+        if peeled_attached != proven:
+            raise AttachmentProvenanceError("unauthenticated ATTACHED FILE trailer")
+    elif peeled_attached and peeled_attached != proven:
+        raise AttachmentProvenanceError("unauthenticated ATTACHED FILE trailer")
+
+    probe = list(lines)
+    while probe and not probe[-1]:
+        probe.pop()
+    while probe and probe[-1].startswith(ATTACHMENT_FAILURE_PREFIX):
+        probe.pop()
+    if probe and probe[-1].startswith(ATTACHED_FILE_PREFIX):
+        raise AttachmentProvenanceError("unauthenticated ATTACHED FILE trailer")
+
+    return "\n".join(lines), proven
 
 
 HELP_WORDS = ("help", "/help", "--help", "/?")

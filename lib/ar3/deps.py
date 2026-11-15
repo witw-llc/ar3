@@ -26,8 +26,10 @@ prepend-at-0 stay authoritative over anything fetched.
 """
 from __future__ import annotations
 
+import importlib
 import importlib.metadata
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -83,6 +85,9 @@ def known_groups() -> list[str]:
 
 _REQ_LINE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$")
 _CLAUSE_RE = re.compile(r"(==|!=|>=|<=|>|<)\s*([A-Za-z0-9.]+)")
+_MARKER_CLAUSE_RE = re.compile(
+    r"^(sys_platform|platform_machine|os_name)\s*(==|!=)\s*(['\"])([^'\"]*)\3$"
+)
 _OPS = {
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
@@ -93,17 +98,58 @@ _OPS = {
 }
 
 
+def _canon_dist(name: str) -> str:
+    """PEP 503 canonical package name so `faster_whisper` matches `faster-whisper`."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _marker_env() -> dict[str, str]:
+    return {
+        "sys_platform": sys.platform,
+        "platform_machine": platform.machine().lower(),
+        "os_name": os.name,
+    }
+
+
+def _marker_applies(marker: str) -> bool:
+    """Evaluate simple PEP 508 environment markers (`sys_platform`, `platform_machine`,
+    `os_name` with `==`/`!=`, `and`, `or`). Unrecognised clauses default to True so
+    `ensure_group` never reports an unsatisfied pin as installed."""
+    if not marker:
+        return True
+    env = _marker_env()
+    for or_part in re.split(r"\s+or\s+", marker):
+        branch_ok = True
+        for and_part in re.split(r"\s+and\s+", or_part.strip()):
+            clause = and_part.strip()
+            match = _MARKER_CLAUSE_RE.match(clause)
+            if not match:
+                return True
+            key, op, _quote, val = match.groups()
+            actual = env[key]
+            target = val.lower() if key == "platform_machine" else val
+            ok = (actual == target) if op == "==" else (actual != target)
+            if not ok:
+                branch_ok = False
+                break
+        if branch_ok:
+            return True
+    return False
+
+
 def _parse_requirements(path: Path) -> list[tuple[str, str]]:
-    """`[(name, version_specifier)]` for each real requirement line — blank
-    lines, comments, and `-r`/`-e`/other flag lines are skipped. Not a full
-    PEP 508 parser: enough to check the pins this suite's own
-    `requirements/*.txt` files actually use."""
+    """`[(name, version_specifier)]` for each real requirement line that applies
+    on this platform — blank lines, comments, `-r`/`-e`/other flag lines, and
+    lines whose `; <marker>` excludes this host are skipped."""
     pins = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line or line.startswith("-"):
             continue
-        match = _REQ_LINE_RE.match(line)
+        spec_part, sep, marker_part = line.partition(";")
+        if sep and not _marker_applies(marker_part.strip()):
+            continue
+        match = _REQ_LINE_RE.match(spec_part.strip())
         if not match:
             continue
         pins.append((match.group(1), match.group(2).strip()))
@@ -126,11 +172,12 @@ def _satisfies(installed_version: str, specifier: str) -> bool:
 
 
 def _installed_versions(dir_: Path) -> dict[str, str]:
+    importlib.invalidate_caches()
     versions = {}
     for dist in importlib.metadata.distributions(path=[str(dir_)]):
         name = dist.metadata.get("Name") if dist.metadata else None
         if name:
-            versions[name.lower()] = dist.version
+            versions[_canon_dist(name)] = dist.version
     return versions
 
 
@@ -149,7 +196,7 @@ def ensure_group(group: str) -> Path | None:
         return dir_
     installed = _installed_versions(dir_)
     for name, specifier in _parse_requirements(req_file):
-        version = installed.get(name.lower())
+        version = installed.get(_canon_dist(name))
         if version is None or not _satisfies(version, specifier):
             return None
     return dir_

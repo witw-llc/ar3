@@ -174,11 +174,15 @@ tested there.
   **[docs/a8s.md](docs/a8s.md)**, **[docs/r4t.md](docs/r4t.md)** and
   **[docs/k7e.md](docs/k7e.md)** cover the apps, flat under [`docs/`](docs/).
 - **[docs/a8s-tools.md](docs/a8s-tools.md)** lists the tool nodes: a shell, a
-  signed-in browser, Gemini on the web and an encrypted vault, each with its own
-  README and a `help` message that tells you how to drive it. The commands of
-  each tool: [command shell](apps/tools/command_shell/README.md),
+  signed-in browser, Gemini on the web, a delayed callback timer, local audio
+  and video transcription, deep web research, and an encrypted vault, each with
+  its own README and a `help` message that tells you how to drive it. The
+  commands of each tool: [command shell](apps/tools/command_shell/README.md),
   [browser](apps/tools/browser/README.md),
-  [Gemini web](apps/tools/gemini_web/README.md) and
+  [Gemini web](apps/tools/gemini_web/README.md),
+  [timer](apps/tools/timer/README.md),
+  [transcribe](apps/tools/transcribe/README.md),
+  [research](apps/tools/research/README.md), and
   [vault](apps/tools/vault/README.md).
 
 ## Where it is going

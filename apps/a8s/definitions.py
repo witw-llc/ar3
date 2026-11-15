@@ -452,6 +452,39 @@ def load_definition(name: str) -> dict:
         raise RuntimeError(f"definition load failed for {path}: {e}") from e
 
 
+def _resolved_attachment_path(
+    files_root: Path, msg_id: str, filename: str
+) -> Path | None:
+    base = (files_root / msg_id).resolve()
+    path = (base / filename).resolve()
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return None
+    return path
+
+
+def attachment_paths(msg: dict, files_root: Path) -> list[str]:
+    """Resolved attachment paths for one envelope's staged files."""
+    files = msg.get("files") or []
+    if not files:
+        return []
+    msg_id = (msg.get("id") or "").strip()
+    if not msg_id:
+        return []
+    out: list[str] = []
+    for entry in files:
+        if (entry.get("path") or "").strip():
+            continue
+        filename = (entry.get("filename") or "").strip()
+        if not filename or entry.get("error"):
+            continue
+        path = _resolved_attachment_path(files_root, msg_id, filename)
+        if path is not None:
+            out.append(str(path))
+    return out
+
+
 def _file_lines(msg: dict, files_root: Path) -> list[str]:
     files = msg.get("files") or []
     if not files:
@@ -470,9 +503,10 @@ def _file_lines(msg: dict, files_root: Path) -> list[str]:
             detail = (entry.get("detail") or entry.get("error") or "").strip()
             out.append(f"{ATTACHMENT_FAILURE_PREFIX}{filename}: {detail}")
             continue
-        path = (files_root / msg_id / filename).resolve()
-        out.append(f"{ATTACHED_FILE_PREFIX}{path}")
-    return out
+        path = _resolved_attachment_path(files_root, msg_id, filename)
+        if path is not None:
+            out.append(f"{ATTACHED_FILE_PREFIX}{path}")
+    return out if len(out) > 1 else []
 
 
 def _message_body(msg: dict, files_root: Path) -> str:

@@ -10,6 +10,38 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.133
+
+### Added
+
+- `tool-timer` (`ar3 tool timer`, `a8s add <name> <dir> tool-timer --ALLOW=...`):
+  delayed callback echo server accepting `<delay> <message>` (`s`, `m`, `h`, `d`
+  suffixes up to `MAX_DELAY`), `list`, `cancel <id|all>`, and `help`, storing
+  `timers.json` and staged attachments in the node's working directory and
+  staying silent on schedule wakes so callers remain asleep until delivery.
+- `tool-transcribe` (`ar3 tool transcribe`, `a8s add <name> <dir> tool-transcribe --ALLOW=...`):
+  local speech and video transcription for attached media files (`faster-whisper`,
+  `mlx-whisper`, `parakeet-mlx`, and `whisper`, plus `plain`, `fancy`, and `auto`
+  video modes with `ffmpeg`/`ffprobe` and Ollama vision), with working-directory
+  `hints.txt` and `replacements.txt` managed locally (`hint`, `replace`, `doctor`)
+  or via `--save`.
+- `tool-research` (`ar3 tool research`, `a8s add <name> <dir> tool-research --ALLOW=...`):
+  pure-stdlib OpenAI Responses API deep research (`gpt-5.6-sol` and
+  `gpt-5.6-luna`) supporting single-shot runs, `--fanout [N]` (`1`..`8` or Stage 0
+  recommendation from `>=12` candidates via MMR `lambda=0` plus a reserved
+  adversarial slot), `--plan-only`, `--resume` (`resume --list` / `<checkpoint-id>`),
+  immediate `.research/` per-job checkpoints, quorum partial merge
+  (`ceil(0.67 * N)`), three-pass cited markdown synthesis, working-directory
+  `0600` `secrets.json` (`secret list|set|rm`), and `.research/pending/` reply
+  redelivery.
+
+### Changed
+
+- `ar3.deps` canonicalizes PEP 503 package names (`-`, `_`, `.`) and evaluates
+  PEP 508 platform markers (`sys_platform`, `platform_machine`, `os_name`) when
+  checking `requirements/*.txt` groups, adding `transcribe-fast`,
+  `transcribe-mlx`, and `transcribe-whisper` on-demand groups.
+
 ## 0.1.132
 
 ### Added

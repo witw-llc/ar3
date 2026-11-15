@@ -273,6 +273,79 @@ def terminate_group(proc: subprocess.Popen | int, *, grace_seconds: float = 0.5)
     _signal_pgid(pgid, pid, signal.SIGKILL)
 
 
+def verified_process_alive(
+    pid: int,
+    start_token: object,
+    *,
+    liveness=None,
+    token_reader=None,
+) -> bool:
+    """True only when `pid` is live and positively matches a valid `start_token`."""
+    alive_fn = pid_alive if liveness is None else liveness
+    token_fn = process_start_token if token_reader is None else token_reader
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if not valid_start_token(start_token):
+        return False
+    if not alive_fn(pid):
+        return False
+    current = token_fn(pid)
+    return valid_start_token(current) and current == start_token
+
+
+def terminate_verified_group(
+    pid: int,
+    start_token: object,
+    *,
+    grace_seconds: float = 0.5,
+    liveness=None,
+    token_reader=None,
+) -> bool:
+    """Terminate `pid` (and its own session group when `pgid == pid`) only after
+    positive `start_token` verification, re-verifying before SIGKILL escalation."""
+    if not verified_process_alive(
+        pid, start_token, liveness=liveness, token_reader=token_reader
+    ):
+        return False
+    if os.name != "posix":
+        _end_tree(pid)
+        return True
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        pgid = -1
+    if pgid == pid:
+        _signal_pgid(pid, pid, signal.SIGTERM)
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return True
+    deadline = time.monotonic() + max(0.0, grace_seconds)
+    while time.monotonic() < deadline:
+        if not verified_process_alive(
+            pid, start_token, liveness=liveness, token_reader=token_reader
+        ):
+            return True
+        time.sleep(min(0.02, max(0.001, deadline - time.monotonic())))
+    if not verified_process_alive(
+        pid, start_token, liveness=liveness, token_reader=token_reader
+    ):
+        return True
+    try:
+        pgid_now = os.getpgid(pid)
+    except OSError:
+        pgid_now = -1
+    if pgid_now == pid:
+        _signal_pgid(pid, pid, signal.SIGKILL)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return True
+
+
 _JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9

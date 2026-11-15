@@ -62,7 +62,7 @@ from ar3 import clock
 from ar3.fsio import atomic_write_text, read_text_retry, stat_or_none
 from ar3.locking import file_lock
 from ar3.wake_outcome import (
-    ENVELOPES_ENV, OUTCOME_DIR_ENV, RECIPIENT_ENV, outcome_dir, take_failures,
+    ENVELOPES_ENV, FILES_ENV, OUTCOME_DIR_ENV, RECIPIENT_ENV, outcome_dir, take_failures,
 )
 from ar3.proc import (
     launch_options, release_job, start_in_job, terminate_group, terminate_job,
@@ -102,6 +102,7 @@ from core import (
 )
 from definitions import (
     BatchEntry,
+    attachment_paths,
     batch_limit,
     build_batch_command,
     build_command,
@@ -588,7 +589,9 @@ def _tell_outbox_env(p: Participant) -> dict[str, str]:
     }
 
 
-def _wake_env(p: Participant, definition: dict, envelopes=()) -> dict[str, str]:
+def _wake_env(
+    p: Participant, definition: dict, envelopes=(), files=()
+) -> dict[str, str]:
     """The layer `_start_wake_subprocess` puts over its own environment.
 
     Declared node env underneath, routing variables on top: an operator who
@@ -602,7 +605,8 @@ def _wake_env(p: Participant, definition: dict, envelopes=()) -> dict[str, str]:
     return {**wake_env(definition, load_agent_env(p.name)), **_tell_outbox_env(p),
             OUTCOME_DIR_ENV: str(directory.resolve()),
             RECIPIENT_ENV: p.name,
-            ENVELOPES_ENV: json.dumps([str(path.resolve()) for path in envelopes])}
+            ENVELOPES_ENV: json.dumps([str(path.resolve()) for path in envelopes]),
+            FILES_ENV: json.dumps([str(Path(path).resolve()) for path in files])}
 
 
 def _deliver_file_proxy(p: Participant) -> None:
@@ -812,7 +816,12 @@ def wake_once(p: Participant, msg_path: Path, *, async_wake: bool = False) -> bo
             resolve_definition_path(p.name),
             vars=load_agent_vars(p.name),
         ))
-        spawn_env = _wake_env(p, definition, [trashed])
+        spawn_env = _wake_env(
+            p,
+            definition,
+            [trashed],
+            files=attachment_paths(msg, p.files_path()),
+        )
     except ValueError as e:
         out_agent(p.name, f"[{p.name}] wake aborted: {e}")
         _settle_wake(p, [trashed], None, reason=str(e))

@@ -1,0 +1,2 @@
+# Optional: tool-transcribe OpenAI Whisper engine (PyTorch).
+openai-whisper

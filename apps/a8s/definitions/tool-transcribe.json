@@ -1,0 +1,29 @@
+{
+  "description": "Transcribe attached audio and video files with local speech and vision models.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/transcribe",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--engine=$ENGINE?",
+    "--model=$MODEL?",
+    "--language=$LANGUAGE?",
+    "--flavor=$FLAVOR?",
+    "--vision-model=$VISION_MODEL?",
+    "--ollama-url=$OLLAMA_URL?",
+    "--hints=$HINTS?",
+    "--timeout=$TIMEOUT?",
+    "--inline-max=$INLINE_MAX?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 1800,
+  "idle": {
+    "timeout": 0
+  }
+}

@@ -75,6 +75,9 @@ class TestKnownGroups:
         groups = ar3_deps.known_groups()
         assert "r4t" in groups
         assert "a8s-s3" in groups
+        assert "transcribe-fast" in groups
+        assert "transcribe-mlx" in groups
+        assert "transcribe-whisper" in groups
         assert not any(g.endswith("-test") for g in groups)
 
 
@@ -116,6 +119,47 @@ class TestEnsureGroup:
         dir_ = ar3_deps.group_dir("no-pins-group")
         dir_.mkdir(parents=True)
         assert ar3_deps.ensure_group("no-pins-group") == dir_
+
+    def test_pep503_hyphen_underscore_dist_name_matches_requirement(self, monkeypatch, tmp_path):
+        req_dir = tmp_path / "requirements"
+        req_dir.mkdir()
+        (req_dir / "fakegroup.txt").write_text("faster-whisper>=1.1.0\n", encoding="utf-8")
+        monkeypatch.setattr(ar3_deps, "REQUIREMENTS_DIR", req_dir)
+        dir_ = ar3_deps.group_dir("fakegroup")
+        dir_.mkdir(parents=True)
+        _write_dist(dir_, "faster_whisper", "1.2.1")
+        assert ar3_deps.ensure_group("fakegroup") == dir_
+
+    def test_pep508_marker_skips_excluded_platform_and_enforces_matching_platform(
+        self, monkeypatch, tmp_path
+    ):
+        req_dir = tmp_path / "requirements"
+        req_dir.mkdir()
+        (req_dir / "fakegroup.txt").write_text(
+            "fakepkg>=1.0\n"
+            "excludedpkg>=1.0; sys_platform == 'never_matches'\n"
+            "requiredpkg>=1.0; sys_platform != 'never_matches' and platform_machine != 'never_arch'\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(ar3_deps, "REQUIREMENTS_DIR", req_dir)
+        dir_ = ar3_deps.group_dir("fakegroup")
+        dir_.mkdir(parents=True)
+        _write_dist(dir_, "fakepkg", "1.0.0")
+        assert ar3_deps.ensure_group("fakegroup") is None
+        _write_dist(dir_, "requiredpkg", "1.0.0")
+        assert ar3_deps.ensure_group("fakegroup") == dir_
+
+    def test_transcribe_fast_pin_rejects_pyav_19_and_accepts_pyav_18(self):
+        import shutil
+
+        dir_ = ar3_deps.group_dir("transcribe-fast")
+        dir_.mkdir(parents=True)
+        _write_dist(dir_, "faster_whisper", "1.2.1")
+        _write_dist(dir_, "av", "19.0.2")
+        assert ar3_deps.ensure_group("transcribe-fast") is None
+        shutil.rmtree(dir_ / "av-19.0.2.dist-info")
+        _write_dist(dir_, "av", "18.1.0")
+        assert ar3_deps.ensure_group("transcribe-fast") == dir_
 
 
 class TestInstallGroup:

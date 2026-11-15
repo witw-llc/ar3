@@ -15,6 +15,7 @@ from ar3.ulid import new as new_ulid
 RECIPIENT_ENV = "A8S_TURN_RECIPIENT"
 ENVELOPES_ENV = "A8S_TURN_ENVELOPES"
 OUTCOME_DIR_ENV = "A8S_TURN_OUTCOME_DIR"
+FILES_ENV = "A8S_TURN_FILES"
 
 
 def outcome_dir(node_dir: Path) -> Path:
