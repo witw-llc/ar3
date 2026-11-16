@@ -53,16 +53,25 @@ accounting path. Completed turns stay completed if a later session step fails.
   waits for a named hook still running, and runs the hook itself only when
   the handler left no mark. A new path that ends a node does the same. A takeover by another
   handler is not a stop and runs no hook.
-- **A node's own environment is `a8s vars <name> set env.<NAME> <value>`,** the
-  grammar `r4t rig set <rig> env.<NAME>` uses. Only an `env.`-prefixed key
-  reaches the child's environment, and `<NAME>` keeps its case; every other var
-  stays argv interpolation and never reaches the environment. Do not export
-  every var. Precedence,
-  lowest first: the start shell, the PATH record (`wake_path`),
-  `definition.env`, the node's `env.<NAME>` vars, then the routing variables a8s
-  injects. `definitions.wake_env` composes the first four and `daemon._wake_env`
-  adds the last; any new place that builds a wake or probe environment calls
-  `wake_env(definition, load_agent_env(name))`.
+- **A node's own environment is `a8s vars <name> set env.<NAME> <value>` and
+  `a8s vars <name> set secret.<NAME> [-]`.** Only an `env.`- or `secret.`-prefixed
+  key reaches the child's environment, and `<NAME>` keeps its case; every other
+  var stays argv interpolation and never reaches the environment. `secret.<NAME>`
+  lives in `0600` `secrets.json` under `"nodes"` with a `bind` digest of the
+  node's registered `root` (`{"bind", "secrets"}`), never in `a8s.json` and never
+  on `argv` (`a8s add` and `ar3 tool --var` refuse `secret.*`, and `secret.PATH`
+  is refused so exit-`127` diagnostics stay clean). Re-registering after a
+  registry reset preserves stored secrets automatically when `root` matches,
+  refuses ambiguous re-registration at a different `root` unless
+  `--rebind-secrets` or `--drop-secrets` is passed, and fails closed if
+  `secrets.json` is unreadable. Do not export every var.
+  Precedence, lowest first: the start shell, the PATH record (`wake_path`),
+  `definition.env`, the node's `env.<NAME>` vars, the node's `secret.<NAME>` vars,
+  then the routing variables a8s injects. `load_agent_env(name)` merges
+  `env.<NAME>` with `load_agent_secrets(name)`, `definitions.wake_env` composes
+  the first five (`wake_env(definition, load_agent_env(name))`), and
+  `daemon._wake_env` adds the last; any new place that builds a wake or probe
+  environment calls `wake_env(definition, load_agent_env(name))`.
   Per-message wakes use `invoke` via `build_command`; batch wakes use
   `batch.invoke` via `build_batch_command`, appending either a composed
   prose prompt (`batch.format` absent/`"prompt"`) or a JSON array of

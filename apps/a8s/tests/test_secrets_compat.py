@@ -22,6 +22,11 @@ FROZEN = {
         "network.json": "19bfb1fe428142fa92690f73ef7ab073998768ca2fe133488c8ec9cc4c324e95",
         "secrets.json": "7b6d6e5b5206a8a9337cbe84b0cc03b80c8173cd3f6aa412e3f5f1ede701c32c",
     },
+    "0.1.134": {
+        "a8s.json": "24a432e308c89d4bb09993df2e6e5a6e137b5d41c002311071ac8b4927d42c0f",
+        "network.json": "19bfb1fe428142fa92690f73ef7ab073998768ca2fe133488c8ec9cc4c324e95",
+        "secrets.json": "add6a6b596b96be639d48e1d4918481a6f1948b05d0408bf8a2242fdccf3360d",
+    },
 }
 
 
@@ -37,10 +42,10 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _entry_keys(cfg: dict) -> dict:
+def _entry_keys(cfg: dict, sections: tuple[str, ...]) -> dict:
     return {
         section: {name: sorted(entry) for name, entry in cfg[section].items()}
-        for section in ("remotes", "services")
+        for section in sections
     }
 
 
@@ -81,6 +86,23 @@ def test_the_current_reader_returns_the_password_of_every_shipped_shape(
 
 
 @pytest.mark.parametrize("shape", _shapes(), ids=lambda p: p.name)
+def test_the_current_reader_returns_the_node_secrets_of_every_shipped_shape(
+    shape, state_root
+):
+    from definitions import load_agent_env, load_agent_secrets
+    from ar3 import nodes as ar3_nodes
+
+    _install(shape, state_root)
+    if (shape / "a8s.json").is_file():
+        assert load_agent_secrets("scholar") == {"OPENAI_API_KEY": "fixture-node-secret"}
+        assert load_agent_env("scholar") == {"OPENAI_API_KEY": "fixture-node-secret"}
+        assert ar3_nodes.node_secrets("scholar") == {"OPENAI_API_KEY": "fixture-node-secret"}
+    else:
+        assert load_agent_secrets("scholar") == {}
+        assert ar3_nodes.node_secrets("scholar") == {}
+
+
+@pytest.mark.parametrize("shape", _shapes(), ids=lambda p: p.name)
 def test_a_frozen_fixture_is_unchanged(shape):
     listed = {}
     for line in (shape / MANIFEST).read_text().splitlines():
@@ -113,14 +135,19 @@ def test_a_frozen_fixture_matches_the_digests_pinned_here(shape):
     }
 
 
-def test_the_writer_still_writes_the_newest_fixture_shape(state_root):
+def test_the_writer_still_writes_the_newest_fixture_shape(state_root, monkeypatch):
+    import io
     import network
-    from commands import cmd_remote
+    from commands import cmd_remote, cmd_vars
+    from registry import save_registry
 
+    save_registry({"scholar": {"root": "/tmp/fixture-scholar", "definition": "default"}})
     assert cmd_remote([
         "hub", "mqtts://broker.example.test:8883", "topic-test",
         "--user", "tester", "--pass", "fixture-password",
     ]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO("fixture-node-secret\n"))
+    assert cmd_vars(["scholar", "set", "secret.OPENAI_API_KEY", "-"]) == 0
     newest = _shapes()[-1]
     written = {
         name: json.loads((state_root / name).read_text())
@@ -130,8 +157,13 @@ def test_the_writer_still_writes_the_newest_fixture_shape(state_root):
         name: json.loads((newest / name).read_text())
         for name in ("network.json", "secrets.json")
     }
-    for name in written:
-        assert _entry_keys(written[name]) == _entry_keys(frozen[name]), (
+    sections_by_file = {
+        "network.json": ("remotes", "services"),
+        "secrets.json": ("remotes", "services", "nodes"),
+    }
+    for name, sections in sections_by_file.items():
+        assert set(written[name]) == set(frozen[name])
+        assert _entry_keys(written[name], sections) == _entry_keys(frozen[name], sections), (
             f"the writer's {name} no longer has the shape of fixture {newest.name}. "
             f"Add a new fixture directory for the new shape, with a reader for the "
             f"old one. " + EXCEPTION
@@ -139,3 +171,10 @@ def test_the_writer_still_writes_the_newest_fixture_shape(state_root):
     assert network.merge_remote_secrets("hub", written["network.json"]["remotes"]["hub"])[
         "pass"
     ] == "fixture-password"
+    assert (
+        written["secrets.json"]["nodes"]["scholar"]["secrets"]["OPENAI_API_KEY"]
+        == "fixture-node-secret"
+    )
+    assert written["secrets.json"]["nodes"]["scholar"]["bind"] == network.node_binding(
+        "/tmp/fixture-scholar"
+    )

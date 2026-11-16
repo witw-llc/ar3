@@ -9,15 +9,15 @@ See [Tool nodes](../../../docs/a8s-tools.md).
 
 ## Needs
 
-Install AR3 and provide an `OPENAI_API_KEY` stored in the node's `secrets.json`
-(or set in `OPENAI_API_KEY` in the node's environment). No third-party Python
+Install AR3 and provide an `OPENAI_API_KEY` via `a8s vars <node> set secret.OPENAI_API_KEY -`
+(or stored in the node's working-directory `secrets.json`). No third-party Python
 packages are required.
 
 ## Register
 
 ```bash
 a8s add scholar ~/nodes/scholar tool-research --ALLOW=operator,assistant
-printf '%s\n' "$OPENAI_API_KEY" | ar3 tool research --node scholar secret set OPENAI_API_KEY -
+printf '%s\n' "$OPENAI_API_KEY" | a8s vars scholar set secret.OPENAI_API_KEY -
 a8s start scholar
 ```
 
@@ -119,7 +119,7 @@ ar3 tool research --help
 
 | Condition | Action |
 |---|---|
-| `OPENAI_API_KEY is not set` | Run `ar3 tool research --node scholar secret set OPENAI_API_KEY -` and pipe the key on stdin. |
+| `OPENAI_API_KEY is not set` | Run `a8s vars scholar set secret.OPENAI_API_KEY -` (or `ar3 tool research --node scholar secret set OPENAI_API_KEY -`) and pipe the key on stdin. |
 | `secrets.json` open to group or other users | Run `chmod 600 <workdir>/secrets.json`. |
 | Quorum not reached | Run `--resume` with the same message (or `ar3 tool research --node scholar resume <checkpoint-id>`) to resume completed sub-jobs from `.research/`. |
 

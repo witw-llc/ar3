@@ -46,6 +46,7 @@ mailing list: you know it came via the list, you don't know who else got it).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -63,6 +64,7 @@ from core import (
     resolve_files_path,
     resolve_inbox_path,
     resolve_outbox_path,
+    secrets_config_path,
     user_definitions_dir,
 )
 from registry import load_registry, resolve_recipient
@@ -105,6 +107,7 @@ PLACEHOLDER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)(\?)?")
 VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 ENV_VAR_PREFIX = "env."
+SECRET_VAR_PREFIX = "secret."
 # Names a8s injects on every wake. A node var that named one would lose to the
 # routing layer, so the verb refuses it where it is written.
 ROUTING_ENV_NAMES = frozenset(n.upper() for n in ROUTING_OWNED)
@@ -129,18 +132,34 @@ def split_env_var_key(key: str) -> str | None:
     return key[len(ENV_VAR_PREFIX):]
 
 
+def split_secret_var_key(key: str) -> str | None:
+    """The variable name in a `secret.<NAME>` var key, else None. Only the
+    prefix case-folds; environment variable names are case-sensitive."""
+    if key[: len(SECRET_VAR_PREFIX)].lower() != SECRET_VAR_PREFIX:
+        return None
+    return key[len(SECRET_VAR_PREFIX):]
+
+
 def canonical_var_key(key: str) -> str:
-    """The stored spelling of a var key: `env.<NAME>` keeps NAME as written,
-    every other key is uppercase."""
+    """The stored spelling of a var key: `env.<NAME>` and `secret.<NAME>` keep
+    NAME as written; every other key is uppercase."""
     name = split_env_var_key(key)
     if name is not None:
         return f"{ENV_VAR_PREFIX}{name}"
+    secret_name = split_secret_var_key(key)
+    if secret_name is not None:
+        return f"{SECRET_VAR_PREFIX}{secret_name}"
     return key.upper()
 
 
-def _env_name_problem(name: str) -> str | None:
+def _env_name_problem(name: str, *, secret: bool = False) -> str | None:
     """Why `name` cannot be a node environment variable, or None if it can."""
     if not VAR_NAME_RE.match(name):
+        if secret:
+            return (
+                f"a8s: secret name is not a usable environment variable name: {name!r} "
+                f"(try: a8s vars <node> set secret.OPENAI_API_KEY)"
+            )
         return (
             f"a8s: env name is not a usable environment variable name: {name!r} "
             f"(try: a8s vars <node> set env.OTEL_RESOURCE_ATTRIBUTES <value>)"
@@ -151,6 +170,8 @@ def _env_name_problem(name: str) -> str | None:
             f"a8s: {name} is set by a8s routing on every wake and a node var "
             f"may not override it"
         )
+    if secret and upper == "PATH":
+        return "a8s: PATH is not a secret variable; set env.PATH instead"
     return None
 
 
@@ -158,9 +179,9 @@ def validate_var_name(name: str) -> str:
     """Return the canonical a8s var key, or raise ValueError.
 
     Names are case-insensitive and stored uppercase: ``model`` and ``MODEL``
-    are the same var. An ``env.<NAME>`` key keeps NAME as written, because
-    environment variable names are case-sensitive; only the ``env.`` prefix
-    case-folds.
+    are the same var. ``env.<NAME>`` and ``secret.<NAME>`` keys keep NAME as
+    written, because environment variable names are case-sensitive; only the
+    ``env.`` / ``secret.`` prefix case-folds.
     """
     env_name = split_env_var_key(name)
     if env_name is not None:
@@ -168,6 +189,12 @@ def validate_var_name(name: str) -> str:
         if problem:
             raise ValueError(problem)
         return f"{ENV_VAR_PREFIX}{env_name}"
+    secret_name = split_secret_var_key(name)
+    if secret_name is not None:
+        problem = _env_name_problem(secret_name, secret=True)
+        if problem:
+            raise ValueError(problem)
+        return f"{SECRET_VAR_PREFIX}{secret_name}"
     if not VAR_NAME_RE.match(name):
         raise ValueError(
             f"var name must match [A-Za-z_][A-Za-z0-9_]*: {name!r}"
@@ -180,13 +207,18 @@ def validate_var_name(name: str) -> str:
 
 def argv_vars(raw: object) -> dict[str, str]:
     """The `$KEY` placeholders in a registry `vars` map: every string pair
-    except an `env.` key, which is environment and never argv. Keys come back
-    uppercase; duplicate spellings collapse."""
+    except an `env.` or `secret.` key, which are environment and never argv.
+    Keys come back uppercase; duplicate spellings collapse."""
     out: dict[str, str] = {}
     if not isinstance(raw, dict):
         return out
     for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, str) and split_env_var_key(k) is None:
+        if (
+            isinstance(k, str)
+            and isinstance(v, str)
+            and split_env_var_key(k) is None
+            and split_secret_var_key(k) is None
+        ):
             out[k.upper()] = v
     return out
 
@@ -215,7 +247,8 @@ def env_vars(raw: object) -> dict[str, str]:
 def load_agent_vars(name: str) -> dict[str, str]:
     """Per-node a8s vars from the registry (`agents.<name>.vars`), the ones
     that expand as `$KEY`. Keys are returned uppercase (canonical). Duplicate
-    spellings collapse. `env.` keys are not here; see `load_agent_env`.
+    spellings collapse. `env.` and `secret.` keys are not here; see
+    `load_agent_env` and `load_agent_secrets`.
     """
     match = resolve_recipient(name)
     if match is None:
@@ -224,13 +257,94 @@ def load_agent_vars(name: str) -> dict[str, str]:
     return argv_vars(info.get("vars"))
 
 
+def _node_binding(root: str) -> str:
+    blob = json.dumps({"root": str(root)}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _read_raw_node_secrets(node: str, root: str) -> dict[str, str]:
+    p = secrets_config_path()
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise ValueError(f"secrets.json unreadable: {p}: {e.strerror or e}") from None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise ValueError(f"secrets.json unreadable: {p}: not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"secrets.json unreadable: {p}: top level is not an object")
+    for section in ("remotes", "services", "nodes"):
+        if section in data and not isinstance(data[section], dict):
+            raise ValueError(f"secrets.json unreadable: {p}: {section!r} is not an object")
+    if "nodes" not in data:
+        return {}
+    nodes_map = data["nodes"]
+    matches = [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]
+    if not matches:
+        return {}
+    expected_bind = _node_binding(root) if isinstance(root, str) and root else None
+    out: dict[str, str] = {}
+    for match_key in matches:
+        entry = nodes_map[match_key]
+        if (
+            not isinstance(entry, dict)
+            or not set(entry) <= {"bind", "secrets"}
+            or not isinstance(entry.get("bind"), str)
+            or not entry["bind"]
+            or not isinstance(entry.get("secrets"), dict)
+        ):
+            raise ValueError(
+                f"secrets.json unreadable: {p}: node {node!r} entry is not a bound secret object"
+            )
+        if expected_bind is None or entry["bind"] != expected_bind:
+            raise ValueError(
+                f"secrets.json: stored secrets for node {node!r} belong to a different directory"
+            )
+        for k, v in entry["secrets"].items():
+            if (
+                not isinstance(k, str)
+                or not k
+                or "=" in k
+                or "\0" in k
+                or not isinstance(v, str)
+                or not v
+                or "\0" in v
+            ):
+                raise ValueError(
+                    f"secrets.json unreadable: {p}: invalid secret entry on node {node!r}"
+                )
+            out[k] = v
+    return out
+
+
+def load_agent_secrets(name: str) -> dict[str, str]:
+    """The node's stored `secret.<NAME>` variables from `secrets.json`, NAME -> value."""
+    match = resolve_recipient(name)
+    if match is None:
+        return {}
+    agent_key, info = match
+    raw = _read_raw_node_secrets(agent_key, str(info.get("root") or ""))
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not VAR_NAME_RE.match(k) or k.upper() == "PATH":
+            raise ValueError(f"node secret var name is not usable as a variable: {k!r}")
+        upper = k.upper()
+        if upper in ROUTING_ENV_NAMES or upper.startswith(ROUTING_ENV_PREFIX):
+            continue
+        out[k] = v
+    return out
+
+
 def load_agent_env(name: str) -> dict[str, str]:
-    """The node's own environment variables (`env.<NAME>` vars), NAME -> value."""
+    """The node's own environment variables (`env.<NAME>` and `secret.<NAME>`), NAME -> value."""
     match = resolve_recipient(name)
     if match is None:
         return {}
     _, info = match
-    return env_vars(info.get("vars"))
+    return {**env_vars(info.get("vars")), **load_agent_secrets(name)}
 
 
 def placeholder_names(argv: list[str]) -> set[str]:

@@ -76,7 +76,9 @@ def test_set_reads_the_value_from_stdin_and_list_prints_names_only(world):
     run = ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", "--origin", ORIGIN, stdin=SENTINEL)
     assert run.returncode == 0, run.stderr
     clean(run)
-    assert stored(seats)["PASSWORD"] == {"value": SENTINEL, "origins": [ORIGIN]}
+    raw = json.loads((seats / "web1" / "secrets.json").read_text())
+    assert raw["version"] == 2
+    assert stored(seats)["PASSWORD"] == [{"value": SENTINEL, "origins": [ORIGIN]}]
     assert oct((seats / "web1" / "secrets.json").stat().st_mode & 0o777) == "0o600"
     listed = ar3(env, "--node", "web1", "secret", "list")
     assert listed.returncode == 0, listed.stderr
@@ -95,7 +97,7 @@ def test_the_node_option_goes_before_secret_and_a_late_one_is_refused_without_st
 def test_a_trailing_newline_is_dropped_and_an_inner_one_kept(world):
     env, seats = world
     ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", "--origin", ORIGIN, stdin="ab\ncd\n")
-    assert stored(seats)["PASSWORD"]["value"] == "ab\ncd"
+    assert stored(seats)["PASSWORD"][0]["value"] == "ab\ncd"
 
 
 def test_setting_an_existing_name_again_keeps_its_origins(world):
@@ -104,7 +106,38 @@ def test_setting_an_existing_name_again_keeps_its_origins(world):
     run = ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", stdin=SENTINEL)
     assert run.returncode == 0, run.stderr
     clean(run)
-    assert stored(seats)["PASSWORD"] == {"value": SENTINEL, "origins": [ORIGIN, "https://b.example.org"]}
+    assert stored(seats)["PASSWORD"] == [{"value": SENTINEL, "origins": [ORIGIN, "https://b.example.org"]}]
+
+
+def test_same_name_on_distinct_origins_preserves_both_and_rm_origin_drops_one(world):
+    env, seats = world
+    second_sentinel = "s3ntinel-SECOND-value-4b1e"
+    other_origin = "https://portal.example.org"
+    r1 = ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", "--origin", ORIGIN, stdin=SENTINEL)
+    r2 = ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", "--origin", other_origin, stdin=second_sentinel)
+    assert r1.returncode == 0 and r2.returncode == 0
+    clean(r1)
+    assert second_sentinel not in r2.stdout + r2.stderr
+    assert stored(seats)["PASSWORD"] == [
+        {"value": SENTINEL, "origins": [ORIGIN]},
+        {"value": second_sentinel, "origins": [other_origin]},
+    ]
+    listed = ar3(env, "--node", "web1", "secret", "list")
+    assert listed.returncode == 0
+    clean(listed)
+    assert second_sentinel not in listed.stdout + listed.stderr
+    assert listed.stdout.splitlines() == [
+        f"PASSWORD {ORIGIN}",
+        f"PASSWORD {other_origin}",
+    ]
+
+    ambiguous = ar3(env, "--node", "web1", "secret", "set", "PASSWORD", "-", stdin="ignored-value")
+    assert ambiguous.returncode == 1 and "multiple origins" in ambiguous.stderr
+    assert "ignored-value" not in ambiguous.stdout + ambiguous.stderr
+
+    rm_one = ar3(env, "--node", "web1", "secret", "rm", "PASSWORD", "--origin", ORIGIN)
+    assert rm_one.returncode == 0
+    assert stored(seats)["PASSWORD"] == [{"value": second_sentinel, "origins": [other_origin]}]
 
 
 def test_a_new_name_needs_an_origin_and_the_refusal_gives_an_example(world):

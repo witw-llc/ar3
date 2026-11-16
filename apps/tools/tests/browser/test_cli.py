@@ -382,7 +382,7 @@ ORIGIN = "https://app.example.com"
 
 
 def _entry(value, origins=(ORIGIN,)):
-    return {"value": value, "origins": list(origins)}
+    return [{"value": value, "origins": list(origins)}]
 
 
 class _Stdin(io.StringIO):
@@ -666,11 +666,59 @@ def test_secret_set_keeps_every_origin_given_normalized_and_once(monkeypatch, ca
     }
 
 
-def test_secret_set_replaces_the_origins_with_the_value(monkeypatch):
+def test_secret_set_preserves_other_origins_and_updates_matching_origins(monkeypatch, capsys):
     secretstore.set_secret("s", "PASSWORD", "first-value", ["https://a.example.com", "https://b.example.com"])
     _stdin(monkeypatch, "second-value")
     assert _secret(monkeypatch, "set", "PASSWORD", "--origin", "https://c.example.com", "--seat", "s") == 0
-    assert secretstore.read("s") == {"PASSWORD": _entry("second-value", ["https://c.example.com"])}
+    capsys.readouterr()
+    assert secretstore.read("s") == {
+        "PASSWORD": [
+            {"value": "first-value", "origins": ["https://a.example.com", "https://b.example.com"]},
+            {"value": "second-value", "origins": ["https://c.example.com"]},
+        ]
+    }
+    assert _secret(monkeypatch, "list", "--seat", "s") == 0
+    out, err = capsys.readouterr()
+    assert out == (
+        "PASSWORD https://a.example.com https://b.example.com\n"
+        "PASSWORD https://c.example.com\n"
+    )
+    assert err == ""
+
+
+def test_secret_set_without_origin_updates_single_binding_and_refuses_multiple_before_reading_input(monkeypatch, capsys):
+    secretstore.set_secret("s", "PASSWORD", "first-value", ["https://a.example.com"])
+    _stdin(monkeypatch, "updated-value")
+    assert _secret(monkeypatch, "set", "PASSWORD", "--seat", "s") == 0
+    capsys.readouterr()
+    assert secretstore.read("s") == {"PASSWORD": _entry("updated-value", ["https://a.example.com"])}
+
+    secretstore.set_secret("s", "PASSWORD", "other-value", ["https://b.example.com"])
+
+    class Boom(_Stdin):
+        def read(self, *a):
+            pytest.fail("stdin was read when multiple origin bindings exist without --origin")
+
+    monkeypatch.setattr(sys, "stdin", Boom("never-read-value"))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt="": pytest.fail("prompted when ambiguous"))
+    assert _secret(monkeypatch, "set", "PASSWORD", "--seat", "s") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "multiple origins" in err and "--origin" in err
+    assert "never-read-value" not in err
+
+
+def test_secret_rm_with_origin_removes_only_matching_origins(monkeypatch, capsys):
+    secretstore.set_secret("s", "PASSWORD", "pw-a", ["https://a.example.com"])
+    secretstore.set_secret("s", "PASSWORD", "pw-b", ["https://b.example.com"])
+    assert _secret(monkeypatch, "rm", "PASSWORD", "--origin", "https://c.example.com", "--seat", "s") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == "s: secret PASSWORD has no binding for https://c.example.com\n"
+
+    assert _secret(monkeypatch, "rm", "PASSWORD", "--origin", "https://a.example.com", "--seat", "s") == 0
+    assert capsys.readouterr() == ("s: removed PASSWORD\n", "")
+    assert secretstore.read("s") == {"PASSWORD": _entry("pw-b", ["https://b.example.com"])}
 
 
 @pytest.mark.parametrize(
@@ -702,7 +750,9 @@ def test_a_wildcard_on_one_label_is_refused_with_the_reason_and_localhost_passes
         _stdin(monkeypatch, VALUE)
         assert _secret(monkeypatch, "set", "PASSWORD", "--origin", origin, "--seat", "s") == 0, origin
     capsys.readouterr()
-    assert secretstore.read("s")["PASSWORD"]["origins"] == ["http://*.localhost:3000"]
+    assert secretstore.read("s")["PASSWORD"] == [
+        {"value": VALUE, "origins": ["https://*.example.com", "https://*.co.uk", "http://*.localhost:3000"]}
+    ]
 
 
 def test_a_bad_origin_is_not_repeated_in_the_message(monkeypatch, capsys):
@@ -1060,11 +1110,24 @@ def test_secret_set_takes_a_dash_for_stdin_and_keeps_the_origins_of_a_stored_nam
     assert VALUE not in _silent(capsys)
 
 
-def test_secret_set_with_an_origin_replaces_the_stored_ones(monkeypatch):
+def test_secret_set_with_an_origin_keeps_other_origins_and_replaces_same_origin(monkeypatch):
     secretstore.set_secret("s", "PASSWORD", "old-value-1", [ORIGIN])
     _stdin(monkeypatch, VALUE)
     assert _secret(monkeypatch, "set", "PASSWORD", "-", "--origin", "https://b.example.org", "--seat", "s") == 0
-    assert secretstore.read("s") == {"PASSWORD": _entry(VALUE, ("https://b.example.org",))}
+    assert secretstore.read("s") == {
+        "PASSWORD": [
+            {"value": "old-value-1", "origins": [ORIGIN]},
+            {"value": VALUE, "origins": ["https://b.example.org"]},
+        ]
+    }
+    _stdin(monkeypatch, "new-value-1")
+    assert _secret(monkeypatch, "set", "PASSWORD", "-", "--origin", ORIGIN, "--seat", "s") == 0
+    assert secretstore.read("s") == {
+        "PASSWORD": [
+            {"value": VALUE, "origins": ["https://b.example.org"]},
+            {"value": "new-value-1", "origins": [ORIGIN]},
+        ]
+    }
 
 
 def test_secret_set_refuses_a_value_given_as_an_argument_without_quoting_it(monkeypatch, capsys):

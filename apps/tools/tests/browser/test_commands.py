@@ -932,6 +932,28 @@ def test_the_selector_and_value_are_json_string_literals(monkeypatch, tmp_path):
     assert json.dumps(selector) in text and json.dumps(odd) in text
 
 
+def test_fill_secret_with_multiple_bindings_dispatches_multi_binding_code_and_scrubs_all_values(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path, snapshot=lambda seat: "- textbox: pw-alpha-val and pw-beta-val")
+    secretstore.set_secret("seat", "PASSWORD", "pw-alpha-val", [ORIGIN])
+    secretstore.set_secret("seat", "PASSWORD", "pw-beta-val", ["https://other.example.org"])
+    cli = FakeCli(monkeypatch)
+    run = commands.run_script("seat", "fill-secret #pw PASSWORD\nsnap")
+    assert run.ok, run.error
+    assert "const rules = " in cli.code[0]["text"]
+    assert "pw-alpha-val" not in cli.argv_text() and "pw-beta-val" not in cli.argv_text()
+    everything = _everything(run)
+    assert "pw-alpha-val" not in everything and "pw-beta-val" not in everything
+    assert "- textbox: [secret:PASSWORD] and [secret:PASSWORD]" in everything
+
+    cli.fill = _Completed(0, '{"refused":"https://unlisted.example"}\n')
+    refused = commands.run_script("seat", "fill-secret #pw PASSWORD")
+    assert not refused.ok
+    assert refused.error == (
+        "fill-secret: secret PASSWORD may not be typed on origin https://unlisted.example; "
+        f"allowed origins: {ORIGIN}, https://other.example.org"
+    )
+
+
 def test_an_unknown_secret_fails_before_any_page_work(monkeypatch, tmp_path):
     cli = _cli(monkeypatch, tmp_path)
     run = commands.run_script("seat", "fill-secret #pw NOPE\nurl")

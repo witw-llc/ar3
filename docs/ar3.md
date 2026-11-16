@@ -79,12 +79,15 @@ Put wrapper options before the command. Use `ar3 tool NAME --help` for public
 commands and settings. Use `ar3 tool NAME COMMAND --help` for one local verb.
 Help performs no tool operation.
 
-`--node NAME` loads a registered node's variables, environment settings, and
+`--node NAME` loads a registered node's variables, `env.<NAME>` and
+`secret.<NAME>` environment settings, and
 root directory. Its definition must match the tool name. `--seat NAME` selects
 local state without loading registered settings. Do not combine them.
 Without either selector, the tool uses its default name and the current
-directory. `--var KEY=VALUE` overrides a setting for one run and is applied
-last. Saved configuration uses `a8s vars NODE set KEY VALUE`.
+directory. `--var KEY=VALUE` overrides a non-secret setting for one run and is
+applied last (`--var secret.*` is refused; store node secrets with
+`a8s vars NODE set secret.<NAME> -`). Saved configuration uses
+`a8s vars NODE set KEY VALUE`.
 
 The local operator passes `ALLOW` by default. `--from NAME` selects the local
 message sender, otherwise `operator`. A final `--var ALLOW=...` can still

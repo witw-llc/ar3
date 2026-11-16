@@ -57,6 +57,7 @@ from services import StorageService
 from transports import OnMessage, PublishAmbiguous, Transport, TransportError
 import txlog
 from ar3.fsio import atomic_write_text, stat_or_none
+from ar3.locking import file_lock
 from ar3.ulid import is_ulid, parse as parse_ulid
 
 
@@ -145,8 +146,12 @@ def _remote_discarded(
 SECRET_SPEC_KEYS = frozenset({"pass", "password"})
 
 
-def _parse_sections(raw: bytes | None, label: str) -> dict:
-    empty = {"remotes": {}, "services": {}}
+def _parse_sections(
+    raw: bytes | None,
+    label: str,
+    sections: tuple[str, ...] = ("remotes", "services"),
+) -> dict:
+    empty = {section: {} for section in sections}
     if raw is None:
         return empty
     try:
@@ -156,34 +161,36 @@ def _parse_sections(raw: bytes | None, label: str) -> dict:
         return empty
     if not isinstance(data, dict):
         return empty
-    data.setdefault("remotes", {})
-    if not isinstance(data["remotes"], dict):
-        data["remotes"] = {}
-    data.setdefault("services", {})
-    if not isinstance(data["services"], dict):
-        data["services"] = {}
+    for section in sections:
+        data.setdefault(section, {})
+        if not isinstance(data[section], dict):
+            data[section] = {}
     return data
 
 
-def _load_sections(p, label: str) -> dict:
+def _load_sections(
+    p,
+    label: str,
+    sections: tuple[str, ...] = ("remotes", "services"),
+) -> dict:
     try:
         raw = p.read_bytes() if p.is_file() else None
     except OSError as e:
         out_err(f"WARN: {label} malformed ({e}); treating as empty")
-        return {"remotes": {}, "services": {}}
-    return _parse_sections(raw, label)
+        return {section: {} for section in sections}
+    return _parse_sections(raw, label, sections)
 
 
 def parse_network_config(raw: bytes | None) -> dict:
-    return _parse_sections(raw, "network.json")
+    return _parse_sections(raw, "network.json", ("remotes", "services"))
 
 
 def parse_secrets_config(raw: bytes | None) -> dict:
-    return _parse_sections(raw, "secrets.json")
+    return _parse_sections(raw, "secrets.json", ("remotes", "services", "nodes"))
 
 
 def load_network_config() -> dict:
-    return _load_sections(network_config_path(), "network.json")
+    return _load_sections(network_config_path(), "network.json", ("remotes", "services"))
 
 
 def save_network_config(cfg: dict) -> None:
@@ -191,13 +198,249 @@ def save_network_config(cfg: dict) -> None:
 
 
 def load_secrets_config() -> dict:
-    return _load_sections(secrets_config_path(), "secrets.json")
+    return _load_sections(secrets_config_path(), "secrets.json", ("remotes", "services", "nodes"))
 
 
 def save_secrets_config(cfg: dict) -> None:
     """Atomic write of secrets.json with mode 0600."""
+    cfg = dict(cfg)
+    for section in ("remotes", "services", "nodes"):
+        if not isinstance(cfg.get(section), dict):
+            cfg[section] = {}
     payload = json.dumps(cfg, indent=2) + "\n"
     atomic_write_text(secrets_config_path(), payload, fsync=True, mode=0o600)
+
+
+class SecretsUnreadable(ValueError):
+    """secrets.json exists on disk and cannot be safely read or updated."""
+
+
+def _secrets_lock_path() -> Path:
+    return secrets_config_path().with_name(".secrets.lock")
+
+
+def load_secrets_config_strict() -> dict:
+    """Read secrets.json without silently treating a damaged file as empty."""
+    p = secrets_config_path()
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        return {"remotes": {}, "services": {}, "nodes": {}}
+    except OSError as e:
+        raise SecretsUnreadable(f"secrets.json unreadable: {p}: {e.strerror or e}") from None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise SecretsUnreadable(f"secrets.json unreadable: {p}: not valid JSON") from None
+    if not isinstance(data, dict):
+        raise SecretsUnreadable(f"secrets.json unreadable: {p}: top level is not an object")
+    out_cfg = dict(data)
+    for section in ("remotes", "services", "nodes"):
+        val = out_cfg.get(section)
+        if section in out_cfg and not isinstance(val, dict):
+            raise SecretsUnreadable(
+                f"secrets.json unreadable: {p}: '{section}' is not an object"
+            )
+        out_cfg[section] = dict(val) if isinstance(val, dict) else {}
+    return out_cfg
+
+
+def node_binding(root: str) -> str:
+    """Digest of a node's registered root directory: the identity a node secret belongs to."""
+    blob = json.dumps({"root": str(root)}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _parse_node_secrets_entry(node: str, entry: object) -> tuple[str, dict[str, str]]:
+    p = secrets_config_path()
+    if not isinstance(entry, dict) or not set(entry) <= {SECRET_BINDING_KEY, "secrets"}:
+        raise SecretsUnreadable(
+            f"secrets.json unreadable: {p}: node {node!r} entry is not a bound secret object"
+        )
+    bind_val = entry.get(SECRET_BINDING_KEY)
+    raw_secrets = entry.get("secrets")
+    if not isinstance(bind_val, str) or not bind_val or not isinstance(raw_secrets, dict):
+        raise SecretsUnreadable(
+            f"secrets.json unreadable: {p}: node {node!r} entry is missing 'bind' or 'secrets'"
+        )
+    result: dict[str, str] = {}
+    for k, v in raw_secrets.items():
+        if (
+            not isinstance(k, str)
+            or not k
+            or "=" in k
+            or "\0" in k
+            or not isinstance(v, str)
+            or not v
+            or "\0" in v
+        ):
+            raise SecretsUnreadable(
+                f"secrets.json unreadable: {p}: invalid secret entry on node {node!r}"
+            )
+        result[k] = v
+    return bind_val, result
+
+
+def load_node_secrets_map(node: str, root: str) -> dict[str, str]:
+    """Return `{NAME: value}` stored for `(node, root)` in `secrets.json['nodes']`."""
+    cfg = load_secrets_config_strict()
+    nodes_map = cfg["nodes"]
+    matches = [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]
+    if not matches:
+        return {}
+    expected_bind = node_binding(root) if isinstance(root, str) and root else None
+    merged: dict[str, str] = {}
+    for k in matches:
+        bind_val, secrets_map = _parse_node_secrets_entry(k, nodes_map[k])
+        if expected_bind is None or bind_val != expected_bind:
+            raise SecretsUnreadable(
+                f"secrets.json: stored secrets for node {node!r} belong to a different directory"
+            )
+        merged.update(secrets_map)
+    return merged
+
+
+def set_node_secret(node: str, root: str, key: str, value: str) -> bool:
+    """Store `secret.<key>` for `(node, root)` in `0600` `secrets.json`. Returns True if overwritten."""
+    if not isinstance(root, str) or not root:
+        raise SecretsUnreadable(f"node {node!r} has no registered root directory")
+    expected_bind = node_binding(root)
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config_strict()
+        nodes_map = cfg["nodes"]
+        matches = [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]
+        secrets_map: dict[str, str] = {}
+        for k in matches:
+            bind_val, existing_secrets = _parse_node_secrets_entry(k, nodes_map[k])
+            if bind_val != expected_bind:
+                raise SecretsUnreadable(
+                    f"secrets.json: stored secrets for node {node!r} belong to a different directory"
+                )
+            secrets_map.update(existing_secrets)
+            if k != node:
+                del nodes_map[k]
+        overwritten = key in secrets_map
+        secrets_map[key] = value
+        nodes_map[node] = {
+            SECRET_BINDING_KEY: expected_bind,
+            "secrets": dict(sorted(secrets_map.items())),
+        }
+        save_secrets_config(cfg)
+        return overwritten
+
+
+def unset_node_secret(node: str, root: str, key: str) -> bool:
+    """Remove `secret.<key>` from `(node, root)` in `secrets.json`. Returns True if removed."""
+    if not secrets_config_path().exists():
+        return False
+    expected_bind = node_binding(root) if isinstance(root, str) and root else None
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config_strict()
+        nodes_map = cfg["nodes"]
+        matches = [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]
+        if not matches:
+            return False
+        secrets_map: dict[str, str] = {}
+        for k in matches:
+            bind_val, existing_secrets = _parse_node_secrets_entry(k, nodes_map[k])
+            if expected_bind is None or bind_val != expected_bind:
+                raise SecretsUnreadable(
+                    f"secrets.json: stored secrets for node {node!r} belong to a different directory"
+                )
+            secrets_map.update(existing_secrets)
+        if key not in secrets_map:
+            return False
+        for k in matches:
+            del nodes_map[k]
+        del secrets_map[key]
+        if secrets_map:
+            nodes_map[node] = {
+                SECRET_BINDING_KEY: expected_bind,
+                "secrets": dict(sorted(secrets_map.items())),
+            }
+        save_secrets_config(cfg)
+        return True
+
+
+def reconcile_node_secrets_on_add(
+    node: str, root: str, *, mode: str | None = None
+) -> str | None:
+    """Validate and reconcile retained `secrets.json['nodes'][node]` during `a8s add`.
+
+    - Missing `secrets.json` or no retained entry for `node`: returns None.
+    - Damaged `secrets.json` (any section): raises `SecretsUnreadable` (never swallowed).
+    - Matching `bind` digest (registry reconstruction at the same root): preserves secrets
+      and returns `'preserved'`.
+    - Mismatched `bind` digest:
+      - `mode == 'rebind'`: updates `bind` to `root` without re-entering secrets (`'rebound'`).
+      - `mode == 'drop'`: deletes the retained entry (`'dropped'`).
+      - `mode is None`: raises `SecretsUnreadable` naming `--rebind-secrets` and `--drop-secrets`
+        without modifying `secrets.json`.
+    """
+    if not secrets_config_path().exists():
+        return None
+    expected_bind = node_binding(root)
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config_strict()
+        nodes_map = cfg["nodes"]
+        matches = [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]
+        if not matches:
+            return None
+        if mode == "drop":
+            for k in matches:
+                del nodes_map[k]
+            save_secrets_config(cfg)
+            return "dropped"
+        binds: set[str] = set()
+        merged: dict[str, str] = {}
+        for k in matches:
+            bind_val, secrets_map = _parse_node_secrets_entry(k, nodes_map[k])
+            binds.add(bind_val)
+            merged.update(secrets_map)
+        if not merged:
+            for k in matches:
+                del nodes_map[k]
+            save_secrets_config(cfg)
+            return None
+        if binds == {expected_bind}:
+            if matches != [node]:
+                for k in matches:
+                    del nodes_map[k]
+                nodes_map[node] = {
+                    SECRET_BINDING_KEY: expected_bind,
+                    "secrets": dict(sorted(merged.items())),
+                }
+                save_secrets_config(cfg)
+            return "preserved"
+        if mode == "rebind":
+            for k in matches:
+                del nodes_map[k]
+            nodes_map[node] = {
+                SECRET_BINDING_KEY: expected_bind,
+                "secrets": dict(sorted(merged.items())),
+            }
+            save_secrets_config(cfg)
+            return "rebound"
+        raise SecretsUnreadable(
+            f"stored secrets for {node!r} belong to a different directory; "
+            f"pass --rebind-secrets to move them to {root}, or --drop-secrets to discard them"
+        )
+
+
+def delete_node_secrets(node: str) -> bool:
+    """Remove all stored secrets for `node` when it is unregistered."""
+    if not secrets_config_path().exists():
+        return False
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config_strict()
+        nodes_map = cfg["nodes"]
+        removed = False
+        for k in [k for k in nodes_map if isinstance(k, str) and k.lower() == node.lower()]:
+            del nodes_map[k]
+            removed = True
+        if removed:
+            save_secrets_config(cfg)
+        return removed
 
 
 def split_secret_keys(spec: dict) -> tuple[dict, dict]:
@@ -367,36 +610,40 @@ def put_spec_secrets(
     reader already treats it as missing, and rebinding it would hand it to a
     destination it was never typed for.
     """
-    cfg = load_secrets_config()
-    prev = cfg[section].get(name)
-    merged: dict = {}
-    if isinstance(prev, dict):
-        kept = {k: v for k, v in prev.items() if k in SECRET_SPEC_KEYS}
-        if kept and not secrets:
-            if isinstance(prior, dict) and prev.get(SECRET_BINDING_KEY) == spec_binding(prior):
-                merged = kept
-            else:
-                out_err(
-                    f"stored password for {_SECTION_NOUN[section]} {name!r} dropped: it is "
-                    "not bound to the entry's previous destination; enter it again"
-                )
-                del cfg[section][name]
-                save_secrets_config(cfg)
-                return
-    merged.update(secrets)
-    if not merged:
-        return
-    merged[SECRET_BINDING_KEY] = spec_binding(spec)
-    cfg[section][name] = merged
-    save_secrets_config(cfg)
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config()
+        prev = cfg[section].get(name)
+        merged: dict = {}
+        if isinstance(prev, dict):
+            kept = {k: v for k, v in prev.items() if k in SECRET_SPEC_KEYS}
+            if kept and not secrets:
+                if isinstance(prior, dict) and prev.get(SECRET_BINDING_KEY) == spec_binding(prior):
+                    merged = kept
+                else:
+                    out_err(
+                        f"stored password for {_SECTION_NOUN[section]} {name!r} dropped: it is "
+                        "not bound to the entry's previous destination; enter it again"
+                    )
+                    del cfg[section][name]
+                    save_secrets_config(cfg)
+                    return
+        merged.update(secrets)
+        if not merged:
+            return
+        merged[SECRET_BINDING_KEY] = spec_binding(spec)
+        cfg[section][name] = merged
+        save_secrets_config(cfg)
 
 
 def delete_spec_secrets(section: str, name: str) -> None:
-    cfg = load_secrets_config()
-    if name not in cfg[section]:
+    if not secrets_config_path().exists():
         return
-    del cfg[section][name]
-    save_secrets_config(cfg)
+    with file_lock(_secrets_lock_path()):
+        cfg = load_secrets_config()
+        if name not in cfg[section]:
+            return
+        del cfg[section][name]
+        save_secrets_config(cfg)
 
 
 def merge_remote_secrets(name: str, spec: dict) -> dict:

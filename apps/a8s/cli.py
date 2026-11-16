@@ -60,7 +60,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("define",   "<name> [<def>]",            "Show or set an agent's definition (path or bare name)."),
     ("definitions", "[add|rm|ls ...]",       "Manage user-installed definition templates (~/.config/a8s/definitions)."),
     ("defs",     "[add|rm|ls ...]",          "Alias for definitions."),
-    ("vars",     "<name> [set|unset ...]",   "Get/set per-node vars: argv $KEY, or env.<NAME> for the environment."),
+    ("vars",     "<name> [set|unset ...]",   "Get/set per-node vars: argv $KEY, env.<NAME>, or secret.<NAME>."),
     ("alias",    "[<name> [<member>]]",       "Group agents under an alias name; show one with `<name>`."),
     ("unalias",  "<alias> [<member>]",        "Remove a member from an alias, or the whole alias."),
     ("aliases",  "",                          "List aliases and their members."),

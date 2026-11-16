@@ -24,6 +24,7 @@ TOOL = Path(__file__).resolve().parents[2] / "browser"
 
 # Made-up values. The password has the characters a snapshot has to quote.
 PASSWORD = '@Zq7"live\\password: #4417'
+OTHER_PASSWORD = "other-origin-pw-7712"
 PIN = "pin-live-8820"
 WRONG = "wrong-live-value-3351"
 CONTROL = "argv-control-9954"
@@ -82,11 +83,11 @@ FRAME = """<!doctype html>
 """
 
 
-def _serve(inner=None):
+def _serve(inner=None, password=PASSWORD):
     """The form, on 127.0.0.1 and a port of its own, so each server is its own origin. The page
     holds the SHA-256 of the right values, not the values. `/frame` is a page that frames `inner`."""
     want = {
-        "pw": hashlib.sha256(PASSWORD.encode()).hexdigest(),
+        "pw": hashlib.sha256(password.encode()).hexdigest(),
         "pin": hashlib.sha256(PIN.encode()).hexdigest(),
     }
     form = (PAGE % {"want": json.dumps(want)}).encode()
@@ -207,7 +208,7 @@ def test_a_stored_secret_signs_in_and_its_value_reaches_nothing_but_the_store(tm
     env = _env(tmp_path)
     home = tmp_path / "data/ar3/browser" / seat
     profile = home / "chrome"
-    other = _serve()
+    other = _serve(password=OTHER_PASSWORD)
     server = _serve(inner=f"http://127.0.0.1:{other.server_address[1]}/")
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     elsewhere = f"http://127.0.0.1:{other.server_address[1]}/"
@@ -355,15 +356,37 @@ def test_a_stored_secret_signs_in_and_its_value_reaches_nothing_but_the_store(tm
         assert _script(env, seat, "url\n")[0].returncode == 0
         assert _mode(home) == 0o700 and _mode(scratch) == 0o700
 
+        # Two bindings under the same name (PASSWORD) on different origins both sign in without stomping each other.
+        other_origin = elsewhere.rstrip("/")
+        _set(env, seat, "PASSWORD", OTHER_PASSWORD, other_origin)
+        _set(env, seat, "PIN", PIN, other_origin)
+        with ArgvWatcher([PASSWORD, OTHER_PASSWORD, PIN]) as watch_multi:
+            first_multi, p1 = _script(
+                env, seat, f"go {url}\nfill-secret #pw PASSWORD\nfill-secret #pin PIN\nclick #go\nwait 1\ntext #result\n"
+            )
+            second_multi, p2 = _script(
+                env, seat, f"go {elsewhere}\nfill-secret #pw PASSWORD\nfill-secret #pin PIN\nclick #go\nwait 1\ntext #result\n"
+            )
+        assert first_multi.returncode == 0 and p1["steps"][-1]["output"] == "result: ok", p1
+        assert second_multi.returncode == 0 and p2["steps"][-1]["output"] == "result: ok", p2
+        assert watch_multi.seen == set(), f"a value was in a command line: {watch_multi.seen}"
+        assert PASSWORD not in first_multi.stdout + second_multi.stdout
+        assert OTHER_PASSWORD not in first_multi.stdout + second_multi.stdout
+        assert _tool(env, seat, "secret", "rm", "PASSWORD", "--origin", other_origin).returncode == 0
+        assert _tool(env, seat, "secret", "rm", "PIN", "--origin", other_origin).returncode == 0
+
         # Close Chrome so the profile is flushed, then look in every file for every value.
         assert _tool(env, seat, "close").returncode == 0
         assert _gone(profile)
-        found = _files_holding([home, tmp_path / "cache"], [PASSWORD, PIN, WRONG])
+        found = _files_holding([home, tmp_path / "cache"], [PASSWORD, OTHER_PASSWORD, PIN, WRONG])
         assert set(found) <= {str(store)}, found
-        assert json.loads(store.read_text())["secrets"] == {
-            "PASSWORD": {"value": PASSWORD, "origins": [allowed, "https://*.example.org"]},
-            "PIN": {"value": PIN, "origins": [allowed]},
-            "WRONG": {"value": WRONG, "origins": [allowed]},
+        assert json.loads(store.read_text()) == {
+            "version": 2,
+            "secrets": {
+                "PASSWORD": [{"value": PASSWORD, "origins": [allowed, "https://*.example.org"]}],
+                "PIN": [{"value": PIN, "origins": [allowed]}],
+                "WRONG": [{"value": WRONG, "origins": [allowed]}],
+            },
         }
 
         prefs = json.loads((profile / "Default" / "Preferences").read_text())

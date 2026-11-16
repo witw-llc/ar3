@@ -276,3 +276,46 @@ def test_timer_transcribe_and_research_local_commands_use_node_root(world):
     tr_att_only = run(world, "transcribe", "--node", "scribe1", "--attach", str(sample_audio))
     assert tr_att_only.returncode == 0, tr_att_only.stderr
     assert "spoken memo payload" in tr_att_only.stdout
+
+
+def test_node_secret_vars_reach_ar3_tool_and_cli_var_flag_refuses_secrets(world):
+    from ar3.nodes import _node_binding
+
+    base, root, env = world
+    registry = Path(env["A8S_HOME"])
+    data = json.loads((registry / "a8s.json").read_text())
+    data["agents"]["shell1"] = {
+        "root": str(root),
+        "definition": "tool-command-shell",
+        "vars": {"ALLOW": "other"},
+    }
+    (registry / "a8s.json").write_text(json.dumps(data))
+    (registry / "secrets.json").write_text(
+        json.dumps({
+            "remotes": {},
+            "services": {},
+            "nodes": {
+                "shell1": {
+                    "bind": _node_binding(str(root)),
+                    "secrets": {"SECRET_API_TOKEN": "tok-node-secret-77"},
+                }
+            },
+        })
+    )
+
+    sentinel = "sk-CLI-LEAK-9999"
+    refused = run(world, "command-shell", "--node", "shell1", "--var", f"secret.SECRET_API_TOKEN={sentinel}", "--", "true")
+    assert refused.returncode == 2
+    assert sentinel not in refused.stdout + refused.stderr
+    assert "never passed on the command line" in refused.stderr
+
+    ok = run(
+        world,
+        "command-shell",
+        "--node",
+        "shell1",
+        "--",
+        "python3 -c \"import os; print('LEN=' + str(len(os.environ.get('SECRET_API_TOKEN', ''))))\"",
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert "LEN=18" in ok.stdout

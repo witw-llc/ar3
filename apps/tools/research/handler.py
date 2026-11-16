@@ -422,8 +422,9 @@ def handle_wake(
     if not api_key:
         sent = rt.send_reply(
             sender,
-            f"tool-research: OPENAI_API_KEY is not set; store it with: "
-            f"ar3 tool research --node {seat} secret set OPENAI_API_KEY -",
+            f"tool-research: OPENAI_API_KEY is not set; store it with "
+            f"`a8s vars {seat} set secret.OPENAI_API_KEY` (or "
+            f"`ar3 tool research --node {seat} secret set OPENAI_API_KEY -`)",
         )
         return _exit_code(sent, ok=False)
 

@@ -10,6 +10,34 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.134
+
+### Added
+
+- `a8s vars <name> set secret.<NAME> [-]` and `a8s vars <name> unset secret.<NAME>`:
+  per-node secret environment variables stored in `0600` `<a8s-home>/secrets.json`
+  under `"nodes"` bound to the node's registered `root` (read from stdin or a
+  hidden terminal prompt and refused on `argv`, `a8s add`, and `ar3 tool --var`),
+  redacted as `[secret]` in `a8s vars <name>` and `(hidden)` in `a8s health <name>`,
+  injected into wake and `ar3 tool --node` child environments above `env.<NAME>`
+  and below routing variables, exposed read-only via `ar3.nodes.node_secrets`,
+  preserved automatically when `a8s add` rebuilds a node at the same `root`
+  (`--rebind-secrets` moves retained secrets to a new directory; `--drop-secrets`
+  discards them), and wiped on `a8s remove <name>`.
+- `ar3 tool browser ... secret rm <NAME> --origin <ORIGIN>` (repeatable) removes
+  only matching origin bindings under `<NAME>` while keeping bindings on other
+  origins.
+
+### Fixed
+
+- `tool-browser` stores secret bindings in `version: 2` `secrets.json`
+  (`{NAME: [{"value", "origins"}, ...]}`) while preserving read compatibility
+  with `version: 1` stores, so setting the same secret `<NAME>` for a new origin
+  keeps existing bindings on other origins, `fill-secret` selects the matching
+  origin binding in strict specificity order (exact origin before longest-host
+  wildcard), and `Scrubber` redacts all values bound under `<NAME>` as
+  `[secret:NAME]`.
+
 ## 0.1.133
 
 ### Added

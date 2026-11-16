@@ -173,3 +173,53 @@ class TestNodeRoot:
         nodes.read()
         assert (sorted(os.listdir(home)), (home / "a8s.json").stat().st_mtime_ns) == before
         assert isinstance(nodes.a8s_home(), Path)
+
+
+class TestNodeSecrets:
+    def test_returns_stored_secrets_for_registered_node_with_matching_root_bind_only(self, home, tmp_path):
+        scholar_root = str(tmp_path / "scholar")
+        _registry(home, {"scholar": _node(scholar_root, definition="tool-research")})
+        (home / "secrets.json").write_text(
+            json.dumps({
+                "remotes": {},
+                "services": {},
+                "nodes": {
+                    "scholar": {
+                        "bind": nodes._node_binding(scholar_root),
+                        "secrets": {"OPENAI_API_KEY": "sk-node-secret"},
+                    },
+                    "unregistered": {
+                        "bind": nodes._node_binding(str(tmp_path / "unregistered")),
+                        "secrets": {"OPENAI_API_KEY": "sk-orphan"},
+                    },
+                },
+            }),
+            encoding="utf-8",
+        )
+        assert nodes.node_secrets("scholar") == {"OPENAI_API_KEY": "sk-node-secret"}
+        assert nodes.node_secrets("SCHOLAR") == {"OPENAI_API_KEY": "sk-node-secret"}
+        assert nodes.node_secrets("unregistered") == {}
+        assert nodes.node_secrets("") == {}
+
+        # Changing the registered root invalidates the binding and returns {}.
+        _registry(home, {"scholar": _node(tmp_path / "other", definition="tool-research")})
+        assert nodes.node_secrets("scholar") == {}
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            None,
+            "",
+            "{bad",
+            "[]",
+            '{"nodes": []}',
+            '{"remotes": [], "nodes": {}}',
+            '{"nodes": {"scholar": "bad"}}',
+            '{"nodes": {"scholar": {"OPENAI_API_KEY": "unbound"}}}',
+        ],
+    )
+    def test_fails_closed_when_secrets_file_missing_or_malformed(self, home, tmp_path, raw):
+        _registry(home, {"scholar": _node(tmp_path / "scholar", definition="tool-research")})
+        if raw is not None:
+            (home / "secrets.json").write_text(raw, encoding="utf-8")
+        assert nodes.node_secrets("scholar") == {}

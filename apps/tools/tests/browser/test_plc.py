@@ -397,6 +397,44 @@ def test_an_allowed_field_is_checked_then_filled_in_that_order(tmp_path):
     assert [call[0] for call in out["calls"]] == ["locator", "evaluate", "fill"]
 
 
+@needs_node
+def test_fill_secret_bindings_selects_disjoint_exact_and_longest_wildcard_in_strict_order(tmp_path):
+    disjoint = [
+        {"value": "pw-alpha", "origins": _parts("https://a.example.com")},
+        {"value": "pw-beta", "origins": _parts("https://b.example.com")},
+    ]
+    code = plc.fill_secret_bindings_code("#pw", disjoint)
+    out_a = _run_in_node(tmp_path, code, "https://a.example.com")
+    assert out_a["result"] == {"typed": "https://a.example.com"}
+    assert [c for c in out_a["calls"] if c[0] == "fill"] == [["fill", "pw-alpha", {"timeout": 5000}]]
+
+    out_b = _run_in_node(tmp_path, code, "https://b.example.com")
+    assert out_b["result"] == {"typed": "https://b.example.com"}
+    assert [c for c in out_b["calls"] if c[0] == "fill"] == [["fill", "pw-beta", {"timeout": 5000}]]
+
+    out_unlisted = _run_in_node(tmp_path, code, "https://c.example.com")
+    assert out_unlisted["result"] == {"refused": "https://c.example.com"}
+    assert [c for c in out_unlisted["calls"] if c[0] == "fill"] == []
+
+    # Exact origin beats wildcard, and longer-host wildcard beats shorter-host wildcard,
+    # independent of binding insertion order.
+    bindings = [
+        {"value": "pw-short-wild", "origins": _parts("https://*.example.org")},
+        {"value": "pw-long-wild", "origins": _parts("https://*.dev.example.org")},
+        {"value": "pw-exact", "origins": _parts("https://api.dev.example.org")},
+    ]
+    for ordered in (bindings, list(reversed(bindings))):
+        rule_code = plc.fill_secret_bindings_code("#pw", ordered)
+        hit_exact = _run_in_node(tmp_path, rule_code, "https://api.dev.example.org")
+        assert [c for c in hit_exact["calls"] if c[0] == "fill"] == [["fill", "pw-exact", {"timeout": 5000}]]
+
+        hit_long = _run_in_node(tmp_path, rule_code, "https://app.dev.example.org")
+        assert [c for c in hit_long["calls"] if c[0] == "fill"] == [["fill", "pw-long-wild", {"timeout": 5000}]]
+
+        hit_short = _run_in_node(tmp_path, rule_code, "https://staging.example.org")
+        assert [c for c in hit_short["calls"] if c[0] == "fill"] == [["fill", "pw-short-wild", {"timeout": 5000}]]
+
+
 # --- run_code_file: the recipe's own code, from a private file -----------------------------------------
 
 

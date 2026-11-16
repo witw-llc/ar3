@@ -55,6 +55,7 @@ from definitions import (
     _WRAPPERS,
     harness_program,
     load_agent_env,
+    load_agent_secrets,
     load_definition,
     split_env_var_key,
     wake_env,
@@ -580,7 +581,13 @@ def _show_definition(view: _View, name: str, info: dict) -> dict | None:
         return None
 
 
-def _show_variables(name: str, info: dict, definition: dict | None, variables: dict[str, str]) -> None:
+def _show_variables(
+    name: str,
+    info: dict,
+    definition: dict | None,
+    variables: dict[str, str],
+    secret_names: list[str] = (),
+) -> None:
     raw = info.get("vars") if isinstance(info.get("vars"), dict) else {}
     shown = [f"{k}={variables[k]}" for k in SHOWN_KNOBS if k in variables]
     print("vars: " + (" ".join(shown) if shown else "(none shown)"))
@@ -592,6 +599,8 @@ def _show_variables(name: str, info: dict, definition: dict | None, variables: d
     )
     if env_names:
         print(f"env (values hidden): {', '.join(env_names)} (values: a8s vars {name})")
+    if secret_names:
+        print(f"secret (values hidden): {', '.join(secret_names)}")
     if definition is not None:
         try:
             names = sorted(definition_env(definition))
@@ -601,9 +610,13 @@ def _show_variables(name: str, info: dict, definition: dict | None, variables: d
             print(f"definition env (values hidden): {', '.join(names)}")
 
 
-def _secret_values(raw: dict, definition: dict | None) -> tuple[str, ...]:
+def _secret_values(
+    raw: dict, definition: dict | None, stored_secrets: dict[str, str] | None = None
+) -> tuple[str, ...]:
     values = [v for k, v in raw.items()
               if isinstance(k, str) and isinstance(v, str) and split_env_var_key(k) is not None]
+    if stored_secrets:
+        values += list(stored_secrets.values())
     if definition is not None:
         try:
             values += list(definition_env(definition).values())
@@ -947,13 +960,22 @@ def _local(name: str, info: dict) -> int:
 
     raw_vars = info.get("vars") if isinstance(info.get("vars"), dict) else {}
     variables = argv_vars(raw_vars)
-    secrets = _secret_values(raw_vars, definition)
+    stored_secrets: dict[str, str] = {}
+    secrets_problem: str | None = None
+    try:
+        stored_secrets = load_agent_secrets(name)
+    except ValueError as e:
+        secrets_problem = str(e)
+        view.find("node secrets unreadable")
+    secrets = _secret_values(raw_vars, definition, stored_secrets)
 
     env: dict[str, str] | None = None
     env_problem: str | None = None
     node_env: dict[str, str] = {}
     def_names: set[str] = set()
-    if definition is not None:
+    if secrets_problem is not None:
+        env_problem = f"the node's environment cannot be composed: {_clean(secrets_problem, secrets)}"
+    elif definition is not None:
         try:
             if wake_shell(definition) is not None:
                 env_problem = "the node wakes through a login shell, so its environment is not knowable here"
@@ -986,7 +1008,7 @@ def _local(name: str, info: dict) -> int:
         else:
             print(f"engine: {engine.engine} (not pinned: {engine.detail})")
             view.find("engine not pinned")
-    _show_variables(name, info, definition, variables)
+    _show_variables(name, info, definition, variables, sorted(stored_secrets))
     if env is not None and engine.kind == "engine":
         print("context: the launch environment a wake started from this shell would get "
               "(definition.env and env.* vars over this shell); not read from a live process")

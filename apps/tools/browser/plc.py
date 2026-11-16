@@ -608,6 +608,51 @@ def fill_secret(seat, selector, value, origins, directory, timeout=30):
     return outcome["typed"]
 
 
+def fill_secret_bindings_code(selector, bindings):
+    """The code `fill_secret_bindings` runs when a secret name has multiple origin bindings.
+
+    Evaluates `el.ownerDocument.location.origin` once and selects the matching rule in
+    strict specificity order: exact origin matches (`wildcard: false`) first, then
+    longest-host wildcard matches (`wildcard: true`, ordered by `host` length descending).
+    """
+    rules = []
+    for binding in bindings:
+        for origin in binding["origins"]:
+            rules.append({
+                "scheme": origin["scheme"],
+                "host": origin["host"],
+                "port": origin["port"],
+                "wildcard": origin["wildcard"],
+                "value": binding["value"],
+            })
+    rules.sort(key=lambda item: (bool(item["wildcard"]), -len(item["host"])))
+    return (
+        "async (page) => {\n"
+        f"  const rules = {json.dumps(rules)};\n"
+        f"  const target = page.locator({json.dumps(selector)});\n"
+        "  const seen = await target.evaluate("
+        f"(el) => el.ownerDocument.location.origin, undefined, {{timeout: {FILL_TIMEOUT_MS}}});\n"
+        "  let url = null;\n"
+        "  try { url = new URL(seen); } catch (error) {}\n"
+        "  const hit = url === null ? null : (rules.find((o) =>\n"
+        "    url.protocol === o.scheme + ':' && url.port === o.port &&\n"
+        "    (o.wildcard ? url.hostname.endsWith('.' + o.host) : url.hostname === o.host)) || null);\n"
+        "  if (hit === null) return {refused: seen};\n"
+        f"  await target.fill(hit.value, {{timeout: {FILL_TIMEOUT_MS}}});\n"
+        "  return {typed: seen};\n"
+        "}\n"
+    )
+
+
+def fill_secret_bindings(seat, selector, bindings, directory, timeout=30):
+    """Type the binding of `bindings` that matches the target element's document origin."""
+    code = fill_secret_bindings_code(selector, bindings)
+    outcome = _fill_outcome(_run_private_file(seat, code, directory, SECRET_DIR_PREFIX, "fill.js", timeout))
+    if "refused" in outcome:
+        raise OriginRefused(outcome["refused"])
+    return outcome["typed"]
+
+
 def _run_private_file(seat, code, directory, prefix, filename, timeout):
     """Run `code` (the text of one async function) with `playwright-cli --raw run-code
     --filename`, from a file made 0600 in a 0700 directory of its own under `directory`, and

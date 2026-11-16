@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import stat
@@ -9,12 +10,21 @@ import pytest
 from browser import secretstore
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "secrets-v1.json"
+FIXTURE_V2 = Path(__file__).resolve().parent / "fixtures" / "secrets-v2.json"
+FROZEN_DIGESTS = {
+    "secrets-v1.json": "a7cc954d0baba77c0ce4c142f51713f60ee56922a2868728a93f76d3c570e437",
+    "secrets-v2.json": "d8287ec8870aeae8a68afd3527f1f2fb7bb94ad9761982fc415dae4c29527460",
+}
 POSIX_MODES = pytest.mark.skipif(os.name == "nt", reason="file modes are POSIX")
 ORIGINS = ["https://app.example.com"]
 
 
-def _entry(value, origins=ORIGINS):
+def _binding(value, origins=ORIGINS):
     return {"value": value, "origins": list(origins)}
+
+
+def _entry(value, origins=ORIGINS):
+    return [_binding(value, origins)]
 
 
 def _set(name, value, origins=ORIGINS, seat="seat"):
@@ -52,8 +62,12 @@ def test_a_secret_set_is_read_back_with_its_origins():
         "PASSWORD": _entry("value-one"),
         "API_TOKEN": _entry("value-two", ["https://api.example.com", "http://127.0.0.1:8080"]),
     }
+    # Setting the same secret name on a different origin keeps both bindings.
     _set("PASSWORD", "value-three", ["https://other.example.com"])
-    assert secretstore.read("seat")["PASSWORD"] == _entry("value-three", ["https://other.example.com"])
+    assert secretstore.read("seat")["PASSWORD"] == [
+        _binding("value-one"),
+        _binding("value-three", ["https://other.example.com"]),
+    ]
 
 
 def test_a_value_keeps_its_spaces_quotes_and_unicode():
@@ -163,9 +177,10 @@ def test_each_seat_has_its_own_store():
 
 
 def test_the_store_as_a_version_1_file_reads_the_same_in_every_later_version():
-    """Frozen. `fixtures/secrets-v1.json` is a version 1 store as it is written
-    today. A stored secret survives an update, so no later version may fail to
-    read it, and none may change this file or this expected result."""
+    """Frozen. `fixtures/secrets-v1.json` is a version 1 store as written by
+    0.1.119-0.1.133. A stored secret survives every update (Decisions, 2026-10-08
+    and 2026-11-16), so `secrets-v1.json` stays byte-identical and readable."""
+    assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == FROZEN_DIGESTS["secrets-v1.json"]
     _write("seat", FIXTURE.read_bytes())
     assert json.loads(FIXTURE.read_text()) == {
         "version": 1,
@@ -186,6 +201,19 @@ def test_the_store_as_a_version_1_file_reads_the_same_in_every_later_version():
     }
 
 
+def test_the_store_as_a_version_2_file_reads_the_same_in_every_later_version():
+    """Frozen `fixtures/secrets-v2.json` multi-binding store (0.1.134)."""
+    assert hashlib.sha256(FIXTURE_V2.read_bytes()).hexdigest() == FROZEN_DIGESTS["secrets-v2.json"]
+    _write("seat", FIXTURE_V2.read_bytes())
+    assert secretstore.read("seat") == {
+        "API_TOKEN": _entry("example-token-value-0001", ["https://api.example.com", "http://127.0.0.1:8080"]),
+        "PASSWORD": [
+            _binding("example password: 2 words", ["https://app.example.com", "https://*.example.org"]),
+            _binding("second site password: 3", ["https://admin.example.org"]),
+        ],
+    }
+
+
 def test_a_version_1_file_may_carry_keys_this_version_does_not_know():
     _write("seat", _store_text({"PASSWORD": {"value": "value-one", "origins": ORIGINS, "note": "later"}}).replace(
         '"secrets"', '"note": "later", "secrets"'
@@ -193,21 +221,22 @@ def test_a_version_1_file_may_carry_keys_this_version_does_not_know():
     assert secretstore.read("seat") == {"PASSWORD": _entry("value-one")}
 
 
-def test_a_store_written_now_has_the_version_1_shape():
+def test_a_store_written_now_has_the_version_2_shape():
     _set("PASSWORD", "value-one", ["https://app.example.com", "https://*.example.org"])
     assert json.loads(Path(secretstore.path("seat")).read_text()) == {
-        "version": 1,
+        "version": 2,
         "secrets": {
-            "PASSWORD": {"value": "value-one", "origins": ["https://app.example.com", "https://*.example.org"]}
+            "PASSWORD": [{"value": "value-one", "origins": ["https://app.example.com", "https://*.example.org"]}]
         },
     }
 
 
-def test_the_store_written_now_has_the_shape_of_the_version_1_fixture():
+def test_the_store_written_now_has_the_shape_of_the_version_2_fixture():
     _set("PASSWORD", "example password: 2 words", ["https://app.example.com", "https://*.example.org"])
+    _set("PASSWORD", "second site password: 3", ["https://admin.example.org"])
     _set("API_TOKEN", "example-token-value-0001", ["https://api.example.com", "http://127.0.0.1:8080"])
     written = json.loads(Path(secretstore.path("seat")).read_text())
-    assert written == json.loads(FIXTURE.read_text())
+    assert written == json.loads(FIXTURE_V2.read_text())
 
 
 @pytest.mark.parametrize("name", ["A", "PASSWORD", "A1_B2", "X" * 64, "API_TOKEN_2"])
@@ -366,7 +395,7 @@ def test_a_one_label_wildcard_stops_a_set_and_nothing_is_written():
 
 
 def test_a_store_with_a_one_label_wildcard_is_not_a_valid_store():
-    target = _write("seat", _store_text({"PASSWORD": _entry("LEAK-9137", ["https://*.com"])}))
+    target = _write("seat", _store_text({"PASSWORD": _binding("LEAK-9137", ["https://*.com"])}))
     with pytest.raises(secretstore.SecretStoreError) as bad:
         secretstore.read("seat")
     assert target in str(bad.value) and "LEAK-9137" not in str(bad.value)
@@ -412,21 +441,49 @@ def test_origins_are_stored_normalized_and_once_in_the_order_given():
     _set("PASSWORD", "value-one", [
         "https://B.example.com", "https://a.example.com:443", "https://b.example.com", "http://a.example.com",
     ])
-    assert secretstore.read("seat")["PASSWORD"]["origins"] == [
+    assert secretstore.read("seat")["PASSWORD"][0]["origins"] == [
         "https://b.example.com", "https://a.example.com", "http://a.example.com",
     ]
 
 
-def test_a_set_replaces_the_origins_with_the_value():
+def test_setting_same_name_on_disjoint_origins_preserves_both_and_replaces_only_matching_origins():
     _set("PASSWORD", "value-one", ["https://a.example.com", "https://b.example.com"])
     _set("PASSWORD", "value-two", ["https://c.example.com"])
-    assert secretstore.read("seat") == {"PASSWORD": _entry("value-two", ["https://c.example.com"])}
+    assert secretstore.read("seat") == {
+        "PASSWORD": [
+            _binding("value-one", ["https://a.example.com", "https://b.example.com"]),
+            _binding("value-two", ["https://c.example.com"]),
+        ]
+    }
+    # Reassigning https://b.example.com moves only that origin and drops no unrelated binding.
+    _set("PASSWORD", "value-three", ["https://b.example.com"])
+    assert secretstore.read("seat") == {
+        "PASSWORD": [
+            _binding("value-one", ["https://a.example.com"]),
+            _binding("value-two", ["https://c.example.com"]),
+            _binding("value-three", ["https://b.example.com"]),
+        ]
+    }
+    # Setting an origin to an already-present value coalesces into that binding.
+    _set("PASSWORD", "value-one", ["https://d.example.com"])
+    assert secretstore.read("seat")["PASSWORD"][0] == _binding(
+        "value-one", ["https://a.example.com", "https://d.example.com"]
+    )
+    # Removing a subset of origins leaves the rest; removing all origins deletes the name.
+    assert secretstore.remove("seat", "PASSWORD", origins=["https://b.example.com"]) is True
+    assert secretstore.remove("seat", "PASSWORD", origins=["https://b.example.com"]) is False
+    assert [b["origins"] for b in secretstore.read("seat")["PASSWORD"]] == [
+        ["https://a.example.com", "https://d.example.com"],
+        ["https://c.example.com"],
+    ]
+    assert secretstore.remove("seat", "PASSWORD") is True
+    assert secretstore.read("seat") == {}
 
 
 @POSIX_MODES
 @pytest.mark.parametrize("mode", [0o640, 0o604, 0o644, 0o660, 0o606, 0o666, 0o610])
 def test_a_store_open_to_group_or_others_is_refused_with_the_fix(mode):
-    target = _write("seat", _store_text({"PASSWORD": _entry("value-one")}), mode)
+    target = _write("seat", _store_text({"PASSWORD": _binding("value-one")}), mode)
     with pytest.raises(secretstore.SecretStoreError) as refused:
         secretstore.read("seat")
     message = str(refused.value)
@@ -438,13 +495,13 @@ def test_a_store_open_to_group_or_others_is_refused_with_the_fix(mode):
 @POSIX_MODES
 @pytest.mark.parametrize("mode", [0o600, 0o400])
 def test_a_store_closed_to_group_and_others_is_read(mode):
-    _write("seat", _store_text({"PASSWORD": _entry("value-one")}), mode)
+    _write("seat", _store_text({"PASSWORD": _binding("value-one")}), mode)
     assert secretstore.read("seat") == {"PASSWORD": _entry("value-one")}
 
 
 @POSIX_MODES
 def test_a_loose_store_cannot_be_written_over_unnoticed():
-    _write("seat", _store_text({"PASSWORD": _entry("value-one")}), 0o644)
+    _write("seat", _store_text({"PASSWORD": _binding("value-one")}), 0o644)
     with pytest.raises(secretstore.SecretStoreError, match="chmod 600"):
         _set("OTHER", "value-two")
     with pytest.raises(secretstore.SecretStoreError, match="chmod 600"):
@@ -478,6 +535,9 @@ CORRUPT = [
     b'{"version": 1, "secrets": {"PASSWORD": {"value": "LEAK-9137", "origins": [7]}}}',
     b'{"version": 1, "secrets": {"PASSWORD": {"value": "LEAK-9137", "origins": ["https://a.example.com"]}, "BAD NAME": {"value": "LEAK-9137", "origins": ["https://a.example.com"]}}}',
     b'{"version": 1, "secrets": {"PASSWORD": {"value": "LEAK-9137", "origins": ["https://a.example.com"]}',
+    b'{"version": 2, "secrets": {"PASSWORD": {"value": "LEAK-9137", "origins": ["https://a.example.com"]}}}',
+    b'{"version": 2, "secrets": {"PASSWORD": []}}',
+    b'{"version": 2, "secrets": {"PASSWORD": [{"value": "LEAK-9137", "origins": ["https://a.example.com"]}, {"value": "LEAK-9137-b", "origins": ["https://a.example.com"]}]}}',
     b"\xff\xfe LEAK-9137 \x00\x01",
 ]
 
@@ -496,10 +556,10 @@ def test_a_corrupt_store_names_the_file_and_never_prints_its_content(content):
 
 
 def test_a_store_from_a_later_version_names_the_version_and_the_file():
-    target = _write("seat", json.dumps({"version": 2, "secrets": {"PASSWORD": _entry("LEAK-9137")}}))
+    target = _write("seat", json.dumps({"version": 3, "secrets": {"PASSWORD": _entry("LEAK-9137")}}))
     with pytest.raises(secretstore.SecretStoreError) as later:
         secretstore.read("seat")
-    assert "version 2" in str(later.value)
+    assert "version 3" in str(later.value)
     assert target in str(later.value)
     assert "LEAK-9137" not in str(later.value)
 
@@ -579,6 +639,14 @@ def test_a_value_with_regex_characters_matches_literally():
 def test_every_secret_of_the_store_is_scrubbed():
     scrubber = _scrubber(PASSWORD="hunter2-value", API_TOKEN="tok-abc-123")
     assert scrubber.scrub("hunter2-value tok-abc-123") == "[secret:PASSWORD] [secret:API_TOKEN]"
+
+
+def test_every_binding_under_a_shared_secret_name_is_scrubbed_to_that_name():
+    _set("PASSWORD", "site-alpha-secret", ["https://alpha.example.com"])
+    _set("PASSWORD", "site-bravo-secret", ["https://bravo.example.com"])
+    scrubber = secretstore.Scrubber(secretstore.read("seat"))
+    assert scrubber.scrub("a=site-alpha-secret b=site-bravo-secret") == "a=[secret:PASSWORD] b=[secret:PASSWORD]"
+    assert scrubber.holds("site-alpha-secret") and scrubber.holds("site-bravo-secret")
 
 
 TRICKY = '@pa"ss\\wo{rd}: #x\t\u00e9\u2603'

@@ -101,8 +101,11 @@ class Run:
         return bool(self.scrubber) and self.scrubber.holds(text)
 
     def secret(self, name):
-        """The stored {"value", "origins"} of `name`, or None."""
-        return self.scrubber.secrets.get(name) if self.scrubber else None
+        """The stored `[{"value", "origins"}, ...]` bindings of `name`, or None."""
+        if not self.scrubber:
+            return None
+        entry = self.scrubber.secrets.get(name)
+        return secretstore.bindings_of(entry) if entry else None
 
     def hide(self, name, value):
         """Scrub `value`, which a recipe read at run time, from now on as `[secret:NAME]` (see
@@ -345,21 +348,33 @@ def _fill_secret(seat, args, run):
     if len(args) != 2:
         raise plc.BrowserError("usage: fill-secret <label or selector> <NAME>")
     name = args[1]
-    entry = run.secret(name)
-    if entry is None:
+    bindings = run.secret(name)
+    if not bindings:
         raise plc.BrowserError(
             f"secret {name} is not set for seat {seat}; "
             f"the operator sets it with `ar3 tool browser --node {seat} secret set {name} - --origin ORIGIN`"
         )
     target = resolve.fill_target(seat, args[0])
     selector = f"aria-ref={target}" if resolve.REF_RE.match(target) else target
-    origins = [secretstore.origin_parts(origin) for origin in entry["origins"]]
     try:
-        plc.fill_secret(seat, selector, entry["value"], origins, session.scratch_dir(seat))
+        if len(bindings) == 1:
+            entry = bindings[0]
+            origins = [secretstore.origin_parts(origin) for origin in entry["origins"]]
+            plc.fill_secret(seat, selector, entry["value"], origins, session.scratch_dir(seat))
+        else:
+            prepared = [
+                {
+                    "value": entry["value"],
+                    "origins": [secretstore.origin_parts(origin) for origin in entry["origins"]],
+                }
+                for entry in bindings
+            ]
+            plc.fill_secret_bindings(seat, selector, prepared, session.scratch_dir(seat))
     except plc.OriginRefused as exc:
+        allowed_origins = [origin for entry in bindings for origin in entry["origins"]]
         raise plc.BrowserError(
             f"fill-secret: secret {name} may not be typed on origin {exc.origin}; "
-            f"allowed origins: {', '.join(entry['origins'])}"
+            f"allowed origins: {', '.join(allowed_origins)}"
         ) from None
     except plc.BrowserError as exc:
         # Playwright prints the value in the call log of a failed fill.

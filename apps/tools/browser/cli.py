@@ -152,6 +152,10 @@ def main():
     secret_sub.add_parser("list", parents=[seat_only], help="print each secret name with its origins")
     parser_rm = secret_sub.add_parser("rm", parents=[seat_only], help="remove a secret")
     parser_rm.add_argument("name", metavar="NAME")
+    parser_rm.add_argument(
+        "--origin", action="append", default=[], dest="origins", metavar="ORIGIN",
+        help="remove only these origins from NAME (repeat for more); omit to remove all bindings for NAME",
+    )
 
     parser_go = sub.add_parser("go", parents=[common], help="navigate to a URL")
     parser_go.add_argument("url")
@@ -403,16 +407,21 @@ def _secret_value(name):
 
 
 def _origins_to_set(seat, args):
-    """The origins a `secret set` binds: those given, else those a stored secret of the name already has."""
+    """The origins a `secret set` binds: those given, else those a single stored binding of the name already has."""
     if args.origins:
         return secretstore.check_origins(args.origins)
     kept = secretstore.read(seat).get(args.name)
-    if kept is None:
+    if not kept:
         raise secretstore.SecretStoreError(
             f"secret {args.name} is new: say where it may be typed with --origin, "
             f"for example: secret set {args.name} - --origin https://app.example.com"
         )
-    return kept["origins"]
+    if len(kept) > 1:
+        raise secretstore.SecretStoreError(
+            f"secret {args.name} has bindings for multiple origins; "
+            f"pass --origin to choose which to update"
+        )
+    return kept[0]["origins"]
 
 
 def _secret(seat, args):
@@ -420,11 +429,19 @@ def _secret(seat, args):
     take no seat lock, and no path through them prints a value."""
     try:
         if args.secret_command == "list":
-            for name, entry in sorted(secretstore.read(seat).items()):
-                print(name, *entry["origins"])
+            for name, bindings in sorted(secretstore.read(seat).items()):
+                for entry in bindings:
+                    print(name, *entry["origins"])
         elif args.secret_command == "rm":
-            if not secretstore.remove(seat, args.name):
-                print(f"{seat}: secret {args.name} is not set", file=sys.stderr)
+            origins = secretstore.check_origins(args.origins) if args.origins else None
+            if not secretstore.remove(seat, args.name, origins=origins):
+                if origins:
+                    print(
+                        f"{seat}: secret {args.name} has no binding for {', '.join(origins)}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"{seat}: secret {args.name} is not set", file=sys.stderr)
                 return 1
             print(f"{seat}: removed {args.name}")
         else:

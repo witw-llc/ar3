@@ -396,9 +396,11 @@ A script supplies the name to `fill-secret`; it does not receive the value.
 
 ```bash
 ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://portal.example.org
 ar3 tool browser --node browser-seat secret set API_TOKEN --origin https://api.example.com --origin 'https://*.example.org'
 ar3 tool browser --node browser-seat secret set API_TOKEN -
 ar3 tool browser --node browser-seat secret list
+ar3 tool browser --node browser-seat secret rm PASSWORD --origin https://portal.example.org
 ar3 tool browser --node browser-seat secret rm API_TOKEN
 ```
 
@@ -421,8 +423,12 @@ or require Playwright CLI. No message or script can call them.
   `_`, with at most 64 characters.
 - A value must be UTF-8, have at least 4 characters, and contain no NUL. Its
   maximum size is 64 KiB. Input removes one trailing newline.
-- A new name requires at least one `--origin`. To replace the value and keep
-  its origins, omit `--origin`. To replace the allowed list, supply new origins.
+- A new name requires at least one `--origin`. Setting an existing name with
+  `--origin` updates only the given origins and preserves bindings for that name
+  on other origins. When `--origin` is omitted, `set` updates a single stored
+  binding for that name and refuses when the name has bindings across multiple
+  origins. `secret rm NAME --origin ORIGIN` (repeatable) removes only matching
+  origins; `secret rm NAME` removes all bindings for `NAME`.
 - An origin has the form `http://host[:port]` or `https://host[:port]`, without
   a path. A default port is equivalent to an omitted port.
 - `https://*.example.org` permits subdomains but not `example.org`. A wildcard
@@ -430,21 +436,25 @@ or require Playwright CLI. No message or script can call them.
   is the exception. The tool accepts `*.co.uk`; choose an appropriately narrow
   host rather than a public suffix.
 - `fill-secret` checks the field's document origin immediately before typing.
-  For an iframe, this is the iframe origin. A `null` origin is refused,
-  including `about:blank`, `srcdoc`, and sandboxed frames.
+  When a secret name has multiple bindings, exact origin matches take precedence
+  over wildcards, and longer-host wildcards take precedence over shorter-host
+  wildcards. For an iframe, the check uses the iframe origin. A `null` origin is
+  refused, including `about:blank`, `srcdoc`, and sandboxed frames.
 
 The transcript shows `fill-secret e9 PASSWORD`. Its result shows
-`e9 <- [secret:PASSWORD]`. `list` prints names and origins, never values.
+`e9 <- [secret:PASSWORD]`. `list` prints one line per binding (`NAME` followed
+by its origins), never values.
 An invalid value stores nothing. Secret commands return 0 on success, 1 on
 refusal or storage failure, and 2 for invalid command-line syntax. An error
 does not repeat a value supplied as an argument.
 
 ### Storage and access
 
-`secrets.json` has mode 0600 in the private seat directory. Its format is:
+`secrets.json` has mode 0600 in the private seat directory. Its format is
+`version: 2` (`version: 1` stores remain readable):
 
 ```json
-{"version":1,"secrets":{"NAME":{"value":"...","origins":["https://app.example.com"]}}}
+{"version":2,"secrets":{"NAME":[{"value":"...","origins":["https://app.example.com"]}]}}
 ```
 
 The tool refuses a store that other users can read. Correct its mode with

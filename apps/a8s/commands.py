@@ -14,6 +14,7 @@ which would resolve to commands.py after the modular split).
 """
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import re
@@ -80,6 +81,7 @@ from definitions import (
     resolve_inbox_dir,
     resolve_outbox_dir,
     split_env_var_key,
+    split_secret_var_key,
     validate_var_name,
     wake_env,
     wake_path_repair,
@@ -109,23 +111,29 @@ from daemon import (
 )
 from network import (
     PAIRED_KEY,
+    SecretsUnreadable,
     _build_service as build_service,
     _build_transport as build_transport,
     configured_remote_ids,
+    delete_node_secrets,
     delete_remote_secrets,
     delete_spec_secrets,
     deps_group_for,
     detect_service_kind,
     load_network_config,
+    load_node_secrets_map,
     load_secrets_config,
     merge_remote_secrets,
     merge_spec_secrets,
     put_remote_secrets,
     put_spec_secrets,
+    reconcile_node_secrets_on_add,
     save_network_config,
     secret_warning_lines,
+    set_node_secret,
     split_secret_keys,
     transport_deps_group_for,
+    unset_node_secret,
     unusable_secret_entries,
 )
 from registry import (
@@ -165,6 +173,21 @@ def _unresolved_definition_error(spec: str) -> str:
     return f"unknown definition: {spec}\navailable: {names}\n(or pass a path to a .json file)"
 
 
+def _split_add_secret_flags(tokens: list[str]) -> tuple[list[str], str | None]:
+    """Extract `--rebind-secrets` / `--drop-secrets` from `a8s add` option tokens."""
+    rest: list[str] = []
+    mode: str | None = None
+    for tok in tokens:
+        if tok in ("--rebind-secrets", "--drop-secrets"):
+            new = "rebind" if tok == "--rebind-secrets" else "drop"
+            if mode not in (None, new):
+                raise ValueError("--rebind-secrets and --drop-secrets contradict each other")
+            mode = new
+        else:
+            rest.append(tok)
+    return rest, mode
+
+
 def cmd_add(args: list[str]) -> int:
     """`a8s add <name> <dir> [<definition>] [--KEY=value ...]` — register a node.
 
@@ -192,7 +215,8 @@ def cmd_add(args: list[str]) -> int:
     Errors on duplicate name (vs. agents or aliases) or non-directory path."""
     if len(args) < 2:
         print(
-            "usage: a8s add <name> <dir> [<definition>] [--autostart] [--KEY value ...]",
+            "usage: a8s add <name> <dir> [<definition>] [--autostart] "
+            "[--rebind-secrets|--drop-secrets] [--KEY value ...]",
             file=sys.stderr,
         )
         return 2
@@ -205,12 +229,14 @@ def cmd_add(args: list[str]) -> int:
     positionals, var_tokens = rest[:first_flag], rest[first_flag:]
     try:
         var_tokens, autostart_mode, _, _ = autostart.split_lifecycle_flags(var_tokens)
+        var_tokens, secret_mode = _split_add_secret_flags(var_tokens)
     except ValueError as e:
         print(f"add: {e}", file=sys.stderr)
         return 2
     if len(positionals) > 1:
         print(
-            "usage: a8s add <name> <dir> [<definition>] [--autostart] [--KEY value ...]",
+            "usage: a8s add <name> <dir> [<definition>] [--autostart] "
+            "[--rebind-secrets|--drop-secrets] [--KEY value ...]",
             file=sys.stderr,
         )
         return 2
@@ -269,6 +295,11 @@ def cmd_add(args: list[str]) -> int:
     entry: dict = {"root": str(root), "definition": definition_path}
     if initial_vars:
         entry["vars"] = dict(sorted(initial_vars.items()))
+    try:
+        reconcile_node_secrets_on_add(name, str(root), mode=secret_mode)
+    except (SecretsUnreadable, OSError) as e:
+        print(f"add: {e}", file=sys.stderr)
+        return 1
     reg[name] = entry
     save_registry(reg)
     from settings import capture_wake_path
@@ -355,7 +386,16 @@ def parse_option_tokens(
 
 def _parse_add_var_flags(tokens: list[str]) -> dict[str, str]:
     """Parse agent-var option tokens into a canonical vars map: uppercase keys,
-    and `env.<NAME>` keys with NAME as written."""
+    and `env.<NAME>` keys with NAME as written. Refuses `--secret.<NAME>` before
+    generic option parsing so a mistyped secret value is never echoed."""
+    for tok in tokens:
+        if tok.startswith("--") and len(tok) > 2:
+            head = tok[2:].split("=", 1)[0]
+            if split_secret_var_key(head) is not None:
+                raise ValueError(
+                    "a8s: secret.<NAME> values are never passed on the command line; "
+                    "register the node first, then run `a8s vars <name> set secret.<NAME>`"
+                )
     return {
         validate_var_name(k): v for k, v in parse_option_tokens(tokens).items()
     }
@@ -396,6 +436,11 @@ def cmd_remove(args: list[str]) -> int:
     holder = _read_handler_pid(name)
     if holder is not None:
         print(f"{name} is running (PID {holder}); stop it first: `a8s stop {name}`", file=sys.stderr)
+        return 1
+    try:
+        delete_node_secrets(name)
+    except (SecretsUnreadable, OSError) as e:
+        print(f"remove: node secrets not cleaned, {name} stays registered: {e}", file=sys.stderr)
         return 1
     aliases = load_aliases()
     pruned: list[str] = []
@@ -611,29 +656,68 @@ def _cmd_definitions_remove(name: str) -> int:
     return 0
 
 
+MAX_NODE_SECRET_BYTES = 65536
+
+
 def _vars_usage() -> int:
     print(
         "usage: a8s vars <name>                      # list a8s vars for a node\n"
         "       a8s vars <name> set <KEY> <val>      # set an argv placeholder\n"
         "       a8s vars <name> set env.<NAME> <val> # set an OS environment variable\n"
-        "       a8s vars <name> unset <KEY>          # remove (also env.<NAME>)\n"
+        "       a8s vars <name> set secret.<NAME> [-]# set a secret env var (prompt or stdin)\n"
+        "       a8s vars <name> unset <KEY>          # remove (also env.<NAME>, secret.<NAME>)\n"
         "\n"
         "A plain KEY is a per-node placeholder for definition argv ($KEY).\n"
         "Names are case-insensitive (stored uppercase). Built-in names\n"
         "($SENDER, $MESSAGE, …) are reserved. Used-but-unset is a wake error.\n"
-        "An env.<NAME> var reaches the node's wakes as the environment variable\n"
-        "NAME, case kept, and is never an argv placeholder.",
+        "An env.<NAME> or secret.<NAME> var reaches the node's wakes as the\n"
+        "environment variable NAME, case kept, and is never an argv placeholder.\n"
+        "A secret.<NAME> value is stored in secrets.json (mode 0600) and never\n"
+        "accepted as a command-line argument.",
         file=sys.stderr,
     )
     return 2
 
 
+def _read_node_secret_value(secret_name: str, *, force_stdin: bool) -> str:
+    if not force_stdin and sys.stdin.isatty():
+        text = getpass.getpass(f"Value for {secret_name}: ")
+    else:
+        buf = getattr(sys.stdin, "buffer", None)
+        if buf is not None:
+            raw = buf.read(MAX_NODE_SECRET_BYTES + 1)
+            if len(raw) > MAX_NODE_SECRET_BYTES:
+                raise ValueError(
+                    f"a8s: secret value exceeds {MAX_NODE_SECRET_BYTES} bytes"
+                )
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError("a8s: secret value must be UTF-8 text") from None
+        else:
+            text = sys.stdin.read(MAX_NODE_SECRET_BYTES + 1)
+            if len(text.encode("utf-8")) > MAX_NODE_SECRET_BYTES:
+                raise ValueError(
+                    f"a8s: secret value exceeds {MAX_NODE_SECRET_BYTES} bytes"
+                )
+        if text.endswith("\r\n"):
+            text = text[:-2]
+        elif text.endswith("\n"):
+            text = text[:-1]
+    if not text:
+        raise ValueError("a8s: secret value must not be empty")
+    if "\0" in text:
+        raise ValueError("a8s: secret value cannot contain a NUL character")
+    return text
+
+
 def cmd_vars(args: list[str]) -> int:
     """`a8s vars` — per-node a8s variables.
 
-    Stored on the agent in the registry (`vars` map). A plain key expands as
+    Stored on the agent in the registry (`vars` map), except `secret.<NAME>`,
+    which lives in `<a8s-home>/secrets.json` (mode 0600). A plain key expands as
     `$KEY` in invoke argv and never reaches the process environment. An
-    `env.<NAME>` key is the opposite: it becomes environment variable NAME in
+    `env.<NAME>` or `secret.<NAME>` key becomes environment variable NAME in
     the node's wakes and never takes part in interpolation.
     """
     if len(args) < 1:
@@ -647,17 +731,26 @@ def cmd_vars(args: list[str]) -> int:
         return _cmd_vars_list(agent_key, info)
     sub = args[1]
     if sub == "set":
+        if len(args) >= 3 and split_secret_var_key(args[2]) is not None:
+            return _cmd_vars_set_secret(agent_key, info, args[2], args[3:])
         if len(args) != 4:
             return _vars_usage()
         return _cmd_vars_set(agent_key, info, args[2], args[3])
     if sub == "unset":
         if len(args) != 3:
             return _vars_usage()
+        if split_secret_var_key(args[2]) is not None:
+            return _cmd_vars_unset_secret(agent_key, info, args[2])
         return _cmd_vars_unset(agent_key, info, args[2])
     return _vars_usage()
 
 
 def _cmd_vars_list(agent_key: str, info: dict) -> int:
+    try:
+        secret_map = load_node_secrets_map(agent_key, str(info.get("root") or ""))
+    except SecretsUnreadable as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
     raw = info.get("vars")
     vars_map = raw if isinstance(raw, dict) else {}
     items: dict[str, str] = argv_vars(vars_map)
@@ -666,14 +759,72 @@ def _cmd_vars_list(agent_key: str, info: dict) -> int:
         for k, v in vars_map.items()
         if isinstance(k, str) and isinstance(v, str) and split_env_var_key(k) is not None
     }
-    if not items and not env_items:
+    secret_items = {f"secret.{k}": "[secret]" for k in secret_map}
+    if not items and not env_items and not secret_items:
         print(f"{agent_key}: (no vars)")
         return 0
-    width = max(len(k) for k in (*items, *env_items))
+    width = max(len(k) for k in (*items, *env_items, *secret_items))
     for k in sorted(items):
         print(f"{k.ljust(width)}  {items[k]}")
     for k in sorted(env_items):
         print(f"{k.ljust(width)}  {env_items[k]}")
+    for k in sorted(secret_items):
+        print(f"{k.ljust(width)}  {secret_items[k]}")
+    return 0
+
+
+def _cmd_vars_set_secret(agent_key: str, info: dict, raw_key: str, rest: list[str]) -> int:
+    try:
+        canon = validate_var_name(raw_key)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    secret_name = split_secret_var_key(canon)
+    assert secret_name is not None
+    if rest not in ([], ["-"]):
+        print(
+            f"a8s: secret values are never passed on the command line; run "
+            f"`a8s vars {agent_key} set {canon}` for a hidden prompt or pipe "
+            f"stdin to `a8s vars {agent_key} set {canon} -`",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        value = _read_node_secret_value(secret_name, force_stdin=(rest == ["-"]))
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    try:
+        overwriting = set_node_secret(
+            agent_key, str(info.get("root") or ""), secret_name, value
+        )
+    except (SecretsUnreadable, OSError) as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
+    verb = "updated" if overwriting else "set"
+    print(f"{agent_key}: {verb} {canon}")
+    return 0
+
+
+def _cmd_vars_unset_secret(agent_key: str, info: dict, raw_key: str) -> int:
+    try:
+        canon = validate_var_name(raw_key)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    secret_name = split_secret_var_key(canon)
+    assert secret_name is not None
+    try:
+        removed = unset_node_secret(
+            agent_key, str(info.get("root") or ""), secret_name
+        )
+    except (SecretsUnreadable, OSError) as e:
+        print(f"a8s: {e}", file=sys.stderr)
+        return 1
+    if not removed:
+        print(f"{agent_key}: no var named {canon!r}", file=sys.stderr)
+        return 1
+    print(f"{agent_key}: unset {canon}")
     return 0
 
 

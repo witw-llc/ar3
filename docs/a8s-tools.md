@@ -38,7 +38,8 @@ and its option defaults:
 
 ## Use a local terminal
 
-Use `--node NAME` to load a registered node's settings and root directory.
+Use `--node NAME` to load a registered node's settings, `env.<NAME>` and
+`secret.<NAME>` environment variables, and root directory.
 The registered definition must match the requested tool. Put wrapper options
 before the command:
 
@@ -50,7 +51,8 @@ ar3 tool gemini-web --node gemini sessions
 ar3 tool vault --node vault fingerprint
 ```
 
-`--var KEY=VALUE` overrides a setting for this run only. It is applied last.
+`--var KEY=VALUE` overrides a non-secret setting for this run only (`--var secret.*`
+is refused on the command line). It is applied last.
 The local operator passes the network `ALLOW` check unless a final
 `--var ALLOW=...` prevents it.
 
@@ -163,7 +165,9 @@ Store secrets through the local command, with a hidden prompt or stdin:
 
 ```bash
 ar3 tool browser --node browser-seat secret set PASSWORD --origin https://app.example.com
+ar3 tool browser --node browser-seat secret set PASSWORD --origin https://portal.example.org
 ar3 tool browser --node browser-seat secret list
+ar3 tool browser --node browser-seat secret rm PASSWORD --origin https://portal.example.org
 ```
 
 A script uses `fill-secret TARGET PASSWORD`. The field's origin must be

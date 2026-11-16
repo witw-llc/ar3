@@ -126,11 +126,11 @@ That's the full loop. Members don't know they're "in a8s" — they just see a `t
 
 |                                |                                                                                                                                                                |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `a8s add <name> <dir> [<def>] [--autostart] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`), and `--env.NAME=value` sets an environment variable for the node's wakes. |
-| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running; also removes its owned startup entry. |
+| `a8s add <name> <dir> [<def>] [--autostart] [--rebind-secrets\|--drop-secrets] [--KEY=value …]` | Register an agent. Auto-detects definition from `<dir>`'s marker file unless `<def>` is given (path, or bare name from bundled `definitions/` or `a8s defs add`). Trailing `--KEY=value` sets per-node a8s vars (case-insensitive; same as `a8s vars`), and `--env.NAME=value` sets an environment variable for the node's wakes (`--secret.*` is refused on the command line; use `a8s vars <name> set secret.<NAME> -` after registration). Retained `secret.<NAME>` entries in `secrets.json` stay intact when `<dir>` matches; at a new `<dir>`, pass `--rebind-secrets` to move them without re-entry or `--drop-secrets` to discard them. |
+| `a8s remove <name>` / `a8s rm <name>` | Unregister an agent. Wipes `agents/<NAME>/` under the a8s state root, deletes any `secret.<NAME>` entries stored for the node in `secrets.json`, and prunes the agent from any alias's member list (deletes empty aliases). Refuses if a handler is running; also removes its owned startup entry. |
 | `a8s define <name> [<path>]`   | Show or set the agent's definition file (path or bare name).                                                                                              |
 | `a8s definitions` / `a8s defs` | Manage user-installed templates in `definitions/` under the a8s state root (`add` / `rm` / `ls`). Basename must not collide with a repo built-in; bare names then work with `add`/`define`. |
-| `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv and the `outbox_dir` / `inbox_dir` / `files_dir` path fields (not OS env). Used-but-unset fails the wake and makes the node unresolved. Refuses a key that feeds a path field while a handler is attached; otherwise moves the old mailbox's contents to the new path. `set env.<NAME> <value>` is the other kind: an OS environment variable for the node's wakes (see [Wake environment](#wake-environment)). |
+| `a8s vars <name> [set\|unset …]` | Per-node a8s vars for `$KEY` in definition argv and the `outbox_dir` / `inbox_dir` / `files_dir` path fields (not OS env). Used-but-unset fails the wake and makes the node unresolved. Refuses a key that feeds a path field while a handler is attached; otherwise moves the old mailbox's contents to the new path. `set env.<NAME> <value>` sets an OS environment variable in `a8s.json`, and `set secret.<NAME> [-]` stores a secret OS environment variable in `0600` `secrets.json` from stdin or a hidden prompt (shown as `[secret]`; see [Wake environment](#wake-environment)). |
 | `a8s discover <path>`          | Walk a path for marker files; print suggested `add`+`define` commands. Read-only.                                                                              |
 | `a8s ls [-q] [--local|--remote] [--since CUTOFF]`                  | List every name this node can reach. Registered nodes first, running or not: NAME, STATUS (`running (pid N)` / `stopped` / `unresolved: $KEY`), DEFINITION, ROOT, and bound namespaces. `running` means the pid is alive and is the same process that claimed the node: its start time is stamped beside the pid, so a number the OS reused after a reboot reads `stopped` (Linux and macOS; Windows checks the pid alone). Then names only ever heard over a remote, with DEFINITION `remote` and the local time each last reached you. `-q` prints just names, both kinds. |
 
@@ -334,9 +334,11 @@ stay unknown. An old last-sent time does not imply a stuck node. A stopped node
 is a state, not a finding: nodes can wake on demand.
 
 - **Configuration:** `MODEL`, `EFFORT`, `TIMEOUT` and `MEMORY` show values.
-  Other variables and environment entries show names only; inspect their values
-  deliberately with `a8s vars <node>`. Credentials and provider errors are not
-  displayed. Conflicting launch settings are identified rather than collapsed.
+  Other variables and `env.<NAME>` entries show names only; inspect non-secret
+  values deliberately with `a8s vars <node>`. `secret.<NAME>` entries show
+  `(hidden)` in `a8s health <node>` and `[secret]` in `a8s vars <node>`.
+  Credentials and provider errors are not displayed. Conflicting launch settings
+  are identified rather than collapsed.
 - **Context:** probes use the configured launch environment that a wake started
   from this shell would receive, in the node's root. This does not reconstruct
   a running handler's inherited environment. Login-shell definitions, invocation
@@ -636,7 +638,19 @@ Only an `env.`-prefixed key reaches the child's environment. The `env.` prefix i
 
 `<NAME>` must be an identifier (`[A-Za-z_][A-Za-z0-9_]*`). `TELL_OUTBOX_DIR`, `TELL_FILE_MAX` and every `A8S_TURN_` name are refused at `set`, because a8s writes them on every wake and a node var would lose. An `env.PATH` var replaces `PATH` the way `definition.env` does, so `wake_path` is not merged into it.
 
-The registry is read at every wake, so a changed var reaches the node's next wake with no restart. A wake already running keeps the environment it started with. Values sit in the registry in plain text: a secret does not belong in one.
+The registry is read at every wake, so a changed var reaches the node's next wake with no restart. A wake already running keeps the environment it started with. `env.<NAME>` values sit in `a8s.json` in plain text; use `secret.<NAME>` for credentials.
+
+**`secret.<NAME>` vars** — one node's secret environment variables, stored in mode-`0600` `secrets.json` under `"nodes"` instead of `a8s.json`:
+
+```bash
+printf '%s\n' "$OPENAI_API_KEY" | a8s vars bob set secret.OPENAI_API_KEY -
+a8s vars bob set secret.OPENAI_API_KEY
+a8s vars bob unset secret.OPENAI_API_KEY
+```
+
+At a terminal without `-`, `set secret.<NAME>` reads from a hidden prompt. With `-` or non-terminal stdin, it reads UTF-8 text from stdin (up to 64 KiB, NUL bytes refused, one trailing newline stripped). A secret value passed on `argv`, `a8s add --secret.*`, or `ar3 tool --var secret.*` is refused without echoing the argument.
+
+The `secret.` prefix is case-insensitive and `<NAME>` keeps its case (`[A-Za-z_][A-Za-z0-9_]*`). `TELL_OUTBOX_DIR`, `TELL_FILE_MAX`, `A8S_TURN_*`, and `PATH` are refused (`PATH` is logged on exit `127`; use `env.PATH` instead). `secret.<NAME>` never expands as `$KEY` in `invoke` `argv` or mailbox path fields. `a8s vars <name>` lists each entry as `secret.<NAME>` followed by `[secret]`, `a8s health <name>` lists `secret (values hidden): <NAME>`, and `a8s remove <name>` deletes the node's stored secrets. Each node's secrets are bound to its registered `root` directory: rebuilding `a8s.json` with `a8s add <name> <dir>` preserves stored secrets automatically when `<dir>` matches, and refuses a different `<dir>` unless `--rebind-secrets` (move secrets to `<dir>` without re-entry) or `--drop-secrets` (discard them) is given.
 
 **`wake_path`** — where a8s keeps what it remembers, machine-wide. It is merged into the start shell's `PATH` for every node whose `definition.env` does not name one. The merge adds and never removes: the start shell's directories keep their order, and each directory only the recording names goes where the recording had it. a8s remembers only directories that exist, and it stores a per-shell fnm directory (`fnm_multishells/<id>/bin`) as the alias that directory links to, because the per-shell link does not outlive its session. A directory written by hand (`a8s config set wake_path ...`) stays. `A8S_WAKE_PATH` in the environment is the operator's own value: a8s uses it and records nothing over it.
 
@@ -646,7 +660,8 @@ Precedence, lowest first:
 2. `wake_path` — `PATH` only, merged into the handler's, and only when neither the definition nor the node names one
 3. `definition.env`
 4. the node's `env.<NAME>` vars
-5. `TELL_OUTBOX_DIR`, `TELL_FILE_MAX` and the `A8S_TURN_` variables, which a8s injects last
+5. the node's `secret.<NAME>` vars
+6. `TELL_OUTBOX_DIR`, `TELL_FILE_MAX` and the `A8S_TURN_` variables, which a8s injects last
 
 a8s injecting last is deliberate: a node that declares `TELL_OUTBOX_DIR` in its own `env` still answers into the outbox a8s routes to, because a node writing into someone else's outbox is worse than a node that does not answer at all.
 
@@ -788,7 +803,7 @@ When `A8S_HOME` is set it is the a8s state root, whatever else exists on disk. U
 ├── a8s.json                  registry: { agents: {...}, aliases: {...}, namespaces: {...} }
 ├── settings.json             operator settings (`a8s config`; env fills gaps)
 ├── network.json              remotes / services (non-secret)
-├── secrets.json              remote secrets (`pass` / `password`; mode 0600)
+├── secrets.json              remote, storage, and node secrets (`pass` / `password` and `secret.<NAME>`; mode 0600)
 ├── conversations.sqlite3     routed message archive (`a8s update` retains convo_max_rows)
 ├── transactions.sqlite3      routing breadcrumbs for `a8s tx` / `a8s trace` (retains txlog_max_rows), the `seen` table for receive-side dedup, and the remote address book `a8s ls` reads
 ├── log.txt                   process-scoped supervisor log

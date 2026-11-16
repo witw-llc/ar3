@@ -461,3 +461,306 @@ class TestHarnessProbe:
         _settle_wake(p, [trashed], 127)
         log = agent_log_path("A").read_text()
         assert "came from the node's `env.PATH` var: /node/bin" in log
+
+
+class TestNodeSecretVars:
+    """`a8s vars <name> set|unset secret.<NAME>`: stored in `0600` `secrets.json`,
+    redacted in `a8s vars` and `a8s health`, never expanded in argv or path fields,
+    and injected into the wake environment above `env.<NAME>` and below routing."""
+
+    def test_set_stdin_list_update_unset_and_mode_0600(
+        self, fake_home, agent_root, monkeypatch, capsys
+    ):
+        import io
+        import os
+        from core import secrets_config_path
+        from definitions import load_agent_secrets
+
+        _add(agent_root, "scholar")
+        capsys.readouterr()
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("sk-first-secret-9001\n"))
+        assert cmd_vars(["scholar", "set", "secret.OPENAI_API_KEY", "-"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "scholar: set secret.OPENAI_API_KEY\n"
+        assert "sk-first-secret-9001" not in out + err
+        assert "vars" not in load_registry()["scholar"]
+        if os.name == "posix":
+            assert (secrets_config_path().stat().st_mode & 0o777) == 0o600
+        assert load_agent_secrets("scholar") == {"OPENAI_API_KEY": "sk-first-secret-9001"}
+        assert load_agent_env("scholar") == {"OPENAI_API_KEY": "sk-first-secret-9001"}
+
+        assert cmd_vars(["scholar"]) == 0
+        listed = capsys.readouterr().out
+        assert listed == "secret.OPENAI_API_KEY  [secret]\n"
+        assert "sk-first-secret-9001" not in listed
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("sk-updated-secret-9002\r\n"))
+        assert cmd_vars(["scholar", "set", "SECRET.OPENAI_API_KEY", "-"]) == 0
+        out, err = capsys.readouterr()
+        assert out == "scholar: updated secret.OPENAI_API_KEY\n"
+        assert "sk-updated-secret-9002" not in out + err
+        assert load_agent_secrets("scholar") == {"OPENAI_API_KEY": "sk-updated-secret-9002"}
+
+        assert cmd_vars(["scholar", "unset", "secret.openai_api_key"]) == 1
+        assert "no var named" in capsys.readouterr().err
+        assert cmd_vars(["scholar", "unset", "Secret.OPENAI_API_KEY"]) == 0
+        assert capsys.readouterr().out == "scholar: unset secret.OPENAI_API_KEY\n"
+        assert load_agent_secrets("scholar") == {}
+        assert json.loads(secrets_config_path().read_text())["nodes"] == {}
+
+    def test_set_prompts_with_getpass_at_tty_when_dash_omitted(
+        self, fake_home, agent_root, monkeypatch, capsys
+    ):
+        from definitions import load_agent_secrets
+
+        class FakeTty:
+            def isatty(self):
+                return True
+
+        _add(agent_root, "scholar")
+        capsys.readouterr()
+        asked = []
+        monkeypatch.setattr("sys.stdin", FakeTty())
+        monkeypatch.setattr(
+            "commands.getpass.getpass",
+            lambda prompt="": asked.append(prompt) or "sk-tty-secret-7777",
+        )
+        assert cmd_vars(["scholar", "set", "secret.OPENAI_API_KEY"]) == 0
+        out, err = capsys.readouterr()
+        assert asked == ["Value for OPENAI_API_KEY: "]
+        assert "sk-tty-secret-7777" not in out + err
+        assert load_agent_secrets("scholar") == {"OPENAI_API_KEY": "sk-tty-secret-7777"}
+
+    def test_argv_and_add_flag_values_are_refused_without_echoing_the_secret(
+        self, fake_home, agent_root, capsys
+    ):
+        sentinel = "sk-LEAK-SENTINEL-4242"
+        assert cmd_add(["bad1", str(agent_root), f"--secret.OPENAI_API_KEY={sentinel}"]) == 2
+        assert sentinel not in (capsys.readouterr().err)
+        assert "bad1" not in load_registry()
+
+        assert cmd_add(["bad2", str(agent_root), "--SECRET.OPENAI_API_KEY", sentinel]) == 2
+        assert sentinel not in (capsys.readouterr().err)
+
+        _add(agent_root, "bob")
+        capsys.readouterr()
+        assert cmd_vars(["bob", "set", "secret.OPENAI_API_KEY", sentinel]) == 2
+        out, err = capsys.readouterr()
+        assert sentinel not in out + err
+        assert "never passed on the command line" in err
+
+        assert cmd_vars(["bob", "set", "secret.OPENAI_API_KEY", "-", sentinel]) == 2
+        out, err = capsys.readouterr()
+        assert sentinel not in out + err
+
+    @pytest.mark.parametrize(
+        "bad_key",
+        [
+            "secret.",
+            "secret.A-B",
+            "secret.1ABC",
+            "secret.PATH",
+            "secret.path",
+            "secret.TELL_OUTBOX_DIR",
+            "secret.A8S_TURN_FILES",
+        ],
+    )
+    def test_invalid_routing_and_path_secret_names_are_refused_before_reading_input(
+        self, fake_home, agent_root, monkeypatch, capsys, bad_key
+    ):
+        class Boom:
+            def isatty(self):
+                return False
+
+            def read(self, *a):
+                pytest.fail("stdin was read for an invalid secret name")
+
+        _add(agent_root, "bob")
+        capsys.readouterr()
+        monkeypatch.setattr("sys.stdin", Boom())
+        assert cmd_vars(["bob", "set", bad_key, "-"]) == 2
+        assert capsys.readouterr().err
+
+    @pytest.mark.parametrize("bad_stdin", ["", "\n", "\r\n", "abc\0def\n"])
+    def test_empty_or_nul_secret_values_are_refused(
+        self, fake_home, agent_root, monkeypatch, capsys, bad_stdin
+    ):
+        import io
+
+        _add(agent_root, "bob")
+        capsys.readouterr()
+        monkeypatch.setattr("sys.stdin", io.StringIO(bad_stdin))
+        assert cmd_vars(["bob", "set", "secret.TOKEN", "-"]) == 2
+        assert "abc" not in capsys.readouterr().err
+
+    def test_secret_var_never_expands_in_argv_or_mailbox_paths_and_wins_over_env_in_wake(
+        self, fake_home, tmp_path, monkeypatch
+    ):
+        import io
+        from commands import cmd_remove
+
+        out = tmp_path / "env.json"
+        p = _register(
+            tmp_path,
+            _dump_definition(out, env={"SHARED": "def", "DEF_ONLY": "1"}),
+            {"MODEL": "m", "env.SHARED": "env-layer"},
+        )
+        monkeypatch.setattr("sys.stdin", io.StringIO("secret-layer-val\n"))
+        assert cmd_vars(["A", "set", "secret.SHARED", "-"]) == 0
+        monkeypatch.setattr("sys.stdin", io.StringIO("only-secret-val\n"))
+        assert cmd_vars(["A", "set", "secret.OPENAI_API_KEY", "-"]) == 0
+
+        # Never satisfies $OPENAI_API_KEY in invoke argv.
+        with pytest.raises(UndefinedVarsError):
+            build_command(
+                {"invoke": ["tool", "$OPENAI_API_KEY", "$MESSAGE"]},
+                {"from": "x", "to": "A", "content": "hi"},
+                p.root,
+                vars=load_agent_vars("A"),
+            )
+
+        child_env = _wake_once(out)
+        assert child_env["SHARED"] == "secret-layer-val"
+        assert child_env["OPENAI_API_KEY"] == "only-secret-val"
+        assert child_env["DEF_ONLY"] == "1"
+        assert "MODEL" not in child_env
+        assert not any(k.lower().startswith("secret.") for k in child_env)
+
+        # Removing the node wipes its stored secrets.
+        assert cmd_remove(["A"]) == 0
+        from core import secrets_config_path
+
+        assert json.loads(secrets_config_path().read_text())["nodes"] == {}
+
+    def test_corrupt_secrets_json_refuses_writes_and_aborts_wake_without_leaking(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        import io
+        from core import secrets_config_path
+
+        out = tmp_path / "env.json"
+        _register(tmp_path, _dump_definition(out))
+        secrets_config_path().parent.mkdir(parents=True, exist_ok=True)
+        raw_corrupt = "{not-json sk-DO-NOT-LEAK-8888"
+        secrets_config_path().write_text(raw_corrupt, encoding="utf-8")
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("sk-new-value\n"))
+        assert cmd_vars(["A", "set", "secret.TOKEN", "-"]) == 1
+        err = capsys.readouterr().err
+        assert "secrets.json unreadable" in err
+        assert "sk-DO-NOT-LEAK-8888" not in err
+        assert secrets_config_path().read_text(encoding="utf-8") == raw_corrupt
+
+        _queue()
+        attached_loop(["A"], 0.05, single_pass=True)
+        assert not out.exists()
+        log = agent_log_path("A").read_text()
+        assert "wake aborted" in log
+        assert "sk-DO-NOT-LEAK-8888" not in log
+
+    def test_node_health_lists_secret_names_hidden_and_never_prints_values(
+        self, fake_home, agent_root, monkeypatch, capsys
+    ):
+        import io
+        import txlog
+        from commands import cmd_health
+
+        txlog.log("RUN_START", detail="init")
+        _add(agent_root, "bob", "--ALLOW=alice", "--env.PUBLIC_ENV=visible-in-vars")
+        monkeypatch.setattr("sys.stdin", io.StringIO("sk-health-secret-5555\n"))
+        assert cmd_vars(["bob", "set", "secret.OPENAI_API_KEY", "-"]) == 0
+        capsys.readouterr()
+
+        assert cmd_health(["bob"]) == 0
+        out, err = capsys.readouterr()
+        assert "secret (values hidden): OPENAI_API_KEY" in out
+        assert "sk-health-secret-5555" not in out + err
+
+    def test_registry_reconstruction_preserves_same_root_secrets_and_refuses_ambiguous_or_damaged_stores(
+        self, fake_home, tmp_path, monkeypatch, capsys
+    ):
+        import io
+        from ar3 import nodes as ar3_nodes
+        from core import registry_path, secrets_config_path
+
+        original = tmp_path / "original"
+        original.mkdir()
+        moved = tmp_path / "moved"
+        moved.mkdir()
+        unrelated = tmp_path / "unrelated"
+        unrelated.mkdir()
+
+        assert cmd_add(["probe", str(original), "filedrop"]) == 0
+        monkeypatch.setattr("sys.stdin", io.StringIO("synthetic-retained-token\n"))
+        assert cmd_vars(["probe", "set", "secret.TOKEN", "-"]) == 0
+        assert load_agent_env("probe")["TOKEN"] == "synthetic-retained-token"
+
+        # Pre-v1 scorch-the-earth reset (rm a8s.json) followed by re-adding the
+        # identical name and root preserves stored node secrets automatically.
+        registry_path().unlink()
+        capsys.readouterr()
+        assert cmd_add(["probe", str(original), "filedrop"]) == 0
+        assert load_agent_env("probe")["TOKEN"] == "synthetic-retained-token"
+        assert ar3_nodes.node_secrets("probe") == {"TOKEN": "synthetic-retained-token"}
+
+        # Re-adding at a different directory refuses without destroying credentials
+        # until the operator passes --rebind-secrets or --drop-secrets.
+        registry_path().unlink()
+        capsys.readouterr()
+        assert cmd_add(["probe", str(moved), "filedrop"]) == 1
+        err = capsys.readouterr().err
+        assert "--rebind-secrets" in err and "--drop-secrets" in err
+        assert "probe" not in load_registry()
+        assert "synthetic-retained-token" not in err
+
+        # Contradictory flags fail closed with usage exit code 2.
+        assert (
+            cmd_add(
+                ["probe", str(moved), "filedrop", "--rebind-secrets", "--drop-secrets"]
+            )
+            == 2
+        )
+        capsys.readouterr()
+
+        # --rebind-secrets moves the retained credentials to the new directory
+        # without re-entering any secret value.
+        assert cmd_add(["probe", str(moved), "filedrop", "--rebind-secrets"]) == 0
+        assert load_agent_env("probe")["TOKEN"] == "synthetic-retained-token"
+        assert ar3_nodes.node_secrets("probe") == {"TOKEN": "synthetic-retained-token"}
+
+        # Hand-editing a8s.json to a different root never leaks the former root's token.
+        reg = load_registry()
+        reg["probe"]["root"] = str(unrelated.resolve())
+        save_registry(reg)
+        with pytest.raises(ValueError, match="different directory"):
+            load_agent_env("probe")
+        assert ar3_nodes.node_secrets("probe") == {}
+
+        # --drop-secrets discards the retained secrets cleanly for a replacement root.
+        registry_path().unlink()
+        capsys.readouterr()
+        assert cmd_add(["probe", str(unrelated), "filedrop", "--drop-secrets"]) == 0
+        assert load_agent_env("probe") == {}
+        assert json.loads(secrets_config_path().read_text())["nodes"] == {}
+
+        # A damaged sibling section in secrets.json fails closed during add AND read,
+        # never registering a replacement that could inherit a former owner's token.
+        registry_path().unlink()
+        secrets_config_path().write_text(
+            json.dumps(
+                {
+                    "remotes": [],
+                    "services": {},
+                    "nodes": {"probe": {"TOKEN": "synthetic-former-owner-token"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        capsys.readouterr()
+        assert cmd_add(["probe", str(unrelated), "filedrop"]) == 1
+        assert "probe" not in load_registry()
+        save_registry({"probe": {"root": str(unrelated.resolve()), "definition": "filedrop"}})
+        with pytest.raises(ValueError, match="secrets.json unreadable"):
+            load_agent_env("probe")
+        assert ar3_nodes.node_secrets("probe") == {}

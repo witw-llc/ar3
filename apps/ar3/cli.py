@@ -1527,7 +1527,7 @@ def _tool_target(defs, args, definition):
         print(f"ar3 tool: node '{node}' runs {stem}, not tool-{args.name}.", file=sys.stderr)
         return 2
     try:
-        node_env = defs.env_vars(info.get("vars"))
+        node_env = {**defs.env_vars(info.get("vars")), **defs.load_agent_secrets(node)}
     except ValueError as exc:
         print(f"ar3 tool: {exc}", file=sys.stderr)
         return 2
@@ -1824,6 +1824,13 @@ def cmd_tool(args: argparse.Namespace) -> int:
     overrides = []
     for item in args.var:
         key, sep, value = item.partition("=")
+        if key[: len("secret.")].lower() == "secret.":
+            print(
+                "ar3 tool: secret.<NAME> values are never passed on the command line; "
+                "set it with `a8s vars <node> set secret.<NAME>`.",
+                file=sys.stderr,
+            )
+            return 2
         if not sep or not key:
             print(f"ar3 tool: --var needs KEY=VALUE, got '{item}'", file=sys.stderr)
             return 2

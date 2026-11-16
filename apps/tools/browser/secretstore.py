@@ -26,11 +26,12 @@ from urllib.parse import quote, quote_plus, urlsplit
 from . import session
 
 FILE = "secrets.json"
-VERSION = 1
+VERSION = 2
 NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 MIN_VALUE_LENGTH = 4
 DEFAULT_PORTS = {"http": "80", "https": "443"}
 HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_WRITE_LOCK = threading.Lock()
 
 
 class SecretStoreError(Exception):
@@ -183,10 +184,20 @@ def url_on_origins(url, origins):
     )
 
 
+def bindings_of(entry):
+    """Normalize a stored secret entry (`{"value", "origins"}` or `[{"value", "origins"}, ...]`)
+    into a list of `{"value", "origins"}` binding dicts."""
+    if isinstance(entry, dict):
+        return [{"value": entry["value"], "origins": list(entry["origins"])}]
+    if isinstance(entry, list):
+        return [{"value": item["value"], "origins": list(item["origins"])} for item in entry]
+    return []
+
+
 def read(seat):
-    """The seat's {NAME: {"value": ..., "origins": [...]}}. A missing file is an
-    empty store; a file open to group or other users, or one that is not a
-    version 1 store, is an error."""
+    """The seat's `{NAME: [{"value": ..., "origins": [...]}, ...]}`. A missing file is an
+    empty store; a file open to group or other users, or one that is not a version 1 or
+    version 2 store, is an error."""
     target = path(seat)
     try:
         descriptor = os.open(target, os.O_RDONLY)
@@ -212,6 +223,13 @@ def _why(exc):
     return exc.strerror or type(exc).__name__
 
 
+def _parse_binding(entry, corrupt):
+    if not isinstance(entry, dict):
+        raise corrupt
+    check_value(entry.get("value"))
+    return {"value": entry["value"], "origins": check_origins(entry.get("origins"))}
+
+
 def _parse(target, raw):
     corrupt = SecretStoreError(
         f"secret store {target} is not a valid secret store; repair it or remove the file"
@@ -227,18 +245,29 @@ def _parse(target, raw):
         raise corrupt
     if version > VERSION:
         raise SecretStoreError(
-            f"secret store {target} is version {version}; this tool reads version {VERSION}"
+            f"secret store {target} is version {version}; this tool reads versions 1 to {VERSION}"
         )
-    if version != VERSION:
+    if version not in (1, 2):
         raise corrupt
     store = {}
     try:
         for name, entry in data["secrets"].items():
             check_name(name)
-            if not isinstance(entry, dict):
-                raise corrupt
-            check_value(entry.get("value"))
-            store[name] = {"value": entry["value"], "origins": check_origins(entry.get("origins"))}
+            if version == 1:
+                store[name] = [_parse_binding(entry, corrupt)]
+            else:
+                if not isinstance(entry, list) or not entry:
+                    raise corrupt
+                seen_origins = set()
+                parsed_bindings = []
+                for item in entry:
+                    binding = _parse_binding(item, corrupt)
+                    for origin in binding["origins"]:
+                        if origin in seen_origins:
+                            raise corrupt
+                        seen_origins.add(origin)
+                    parsed_bindings.append(binding)
+                store[name] = parsed_bindings
     except SecretStoreError:
         raise corrupt from None
     return store
@@ -270,11 +299,16 @@ def _create_aside(aside):
 
 
 def save(seat, store):
-    """Write the whole store: a 0600 file made beside the target, then renamed over it."""
+    """Write the whole store (`version: 2`): a 0600 file made beside the target, then renamed over it."""
     target = path(seat)
     directory = os.path.dirname(target)
     session.private_dir(directory)
-    body = json.dumps({"version": VERSION, "secrets": dict(sorted(store.items()))}, indent=2)
+    cleaned = {
+        name: bindings_of(entry)
+        for name, entry in sorted(store.items())
+        if bindings_of(entry)
+    }
+    body = json.dumps({"version": VERSION, "secrets": cleaned}, indent=2)
     aside = os.path.join(directory, f".{FILE}.{os.getpid()}.{threading.get_ident()}.tmp")
     descriptor = _create_aside(aside)
     try:
@@ -292,24 +326,60 @@ def save(seat, store):
 
 
 def set_secret(seat, name, value, origins):
-    """Store `value` under `name`, to be typed only on `origins`. A later set replaces both."""
+    """Store `value` under `name` for `origins`, keeping bindings under `name` on other origins."""
     check_name(name)
     check_value(value)
     origins = check_origins(origins)
-    store = read(seat)
-    store[name] = {"value": value, "origins": origins}
-    save(seat, store)
+    target_set = set(origins)
+    with _WRITE_LOCK:
+        store = read(seat)
+        kept = []
+        for binding in store.get(name, ()):
+            remaining = [origin for origin in binding["origins"] if origin not in target_set]
+            if remaining:
+                kept.append({"value": binding["value"], "origins": remaining})
+        merged = False
+        for binding in kept:
+            if binding["value"] == value:
+                for origin in origins:
+                    if origin not in binding["origins"]:
+                        binding["origins"].append(origin)
+                merged = True
+                break
+        if not merged:
+            kept.append({"value": value, "origins": list(origins)})
+        store[name] = kept
+        save(seat, store)
 
 
-def remove(seat, name):
-    """Drop `name`. False when the store never held it."""
+def remove(seat, name, origins=None):
+    """Drop `name` (or only `origins` under `name`). False when nothing matched."""
     check_name(name)
-    store = read(seat)
-    if name not in store:
-        return False
-    del store[name]
-    save(seat, store)
-    return True
+    target_set = set(check_origins(origins)) if origins is not None else None
+    with _WRITE_LOCK:
+        store = read(seat)
+        if name not in store:
+            return False
+        if target_set is None:
+            del store[name]
+            save(seat, store)
+            return True
+        kept = []
+        removed = False
+        for binding in store[name]:
+            remaining = [origin for origin in binding["origins"] if origin not in target_set]
+            if len(remaining) != len(binding["origins"]):
+                removed = True
+            if remaining:
+                kept.append({"value": binding["value"], "origins": remaining})
+        if not removed:
+            return False
+        if kept:
+            store[name] = kept
+        else:
+            del store[name]
+        save(seat, store)
+        return True
 
 
 _YAML_ESCAPES = {
@@ -1391,10 +1461,15 @@ class Scrubber:
     passcode, which is scrubbed the same way from then on."""
 
     def __init__(self, store):
-        self.secrets = dict(store)
+        self.secrets = {
+            name: bindings_of(entry)
+            for name, entry in dict(store).items()
+            if bindings_of(entry)
+        }
         self._texts = {}  # the text of a value, as typed or tidied, and the name it goes by
-        for name, entry in sorted(self.secrets.items()):
-            self._add(name, entry["value"])
+        for name, bindings in sorted(self.secrets.items()):
+            for entry in bindings:
+                self._add(name, entry["value"])
         self._whole = self._exact = None
         self._entries, self._traces, self._wholes, self._markers, self._starts, self._lines = [], [], [], [], None, False
         self._dot_run, self._value_ellipses = 0, 0
