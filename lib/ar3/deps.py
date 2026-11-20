@@ -88,6 +88,7 @@ _CLAUSE_RE = re.compile(r"(==|!=|>=|<=|>|<)\s*([A-Za-z0-9.]+)")
 _MARKER_CLAUSE_RE = re.compile(
     r"^(sys_platform|platform_machine|os_name)\s*(==|!=)\s*(['\"])([^'\"]*)\3$"
 )
+_CPYTHON_EXT_RE = re.compile(r"\.(?:cpython-(\d+[a-z]*)|cp(\d+[a-z]*))[-.]")
 _OPS = {
     "==": lambda a, b: a == b,
     "!=": lambda a, b: a != b,
@@ -181,6 +182,32 @@ def _installed_versions(dir_: Path) -> dict[str, str]:
     return versions
 
 
+def _cpython_abi_digits() -> str | None:
+    if sys.implementation.name != "cpython":
+        return None
+    tag = sys.implementation.cache_tag or ""
+    if tag.startswith("cpython-"):
+        return tag.split("-", 1)[1]
+    return f"{sys.version_info.major}{sys.version_info.minor}"
+
+
+def _extensions_match_interpreter(dir_: Path) -> bool:
+    """False when `dir_` contains a CPython-tagged `.so`/`.pyd` built for a
+    different interpreter (e.g. `cpython-314` inside a `cpython-315` group dir).
+    `abi3` extensions carry no version digits and remain valid."""
+    expected = _cpython_abi_digits()
+    if not expected:
+        return True
+    for ext in ("*.so", "*.pyd"):
+        for candidate in dir_.rglob(ext):
+            match = _CPYTHON_EXT_RE.search(candidate.name)
+            if match:
+                found = match.group(1) or match.group(2)
+                if found != expected:
+                    return False
+    return True
+
+
 def ensure_group(group: str) -> Path | None:
     """`group_dir(group)` if it already exists and satisfies every pin in
     `requirements/<group>.txt`, else `None`. Never installs, never writes —
@@ -190,6 +217,8 @@ def ensure_group(group: str) -> Path | None:
     process start."""
     dir_ = group_dir(group)
     if not dir_.is_dir():
+        return None
+    if not _extensions_match_interpreter(dir_):
         return None
     req_file = _requirements_file(group)
     if not req_file.is_file():
@@ -205,13 +234,15 @@ def ensure_group(group: str) -> Path | None:
 def install_group(group: str) -> Path:
     """Install `requirements/<group>.txt` into `group_dir(group)`.
 
-    Resolves `uv` first (`uv pip install --target <dir> -r <file>`), falling
+    Resolves `uv` first (`uv pip install --python <sys.executable> --target <dir> -r <file>`), falling
     back to `<sys.executable> -m pip install --target <dir> -r <file>` when
-    `uv` is not on PATH. `--target` is what makes either command work on a
-    PEP 668 (externally-managed) system: it installs into a plain directory
-    rather than the interpreter's own site-packages, so there is no
-    system/venv Python to protect and no `--break-system-packages` flag to
-    reach for.
+    `uv` is not on PATH. `--python` binds `uv` to the running interpreter so a
+    multi-Python machine never resolves wheels for a different `uv` default
+    Python into this interpreter's directory. `--target` is what makes either
+    command work on a PEP 668 (externally-managed) system: it installs into a
+    plain directory rather than the interpreter's own site-packages, so there
+    is no system/venv Python to protect and no `--break-system-packages` flag
+    to reach for.
 
     Installs into a sibling temp directory first, and only swaps it into
     `group_dir(group)` — via `os.replace`, moving the previous install aside
@@ -227,7 +258,17 @@ def install_group(group: str) -> Path:
     tmp_dir = final_dir.parent / f".{group}.{new_ulid()}.tmp"
     installer = shutil.which("uv")
     argv = (
-        [installer, "pip", "install", "--target", str(tmp_dir), "-r", str(req_file)]
+        [
+            installer,
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--target",
+            str(tmp_dir),
+            "-r",
+            str(req_file),
+        ]
         if installer
         else [sys.executable, "-m", "pip", "install", "--target", str(tmp_dir), "-r", str(req_file)]
     )

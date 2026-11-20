@@ -1,20 +1,20 @@
 ---
 name: "a8s-tools"
-description: "Set up and use tool nodes for shell commands, encrypted files, Chrome, Gemini, delayed timers, local transcription, and deep research."
+description: "Set up and use tool nodes for shell commands, encrypted files, Chrome, Gemini, delayed timers, local transcription, speech synthesis, and deep research."
 ---
 
 # a8s tool nodes
 
 A tool node runs a program when it receives a message. It returns the result
 as a message. The bundled tools are `command-shell`, `vault`, `browser`,
-`gemini-web`, `timer`, `transcribe`, and `research`. Each has a public command
+`gemini-web`, `timer`, `transcribe`, `speak`, and `research`. Each has a public command
 under `ar3 tool`.
 
 ## Register and configure a tool
 
 Use the bundled definition name `tool-NAME` (`tool-command-shell`, `tool-vault`,
-`tool-browser`, `tool-gemini-web`, `tool-timer`, `tool-transcribe`, or
-`tool-research`):
+`tool-browser`, `tool-gemini-web`, `tool-timer`, `tool-transcribe`,
+`tool-speak`, or `tool-research`):
 
 ```bash
 a8s add terminal ~/work tool-command-shell --ALLOW=operator,assistant
@@ -34,6 +34,7 @@ and its option defaults:
 | `gemini-web` | Sends prompts through a signed-in Gemini profile. | [Gemini tool](../apps/tools/gemini_web/README.md) |
 | `timer` | Schedules delayed callback messages back to the sender. | [Timer tool](../apps/tools/timer/README.md) |
 | `transcribe` | Transcribes attached audio and video files with local models. | [Transcribe tool](../apps/tools/transcribe/README.md) |
+| `speak` | Synthesizes speech from text or markdown (`speak.json` stores `engine`, `voice`, `model`, `format`, `speed`, and `style`) and returns an audio attachment. | [Speak tool](../apps/tools/speak/README.md) |
 | `research` | Runs cited deep web research via the OpenAI Responses API. | [Research tool](../apps/tools/research/README.md) |
 
 ## Use a local terminal
@@ -74,6 +75,7 @@ ar3 tool gemini-web --seat gemini-test --var BROWSER_SEAT=browser-seat -- "Hello
 | `gemini-web` | `sessions`, `forget` |
 | `timer` | `list`, `cancel`, `stop`, `idle` |
 | `transcribe` | `doctor`, `hint`, `replace` |
+| `speak` | `doctor`, `voices`, `config`, `replace`, `pronounce`, `secret` |
 | `research` | `secret`, `idle`, `resume` |
 | `vault` | `init`, `fingerprint`, `admin`, `voucher`, `seat`, `client` |
 | `command-shell` | Uses shell messages; set options with `a8s vars` or `--var`. |
@@ -203,8 +205,8 @@ sender's next prompt in a new conversation. These local commands do not need
 
 ## Access control
 
-`command-shell`, `browser`, `gemini-web`, `timer`, `transcribe`, and `research`
-require `ALLOW` for routed
+`command-shell`, `browser`, `gemini-web`, `timer`, `transcribe`, `speak`, and
+`research` require `ALLOW` for routed
 messages. Separate sender names with commas or spaces. Names are not
 case-sensitive. If the variable is missing, a8s stops the wake before the
 tool runs. Read `a8s logs NODE` for the error. A sender outside the list gets

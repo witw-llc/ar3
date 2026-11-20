@@ -55,7 +55,7 @@ class TestEfforts:
         assert found == []
         assert "any non-empty effort value" in note
 
-    @pytest.mark.parametrize("preset", ["cursor", "devin", "ollama"])
+    @pytest.mark.parametrize("preset", ["devin", "ollama"])
     def test_a_preset_without_an_effort_flag_refuses_with_apply_efforts_wording(self, preset):
         with pytest.raises(values.ValuesError, match=f"engine '{preset}' does not support --effort"):
             values.efforts(preset)
@@ -304,7 +304,8 @@ class TestVerbs:
     def test_verbs_follow_the_effort_flag_and_the_list_source(self):
         assert values.verbs("claude") == ["efforts", "models"]
         assert values.verbs("codex") == ["efforts", "models"]
-        assert values.verbs("cursor") == ["models"]
+        assert values.verbs("cursor") == ["efforts", "models"]
+        assert values.verbs("devin") == ["models"]
         assert values.verbs("muse") == ["efforts", "models"]
 
 class TestCli:
@@ -338,10 +339,12 @@ class TestCli:
         assert captured.err.startswith("r4t engine: engine 'opencode' takes any")
 
     def test_a_refusal_is_exit_one_on_stderr(self, capsys):
-        assert r4t_main(["engine", "cursor", "efforts"]) == 1
+        assert r4t_main(["engine", "devin", "efforts"]) == 1
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert "r4t engine: engine 'cursor' does not support --effort" in captured.err
+        assert "r4t engine: engine 'devin' does not support --effort" in captured.err
+        assert r4t_main(["engine", "cursor", "efforts"]) == 0
+        assert "high" in capsys.readouterr().out.split()
 
     def test_models_through_the_cli(self, monkeypatch, capsys):
         fake_cli(monkeypatch, {("ollama", "list"): "NAME ID\nm1:latest x\n"})

@@ -1,0 +1,3 @@
+# Optional: tool-speak local Kokoro ONNX neural TTS engine.
+kokoro>=0.9
+soundfile>=0.12

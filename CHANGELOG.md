@@ -10,6 +10,40 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.135
+
+### Added
+
+- `tool-speak` (`ar3 tool speak`, `a8s add <name> <dir> tool-speak --ALLOW=...`):
+  text and markdown speech synthesis across local (`say`, `pocket` with SHA-256
+  verified `pocket-tts==4.0.1` weights and WSOLA tempo scaling, `kokoro`) and
+  secret-gated cloud (`openai` GA Realtime `gpt-realtime-2.1-mini`, `elevenlabs`,
+  `cartesia`) engines, replying with an `.m4a` (default), `.mp3`, or `.wav`
+  attachment, markdown section pauses, emphasis, `<!-- speak: ... -->` section
+  directives, and working-directory `speak.json`, `replacements.txt`,
+  `pronunciations.txt`, and `0600` `secrets.json` (`config`, `voices`, `doctor`,
+  `replace`, `pronounce`, `secret`).
+
+### Changed
+
+- `r4t` supports `--effort` (`EFFORT` and `r4t engine cursor efforts`) directly on
+  `cursor`, accepting bare model names (`grok-4.7`), `agent models` variant slugs
+  (`cursor-grok-4.7-high`), and bracketed specs across both headless `agent -p`
+  and resident `agent acp` sessions, mapping effort onto whichever bracket key
+  (`effort`, `reasoning_effort`, or `reasoning`) the model carries and failing
+  closed when a model has no effort parameter.
+- `requirements/transcribe-mlx.txt` widens `numpy` to `>=2.2.5,<2.6` for Python
+  3.15 Apple Silicon wheel compatibility, and `requirements/` adds `speak-pocket`
+  and `speak-kokoro` on-demand `ar3 deps` groups.
+
+### Fixed
+
+- `ar3.deps.install_group` passes `--python <sys.executable>` to `uv pip install`
+  and `ar3.deps.ensure_group` invalidates group directories containing CPython
+  `.so`/`.pyd` extensions compiled for a different minor Python version,
+  preventing multi-Python machines from installing or reusing mismatched ABI
+  wheels.
+
 ## 0.1.134
 
 ### Added

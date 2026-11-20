@@ -30,13 +30,14 @@ def world(tmp_path):
         ("vault1", "vault"),
         ("timer1", "timer"),
         ("scribe1", "transcribe"),
+        ("speak1", "speak"),
         ("scholar1", "research"),
     ):
         nodes[name] = {
             "root": str(root), "definition": f"tool-{tool}",
             "vars": {"ALLOW": "other", "CHROME": str(chrome), "ALLOW_EVAL": "1",
                      "env.LOCAL_PROBE": "node-value", "VAULT_DIR": str(tmp_path / "vault-state"),
-                     "ENGINE": "faster-whisper"},
+                     "ENGINE": "pocket" if tool == "speak" else "faster-whisper"},
         }
     (registry / "a8s.json").write_text(json.dumps({"agents": nodes, "aliases": {}, "namespaces": {}}))
     env = {key: value for key, value in os.environ.items()
@@ -62,6 +63,7 @@ def run(world, *args, stdin=""):
     ("research", ["secret", "idle", "resume"]),
     ("timer", ["list", "cancel", "stop", "idle"]),
     ("transcribe", ["doctor", "hint", "replace"]),
+    ("speak", ["doctor", "voices", "config", "replace", "pronounce", "secret"]),
     ("vault", ["init", "fingerprint", "admin", "voucher", "seat", "client"]),
     ("command-shell", []),
 ])
@@ -222,6 +224,15 @@ def test_timer_transcribe_and_research_local_commands_use_node_root(world):
     assert (root / "replacements.txt").is_file()
     doc = run(world, "transcribe", "--node", "scribe1", "doctor")
     assert doc.returncode == 0 and "engine: faster-whisper" in doc.stdout
+
+    # Speak local commands write speak.json in the node's root, honor node ENGINE var in doctor, and guard secrets.
+    sp_cfg = run(world, "speak", "--node", "speak1", "config", "set", "--voice", "charles", "--format", "wav")
+    assert sp_cfg.returncode == 0
+    assert (root / "speak.json").is_file()
+    sp_doc = run(world, "speak", "--node", "speak1", "doctor")
+    assert sp_doc.returncode == 0 and "engine: pocket (voice: charles" in sp_doc.stdout
+    sp_bad_sec = run(world, "speak", "--node", "speak1", "secret", "sk-speak-mistyped")
+    assert sp_bad_sec.returncode == 2 and "sk-speak-mistyped" not in sp_bad_sec.stderr
 
     # Research local commands write secrets.json in the node's root and reject bad secret verbs safely.
     s_set = run(world, "research", "--node", "scholar1", "secret", "set", "OPENAI_API_KEY", "-", stdin="sk-test-node-key\n")

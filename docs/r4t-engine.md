@@ -124,7 +124,7 @@ its advertised vocabulary fails before the harness starts.
 | agy | model variant when pinned; `--effort` otherwise | low, medium, high; pinned models must offer the requested variant |
 | codex / ollama-codex | `-c model_reasoning_effort=VALUE` | non-empty string; model-specific acceptance belongs to Codex |
 | opencode / ollama-opencode | `--variant` | non-empty provider-specific variant |
-| cursor | inside `--model` | preserve bracket syntax; separate `--effort` errors |
+| cursor | inside `--model` / ACP `model` | none, minimal, low, medium, high, xhigh, max, ultra (mapped onto `effort`, `reasoning_effort`, or `reasoning`; bracket syntax and `agent models` slugs accepted) |
 | devin / bare ollama | unsupported | separate `--effort` errors |
 
 Codex CLI 0.147.0's generated `ReasoningEffort` schema is a non-empty string,
@@ -155,7 +155,7 @@ Rig effort is a separate persisted setting: `rig add` and `rig swap` accept
 A `rig run --effort` override affects only that turn. Precedence is the runtime
 flag, then the rig setting, then embedded model effort or the engine default.
 Engine swaps preserve effort and refuse incompatible values before saving;
-unset it before switching to Cursor or Devin. Dispatch and knowledge
+unset it before switching to Devin. Dispatch and knowledge
 distillation also use the rig setting. `--echo` shows the resulting argv.
 
 ### Git identity
@@ -902,12 +902,14 @@ still exit on stdin EOF.
   Measure the next ACP engine before assuming it exits on EOF.
 - After `session/new`, the bridge pins the catalog value with
   `session/set_config_option`. The slug `composer-2.5` is the option's name;
-  its catalog value is `composer-2.5[fast=true]`. A bracketed slug such as
-  `grok-4.6[effort=high]` matches the catalog value that contains those
-  pairs. Two such values say the model name is ambiguous. A `currentValue`
-  that already matches is left alone.
-  Unset `MODEL` means `composer-2.5`. A separate `EFFORT` variable is
-  ignored, with one warning; effort belongs in the model slug's brackets.
+  its catalog value is `composer-2.5[fast=true]`. Bare names (`grok-4.7`),
+  `agent models` variant slugs (`cursor-grok-4.7-high`), and bracketed specs
+  (`grok-4.6[effort=high]`) resolve against the catalog, mapping `EFFORT` (or
+  an embedded effort suffix/bracket) onto whichever effort key (`effort`,
+  `reasoning_effort`, or `reasoning`) that model's catalog entry carries. A
+  model whose catalog value has no effort key refuses `EFFORT`. Two distinct
+  matches say the model name is ambiguous. A `currentValue` that already
+  matches is left alone. Unset `MODEL` means `composer-2.5`.
 - The a8s MCP server goes on `session/new` as `mcpServers` (`env` is a list
   of `{name, value}`). The tell step names `a8s_tell`. One-shot cursor turns
   stay on the `tell` CLI.

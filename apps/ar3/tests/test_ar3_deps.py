@@ -78,6 +78,8 @@ class TestKnownGroups:
         assert "transcribe-fast" in groups
         assert "transcribe-mlx" in groups
         assert "transcribe-whisper" in groups
+        assert "speak-kokoro" in groups
+        assert "speak-pocket" in groups
         assert not any(g.endswith("-test") for g in groups)
 
 
@@ -161,6 +163,31 @@ class TestEnsureGroup:
         _write_dist(dir_, "av", "18.1.0")
         assert ar3_deps.ensure_group("transcribe-fast") == dir_
 
+    def test_mismatched_cpython_extension_invalidates_group_while_abi3_passes(
+        self, monkeypatch, tmp_path
+    ):
+        req_dir = tmp_path / "requirements"
+        req_dir.mkdir()
+        (req_dir / "fakegroup.txt").write_text("numpy>=2.0\n", encoding="utf-8")
+        monkeypatch.setattr(ar3_deps, "REQUIREMENTS_DIR", req_dir)
+        dir_ = ar3_deps.group_dir("fakegroup")
+        (dir_ / "numpy" / "_core").mkdir(parents=True)
+        _write_dist(dir_, "numpy", "2.5.5")
+        (dir_ / "safetensors.abi3.so").write_bytes(b"abi3")
+        assert ar3_deps.ensure_group("fakegroup") == dir_
+
+        wrong_digits = "399" if ar3_deps._cpython_abi_digits() != "399" else "398"
+        bad_so = dir_ / "numpy" / "_core" / f"_multiarray_umath.cpython-{wrong_digits}-darwin.so"
+        bad_so.write_bytes(b"wrong-abi")
+        assert ar3_deps.ensure_group("fakegroup") is None
+
+        bad_so.unlink()
+        cur = ar3_deps._cpython_abi_digits()
+        if cur:
+            good_so = dir_ / "numpy" / "_core" / f"_multiarray_umath.cpython-{cur}-darwin.so"
+            good_so.write_bytes(b"matching-abi")
+            assert ar3_deps.ensure_group("fakegroup") == dir_
+
 
 class TestInstallGroup:
     def _fake_group(self, monkeypatch, tmp_path, pin="fakepkg\n"):
@@ -184,14 +211,20 @@ class TestInstallGroup:
         )
         seen = {}
 
-        def fake_run(argv):
+        def fake_run(argv, **kwargs):
             seen["argv"] = argv
             Path(argv[argv.index("--target") + 1]).mkdir(parents=True)
             return SimpleNamespace(returncode=0)
 
         monkeypatch.setattr(ar3_deps.subprocess, "run", fake_run)
         ar3_deps.install_group("fakegroup")
-        assert seen["argv"][:3] == ["/opt/homebrew/bin/uv", "pip", "install"]
+        assert seen["argv"][:5] == [
+            "/opt/homebrew/bin/uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+        ]
 
     def test_falls_back_to_pip_module_when_uv_absent(self, monkeypatch, tmp_path):
         self._fake_group(monkeypatch, tmp_path)

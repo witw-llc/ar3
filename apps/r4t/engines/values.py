@@ -72,8 +72,7 @@ def efforts(preset: str, model: str | None = None) -> tuple[list[str], str | Non
             f"engine {key!r} takes any non-empty effort value; "
             f"the provider decides (for example low, medium, high)"
         )
-    hint = "; use --model with [effort=...] for Cursor" if key == "cursor" else ""
-    raise ValuesError(f"engine {key!r} does not support --effort{hint}")
+    raise ValuesError(f"engine {key!r} does not support --effort")
 
 
 def _lines(argv: list[str]) -> list[str]:
@@ -505,6 +504,7 @@ def models(preset: str, model: str | None = None) -> tuple[list[str], str | None
 def verbs(preset: str) -> list[str]:
     key = (preset or "").strip().lower()
     entry = HARNESS_PRESETS.get(key, {})
-    return (["efforts"] if entry.get("effort_argv") else []) + (
+    has_effort = bool(entry.get("effort_argv") or entry.get("effort_in_model"))
+    return (["efforts"] if has_effort else []) + (
         ["models"] if has_models(key) else []
     )

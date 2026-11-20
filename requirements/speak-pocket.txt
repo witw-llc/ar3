@@ -1,0 +1,2 @@
+# Optional: tool-speak local Kyutai Pocket TTS engine (CPU, SHA-256 verified weights).
+pocket-tts==4.0.1

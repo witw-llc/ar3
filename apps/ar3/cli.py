@@ -1553,6 +1553,7 @@ _LOCAL_COMMANDS = {
     "browser": ("open", "close", "status", "doctor", "go", "snap", "console", "do", "idle", "secret"),
     "gemini-web": ("sessions", "forget"),
     "research": ("secret", "idle", "resume"),
+    "speak": ("doctor", "voices", "config", "replace", "pronounce", "secret"),
     "timer": ("list", "cancel", "stop", "idle"),
     "transcribe": ("doctor", "hint", "replace"),
     "vault": ("init", "fingerprint", "admin", "voucher", "seat", "client"),
@@ -1597,7 +1598,7 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
         if args.name == "browser" and any(word.split("=", 1)[0] == "--recipes" for word in option_words):
             print("ar3 tool: --recipes is not available. Put recipes in the registered node's recipes directory.", file=sys.stderr)
             return 2
-        if args.name in ("browser", "research") and words[0] == "secret":
+        if args.name in ("browser", "research", "speak") and words[0] == "secret":
             if args.name == "browser" and not args.node and not args.seat:
                 print("ar3 tool: secret needs --node NAME or --seat NAME.", file=sys.stderr)
                 return 2
@@ -1607,7 +1608,7 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
     native = list(words)
     if not help_only:
         inject = []
-        if args.name in ("browser", "gemini-web", "research", "timer", "transcribe"):
+        if args.name in ("browser", "gemini-web", "research", "speak", "timer", "transcribe"):
             inject = ["--seat", node]
         elif args.name == "vault" and words[0] != "client":
             inject = ["--node", node]
@@ -1634,6 +1635,14 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
                 ("ENGINE", "--engine"),
                 ("VISION_MODEL", "--vision-model"),
                 ("OLLAMA_URL", "--ollama-url"),
+            ):
+                if var_key in node_vars and not any(word.split("=", 1)[0] == flag for word in option_words):
+                    position = native.index("--") if "--" in native else len(native)
+                    native[position:position] = [flag, node_vars[var_key]]
+        if args.name == "speak" and words[0] == "doctor":
+            for var_key, flag in (
+                ("ENGINE", "--engine"),
+                ("VOICE", "--voice"),
             ):
                 if var_key in node_vars and not any(word.split("=", 1)[0] == flag for word in option_words):
                     position = native.index("--") if "--" in native else len(native)
@@ -1810,7 +1819,7 @@ def cmd_tool(args: argparse.Namespace) -> int:
     if local and args.name == "vault" and local[0] == "client" and (args.node or args.seat):
         print("ar3 tool: vault client takes no --node or --seat. Run it from the sender's directory. Use --to for the vault name.", file=sys.stderr)
         return 2
-    session = not words and not (args.name == "transcribe" and args.attach)
+    session = not words and not (args.name in ("speak", "transcribe") and args.attach)
     if local is None and args.name in NO_SESSION and (args.node or session):
         print(
             f"ar3 tool: {args.name} takes no --node and no session. "

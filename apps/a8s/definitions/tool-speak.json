@@ -1,0 +1,27 @@
+{
+  "description": "Synthesize speech from text or markdown and reply with an audio file.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/speak",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--engine=$ENGINE?",
+    "--voice=$VOICE?",
+    "--model=$MODEL?",
+    "--format=$FORMAT?",
+    "--speed=$SPEED?",
+    "--style=$STYLE?",
+    "--timeout=$TIMEOUT?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 1800,
+  "idle": {
+    "timeout": 0
+  }
+}

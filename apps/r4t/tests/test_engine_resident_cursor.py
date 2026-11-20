@@ -139,6 +139,100 @@ class TestComposeCursorArgv:
             "grok-4.6[effort=high]", two_fast,
         ) == "ambiguous model name 'grok-4.6[effort=high]'"
 
+    def test_cli_slugs_and_separate_effort_resolve_across_cursor_bracket_keys(self):
+        heterogeneous = [
+            {"value": "default[]", "name": "Auto"},
+            {
+                "value": "grok-4.7[context=256k,reasoning_effort=high,fast=true]",
+                "name": "grok-4.7",
+            },
+            {
+                "value": "claude-opus-5-5[context=300k,effort=medium,fast=false]",
+                "name": "claude-opus-5-5",
+            },
+            {
+                "value": "gpt-5.6-sol[context=272k,reasoning=medium,fast=false]",
+                "name": "gpt-5.6-sol",
+            },
+            {"value": "composer-2.5[fast=true]", "name": "composer-2.5"},
+            {"value": "gemini-3.1-pro[]", "name": "gemini-3.1-pro"},
+        ]
+        # CLI variant slugs emitted by `agent models` (`r4t engine cursor models`):
+        assert resident_mod.cursor_catalog_model(
+            "cursor-grok-4.7-high", heterogeneous,
+        ) == "grok-4.7[context=256k,reasoning_effort=high,fast=true]"
+        assert resident_mod.cursor_catalog_model(
+            "cursor-grok-4.7-medium", heterogeneous,
+        ) == "grok-4.7[context=256k,reasoning_effort=medium,fast=true]"
+        assert resident_mod.cursor_catalog_model(
+            "cursor-composer-2.5", heterogeneous,
+        ) == "composer-2.5[fast=true]"
+
+        # Separate EFFORT (`--effort`) composed with bare or CLI-slug MODEL:
+        for model_in, effort_in, expected in (
+            ("grok-4.7", "high", "grok-4.7[context=256k,reasoning_effort=high,fast=true]"),
+            ("grok-4.7", "low", "grok-4.7[context=256k,reasoning_effort=low,fast=true]"),
+            ("cursor-grok-4.7-high", "low", "grok-4.7[context=256k,reasoning_effort=low,fast=true]"),
+            ("claude-opus-5-5", "high", "claude-opus-5-5[context=300k,effort=high,fast=false]"),
+            ("gpt-5.6-sol", "high", "gpt-5.6-sol[context=272k,reasoning=high,fast=false]"),
+        ):
+            template, _ = _build_argv_template(
+                "cursor", model=model_in, effort=effort_in,
+                timeout=900, workdir=Path("/tmp"), resident=True,
+            )
+            env: dict[str, str] = {}
+            resident_mod.compose_resident_argv(template, env, engine="cursor")
+            assert resident_mod.cursor_catalog_model(
+                env["R4T_SESSION_MODEL"], heterogeneous,
+            ) == expected
+
+        # Generic `[effort=...]` written by hand also translates onto `reasoning_effort`/`reasoning`:
+        assert resident_mod.cursor_catalog_model(
+            "grok-4.7[effort=medium]", heterogeneous,
+        ) == "grok-4.7[context=256k,reasoning_effort=medium,fast=true]"
+        assert resident_mod.cursor_catalog_model(
+            "gpt-5.6-sol[effort=high]", heterogeneous,
+        ) == "gpt-5.6-sol[context=272k,reasoning=high,fast=false]"
+
+        # Models without an effort parameter fail closed when effort is requested:
+        for modelless in ("composer-2.5[effort=high]", "gemini-3.1-pro[effort=low]"):
+            assert resident_mod.cursor_catalog_model(modelless, heterogeneous) is None
+            assert "does not support effort" in resident_mod.cursor_catalog_refusal(
+                modelless, heterogeneous,
+            )
+
+        # CLI `auto` (lowercase) resolves onto the catalog's `Auto` (`default[]`) entry:
+        assert resident_mod.cursor_catalog_model("auto", heterogeneous) == "default[]"
+
+    def test_captured_handshake_catalog_round_trips_every_effort_bearing_model(self):
+        lines = (FIXTURES / "handshake-force.jsonl").read_text(encoding="utf-8").splitlines()
+        frame = json.loads(lines[2])
+        select = next(
+            o for o in frame["result"]["configOptions"] if o.get("id") == "model"
+        )
+        options = select["options"]
+        assert resident_mod.cursor_catalog_model("auto", options) == "default[]"
+        assert resident_mod.cursor_catalog_model(
+            "cursor-claude-opus-5-high-thinking", options,
+        ) == "claude-opus-5[thinking=true,context=300k,effort=high,fast=false]"
+        for entry in options:
+            raw_val = entry["value"]
+            name = entry["name"]
+            if not any(k in raw_val for k in ("effort=", "reasoning_effort=", "reasoning=")):
+                continue
+            template, _ = _build_argv_template(
+                "cursor", model=name, effort="low",
+                timeout=900, workdir=Path("/tmp"), resident=True,
+            )
+            env: dict[str, str] = {}
+            resident_mod.compose_resident_argv(template, env, engine="cursor")
+            resolved = resident_mod.cursor_catalog_model(env["R4T_SESSION_MODEL"], options)
+            assert resolved is not None, name
+            assert any(
+                token in resolved
+                for token in ("effort=low", "reasoning_effort=low", "reasoning=low")
+            )
+
 
 class TestCursorSession:
     def _open(self, tmp_path, permissions=None, model="composer-2.5"):

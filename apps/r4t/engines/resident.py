@@ -1208,22 +1208,13 @@ _CURSOR_DROPPED = frozenset({"{prompt}", "-p", "--print", "--trust", "--approve-
 
 def _bracket_model(spec: str) -> tuple[str, dict[str, str]] | None:
     """`grok-4.6[effort=high,fast=true]` → base plus the bracket pairs.
-    A bare slug, or a bracket body that is not `key=value` pairs, is None."""
-    if "[" not in spec or not spec.endswith("]"):
+    A bare slug, `model[]`, or a bracket body that is not `key=value` pairs is None."""
+    from rig import parse_cursor_brackets
+
+    parsed = parse_cursor_brackets(spec)
+    if parsed is None or not parsed[1]:
         return None
-    base, body = spec[:-1].split("[", 1)
-    if not base or not body:
-        return None
-    pairs: dict[str, str] = {}
-    for part in body.split(","):
-        if "=" not in part:
-            return None
-        key, value = part.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if not key or not value:
-            return None
-        pairs[key] = value
-    return base, pairs
+    return parsed[0], dict(parsed[1])
 
 
 def cursor_catalog_resolve(
@@ -1231,17 +1222,24 @@ def cursor_catalog_resolve(
 ) -> tuple[str | None, str | None]:
     """`(value, None)` or `(None, reason)` from one scan of the catalog.
 
-    An exact value wins, then an option whose `name` is the slug. Two
-    options with that name and different values are ambiguous. Then a
-    unique catalog value whose base matches and whose brackets contain
-    every requested pair (`grok-4.6[effort=high]` matches
-    `grok-4.6[effort=high,fast=true]`). Two such values are ambiguous.
-    Any other miss names the catalog values.
+    Resolves exact catalog values, bare `name` entries, `agent models` CLI
+    slugs (`cursor-grok-4.7-high`), and bracketed specs (`grok-4.7[effort=high]`
+    or `grok-4.7[reasoning_effort=low]`), mapping any requested effort onto
+    whichever effort key (`effort`, `reasoning_effort`, or `reasoning`) the
+    model's catalog template carries and failing closed when a model has no
+    effort parameter or matches ambiguously.
     """
+    from rig import (
+        CURSOR_EFFORT_KEYS,
+        parse_cursor_brackets,
+        split_cursor_cli_slug,
+    )
+
     values: list[str] = []
     by_name: dict[str, str] = {}
     ambiguous: set[str] = set()
-    bracketed: list[tuple[str | None, str, dict[str, str], str]] = []
+    entries: list[tuple[str | None, str, list[tuple[str, str]], str]] = []
+    known_bases: set[str] = set()
     for opt in options:
         if not isinstance(opt, dict):
             continue
@@ -1250,17 +1248,18 @@ def cursor_catalog_resolve(
             continue
         values.append(value)
         name = opt.get("name")
-        if isinstance(name, str):
-            previous = by_name.get(name)
+        clean_name = name if isinstance(name, str) else None
+        if clean_name is not None:
+            known_bases.add(clean_name)
+            previous = by_name.get(clean_name)
             if previous is not None and previous != value:
-                ambiguous.add(name)
-            by_name[name] = value
-        parsed = _bracket_model(value)
+                ambiguous.add(clean_name)
+            by_name[clean_name] = value
+        parsed = parse_cursor_brackets(value)
         if parsed is not None:
-            bracketed.append((
-                name if isinstance(name, str) else None,
-                parsed[0], parsed[1], value,
-            ))
+            known_bases.add(parsed[0])
+            entries.append((clean_name, parsed[0], parsed[1], value))
+
     if requested in values:
         return requested, None
     if requested in ambiguous:
@@ -1268,19 +1267,82 @@ def cursor_catalog_resolve(
     named = by_name.get(requested)
     if named is not None:
         return named, None
-    wanted = _bracket_model(requested)
-    if wanted is not None:
-        base, pairs = wanted
-        matches = [
-            value
-            for name, value_base, have, value in bracketed
-            if (name == base or value_base == base)
-            and all(have.get(key) == item for key, item in pairs.items())
-        ]
-        if len(matches) == 1:
-            return matches[0], None
-        if len(matches) > 1:
+    if requested.lower() == "auto":
+        auto_vals = list(dict.fromkeys(
+            v for name, _base, _pairs, v in entries
+            if name is not None and name.lower() == "auto"
+        ))
+        if len(auto_vals) == 1:
+            return auto_vals[0], None
+        if len(auto_vals) > 1:
             return None, f"ambiguous model name {requested!r}"
+
+    wanted_base: str | None = None
+    wanted_effort: str | None = None
+    wanted_other: dict[str, str] = {}
+
+    if "[" in requested and requested.endswith("]"):
+        parsed_req = parse_cursor_brackets(requested)
+        if parsed_req is not None:
+            wanted_base = parsed_req[0]
+            for key, item in parsed_req[1]:
+                if key in CURSOR_EFFORT_KEYS:
+                    wanted_effort = item
+                else:
+                    wanted_other[key] = item
+    else:
+        stripped = requested[len("cursor-") :] if requested.startswith("cursor-") else requested
+        if stripped != requested:
+            if stripped in ambiguous:
+                return None, f"ambiguous model name {requested!r}"
+            if stripped in by_name:
+                return by_name[stripped], None
+        slug_base, slug_effort, slug_fast, slug_thinking = split_cursor_cli_slug(requested)
+        if slug_base in known_bases and (
+            slug_effort is not None or slug_fast or slug_thinking or requested.startswith("cursor-")
+        ):
+            wanted_base = slug_base
+            wanted_effort = slug_effort
+            if slug_fast:
+                wanted_other["fast"] = "true"
+            if slug_thinking:
+                wanted_other["thinking"] = "true"
+
+    if wanted_base is not None:
+        candidates = [
+            (name, entry_base, ordered_pairs, value)
+            for name, entry_base, ordered_pairs, value in entries
+            if (name == wanted_base or entry_base == wanted_base)
+            and all(dict(ordered_pairs).get(k) == v for k, v in wanted_other.items())
+        ]
+        if candidates:
+            if wanted_effort is None:
+                unique_vals = list(dict.fromkeys(v for *_, v in candidates))
+                if len(unique_vals) == 1:
+                    return unique_vals[0], None
+                return None, f"ambiguous model name {requested!r}"
+            rewritten: list[str] = []
+            for _name, entry_base, ordered_pairs, _raw in candidates:
+                eff_keys = [k for k, _ in ordered_pairs if k in CURSOR_EFFORT_KEYS]
+                if not eff_keys:
+                    continue
+                new_pairs = [
+                    (k, wanted_effort if k in CURSOR_EFFORT_KEYS else v)
+                    for k, v in ordered_pairs
+                ]
+                rewritten.append(
+                    f"{entry_base}[{','.join(f'{k}={v}' for k, v in new_pairs)}]"
+                )
+            if not rewritten:
+                return None, (
+                    f"cursor model {wanted_base!r} does not support effort "
+                    f"{wanted_effort!r} (catalog value: {candidates[0][3]})"
+                )
+            unique_rewritten = list(dict.fromkeys(rewritten))
+            if len(unique_rewritten) == 1:
+                return unique_rewritten[0], None
+            return None, f"ambiguous model name {requested!r}"
+
     shown = ", ".join(values) or "(none)"
     return None, (
         f"cursor catalog has no model {requested!r}; catalog values: {shown}"

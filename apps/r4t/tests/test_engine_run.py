@@ -2320,7 +2320,7 @@ class TestEffortUnsupportedEngines:
     """An engine with no effort flag runs anyway: the value is dropped with
     one warning (owner ruling 2026-10-20)."""
 
-    @pytest.mark.parametrize("engine", ["cursor", "devin"])
+    @pytest.mark.parametrize("engine", ["devin"])
     def test_effort_is_dropped_and_the_engine_still_runs(
         self, engine, tmp_path, monkeypatch, capsys
     ):
@@ -2338,3 +2338,27 @@ class TestEffortUnsupportedEngines:
         err = capsys.readouterr().err
         assert f"engine '{engine}' does not support --effort; 'high' ignored" in err
         assert err.count("does not support --effort") == 1
+
+    def test_cursor_effort_embeds_into_model_and_refuses_effortless_default(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        calls = drive_engine(monkeypatch, tmp_path, "cursor")
+        code = engine_cli(
+            "cursor", "run", "--dir", str(tmp_path), "--no-scaffold",
+            "--model", "grok-4.7", "--effort", "high", "hello",
+        )
+        assert code == 0
+        [argv] = recorded_argv(calls)
+        assert "--effort" not in argv
+        assert argv[argv.index("--model") + 1] == "grok-4.7[reasoning_effort=high]"
+        assert "does not support --effort" not in capsys.readouterr().err
+
+        # Unpinned cursor defaults to composer-2.5, and effortless catalog models fail closed:
+        for extra in ([], ["--model", "gemini-3.1-pro[]"], ["--model", "gemini-3.1-pro"]):
+            bad = engine_cli(
+                "cursor", "run", "--dir", str(tmp_path), "--no-scaffold",
+                *extra, "--effort", "high", "hello",
+            )
+            assert bad != 0
+            assert "does not support --effort" in capsys.readouterr().err
+        assert len(recorded_argv(calls)) == 1

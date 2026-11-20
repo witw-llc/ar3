@@ -234,6 +234,17 @@ HARNESS_PRESETS: dict[str, dict] = {
         "continue_drop_pair": ["--sandbox"],
     },
     "cursor": {
+        "effort_in_model": True,
+        "effort_values": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ],
         "text_tier": "moderate",
         "description": "Cursor Agent CLI (`agent`) — matches apps/a8s/definitions/cursor.json",
         "a8s_definition": "cursor.json",
@@ -3033,7 +3044,213 @@ def format_preset_invoke(preset: str) -> str:
     return " ".join(build_preset_invoke(preset))
 
 
+CURSOR_EFFORT_KEYS: tuple[str, ...] = ("effort", "reasoning_effort", "reasoning")
 _EFFORT_DROPPED: set[tuple[str | None, object]] = set()
+
+
+def parse_cursor_brackets(spec: str) -> tuple[str, list[tuple[str, str]]] | None:
+    """Parse `model[k=v,...]` or `model[]` into `(base, ordered_pairs)`.
+    Returns None for unbracketed strings or malformed/duplicate bracket pairs."""
+    if "[" not in spec or not spec.endswith("]"):
+        return None
+    base, body = spec[:-1].split("[", 1)
+    base = base.strip()
+    if not base or "[" in base or "]" in base:
+        return None
+    if not body.strip():
+        return base, []
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    effort_keys_seen = 0
+    for part in body.split(","):
+        if "=" not in part:
+            return None
+        key, value = part.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key or not value or key in seen:
+            return None
+        seen.add(key)
+        if key in CURSOR_EFFORT_KEYS:
+            effort_keys_seen += 1
+            if effort_keys_seen > 1:
+                return None
+        pairs.append((key, value))
+    return base, pairs
+
+
+CURSOR_NO_EFFORT_PREFIXES: tuple[str, ...] = ("composer-",)
+CURSOR_NO_EFFORT_NAMES: frozenset[str] = frozenset({
+    "default",
+    "auto",
+    "gemini-3.1-pro",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
+    "gemini-2.5-flash",
+    "claude-opus-4-5",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4",
+    "claude-haiku-4-5",
+    "gpt-5-mini",
+    "kimi-k2.7-code",
+})
+CURSOR_KNOWN_SLUG_FAMILIES: tuple[str, ...] = (
+    "grok-",
+    "claude-",
+    "gemini-",
+    "gpt-",
+    "o1-",
+    "o3-",
+    "o4-",
+    "muse-",
+    "kimi-",
+    "glm-",
+)
+
+
+def cursor_base_refuses_effort(base: str) -> bool:
+    low = base.strip().lower()
+    if low.startswith("cursor-"):
+        low = low[len("cursor-") :]
+    return low in CURSOR_NO_EFFORT_NAMES or low.startswith(CURSOR_NO_EFFORT_PREFIXES)
+
+
+def cursor_effort_key_for_base(base: str) -> str:
+    """Default bracket key Cursor uses for `base` when no catalog template is present."""
+    low = base.strip().lower()
+    if low.startswith("cursor-"):
+        low = low[len("cursor-") :]
+    if low.startswith(("gpt-5", "o1", "o3", "o4", "kimi-k3", "glm-")):
+        return "reasoning"
+    if low.startswith((
+        "grok-4.7",
+        "gemini-4",
+        "gemini-3.8",
+        "muse-wonder",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    )):
+        return "reasoning_effort"
+    return "effort"
+
+
+def split_cursor_cli_slug(
+    spec: str, *, require_family_or_prefix: bool = False,
+) -> tuple[str, str | None, bool, bool]:
+    """Decompose flat `agent models` slugs like `cursor-grok-4.7-high[-fast][-thinking]`
+    into `(base, embedded_effort, fast, thinking)`."""
+    raw = spec.strip()
+    has_prefix = raw.startswith("cursor-")
+    body = raw[len("cursor-") :] if has_prefix else raw
+    if require_family_or_prefix and not (
+        has_prefix or body.lower().startswith(CURSOR_KNOWN_SLUG_FAMILIES)
+    ):
+        return body, None, False, False
+    thinking = False
+    fast = False
+    work = body
+    while True:
+        if work.endswith("-thinking") and len(work) > len("-thinking"):
+            work = work[: -len("-thinking")]
+            thinking = True
+            continue
+        if work.endswith("-fast") and len(work) > len("-fast"):
+            work = work[: -len("-fast")]
+            fast = True
+            continue
+        break
+    efforts = HARNESS_PRESETS["cursor"]["effort_values"]
+    for eff in sorted(efforts, key=len, reverse=True):
+        plain_suffix = f"-{eff}"
+        if work.endswith(plain_suffix) and len(work) > len(plain_suffix):
+            return work[: -len(plain_suffix)], eff, fast, thinking
+    if has_prefix:
+        return work, None, fast, thinking
+    return body, None, False, False
+
+
+def apply_cursor_effort_to_model(spec: str, effort: str, *, where: str = "") -> str:
+    """Embed `effort` into a Cursor `--model` value, preserving existing bracket keys.
+
+    An explicit bracketed spec (`model[]`, `model[fast=true]`, `model[thinking=true]`)
+    whose bracket list carries no effort key is an effortless catalog entry and fails
+    closed rather than inventing a synthetic effort key.
+    """
+    parsed = parse_cursor_brackets(spec)
+    if parsed is not None:
+        base, pairs = parsed
+        if cursor_base_refuses_effort(base):
+            raise RigError(
+                f"{where}engine 'cursor': model {spec!r} does not support "
+                f"--effort {effort!r}; pass --model with an effort-capable model"
+            )
+        updated: list[tuple[str, str]] = []
+        replaced = False
+        for key, value in pairs:
+            if key in CURSOR_EFFORT_KEYS:
+                updated.append((key, effort))
+                replaced = True
+            else:
+                updated.append((key, value))
+        if not replaced:
+            raise RigError(
+                f"{where}engine 'cursor': model {spec!r} does not support "
+                f"--effort {effort!r}; pass --model with an effort-capable model"
+            )
+        return f"{base}[{','.join(f'{k}={v}' for k, v in updated)}]"
+    base, _embedded, fast, thinking = split_cursor_cli_slug(
+        spec, require_family_or_prefix=True,
+    )
+    if cursor_base_refuses_effort(base):
+        raise RigError(
+            f"{where}engine 'cursor': model {base!r} does not support "
+            f"--effort {effort!r}; pass --model with an effort-capable model"
+        )
+    extras: list[str] = []
+    if thinking:
+        extras.append("thinking=true")
+    key = cursor_effort_key_for_base(base)
+    extras.append(f"{key}={effort}")
+    if fast:
+        extras.append("fast=true")
+    return f"{base}[{','.join(extras)}]"
+
+
+def _apply_cursor_effort(
+    argv: list[str], entry: dict, effort: str, *, where: str = "",
+) -> list[str]:
+    out: list[str] = [argv[0]]
+    replaced = False
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            out.extend(argv[i:])
+            break
+        if arg == "--model" and i + 1 < len(argv):
+            out.extend([
+                "--model",
+                apply_cursor_effort_to_model(argv[i + 1], effort, where=where),
+            ])
+            replaced = True
+            i += 2
+            continue
+        if arg.startswith("--model="):
+            current = arg.split("=", 1)[1]
+            out.append(
+                f"--model={apply_cursor_effort_to_model(current, effort, where=where)}"
+            )
+            replaced = True
+            i += 1
+            continue
+        out.append(arg)
+        i += 1
+    if not replaced:
+        default_model = entry.get("model_default", "composer-2.5")
+        out[1:1] = [
+            "--model",
+            apply_cursor_effort_to_model(default_model, effort, where=where),
+        ]
+    return out
 
 
 def apply_effort(
@@ -3043,21 +3260,17 @@ def apply_effort(
         return list(argv)
     entry = HARNESS_PRESETS.get(preset or "", {})
     tokens = entry.get("effort_argv")
-    if not tokens:
+    effort_in_model = bool(entry.get("effort_in_model"))
+    if not tokens and not effort_in_model:
         # An engine with no effort flag runs without one: a node or rig that
         # carries an effort must never be stopped by an engine that cannot use
         # it. Warn once per process and drop the value.
         seen = (preset, effort)
         if seen not in _EFFORT_DROPPED:
             _EFFORT_DROPPED.add(seen)
-            hint = (
-                "; use --model with [effort=...] for Cursor"
-                if preset == "cursor"
-                else ""
-            )
             print(
                 f"r4t: {where}engine {preset!r} does not support --effort; "
-                f"{effort!r} ignored{hint}",
+                f"{effort!r} ignored",
                 file=sys.stderr,
             )
         return list(argv)
@@ -3073,6 +3286,8 @@ def apply_effort(
         raise RigError(
             f"{where}engine {preset!r}: invalid effort {effort!r}; accepted: {accepted}"
         )
+    if effort_in_model and preset == "cursor":
+        return _apply_cursor_effort(argv, entry, effort, where=where)
 
     # The launcher owns everything before --; only edit the child CLI's args.
     start = 1
@@ -3911,7 +4126,10 @@ def set_rig_model(path: Path, rig_name: str, model: str) -> None:
             f"rig {rig_key!r} has no recorded preset to re-resolve model through "
             f"(try: r4t rig swap {rig_key} <preset> --model {model})"
         )
-    entry["invoke"] = build_preset_invoke(preset, model=model)
+    new_invoke = build_preset_invoke(preset, model=model)
+    if entry.get("effort") is not None:
+        apply_effort(new_invoke, preset, entry["effort"], where=f"rig {rig_key!r}: ")
+    entry["invoke"] = new_invoke
     entry.pop("model", None)
     entry.pop("model_resolver", None)
     if HARNESS_PRESETS.get(preset, {}).get("model_resolver"):
