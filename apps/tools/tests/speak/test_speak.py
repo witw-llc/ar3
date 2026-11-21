@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from array import array
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import cmath
 import hashlib
@@ -346,6 +347,28 @@ class TestOpenAIRealtimeAndCloudBackends:
 
 
 class TestPocketRunnerAndWSOLA:
+    def test_synthesis_cache_can_be_updated_in_generation_worker(self) -> None:
+        torch = pytest.importorskip("torch")
+
+        class ThreadedModel:
+            def generate_audio(self, state, text, **kwargs):
+                cache = state.clone()
+
+                def generate():
+                    with torch.no_grad():
+                        cache[0] = 0.5
+                    return cache
+
+                with ThreadPoolExecutor(max_workers=1) as worker:
+                    return worker.submit(generate).result(timeout=10)
+
+        state = torch.zeros(2)
+        model = ThreadedModel()
+        for _ in range(2):
+            pcm = _pocket_runner.synth_chunk(model, state, "Hello there")
+            assert pcm == b"\x00\x40\x00\x00"
+            assert torch.equal(state, torch.zeros(2))
+
     def test_pocket_checksum_verification_and_wsola_pitch_preservation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

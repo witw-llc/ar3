@@ -151,7 +151,9 @@ def synth_chunk(model, state, text: str) -> bytes:
     if not chunks:
         return b""
     tensors = []
-    with torch.inference_mode():
+    # Pocket expands its mutable cache here, then updates it in a worker
+    # thread. Inference mode is thread-local, so those tensors must stay normal.
+    with torch.no_grad():
         for part in chunks:
             part_clean = part.strip()
             if not part_clean:

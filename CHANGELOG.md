@@ -10,6 +10,14 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.136
+
+### Fixed
+
+- `tool-speak --engine pocket` uses a thread-compatible PyTorch context so
+  Pocket TTS can update its attention cache during speech generation without
+  failing with an inference-tensor error.
+
 ## 0.1.135
 
 ### Added
