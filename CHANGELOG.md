@@ -10,6 +10,21 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.137
+
+### Added
+
+- `tool-music` (`ar3 tool music`, `a8s add <name> <dir> tool-music --ALLOW=...`):
+  instrumental music generation from a free-form text description with local
+  ACE-Step 1.5 (`turbo`, `sft`, `xl-turbo`). Leading message options set
+  `--duration` (10 to 600 seconds), `--bpm`, `--key`, `--seed`, `--steps`,
+  `--format` (`wav`, `flac`, `m4a`), and `--model`; the reply carries the audio
+  file and its seed. The ACE-Step source and weights download on first use (or
+  with `prepare`) at pinned revisions and are checked against a pinned tree
+  digest and per-file SHA-256 values. `AR3_MUSIC_CACHE` moves the cache. A new
+  `music-ace` dependency group holds the runtime libraries, and the model runs
+  in an isolated interpreter so host-wide Python packages cannot break it.
+
 ## 0.1.136
 
 ### Fixed

@@ -1,0 +1,26 @@
+{
+  "description": "Generate instrumental music from a text description and reply with an audio file.",
+  "invoke": [
+    "$PYTHON",
+    "$A8S_DIR/../tools/music",
+    "handle",
+    "--seat",
+    "$RECIPIENT",
+    "--from",
+    "$SENDER",
+    "--allow",
+    "$ALLOW",
+    "--engine=$ENGINE?",
+    "--model=$MODEL?",
+    "--duration=$DURATION?",
+    "--format=$FORMAT?",
+    "--steps=$STEPS?",
+    "--timeout=$TIMEOUT?",
+    "--",
+    "$MESSAGE"
+  ],
+  "max_wake_seconds": 3600,
+  "idle": {
+    "timeout": 0
+  }
+}

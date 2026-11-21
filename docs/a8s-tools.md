@@ -1,20 +1,20 @@
 ---
 name: "a8s-tools"
-description: "Set up and use tool nodes for shell commands, encrypted files, Chrome, Gemini, delayed timers, local transcription, speech synthesis, and deep research."
+description: "Set up and use tool nodes for shell commands, encrypted files, Chrome, Gemini, delayed timers, local transcription, speech synthesis, instrumental music, and deep research."
 ---
 
 # a8s tool nodes
 
 A tool node runs a program when it receives a message. It returns the result
 as a message. The bundled tools are `command-shell`, `vault`, `browser`,
-`gemini-web`, `timer`, `transcribe`, `speak`, and `research`. Each has a public command
+`gemini-web`, `timer`, `transcribe`, `speak`, `music`, and `research`. Each has a public command
 under `ar3 tool`.
 
 ## Register and configure a tool
 
 Use the bundled definition name `tool-NAME` (`tool-command-shell`, `tool-vault`,
 `tool-browser`, `tool-gemini-web`, `tool-timer`, `tool-transcribe`,
-`tool-speak`, or `tool-research`):
+`tool-speak`, `tool-music`, or `tool-research`):
 
 ```bash
 a8s add terminal ~/work tool-command-shell --ALLOW=operator,assistant
@@ -35,6 +35,7 @@ and its option defaults:
 | `timer` | Schedules delayed callback messages back to the sender. | [Timer tool](../apps/tools/timer/README.md) |
 | `transcribe` | Transcribes attached audio and video files with local models. | [Transcribe tool](../apps/tools/transcribe/README.md) |
 | `speak` | Synthesizes speech from text or markdown (`speak.json` stores `engine`, `voice`, `model`, `format`, `speed`, and `style`) and returns an audio attachment. | [Speak tool](../apps/tools/speak/README.md) |
+| `music` | Generates instrumental music from a text description with local ACE-Step 1.5 (`music.json` stores `engine`, `model`, `duration`, `format`, and `steps`) and returns an audio attachment. | [Music tool](../apps/tools/music/README.md) |
 | `research` | Runs cited deep web research via the OpenAI Responses API. | [Research tool](../apps/tools/research/README.md) |
 
 ## Use a local terminal
@@ -76,6 +77,7 @@ ar3 tool gemini-web --seat gemini-test --var BROWSER_SEAT=browser-seat -- "Hello
 | `timer` | `list`, `cancel`, `stop`, `idle` |
 | `transcribe` | `doctor`, `hint`, `replace` |
 | `speak` | `doctor`, `voices`, `config`, `replace`, `pronounce`, `secret` |
+| `music` | `doctor`, `prepare`, `config` |
 | `research` | `secret`, `idle`, `resume` |
 | `vault` | `init`, `fingerprint`, `admin`, `voucher`, `seat`, `client` |
 | `command-shell` | Uses shell messages; set options with `a8s vars` or `--var`. |

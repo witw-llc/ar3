@@ -31,6 +31,7 @@ def world(tmp_path):
         ("timer1", "timer"),
         ("scribe1", "transcribe"),
         ("speak1", "speak"),
+        ("music1", "music"),
         ("scholar1", "research"),
     ):
         nodes[name] = {
@@ -64,6 +65,7 @@ def run(world, *args, stdin=""):
     ("timer", ["list", "cancel", "stop", "idle"]),
     ("transcribe", ["doctor", "hint", "replace"]),
     ("speak", ["doctor", "voices", "config", "replace", "pronounce", "secret"]),
+    ("music", ["doctor", "prepare", "config"]),
     ("vault", ["init", "fingerprint", "admin", "voucher", "seat", "client"]),
     ("command-shell", []),
 ])
@@ -233,6 +235,14 @@ def test_timer_transcribe_and_research_local_commands_use_node_root(world):
     assert sp_doc.returncode == 0 and "engine: pocket (voice: charles" in sp_doc.stdout
     sp_bad_sec = run(world, "speak", "--node", "speak1", "secret", "sk-speak-mistyped")
     assert sp_bad_sec.returncode == 2 and "sk-speak-mistyped" not in sp_bad_sec.stderr
+
+    # Music local commands write music.json in the node's root and report readiness without downloading.
+    mu_cfg = run(world, "music", "--node", "music1", "config", "set", "--duration", "90", "--format", "flac")
+    assert mu_cfg.returncode == 0, mu_cfg.stderr
+    assert json.loads((root / "music.json").read_text()) == {"duration": 90.0, "format": "flac"}
+    mu_doc = run(world, "music", "--node", "music1", "doctor")
+    assert mu_doc.returncode == 0, mu_doc.stderr
+    assert "music-ace: not installed" in mu_doc.stdout and "weights (turbo" in mu_doc.stdout
 
     # Research local commands write secrets.json in the node's root and reject bad secret verbs safely.
     s_set = run(world, "research", "--node", "scholar1", "secret", "set", "OPENAI_API_KEY", "-", stdin="sk-test-node-key\n")

@@ -1552,6 +1552,7 @@ _TOOL_VALUE_OPTIONS = ("--from", "--node", "--seat", "--var", "--attach")
 _LOCAL_COMMANDS = {
     "browser": ("open", "close", "status", "doctor", "go", "snap", "console", "do", "idle", "secret"),
     "gemini-web": ("sessions", "forget"),
+    "music": ("doctor", "prepare", "config"),
     "research": ("secret", "idle", "resume"),
     "speak": ("doctor", "voices", "config", "replace", "pronounce", "secret"),
     "timer": ("list", "cancel", "stop", "idle"),
@@ -1608,7 +1609,7 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
     native = list(words)
     if not help_only:
         inject = []
-        if args.name in ("browser", "gemini-web", "research", "speak", "timer", "transcribe"):
+        if args.name in ("browser", "gemini-web", "music", "research", "speak", "timer", "transcribe"):
             inject = ["--seat", node]
         elif args.name == "vault" and words[0] != "client":
             inject = ["--node", node]
@@ -1639,6 +1640,10 @@ def _tool_local(args, node, node_vars, env, cwd, words) -> int:
                 if var_key in node_vars and not any(word.split("=", 1)[0] == flag for word in option_words):
                     position = native.index("--") if "--" in native else len(native)
                     native[position:position] = [flag, node_vars[var_key]]
+        if args.name == "music" and words[0] in ("doctor", "prepare"):
+            if "MODEL" in node_vars and not any(word.split("=", 1)[0] == "--model" for word in option_words):
+                position = native.index("--") if "--" in native else len(native)
+                native[position:position] = ["--model", node_vars["MODEL"]]
         if args.name == "speak" and words[0] == "doctor":
             for var_key, flag in (
                 ("ENGINE", "--engine"),
