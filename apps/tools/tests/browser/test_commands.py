@@ -480,7 +480,85 @@ def test_drop_needs_a_target_and_a_file(monkeypatch, tmp_path):
     _stub_targets(monkeypatch)
     run = commands.run_script("seat", "drop div.box\n")
     assert not run.ok
-    assert "drop <target> <path>" in run.error
+    assert "drop <target> <path|@name>" in run.error
+
+
+# --- `@NAME` names a file attached to the script's message ----------------------------
+
+
+def _attached(tmp_path, *names):
+    """Files as a8s saves a message's attachments on the node: `files/<msg id>/<name>`."""
+    folder = tmp_path / "node" / "files" / "msg-1"
+    folder.mkdir(parents=True)
+    paths = []
+    for name in names:
+        path = folder / name
+        path.write_bytes(b"\x89PNG")
+        paths.append(str(path))
+    return paths
+
+
+def test_upload_takes_an_attached_file_by_its_name(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    seen = _stub_real_argv(monkeypatch)
+    logo, image = _attached(tmp_path, "logo.png", "image.png")
+    run = commands.run_script("seat", "upload @logo.png @image.png\n", attachments=[logo, image])
+    assert run.ok, run.error
+    assert seen == [("upload", logo, image)]
+    assert run.steps[0]["output"] == "logo.png, image.png"
+
+
+def test_drop_takes_an_attached_file_by_its_name_beside_an_absolute_path(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_targets(monkeypatch)
+    seen = _stub_real_argv(monkeypatch)
+    (image,) = _attached(tmp_path, "my image.png")
+    local = tmp_path / "local.txt"
+    local.write_text("a")
+    run = commands.run_script("seat", f'drop div.box "@my image.png" {local}\n', attachments=[image])
+    assert run.ok, run.error
+    assert seen == [("drop", "div.box", "--path", image, "--path", str(local))]
+
+
+@pytest.mark.parametrize("line", ["upload @other.png", "drop div.box @other.png"])
+def test_a_name_no_attached_file_has_is_refused_and_lists_the_names(monkeypatch, tmp_path, line):
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_targets(monkeypatch)
+    seen = _stub_real_argv(monkeypatch)
+    (logo,) = _attached(tmp_path, "logo.png")
+    run = commands.run_script("seat", line, attachments=[logo])
+    verb = line.split()[0]
+    assert run.error == f"{verb}: no file named 'other.png' is attached to this message (attached: @logo.png)"
+    assert seen == []
+
+
+def test_an_attachment_name_without_attachments_is_refused(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    seen = _stub_real_argv(monkeypatch)
+    run = commands.run_script("seat", "upload @logo.png")
+    assert run.error == "upload: no file named 'logo.png' is attached to this message (attached: none)"
+    assert seen == []
+
+
+def test_a_name_two_attached_files_share_names_neither(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    seen = _stub_real_argv(monkeypatch)
+    one = tmp_path / "a" / "logo.png"
+    two = tmp_path / "b" / "logo.png"
+    for path in (one, two):
+        path.parent.mkdir()
+        path.write_text("x")
+    run = commands.run_script("seat", "upload @logo.png", attachments=[str(one), str(two)])
+    assert "two attached files are named 'logo.png'" in run.error
+    assert seen == []
+
+
+def test_an_attached_file_inside_the_state_directory_is_still_refused(monkeypatch, tmp_path):
+    store, root = _state(monkeypatch, tmp_path)
+    seen = _calls(monkeypatch)
+    run = commands.run_script("seat", "upload @secrets.json", attachments=[str(store)])
+    assert run.error == f"upload: refusing {str(store)!r} \u2014 it is inside the browser state directory"
+    assert seen == []
 
 
 class FakeDownloads:

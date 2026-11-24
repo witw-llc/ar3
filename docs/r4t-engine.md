@@ -1462,7 +1462,7 @@ spends a turn. `r4t engine list` shows which engines answer which verb.
 
 | Engine | `models` source | `efforts` source |
 |---|---|---|
-| claude | aliases read from `claude --help`, or a full model name | fixed list |
+| claude | aliases read from `claude --help`, then the current full model ids (see [Claude model ids](#claude-model-ids)) | fixed list |
 | ollama, ollama-* | `ollama list` | fixed list for ollama-claude and ollama-copilot; any value for ollama-codex and ollama-opencode; none for bare ollama |
 | agy | `agy models` ids; effort is part of each id | fixed list |
 | cursor | `cursor-agent models` | none; effort goes inside `--model` brackets |
@@ -1471,6 +1471,64 @@ spends a turn. `r4t engine list` shows which engines answer which verb.
 | copilot | no list verb | fixed list |
 | codex | `model/list` asked of `codex app-server` (no thread, no turn) | the same catalog's `supportedReasoningEfforts` |
 | opencode | no list verb | any value |
+
+### Claude model ids
+
+`--model` for claude takes an alias or a full model id. The claude CLI has no
+list verb, so `r4t engine claude models` prints the aliases from
+`claude --help`, then the current full ids this ar3 version knows:
+
+```
+$ r4t engine claude models
+fable
+opus
+sonnet
+claude-fable-5-2
+claude-opus-5-5
+claude-sonnet-5-5
+claude-haiku-5-5
+```
+
+- An alias selects the latest model in its family. It moves when a new model
+  ships.
+- A full id pins one model. Its form is `claude-<family>-<major>[-<minor>]`:
+  lowercase, dashes (not dots), the `claude-` prefix (not `anthropic`), and no
+  date suffix. Older and newer ids in the same form work too, for example
+  `claude-opus-5` or `claude-fable-5-1`.
+- Append `[1m]` for the 1M context window, for example `claude-opus-5-5[1m]`.
+- Bedrock (`anthropic.claude-...`, `us.anthropic.claude-...`), Vertex
+  (`...@<date>`) and Foundry deployment names pass through unchanged. The CLI
+  resolves them against the backend it is configured for.
+
+Before a claude turn starts, r4t prints a hint when `--model` shows a common
+slip, and names the likely correction. This covers `r4t engine claude run` and
+`check` (stderr and the check row), engine nodes (the `MODEL` var), and roster
+turns on a claude rig (the node's day log):
+
+```
+$ r4t engine claude run --model claude-fable-5.2 "hi"
+r4t engine: note: --model 'claude-fable-5.2' looks like a typo for 'claude-fable-5-2' (...)
+There's an issue with the selected model (claude-fable-5.2). It may not exist or you may not have access to it. ...
+```
+
+The slips are a dot between digits, an `anthropic/` or `anthropic-` prefix,
+and spaces. The hint never stops the turn: the value always goes to the CLI
+unchanged, and a value the account cannot use fails at spawn with claude's
+own message and spends no turn. r4t cannot know the backend for certain, and
+on Bedrock, Vertex, Foundry or a gateway any name may be valid (a Foundry
+deployment name such as `anthropic-claude-prod` is the user's choice).
+
+The hint stays quiet when the turn visibly names another backend: the argv
+carries `--settings`, or `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY` or `ANTHROPIC_BASE_URL` is set in the env claude
+runs with (including a rig's `env`) or in the `env` block of a claude
+settings file: `~/.claude/settings.json` (or
+`$CLAUDE_CONFIG_DIR/settings.json`), the project's `.claude/settings.json`
+and `.claude/settings.local.json` in the turn's directory and at its git
+root, and the managed settings file (`/etc/claude-code/managed-settings.json`,
+`/Library/Application Support/ClaudeCode/managed-settings.json`, or
+`C:\Program Files\ClaudeCode\managed-settings.json`). A settings file that
+cannot be read also quiets it.
 
 ### Codex catalog
 

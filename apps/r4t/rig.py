@@ -3340,6 +3340,114 @@ def apply_effort(
     return out
 
 
+# Claude Code's `--model` takes an alias or a full model id. A full id is
+# `claude-<family>-<major>[-<minor>]`: lowercase, dashes, the `claude-` prefix
+# and no date suffix. A bad id fails at spawn with a message that does not say
+# what the right value is, so a turn prints a hint naming the correction.
+CLAUDE_MODEL_FORMAT = (
+    "a full claude model id is claude-<family>-<major>[-<minor>]: dashes, "
+    "not dots, and the claude- prefix, not anthropic"
+)
+CLAUDE_FULL_IDS = ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+
+
+CLAUDE_BACKEND_VARS = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+)
+CLAUDE_MANAGED_SETTINGS_FILES = (
+    "/etc/claude-code/managed-settings.json",
+    "/Library/Application Support/ClaudeCode/managed-settings.json",
+    "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+)
+
+
+def _names_other_backend(env: dict) -> bool:
+    if str(env.get("ANTHROPIC_BASE_URL") or "").strip():
+        return True
+    return any(
+        str(env.get(name) or "").strip().lower() not in ("", "0", "false", "no", "off")
+        for name in CLAUDE_BACKEND_VARS
+    )
+
+
+def claude_backend_is_first_party(env: dict | None = None, workdir: Path | None = None) -> bool:
+    """False when something the claude CLI reads visibly names another
+    backend: the spawned env, or the `env` block of the user, managed or
+    project settings files (in `workdir` and at its git root). Bedrock,
+    Vertex, Foundry and gateways take names r4t cannot judge (a Foundry
+    deployment name is the user's choice). This is a best effort that only
+    quiets the model-id hint; it cannot prove first-party, because claude
+    also takes `--settings` and other sources, so nothing is refused on it."""
+    env = dict(os.environ if env is None else env)
+    if _names_other_backend(env):
+        return False
+    home = env.get("HOME") or str(Path.home())
+    user_dir = Path(env.get("CLAUDE_CONFIG_DIR") or Path(home) / ".claude")
+    files = [user_dir / "settings.json", *(Path(f) for f in CLAUDE_MANAGED_SETTINGS_FILES)]
+    if workdir is not None:
+        here = Path(workdir).resolve()
+        project_dirs = [here]
+        for parent in [here, *here.parents]:
+            if (parent / ".git").exists():
+                if parent != here:
+                    project_dirs.append(parent)
+                break
+        for folder in project_dirs:
+            files += [folder / ".claude" / "settings.json",
+                      folder / ".claude" / "settings.local.json"]
+    for path in files:
+        try:
+            if not path.is_file():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        block = data.get("env") if isinstance(data, dict) else None
+        if isinstance(block, dict) and _names_other_backend(block):
+            return False
+    return True
+
+
+def claude_model_correction(value: str) -> str | None:
+    """The first-party id a mistyped claude `--model` value most likely
+    meant, or None when the value shows none of the known slips. Only a
+    value that names claude is judged; aliases, mixed case, `[1m]`, Bedrock
+    ids (`anthropic.claude-...`) and Vertex ids (`...@20251101`) pass."""
+    text = value.strip()
+    if "claude" not in text.lower():
+        return None
+    fixed = re.sub(r"\s+", "-", text)
+    fixed = re.sub(r"^anthropic[/-]", "", fixed, flags=re.I)
+    fixed = re.sub(r"(?<=\d)\.(?=\d)", "-", fixed)
+    return None if fixed == text else fixed.lower()
+
+
+def claude_model_hint(argv: list[str], env: dict | None, workdir: Path | None) -> str | None:
+    """An advisory note when a claude argv's `--model` looks mistyped, or
+    None. Never a refusal: r4t cannot know the backend for certain, and on
+    Bedrock, Vertex, Foundry or a gateway any name may be valid. The note is
+    quiet when the turn visibly names another backend (`--settings` in the
+    argv counts, since r4t does not read it)."""
+    value = None
+    for index, arg in enumerate(argv):
+        if arg == "--model" and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith("--model="):
+            value = arg.split("=", 1)[1]
+        elif arg == "--settings" or arg.startswith("--settings="):
+            return None
+    if not value:
+        return None
+    corrected = claude_model_correction(value)
+    if corrected is None or not claude_backend_is_first_party(env, workdir):
+        return None
+    return (
+        f"note: --model {value!r} looks like a typo for {corrected!r} "
+        f"({CLAUDE_MODEL_FORMAT}; see `r4t engine claude models`). "
+        f"If it is a Bedrock, Vertex, Foundry or gateway name, ignore this note"
+    )
+
+
 def build_preset_invoke(
     preset: str, *, model: str | None = None, effort: str | None = None
 ) -> list[str]:

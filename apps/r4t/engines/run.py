@@ -62,6 +62,7 @@ from rig import (
     apply_mcp,
     apply_permissions,
     build_preset_invoke,
+    claude_model_hint,
     check_access_support,
     child_home,
     normalize_add_dirs,
@@ -601,6 +602,16 @@ def _splice_session(
     )
 
 
+def _print_model_hint(engine: str, template: list[str], env: dict | None, workdir: Path) -> None:
+    """Name the likely correction for a mistyped claude `--model` on stderr
+    before the turn starts. Advisory: the turn still runs."""
+    if engine != "claude":
+        return
+    hint = claude_model_hint(template, env, workdir)
+    if hint:
+        print(f"r4t engine: {hint}", file=sys.stderr)
+
+
 def _build_argv_template(
     engine: str,
     *,
@@ -979,6 +990,7 @@ def execute(
             # it, so the note says what the session really runs with.
             note = resident_mod.RESIDENT_PERMISSION_NOTES.get((engine, permissions), note)
             print(f"r4t engine: {note}", file=sys.stderr)
+        _print_model_hint(engine, template, launch.env if launch is not None else env, dir_path)
         # Composed here as well as in the bridge, so a template the resident
         # adapter refuses fails this call rather than the detached session.
         composed = resident_mod.compose_resident_argv(
@@ -1119,6 +1131,7 @@ def execute(
         )
         if note:
             print(f"r4t engine: {note}", file=sys.stderr)
+        _print_model_hint(engine, template, launch.env, dir_path)
         if template[0] != launch.argv0:
             # Never vouch for a file the argv does not start.
             launch = resolve_launch(template[0], launch.env, cwd=dir_path)

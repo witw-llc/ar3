@@ -69,16 +69,24 @@ class TestModels:
     def test_claude_parses_the_aliases_from_help(self, monkeypatch):
         fake_cli(monkeypatch, {("claude", "--help"): CLAUDE_HELP.replace("'sonnet'", "'sonnet' or 'haiku'")})
         found, note = values.models("claude")
-        assert found == ["fable", "opus", "sonnet", "haiku"]
-        assert note == "claude also accepts a full model name"
+        assert found[:4] == ["fable", "opus", "sonnet", "haiku"]
+        assert found[4:] == ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+        assert "claude-<family>-<major>[-<minor>]" in note
+        assert "dashes, not dots" in note
+
+    def test_claude_lists_full_ids_even_without_the_cli(self, monkeypatch):
+        fake_cli(monkeypatch, {("claude", "--help"): FileNotFoundError("claude")})
+        found, note = values.models("claude")
+        assert "claude-opus-5-5" in found
+        assert note
 
     def test_claude_falls_back_when_help_has_no_list(self, monkeypatch):
         fake_cli(monkeypatch, {("claude", "--help"): "  --model <model>  A model\n  -n x\n"})
-        assert values.models("claude")[0] == ["fable", "opus", "sonnet"]
+        assert values.models("claude")[0][:3] == ["fable", "opus", "sonnet"]
 
     def test_claude_falls_back_when_the_cli_is_missing(self, monkeypatch):
         fake_cli(monkeypatch, {("claude", "--help"): FileNotFoundError("claude")})
-        assert values.models("claude")[0] == ["fable", "opus", "sonnet"]
+        assert values.models("claude")[0][:3] == ["fable", "opus", "sonnet"]
 
     @pytest.mark.parametrize("preset", ["ollama", "ollama-claude", "ollama-codex"])
     def test_ollama_presets_read_the_ollama_table(self, monkeypatch, preset):

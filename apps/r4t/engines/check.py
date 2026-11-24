@@ -37,7 +37,7 @@ from pathlib import Path
 
 from rig import (
     HARNESS_PRESETS, Launch, RigError, access_binary_state, access_engine,
-    resolve_launch,
+    claude_model_hint, resolve_launch,
 )
 
 from engines.run import (
@@ -199,7 +199,20 @@ def _mentions(help_text: str, flag: str) -> bool:
     return re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text) is not None
 
 
-def check_engine(
+def check_engine(engine: str, **kwargs) -> EngineReport:
+    """`_check_engine`, plus the advisory claude model-id hint in `detail`.
+    The hint never changes the verdict: whether a name is valid depends on a
+    backend r4t cannot see for certain."""
+    report = _check_engine(engine, **kwargs)
+    if engine == "claude" and report.argv:
+        workdir = kwargs.get("workdir") or Path.cwd()
+        hint = claude_model_hint(report.argv, dict(os.environ), workdir)
+        if hint:
+            report.detail = "; ".join(filter(None, (report.detail, hint)))
+    return report
+
+
+def _check_engine(
     engine: str,
     *,
     model: str | None = None,
@@ -259,6 +272,12 @@ def check_engine(
         report.verdict = REJECTED
         report.detail = str(exc)
         report.method = "composition"
+        # Say whether the CLI is there, so the row does not read "not
+        # installed" for an installed CLI whose flags r4t refused.
+        report.binary = launch.argv0
+        report.installed = launch.binary is not None
+        if report.installed:
+            report.version = _version(launch)
         return report
 
     report.argv = template

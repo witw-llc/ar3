@@ -66,10 +66,16 @@ class Run:
     the `recipe` verb reads; None means the bundled recipes.
     """
 
-    def __init__(self, seat, scrubber=None, recipes=None):
+    def __init__(self, seat, scrubber=None, recipes=None, attachments=()):
         self.seat = seat
         self.scrubber = scrubber
         self.recipes = recipes
+        # The files attached to the script's message, by file name, for `upload @NAME` and `drop T @NAME`.
+        # A name two attached files share maps to None: it names neither.
+        self.attached = {}
+        for path in attachments:
+            name = os.path.basename(path)
+            self.attached[name] = None if name in self.attached else path
         self.steps = []
         self.files = []
         self.error = None
@@ -668,6 +674,31 @@ def _video_chapter(seat, args):
 DOWNLOAD_POLL_SECONDS = 30.0
 
 
+ATTACHMENT_REF = "@"
+
+
+def _file_arg(arg, verb, run):
+    """The path an `upload` or `drop` file argument names, checked by `_local_file`.
+
+    `@NAME` names the file called NAME that is attached to the script's message: a8s saved it on this
+    machine before the wake, so a sender on another machine can hand the page a file of its own. An
+    absolute path never starts with `@`, so the two forms cannot be confused."""
+    if arg.startswith(ATTACHMENT_REF):
+        name = arg[len(ATTACHMENT_REF):]
+        attached = run.attached if run is not None else {}
+        if name not in attached:
+            names = ", ".join(ATTACHMENT_REF + n for n in sorted(attached)) or "none"
+            raise plc.BrowserError(
+                f"{verb}: no file named {name!r} is attached to this message (attached: {names})"
+            )
+        if attached[name] is None:
+            raise plc.BrowserError(
+                f"{verb}: two attached files are named {name!r} — attach them under different names"
+            )
+        arg = attached[name]
+    return _local_file(arg, verb)
+
+
 def _local_file(path, verb):
     """A path the seat can actually open, or a refusal that says why.
 
@@ -691,26 +722,26 @@ def _local_file(path, verb):
     return path
 
 
-def _upload(seat, args):
+def _upload(seat, args, run=None):
     """Hand one or more files to a file chooser the page has already opened.
 
     playwright-cli's own `upload` is the only thing that answers a chooser: the
     modal belongs to the driver, not the DOM, so no amount of page JS reaches it.
     """
-    _need(args, 1, "upload <path> [<path> ...]")
-    paths = [_local_file(arg, "upload") for arg in args]
+    _need(args, 1, "upload <path|@name> [<path|@name> ...]")
+    paths = [_file_arg(arg, "upload", run) for arg in args]
     plc.run(seat, "upload", *paths, timeout=120)
     return ", ".join(os.path.basename(path) for path in paths)
 
 
-def _drop(seat, args):
+def _drop(seat, args, run=None):
     """Drop files onto an element, as a person dragging them in would.
 
     Preferred over `upload` where a page accepts it, because it opens no menu
     and no chooser — one command, no intermediate state to get wedged in.
     """
-    _need(args, 2, "drop <target> <path> [<path> ...]")
-    paths = [_local_file(arg, "drop") for arg in args[1:]]
+    _need(args, 2, "drop <target> <path|@name> [<path|@name> ...]")
+    paths = [_file_arg(arg, "drop", run) for arg in args[1:]]
     target = resolve.click_target(seat, args[0])
     argv = ["drop", target]
     for path in paths:
@@ -938,9 +969,9 @@ def _step(seat, verb, args, run, allow_eval, script_epoch=None):
         run.attach(path)
         return path
     if verb == "upload":
-        return _upload(seat, args)
+        return _upload(seat, args, run)
     if verb == "drop":
-        return _drop(seat, args)
+        return _drop(seat, args, run)
     if verb == "download":
         return _download(seat, args, run)
     if verb in ("eval", "run-code"):
@@ -1201,10 +1232,12 @@ def script_commands(body):
     return parsed
 
 
-def run_script(seat, body, allow_eval=False, epoch=None, recipes=None):
+def run_script(seat, body, allow_eval=False, epoch=None, recipes=None, attachments=()):
     """`epoch` is the stop epoch the caller read at its entry, before any wait
     for the seat. None reads it now. `recipes` is the `recipe.Library` the
-    `recipe` verb reads; None means the bundled recipes."""
+    `recipe` verb reads; None means the bundled recipes. `attachments` are the
+    verified paths of the files attached to the message, which `upload` and
+    `drop` name as `@NAME`."""
     session.secure_seat(seat)
     try:
         # Read once. A store that cannot be read cannot be scrubbed with, so no
@@ -1214,7 +1247,7 @@ def run_script(seat, body, allow_eval=False, epoch=None, recipes=None):
         run = Run(seat)
         run.fail("secret store", str(exc))
         return run
-    run = Run(seat, scrubber, recipes)
+    run = Run(seat, scrubber, recipes, attachments)
     session.prune_scratch(seat)
     # The values to keep out of a command line are the ones this script holds, those it hides included.
     with plc.protecting(seat, scrubber):

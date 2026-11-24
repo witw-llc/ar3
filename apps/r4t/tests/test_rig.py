@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -913,6 +914,117 @@ class TestHarnessPresets:
         argv = build_preset_invoke("opencode")
         assert argv[0] == "opencode"
         assert "{prompt}" in argv
+
+    @pytest.mark.parametrize(
+        ("typed", "meant"),
+        [
+            ("claude-fable-5.2", "claude-fable-5-2"),
+            ("anthropic/claude-opus-5-5", "claude-opus-5-5"),
+            ("anthropic-claude-sonnet-5-5", "claude-sonnet-5-5"),
+            ("Claude Fable 5.2", "claude-fable-5-2"),
+            ("claude-opus-5.5[1m]", "claude-opus-5-5[1m]"),
+        ],
+    )
+    def test_claude_model_hint_names_the_meant_model_id(self, typed, meant, tmp_path):
+        argv = build_preset_invoke("claude", model=typed)
+        assert argv[argv.index("--model") + 1] == typed
+        hint = rig_module.claude_model_hint(argv, {"HOME": str(tmp_path)}, tmp_path)
+        assert f"looks like a typo for '{meant}'" in hint
+
+    def test_claude_model_hint_reads_the_equals_form(self, tmp_path):
+        hint = rig_module.claude_model_hint(
+            ["claude", "--model=claude-fable-5.2"], {"HOME": str(tmp_path)}, tmp_path,
+        )
+        assert "looks like a typo for 'claude-fable-5-2'" in hint
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "opus", "fable", "claude-fable-5-2", "claude-opus-5", "Claude-Opus-5-5",
+            "claude-opus-5-5[1m]", "anthropic.claude-opus-5-5",
+            "us.anthropic.claude-opus-5-5", "claude-opus-4-5@20251101",
+            "my-foundry-deployment",
+        ],
+    )
+    def test_claude_model_hint_passes_aliases_and_backend_ids(self, model, tmp_path):
+        argv = build_preset_invoke("claude", model=model)
+        assert rig_module.claude_model_hint(argv, {"HOME": str(tmp_path)}, tmp_path) is None
+
+    def test_composition_never_judges_a_claude_model(self):
+        argv = build_preset_invoke("claude", model="anthropic-claude-prod")
+        assert argv[argv.index("--model") + 1] == "anthropic-claude-prod"
+
+    @pytest.mark.parametrize(
+        "backend",
+        [
+            {"CLAUDE_CODE_USE_FOUNDRY": "1"},
+            {"CLAUDE_CODE_USE_BEDROCK": "true"},
+            {"CLAUDE_CODE_USE_VERTEX": "1"},
+            {"ANTHROPIC_BASE_URL": "https://gateway.example"},
+        ],
+    )
+    def test_claude_model_hint_passes_any_name_on_another_backend(self, backend, tmp_path):
+        env = {"HOME": str(tmp_path), **backend}
+        for name in ("anthropic-claude-prod", "claude-opus-4.5-east"):
+            assert rig_module.claude_model_hint(["claude", "--model", name], env, tmp_path) is None
+
+    def test_a_backend_off_switch_still_counts_as_first_party(self, tmp_path):
+        env = {"HOME": str(tmp_path), "CLAUDE_CODE_USE_FOUNDRY": "0"}
+        assert rig_module.claude_model_hint(["claude", "--model", "claude-fable-5.2"], env, tmp_path)
+
+    @pytest.mark.parametrize(
+        "where",
+        [".claude/settings.json", "project/.claude/settings.json", "project/.claude/settings.local.json"],
+    )
+    def test_a_backend_named_in_claude_settings_passes_the_name(self, where, tmp_path):
+        target = tmp_path / where
+        target.parent.mkdir(parents=True)
+        target.write_text(json.dumps({"env": {"CLAUDE_CODE_USE_FOUNDRY": "1"}}))
+        (tmp_path / "project").mkdir(exist_ok=True)
+        assert rig_module.claude_model_hint(
+            ["claude", "--model", "anthropic-claude-prod"],
+            {"HOME": str(tmp_path)}, tmp_path / "project",
+        ) is None
+
+    def test_an_unreadable_claude_settings_file_does_not_refuse(self, tmp_path):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text("{not json")
+        assert rig_module.claude_model_hint(
+            ["claude", "--model", "claude-fable-5.2"], {"HOME": str(tmp_path)}, tmp_path,
+        ) is None
+
+    @pytest.mark.parametrize(
+        "settings", [["--settings", '{"env":{"CLAUDE_CODE_USE_FOUNDRY":"1"}}'], ["--settings=/x.json"]],
+    )
+    def test_a_settings_flag_quiets_the_hint(self, settings, tmp_path):
+        argv = ["claude", *settings, "--model", "anthropic-claude-prod"]
+        assert rig_module.claude_model_hint(argv, {"HOME": str(tmp_path)}, tmp_path) is None
+
+    def test_git_root_local_settings_quiet_the_hint_from_a_subdirectory(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.local.json").write_text(
+            json.dumps({"env": {"CLAUDE_CODE_USE_FOUNDRY": "1"}})
+        )
+        sub = repo / "a" / "b"
+        sub.mkdir(parents=True)
+        assert rig_module.claude_model_hint(
+            ["claude", "--model", "anthropic-claude-prod"], {"HOME": str(tmp_path)}, sub,
+        ) is None
+
+    def test_claude_config_dir_moves_the_user_settings(self, tmp_path):
+        conf = tmp_path / "conf"
+        conf.mkdir()
+        (conf / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://g"}}))
+        env = {"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": str(conf)}
+        assert rig_module.claude_model_hint(
+            ["claude", "--model", "anthropic-claude-prod"], env, tmp_path,
+        ) is None
+
+    def test_the_claude_id_check_is_claude_only(self):
+        argv = build_preset_invoke("opencode", model="anthropic/claude-opus-5.5")
+        assert "anthropic/claude-opus-5.5" in argv
 
     def test_build_preset_invoke_ollama_opencode_requires_model(self):
         with pytest.raises(RigError, match="requires --model"):

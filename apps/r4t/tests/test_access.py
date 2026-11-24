@@ -804,6 +804,54 @@ class TestRosterTurn:
         assert argv[argv.index("--add-dir") + 1] == str(shared)
         assert argv[argv.index("--disallowedTools") + 1] == "Bash(rm:*)"
 
+    def clean_backend(self, env, tmp_path):
+        env = {k: v for k, v in env.items() if k not in (
+            "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR",
+        )}
+        env["HOME"] = str(tmp_path / "home")
+        return env
+
+    def test_a_mistyped_claude_model_still_spawns_and_logs_a_hint(self, tmp_path, monkeypatch):
+        from dispatch import run_harness
+        import dispatch
+
+        logged = []
+        monkeypatch.setattr(dispatch.state, "append_log", lambda node, line: logged.append((node, line)))
+        env, calls = self.fake_claude(tmp_path)
+        env = {**self.clean_backend(env, tmp_path), "R4T_NODE": "n1", "R4T_MEMBER": "lead"}
+        lead = rig_from_spec("lead", {"preset": "claude", "invoke": build_preset_invoke("claude", model="claude-fable-5.2")})
+        code, _out, _dur, _timed = run_harness(lead, "hi", tmp_path, env=env)
+        assert code == 0 and len(list(calls.iterdir())) == 1
+        assert any("looks like a typo for 'claude-fable-5-2'" in line for _n, line in logged)
+
+    def test_a_foundry_rig_env_lets_its_deployment_name_spawn(self, tmp_path):
+        from dispatch import run_harness
+
+        env, calls = self.fake_claude(tmp_path)
+        env = self.clean_backend(env, tmp_path)
+        lead = rig_from_spec("lead", {
+            "preset": "claude", "invoke": build_preset_invoke("claude", model="anthropic-claude-prod"),
+            "env": {"CLAUDE_CODE_USE_FOUNDRY": "1"},
+        })
+        code, _out, _dur, _timed = run_harness(lead, "hi", tmp_path, env=env)
+        assert code == 0
+        [call] = list(calls.iterdir())
+        assert "anthropic-claude-prod" in json.loads(call.read_text())
+
+    def test_project_claude_settings_let_a_deployment_name_spawn(self, tmp_path):
+        from dispatch import run_harness
+
+        env, calls = self.fake_claude(tmp_path)
+        env = self.clean_backend(env, tmp_path)
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.json").write_text(
+            json.dumps({"env": {"CLAUDE_CODE_USE_FOUNDRY": "1"}})
+        )
+        lead = rig_from_spec("lead", {"preset": "claude", "invoke": build_preset_invoke("claude", model="anthropic-claude-prod")})
+        code, _out, _dur, _timed = run_harness(lead, "hi", tmp_path, env=env)
+        assert code == 0
+
     def test_a_missing_directory_fails_the_turn_before_it_spawns(self, tmp_path):
         from dispatch import run_harness
 

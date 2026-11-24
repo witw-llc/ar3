@@ -222,8 +222,8 @@ An invalid index or extra argument fails the command.
 | `tabs` | no arguments | Lists zero-based tab indices and URLs. `*` marks the selected tab. |
 | `tab` | `tab N` | Selects tab N and returns its URL. |
 | `shot` | `shot [N]` | Selects tab N if given, then attaches a screenshot as `screen.png`. |
-| `upload` | `upload <abs path>...` | Answers an open file chooser with one or more files. |
-| `drop` | `drop <target> <abs path>...` | Drops files onto an element. Prefer it to `upload`. |
+| `upload` | `upload <abs path or @name>...` | Answers an open file chooser with one or more files. |
+| `drop` | `drop <target> <abs path or @name>...` | Drops files onto an element. Prefer it to `upload`. |
 | `download` | `download <target> [seconds]` | Clicks the target, waits for a finished file (default 30 seconds), attaches it. |
 | `video-start` | `video-start [slug]` | One recording at a time. A recipe's sensitive step does not open while a recording is on. |
 | `video-chapter` | `video-chapter <title>` | Needs a recording. |
@@ -234,7 +234,23 @@ An invalid index or extra argument fails the command.
 | `help` | `help` | Returns this usage text. Also `/help`, `--help`, `/?`. The message must be that one line. Nothing otherwise runs. |
 
 `upload` and `drop` paths are paths on the node's machine and must be
-absolute. A path inside the browser state directory, which holds every seat's
+absolute. To send a file from another machine, attach it to the script
+message and name it `@<file name>`. a8s saves the attachment on the node
+before the script runs. Put a name with spaces in quotes (`"@my logo.png"`).
+An unknown name fails the step and lists the attached names:
+
+```bash
+tell my-browser --attach=/home/me/logo.png - <<'EOF'
+go https://example.com/settings
+drop "input[type=file]" @logo.png
+EOF
+```
+
+`ar3 tool browser --attach=<path>` works the same way. The tool accepts only
+attachments that a8s or `ar3 tool` delivered; it refuses a typed `ATTACHED
+FILE:` line and runs nothing. a8s keeps the saved files in the node's `files/`
+directory after the script. A page can read a chosen file later, for example
+when a form is sent. A path inside the browser state directory, which holds every seat's
 home, is refused. A file the tool saved (a download, a screenshot) is in that
 directory, so it cannot be uploaded from there.
 

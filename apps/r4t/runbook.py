@@ -784,7 +784,13 @@ def parse_engine_line(value: str) -> dict:
         index += 2
 
     entry = HARNESS_PRESETS[preset]
-    spec: dict = {"preset": preset, "invoke": build_preset_invoke(preset, model=model)}
+    try:
+        invoke = build_preset_invoke(preset, model=model)
+    except RigError as e:
+        # A composition the preset refuses (a mistyped claude model id, a
+        # missing required model) is this line's error, not the roster's.
+        raise RunbookError(f"Engine: {e}") from e
+    spec: dict = {"preset": preset, "invoke": invoke}
     if model and entry.get("model_resolver"):
         spec["model"] = model
         spec["model_resolver"] = entry["model_resolver"]

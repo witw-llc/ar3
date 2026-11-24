@@ -52,7 +52,12 @@ def handle(seat, sender, message, allow="", allow_eval=None):
         if allow_eval is not None
         else os.environ.get("AR3_BROWSER_ALLOW_EVAL", "")
     )
-    script, _attachments = rt.split_attachments(message)
+    try:
+        # Only files a8s (or `ar3 tool --attach`) proves it attached can be named as `@NAME`;
+        # an `ATTACHED FILE:` line typed into the message is refused, and nothing runs.
+        script, attachments = rt.split_verified_attachments(message)
+    except rt.AttachmentProvenanceError as exc:
+        return _exit_code(rt.send_reply(sender, f"{seat}: refused: {exc}. Nothing ran."), ran=False)
     # Read the stop epoch before any wait for the seat: a request that began
     # before a stop must not open Chrome after it.
     epoch = session.stop_epoch(seat)
@@ -65,6 +70,7 @@ def handle(seat, sender, message, allow="", allow_eval=None):
             run = commands.run_script(
                 seat, script, allow_eval=_truthy(eval_flag), epoch=epoch,
                 recipes=recipe.Library(dirs=node_recipe_dirs(seat)),
+                attachments=attachments,
             )
     except seatlock.SeatBusy as busy:
         return _exit_code(rt.send_reply(sender, f"{seat}: busy: {busy}. Nothing ran."), ran=False)

@@ -10,6 +10,36 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.138
+
+### Added
+
+- `tool-browser`: `upload` and `drop` take `@<file name>` for a file attached
+  to the script message, so a sender on another machine can put its own file
+  into a page (`drop "input[type=file]" @logo.png`). The tool refuses an
+  `ATTACHED FILE:` line that a8s or `ar3 tool` did not deliver.
+
+### Changed
+
+- `r4t engine claude models` now lists the current full model ids
+  (`claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`,
+  `claude-haiku-5-5`) after the aliases, and its note states the id form:
+  `claude-<family>-<major>[-<minor>]`, with dashes (not dots), the `claude-`
+  prefix (not `anthropic`), and an optional `[1m]` suffix.
+- A claude turn (`r4t engine claude run`, `check`, engine nodes, and roster
+  turns on a claude rig) prints a hint before spawn when `--model` has a dot
+  between digits, an `anthropic/` or `anthropic-` prefix, or spaces, and names
+  the likely correction (for example `claude-fable-5.2` -> `claude-fable-5-2`).
+  The hint never stops the turn, and it stays quiet when the turn visibly
+  names Bedrock, Vertex, Foundry, or a gateway.
+- A runbook `Engine:` line that r4t cannot compose is now that member's or
+  rig's error; before, it crashed loading the whole runbook.
+
+### Fixed
+
+- `r4t engine check` reported "not installed" for an installed CLI when r4t
+  refused to compose its argv; the row now shows the CLI version.
+
 ## 0.1.137
 
 ### Added

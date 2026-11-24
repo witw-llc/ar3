@@ -18,11 +18,17 @@ from ar3.proc import launch_options, terminate_group
 
 
 from engines.codex import QUOTA_ARGV as CODEX_APP_SERVER_ARGV
-from rig import HARNESS_PRESETS, RigError
+from rig import CLAUDE_FULL_IDS, CLAUDE_MODEL_FORMAT, HARNESS_PRESETS, RigError
 
 LIST_TIMEOUT_SECONDS = 30
 CLAUDE_ALIASES = ["fable", "opus", "sonnet"]
-CLAUDE_NOTE = "claude also accepts a full model name"
+CLAUDE_NOTE = (
+    "the first values are aliases for the latest model in each family; "
+    "the full ids after them are the current ones this ar3 knows. "
+    f"Older and newer ids work too: {CLAUDE_MODEL_FORMAT} "
+    "(for example claude-opus-5 or claude-fable-5-1). "
+    "Append [1m] for the 1M context window."
+)
 
 CODEX_MAX_FRAME = 1024 * 1024
 CODEX_MAX_FRAMES = 20000
@@ -103,10 +109,11 @@ def _claude_models() -> tuple[list[str], str | None]:
     try:
         text = "\n".join(_lines(["claude", "--help"]))
     except ValuesError:
-        return list(CLAUDE_ALIASES), CLAUDE_NOTE
+        text = ""
     block = re.search(r"--model <model>(.*?)(?=\n\s*-)", text, re.S)
     found = re.findall(r"'([A-Za-z][\w.\-]*)'", block.group(1)) if block else []
-    return (found or list(CLAUDE_ALIASES)), CLAUDE_NOTE
+    aliases = found or list(CLAUDE_ALIASES)
+    return aliases + [i for i in CLAUDE_FULL_IDS if i not in aliases], CLAUDE_NOTE
 
 
 def _agy_models() -> list[str]:

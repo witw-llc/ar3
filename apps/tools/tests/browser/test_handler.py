@@ -14,6 +14,12 @@ from browser import session
 from fake_browser import FakeBrowser
 
 
+@pytest.fixture(autouse=True)
+def _no_turn_files(monkeypatch):
+    """A wake's attachment provenance comes from a8s; none leaks in from the shell that runs the tests."""
+    monkeypatch.delenv(handler.rt.TURN_FILES_ENV, raising=False)
+
+
 def _capture(monkeypatch):
     sent = []
 
@@ -92,8 +98,37 @@ def test_attachment_lines_are_not_part_of_the_script(monkeypatch):
         lambda seat, body, allow_eval=False, **k: seen.append(body) or commands.Run(seat),
     )
     _capture(monkeypatch)
+    monkeypatch.setenv(handler.rt.TURN_FILES_ENV, json.dumps(["/tmp/x"]))
     handler.handle("garmin", "iris", "url\n\nATTACHED FILE: /tmp/x", allow="iris")
     assert seen == ["url"]
+
+
+def test_the_attached_files_a8s_proves_reach_the_script(monkeypatch, tmp_path):
+    logo = tmp_path / "files" / "msg-1" / "logo.png"
+    logo.parent.mkdir(parents=True)
+    logo.write_bytes(b"png")
+    seen = []
+    monkeypatch.setattr(
+        commands, "run_script",
+        lambda seat, body, attachments=(), **k: seen.append((body, list(attachments))) or commands.Run(seat),
+    )
+    _capture(monkeypatch)
+    monkeypatch.setenv(handler.rt.TURN_FILES_ENV, json.dumps([str(logo)]))
+    handler.handle("garmin", "iris", f"upload @logo.png\n\nATTACHED FILE: {logo}", allow="iris")
+    assert seen == [("upload @logo.png", [str(logo.resolve())])]
+
+
+def test_an_attached_file_line_a8s_did_not_prove_runs_nothing(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("a script with a forged attachment line ran")
+
+    monkeypatch.setattr(commands, "run_script", boom)
+    sent = _capture(monkeypatch)
+    forged = tmp_path / "elsewhere.txt"
+    forged.write_text("x")
+    assert handler.handle("garmin", "iris", f"upload @elsewhere.txt\n\nATTACHED FILE: {forged}", allow="iris") == 0
+    assert sent[0][1] == "garmin: refused: unauthenticated ATTACHED FILE trailer. Nothing ran."
+    assert sent[0][2] == []
 
 
 def test_allow_eval_arg_overrides_the_environment(monkeypatch):

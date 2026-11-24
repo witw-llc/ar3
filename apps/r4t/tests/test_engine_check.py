@@ -241,6 +241,27 @@ class TestComposition:
         assert "auto-denies" in report.detail
 
 
+class TestClaudeModelIds:
+    def test_a_dotted_id_gets_a_hint_and_keeps_the_verdict(self, bin_dir):
+        fake_binary(bin_dir, "claude", flags=CLAUDE_FLAGS, version="2.1.329")
+        report = engine_check.check_engine("claude", model="claude-fable-5.2", workdir=bin_dir)
+        assert report.verdict != engine_check.REJECTED
+        assert "looks like a typo for 'claude-fable-5-2'" in report.detail
+
+    def test_a_refused_composition_reports_the_installed_version(self, bin_dir):
+        fake_binary(bin_dir, "agy", flags=["--dangerously-skip-permissions"], version="7.7.7")
+        report = engine_check.check_engine("agy", permissions="auto")
+        assert report.verdict == engine_check.REJECTED and report.method == "composition"
+        assert report.installed is True and report.version == "7.7.7"
+
+    def test_a_foundry_deployment_name_is_not_judged(self, bin_dir, monkeypatch):
+        fake_binary(bin_dir, "claude", flags=CLAUDE_FLAGS)
+        monkeypatch.setenv("CLAUDE_CODE_USE_FOUNDRY", "1")
+        report = engine_check.check_engine("claude", model="anthropic-claude-prod", workdir=bin_dir)
+        assert report.verdict != engine_check.REJECTED
+        assert "typo" not in report.detail
+
+
 def engine_cli(*args):
     return r4t_main(["engine", *args])
 

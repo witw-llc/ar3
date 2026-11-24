@@ -133,6 +133,7 @@ from rig import (
     Rig,
     Launch,
     access_binary_state,
+    claude_model_hint,
     home_env_problem as rig_mod_home_env_problem,
     mcp_env,
     merge_env,
@@ -876,6 +877,11 @@ def run_harness(
         if bad_home:
             return 126, f"rig {rig.name!r}: {bad_home}", 0.0, False
         pool = rig.pool()
+        if rig.preset == "claude" and pool and turn_context:
+            hint = claude_model_hint(pool[variant % len(pool)], final_env, workdir)
+            node, _member, _ = roster_context(env)
+            if hint and node:
+                state.append_log(node, f"r4t: rig {rig.name!r}: {hint}")
         launch = resolve_launch(
             pool[variant % len(pool)][0] if pool else "",
             final_env,

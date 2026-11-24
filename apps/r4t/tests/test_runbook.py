@@ -343,6 +343,54 @@ class TestEngineLine:
         err = "; ".join(runbook.load_for_root(node, validate=False).roster.find("Lead").errors)
         assert "--temperature" in err and "--allowed-tools" in err
 
+    def test_a_refused_composition_is_the_members_error_not_a_crash(self, node):
+        write(node, """
+            ## Roster
+
+            ### Lead
+            - **Engine:** ollama
+            - **Leader:** yes
+
+            ### Helper
+            - **Engine:** claude --model opus
+        """)
+        roster = runbook.load_for_root(node, validate=False).roster
+        assert "requires --model" in "; ".join(roster.find("Lead").errors)
+        assert not roster.find("Helper").errors
+
+    def test_a_refused_composition_fails_only_its_rig(self, node):
+        write(node, """
+            ## Roster
+
+            ### Lead
+            - **Engine:** claude
+            - **Leader:** yes
+
+            ## Rigs
+
+            ### broken
+            - **Engine:** ollama
+
+            ### fine
+            - **Engine:** claude --model claude-opus-5-5
+        """)
+        book = runbook.load_for_root(node, validate=False)
+        assert "requires --model" in (book.rigs["broken"].error or "")
+        assert not book.rigs["fine"].error
+        assert not book.roster.find("Lead").errors
+
+    def test_a_claude_model_id_is_judged_at_the_turn_not_at_load(self, node):
+        # The backend (and so whether a name is valid) is known only from the
+        # turn's env and directory; a runbook load has neither.
+        write(node, """
+            ## Roster
+
+            ### Lead
+            - **Engine:** claude --model anthropic-claude-prod
+            - **Leader:** yes
+        """)
+        assert not runbook.load_for_root(node, validate=False).roster.find("Lead").errors
+
     def test_continue_is_a_member_field_not_an_engine_flag(self, node):
         write(node, """
             ## Roster
