@@ -582,13 +582,13 @@ class Page:
         return self.command("download", target, seconds)
 
     def upload(self, target, *paths):
-        """Click `target`, which opens the page's file chooser, and hand the chooser the files at `paths`
-        (absolute paths on this machine, outside the browser state directory)."""
+        """Hand the files at `paths` (absolute paths on this machine, outside the browser state
+        directory) to `target`: a file input, hidden or not, takes them directly; any other element is
+        clicked with the chooser armed, so a chooser the page opens late still gets them."""
         self._tick()
         if not paths:
-            raise plc.BrowserError("usage: upload <path> [<path> ...]")
-        self.click(target)
-        return self.command("upload", *paths)
+            raise plc.BrowserError("usage: upload <target> <path> [<path> ...]")
+        return self.command("upload", target, *paths)
 
     def drop(self, target, *paths):
         """Drop files onto an element, as a person dragging them in would."""

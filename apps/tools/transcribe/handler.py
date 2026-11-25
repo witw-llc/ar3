@@ -11,6 +11,7 @@ from pathlib import Path
 import _runtime as rt
 
 from .engine import DEFAULT_TIMEOUT, TranscribeError, transcribe_file
+from .openai_stt import scrub_text
 from .store import (
     TranscribeConfigError,
     add_hints,
@@ -275,10 +276,10 @@ def handle_wake(
             else:
                 sections.append(transcript)
     except (TranscribeError, TranscribeConfigError, OSError) as exc:
-        sent = rt.send_reply(sender, f"tool-transcribe: {exc}")
+        sent = rt.send_reply(sender, scrub_text(f"tool-transcribe: {exc}"))
         return _exit_code(sent, ok=False)
 
-    final_text = "\n\n".join(sections)
+    final_text = scrub_text("\n\n".join(sections))
     if saved_notes:
         final_text = f"({'; '.join(saved_notes)})\n\n{final_text}"
 

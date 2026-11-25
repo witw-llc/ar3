@@ -221,7 +221,9 @@ def print_mode() -> bool:
     return bool(os.environ.get(REPLY_DIR_ENV))
 
 
-def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> int:
+def send_reply(
+    recipient: str, body: str, attachments: tuple[str, ...] = (), *, new_session: bool = False
+) -> int:
     """Reply to `recipient` by running `a8s tell`, which reads `TELL_OUTBOX_DIR`
     from the environment a8s injected on wake. `body` is sent verbatim; large
     or binary output belongs in `attachments`, which tell stages, size-caps,
@@ -229,7 +231,11 @@ def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> 
 
     When `AR3_TOOL_REPLY_DIR` is set (print mode, see `ar3 tool`) nothing is
     sent: the reply prints as the body, each attachment is copied into that
-    directory, and each copy prints as `artifact: <path>`."""
+    directory, and each copy prints as `artifact: <path>`.
+
+    `new_session` starts `tell` outside the caller's process group, so a signal to that group (a
+    worker's `stop`) cannot kill a `tell` that already wrote the envelope and make a sent reply
+    read as failed."""
     if not recipient:
         return 0
     reply_dir = os.environ.get(REPLY_DIR_ENV)
@@ -249,7 +255,7 @@ def send_reply(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> 
     argv += ["--", recipient, "-"]
     proc = subprocess.run(
         argv, input=body, capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"},
-        **launch_options(),
+        **launch_options(new_session=new_session),
     )
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)

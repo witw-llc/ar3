@@ -1317,14 +1317,14 @@ def test_the_snapshot_is_text_through_the_scrub(browser):
         page.snapshot_text(depth=-1)
 
 
-def test_upload_clicks_the_target_then_hands_the_chooser_the_file(browser, tmp_path):
+def test_upload_hands_the_target_and_the_files_to_the_upload_verb_in_one_step(browser, tmp_path):
     page, call, run = make_page()
     path = file_to_upload(tmp_path)
     second = tmp_path / "second.txt"
     second.write_text("y")
     page.upload("#choose", path, str(second))
-    assert [c[0] for c in browser.calls] == ["click", "upload"]
-    assert browser.calls[1] == ("upload", path, str(second))
+    assert [c[0] for c in browser.calls] == ["upload"]
+    assert browser.calls[0] == ("upload", "#choose", path, str(second))
     with pytest.raises(plc.BrowserError, match="usage: upload"):
         page.upload("#choose")
 

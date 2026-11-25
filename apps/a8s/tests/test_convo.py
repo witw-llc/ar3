@@ -263,7 +263,7 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=1)
-        assert f"attachment: {attachment.resolve()}" in text
+        assert f"- ATTACHMENT: {attachment.resolve()}" in text
 
     def test_attachment_falls_back_to_basename_when_missing(self, fake_home, tmp_path):
         from registry import save_registry
@@ -283,13 +283,13 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=1)
-        assert "attachment: missing.pdf" in text
-        assert "missing.pdf" == text.split("attachment: ")[-1].strip()
+        assert "- ATTACHMENT: missing.pdf" in text
+        assert "missing.pdf" == text.split("ATTACHMENT: ")[-1].strip()
 
-    def test_lost_attachment_says_so_and_says_why(self, fake_home, tmp_path):
-        """A file the transfer could not deliver must not render in the
-        vocabulary of one that arrived. The owner read `- attachment: x.md`
-        for a file that did not exist and went looking for it."""
+    def test_lost_attachment_prints_only_the_attachment_line(self, fake_home, tmp_path):
+        """Markdown carries no status words: a lost file prints the same
+        `ATTACHMENT:` line with its bare name (no local path). Status lines
+        made readers doubt files that were sent."""
         from registry import save_registry
 
         root = tmp_path / "bob"
@@ -313,12 +313,11 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=1)
-        assert "ATTACHMENT UNAVAILABLE: notes.md" in text
-        assert "could not download after 900s" in text
-        # The success vocabulary must not appear for it.
-        assert "- attachment: notes.md" not in text
+        assert "- ATTACHMENT: notes.md" in text
+        assert "UNAVAILABLE" not in text
+        assert "could not download after 900s" not in text
 
-    def test_lost_and_delivered_in_one_message_read_differently(self, fake_home, tmp_path):
+    def test_lost_and_delivered_in_one_message_differ_only_by_path(self, fake_home, tmp_path):
         from registry import save_registry
 
         root = tmp_path / "bob"
@@ -344,10 +343,10 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=1)
-        assert f"attachment: {arrived.resolve()}" in text
-        assert "ATTACHMENT UNAVAILABLE: lost.md" in text
+        assert f"- ATTACHMENT: {arrived.resolve()}" in text
+        assert "- ATTACHMENT: lost.md" in text
 
-    def test_error_without_detail_still_reports_the_loss(self, fake_home, tmp_path):
+    def test_error_without_detail_prints_the_attachment_line(self, fake_home, tmp_path):
         from registry import save_registry
 
         root = tmp_path / "bob"
@@ -365,7 +364,8 @@ class TestFormatConversation:
             recipients=["Bob"],
         )
         text = format_conversation("Bob", limit=1)
-        assert "ATTACHMENT UNAVAILABLE: x.md" in text
+        assert "- ATTACHMENT: x.md" in text
+        assert "UNAVAILABLE" not in text
 
     def test_clean_envelope_gains_no_unavailable_key(self):
         from convo import entry_from_message
@@ -1960,7 +1960,8 @@ class TestJsonOutput:
 
         assert cmd_convo(["bob"]) == 0
         markdown = capsys.readouterr().out
-        assert "ATTACHMENT UNAVAILABLE: proof.txt: HTTP 404" in markdown
+        assert "- ATTACHMENT: proof.txt" in markdown
+        assert "UNAVAILABLE" not in markdown
 
     def test_json_drains_a_burst_and_pages_it_without_skipping(
         self, fake_home, tmp_path, capsys

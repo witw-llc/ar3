@@ -25,7 +25,9 @@ def _install_fake_kokoro_and_ffmpeg(xdg_data: Path, bin_dir: Path) -> None:
     """Populate a tier-2 `speak-kokoro` group and a fake `ffmpeg` AAC encoder so wakes run offline."""
     interp = f"{sys.implementation.cache_tag}-{sysconfig.get_platform()}"
     gdir = xdg_data / "ar3" / "deps" / interp / "speak-kokoro"
-    for pkg, ver in (("kokoro", "0.9.4"), ("soundfile", "0.14.0")):
+    for pkg, ver in (
+        ("kokoro", "0.9.4"), ("soundfile", "0.14.0"), ("spacy", "3.8.18"), ("en_core_web_sm", "3.8.0"),
+    ):
         dist = gdir / f"{pkg}-{ver}.dist-info"
         dist.mkdir(parents=True)
         (dist / "METADATA").write_text(

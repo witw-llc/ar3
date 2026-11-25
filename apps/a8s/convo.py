@@ -165,9 +165,9 @@ output:
                  --since: record the newest ulid, ask
                  --since <it> next time. files_unavailable carries one
                  {{filename, error, detail}} object per attachment the transfer could
-                 not deliver for this recipient. files_outcome_unrecorded lists
-                 files whose recipient outcome was not recorded (including legacy
-                 archive rows and publish-only records).
+                 not deliver for this recipient.
+                 It is empty on rows with no recorded outcome for this agent
+                 (its own sent rows, legacy rows).
 
 examples:
   a8s convo my-desktop -f --limit 10 --glow
@@ -189,15 +189,11 @@ def json_row(entry: dict[str, Any], seq: int | None = None) -> dict[str, Any]:
     `files` names every attachment the message declared, delivered or not, so
     a consumer reading it alone reads a lost file as an arrived one — the
     confusion `files_unavailable` exists to prevent (see `entry_from_message`).
-    The key is always present. `files_outcome_unrecorded` names attachments
-    with no recorded recipient outcome; an empty unavailable list alone is
-    not evidence of delivery. `seq` is the archive's insertion order and is
+    The key is always present. `seq` is the archive's insertion order and is
     absent for a message that has no archive row yet."""
     row: dict[str, Any] = {"ulid": entry.get("id", "")}
     if seq is not None:
         row["seq"] = seq
-    if entry.get("files_outcome_unrecorded"):
-        row["files_outcome_unrecorded"] = entry["files_outcome_unrecorded"]
     row.update({
         "from": entry.get("from", ""),
         "to": entry.get("to", ""),
@@ -513,8 +509,6 @@ def _recipient_entry(entry: dict[str, Any], agent: str) -> dict[str, Any]:
     if key in outcomes:
         if outcomes[key]:
             projected["files_unavailable"] = outcomes[key]
-    elif projected.get("files"):
-        projected["files_outcome_unrecorded"] = list(projected["files"])
     return projected
 
 
@@ -874,25 +868,19 @@ def _format_heading(template: str, entry: dict[str, Any]) -> str:
 
 
 def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
-    """One line per attachment. A file the transfer lost says so and says why.
+    """One `ATTACHMENT:` line per declared file, with no status.
 
-    The bare-name line is not evidence of failure and must not read as one: a
-    message this agent *sent* keeps its files in an outbox bundle this lookup
-    does not search, and an inbound bundle is reaped after its retention
-    window. Only an entry that arrived carrying an error is reported lost.
+    The line names the local path when this agent's inbound bundle holds the
+    file, else the bare name. Status words (lost, unrecorded) sent readers
+    hunting for files that were sent; `--json` keeps `files_unavailable` as
+    data for a consumer that needs it.
     """
     names = [str(name).strip() for name in (entry.get("files") or []) if str(name).strip()]
-    unrecorded = set(entry.get("files_outcome_unrecorded") or [])
-    lost = {
-        str(e.get("filename") or "").strip(): str(e.get("detail") or "").strip()
-        for e in (entry.get("files_unavailable") or [])
-        if isinstance(e, dict) and str(e.get("filename") or "").strip()
-    }
     if not names:
         return []
     msg_id = (entry.get("id") or "").strip()
     bundle_root: Path | None = None
-    if msg_id and not all(name in lost for name in names):
+    if msg_id:
         from registry import find_participant, participants_from_registry
 
         participant = find_participant(participants_from_registry(), agent)
@@ -900,21 +888,12 @@ def _attachment_lines(agent: str, entry: dict[str, Any]) -> list[str]:
             bundle_root = inbound_bundle_dir(participant.files_path(), msg_id)
     lines: list[str] = []
     for name in names:
-        if name in unrecorded:
-            lines.append(f"- ATTACHMENT OUTCOME UNRECORDED: {name}")
-            continue
-        if name in lost:
-            detail = lost[name]
-            lines.append(
-                f"- ATTACHMENT UNAVAILABLE: {name}" + (f": {detail}" if detail else "")
-            )
-            continue
         if bundle_root is not None:
             path = bundle_root / name
             if path.is_file():
-                lines.append(f"- attachment: {path}")
+                lines.append(f"- ATTACHMENT: {path}")
                 continue
-        lines.append(f"- attachment: {name}")
+        lines.append(f"- ATTACHMENT: {name}")
     return lines
 
 

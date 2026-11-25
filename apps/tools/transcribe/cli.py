@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     in_ar3_tool = bool(os.environ.get("AR3_TOOL_PROG"))
     parser = argparse.ArgumentParser(
         prog=os.environ.get("AR3_TOOL_PROG", "transcribe"),
-        description="Transcribe attached audio and video files with local models.",
+        description="Transcribe attached audio and video files with local models or the OpenAI API.",
     )
     parser.add_argument(
         "--seat",

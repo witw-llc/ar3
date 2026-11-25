@@ -222,7 +222,7 @@ An invalid index or extra argument fails the command.
 | `tabs` | no arguments | Lists zero-based tab indices and URLs. `*` marks the selected tab. |
 | `tab` | `tab N` | Selects tab N and returns its URL. |
 | `shot` | `shot [N]` | Selects tab N if given, then attaches a screenshot as `screen.png`. |
-| `upload` | `upload <abs path or @name>...` | Answers an open file chooser with one or more files. |
+| `upload` | `upload [<target>] <abs path or @name>...` | With a target: a file input (hidden or not) takes the files directly; any other element is clicked and the chooser it opens (up to 10 seconds later) gets the files. Without a target: answers a file chooser that is already open. |
 | `drop` | `drop <target> <abs path or @name>...` | Drops files onto an element. Prefer it to `upload`. |
 | `download` | `download <target> [seconds]` | Clicks the target, waits for a finished file (default 30 seconds), attaches it. |
 | `video-start` | `video-start [slug]` | One recording at a time. A recipe's sensitive step does not open while a recording is on. |
@@ -242,9 +242,13 @@ An unknown name fails the step and lists the attached names:
 ```bash
 tell my-browser --attach=/home/me/logo.png - <<'EOF'
 go https://example.com/settings
-drop "input[type=file]" @logo.png
+upload "input[type=file]" @logo.png
 EOF
 ```
+
+`upload "input[type=file]"` works when the page hides its file input behind a
+button. `drop` needs a visible target, such as the box a person drags files
+into.
 
 `ar3 tool browser --attach=<path>` works the same way. The tool accepts only
 attachments that a8s or `ar3 tool` delivered; it refuses a typed `ATTACHED

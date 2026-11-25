@@ -483,6 +483,101 @@ def test_drop_needs_a_target_and_a_file(monkeypatch, tmp_path):
     assert "drop <target> <path|@name>" in run.error
 
 
+def _stub_upload_code(monkeypatch, how="input"):
+    """Record the code `upload <target> ...` runs and answer with `how`."""
+    import json as _json
+
+    seen = []
+
+    def run_code_file(seat, code, directory, timeout=60):
+        start = code.index("JSON.parse(") + len("JSON.parse(")
+        literal, _ = _json.JSONDecoder().raw_decode(code[start:])
+        seen.append(_json.loads(literal))
+        return _json.dumps(how)
+
+    monkeypatch.setattr(plc, "run_code_file", run_code_file)
+    monkeypatch.setattr(commands.resolve, "element_target", lambda seat, arg, noun="snap": arg)
+    return seen
+
+
+def test_upload_with_no_chooser_open_names_the_one_step_form(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+
+    def run(seat, *args, timeout=30):
+        raise plc.BrowserError(
+            'Error: The tool "browser_file_upload" can only be used when there is related modal state present.'
+        )
+
+    monkeypatch.setattr(plc, "run", run)
+    one = tmp_path / "a.pdf"
+    one.write_text("a")
+    result = commands.run_script("seat", f"upload {one}\n")
+    assert not result.ok
+    assert "no file chooser is open" in result.error
+    assert "upload <target> <files>" in result.error
+
+
+def test_upload_with_a_target_hands_the_files_to_that_element(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    argv = _stub_real_argv(monkeypatch)
+    seen = _stub_upload_code(monkeypatch)
+    one, two = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    one.write_text("a")
+    two.write_text("b")
+    run = commands.run_script("seat", f'upload "input[type=file]" {one} {two}\n')
+    assert run.ok, run.error
+    assert argv == []
+    assert seen == [["input[type=file]", [str(one), str(two)], commands.UPLOAD_CHOOSER_WAIT_MS]]
+    assert run.steps[0]["output"] == "input[type=file] <- a.pdf, b.pdf"
+
+
+def test_upload_with_a_ref_target_uses_the_aria_ref_selector(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_real_argv(monkeypatch)
+    seen = _stub_upload_code(monkeypatch, "chooser")
+    logo, = _attached(tmp_path, "my logo.png")
+    run = commands.run_script("seat", 'upload e12 "@my logo.png"\n', attachments=[logo])
+    assert run.ok, run.error
+    assert seen[0][:2] == ["aria-ref=e12", [logo]]
+
+
+def test_upload_with_a_target_that_opens_no_chooser_says_what_to_do(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_real_argv(monkeypatch)
+    _stub_upload_code(monkeypatch, "no-chooser")
+    one = tmp_path / "a.pdf"
+    one.write_text("a")
+    run = commands.run_script("seat", f"upload button.attach {one}\n")
+    assert not run.ok
+    assert "opened no file chooser" in run.error
+    assert "<input type=file>" in run.error
+
+
+def test_upload_with_a_target_checks_every_file_before_it_touches_the_page(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+    _stub_real_argv(monkeypatch)
+    seen = _stub_upload_code(monkeypatch)
+    one = tmp_path / "a.pdf"
+    one.write_text("a")
+    run = commands.run_script("seat", f"upload button.attach {one} relative.pdf\n")
+    assert not run.ok
+    assert "not an absolute path" in run.error
+    assert seen == []
+
+
+def test_upload_target_falls_back_to_visible_text(monkeypatch, tmp_path):
+    _stub_browser(monkeypatch, tmp_path)
+
+    def no_selector(seat, arg, noun="snap"):
+        raise plc.BrowserError(f"{noun}: selector {arg!r} matched no element — try `snap`")
+
+    monkeypatch.setattr(commands.resolve, "element_target", no_selector)
+    monkeypatch.setattr(commands.resolve, "click_target", lambda seat, arg: "e7")
+    assert commands._upload_target("seat", "Attach file") == "aria-ref=e7"
+    monkeypatch.setattr(commands.resolve, "click_target", lambda seat, arg: "#attach")
+    assert commands._upload_target("seat", "Attach file") == "#attach"
+
+
 # --- `@NAME` names a file attached to the script's message ----------------------------
 
 

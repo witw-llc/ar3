@@ -162,7 +162,7 @@ class TestTimerStore:
 
         calls: list[tuple[str, str]] = []
 
-        def flaky_send(recipient: str, body: str, attachments: tuple[str, ...] = ()) -> int:
+        def flaky_send(recipient: str, body: str, attachments: tuple[str, ...] = (), **_kw) -> int:
             calls.append((recipient, body))
             return 1 if len(calls) == 1 else 0
 
@@ -292,6 +292,34 @@ class TestWakeAndWorkerLifecycle:
             assert store.list_timers() == []
         finally:
             stop_worker(TimerStore(workdir))
+
+    def test_worker_sends_in_a_new_session_so_stop_cannot_kill_a_sent_reply(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`stop` signals the worker's process group. A `tell` in that group could die after it
+        wrote the envelope, read as failed, and leave the timer to be sent a second time."""
+        from timer import worker as worker_mod
+
+        workdir = tmp_path / "timer"
+        (workdir / ".outbox").mkdir(parents=True)
+        monkeypatch.setenv("TELL_OUTBOX_DIR", str(workdir / ".outbox"))
+        store = TimerStore(workdir)
+        store.schedule("alpha", 0.0, "deliver me", now=time.time() - 1.0)
+        seen: list[dict] = []
+
+        def send(recipient, body, attachments=(), **kw):
+            seen.append(kw)
+            return 0
+
+        monkeypatch.setattr(rt, "send_reply", send)
+        assert worker_mod.run_worker(workdir) == 0
+        assert seen == [{"new_session": True}]
+        assert store.list_timers() == []
+
+    def test_stop_gives_a_delivery_in_flight_time_to_finish(self) -> None:
+        from timer import worker as worker_mod
+
+        assert worker_mod.STOP_GRACE_SECONDS >= 2.0
 
     def test_stop_worker_fails_closed_without_verified_ownership(
         self, tmp_path: Path, monkeypatch

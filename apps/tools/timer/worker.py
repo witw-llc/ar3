@@ -35,6 +35,7 @@ import _runtime as rt  # noqa: E402
 from timer.store import TimerStore, TimerStoreError  # noqa: E402
 
 POLL_TICK_SECONDS = 0.2
+STOP_GRACE_SECONDS = 5.0
 SPAWN_CONFIRM_SECONDS = 1.5
 
 
@@ -147,10 +148,12 @@ def stop_worker(store: TimerStore) -> bool:
             liveness=pid_alive,
             token_reader=process_start_token,
         ):
+            # The worker ends at its next loop check after SIGTERM. The grace covers a delivery in
+            # flight (a `tell` process start); SIGKILL before `complete_delivery` re-sends the timer.
             terminate_verified_group(
                 pid,
                 stamped_token,
-                grace_seconds=0.3,
+                grace_seconds=STOP_GRACE_SECONDS,
                 liveness=pid_alive,
                 token_reader=process_start_token,
             )
@@ -275,7 +278,9 @@ def run_worker(workdir: Path, seat: str = "timer") -> int:
                 recipient = str(entry.get("sender", ""))
                 body = str(entry.get("body", ""))
                 attachments = store.attachment_paths(entry)
-                rc = rt.send_reply(recipient, body, attachments)
+                # Its own session: `stop` signals this worker's group, and a `tell` killed after it
+                # wrote the envelope would read as failed, so the timer would be sent again.
+                rc = rt.send_reply(recipient, body, attachments, new_session=True)
                 store.complete_delivery(str(entry["id"]), claim, delivered=(rc == 0))
                 continue
 

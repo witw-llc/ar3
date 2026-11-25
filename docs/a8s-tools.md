@@ -33,7 +33,7 @@ and its option defaults:
 | `browser` | Runs browser scripts in a saved Chrome profile. | [Browser tool](../apps/tools/browser/README.md) |
 | `gemini-web` | Sends prompts through a signed-in Gemini profile. | [Gemini tool](../apps/tools/gemini_web/README.md) |
 | `timer` | Schedules delayed callback messages back to the sender. | [Timer tool](../apps/tools/timer/README.md) |
-| `transcribe` | Transcribes attached audio and video files with local models. | [Transcribe tool](../apps/tools/transcribe/README.md) |
+| `transcribe` | Transcribes attached audio and video files with local models or the OpenAI API. | [Transcribe tool](../apps/tools/transcribe/README.md) |
 | `speak` | Synthesizes speech from text or markdown (`speak.json` stores `engine`, `voice`, `model`, `format`, `speed`, and `style`) and returns an audio attachment. | [Speak tool](../apps/tools/speak/README.md) |
 | `music` | Generates instrumental music from a text description with local ACE-Step 1.5 (`music.json` stores `engine`, `model`, `duration`, `format`, and `steps`) and returns an audio attachment. | [Music tool](../apps/tools/music/README.md) |
 | `research` | Runs cited deep web research via the OpenAI Responses API. | [Research tool](../apps/tools/research/README.md) |

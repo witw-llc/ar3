@@ -15,7 +15,7 @@ through `ar3 deps`:
 
 - `say`: built into macOS (no extra Python packages).
 - `speak-pocket` (`pocket-tts==4.0.1`): cross-platform CPU neural TTS with SHA-256 verified weights.
-- `speak-kokoro` (`kokoro`, `soundfile`): optional Kokoro ONNX neural TTS.
+- `speak-kokoro` (`kokoro`, `soundfile`, `spacy`, and the `en_core_web_sm` model wheel): optional Kokoro ONNX neural TTS. The group carries the spaCy English model, so Kokoro never downloads it into the system Python.
 
 Cloud engines require the corresponding API key via
 `a8s vars <node> set secret.<NAME> -` (or `ar3 tool speak --node <node> secret set <NAME> -`):

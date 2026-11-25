@@ -1,7 +1,7 @@
 # tool-transcribe
 
-Transcribe attached audio and video files with local speech-to-text models and
-optional local Ollama vision scene analysis. The tool accepts attached files
+Transcribe attached audio and video files with local speech-to-text models or
+the OpenAI API, and optional local Ollama vision scene analysis. The tool accepts attached files
 only and refuses bare file paths in messages.
 
 Use `ar3 tool transcribe` from a terminal. Use `tell --attach` from another
@@ -16,8 +16,12 @@ into `~/.local/share/ar3/deps` through `ar3 deps`:
 - `transcribe-mlx` (`mlx-whisper`, `parakeet-mlx`): default on Apple Silicon macOS.
 - `transcribe-whisper` (`openai-whisper`): optional PyTorch Whisper engine.
 
+The `openai` engine installs no package. It needs an OpenAI API key (see
+[OpenAI engine](#openai-engine)).
+
 Install `ffmpeg` and `ffprobe` for non-`faster-whisper` engines and video
-inspection. For `--flavor fancy`, run Ollama (`ollama serve`) with a vision
+inspection. The `openai` engine needs an `ffmpeg` build with the `libmp3lame`
+encoder. For `--flavor fancy`, run Ollama (`ollama serve`) with a vision
 model such as `qwen3.6`.
 
 ## Register
@@ -71,12 +75,12 @@ ar3 tool transcribe --node scribe --attach memo.m4a -- --language en
 
 Message flags:
 
-- `--engine auto|mlx-whisper|faster-whisper|parakeet-mlx|whisper`
-- `--model <name>` (`tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `turbo`, or `org/repo`)
+- `--engine auto|mlx-whisper|faster-whisper|parakeet-mlx|whisper|openai`
+- `--model <name>` (`tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`, `turbo`, or `org/repo`; for `openai`: `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, or another OpenAI model ID)
 - `--language <code>` (skip language auto-detection on Whisper engines)
 - `--flavor auto|plain|fancy` (`auto` uses `fancy` when `ffprobe` finds a video stream, otherwise `plain`)
 - `--vision-model <name>` (Ollama vision model for `fancy`, default `qwen3.6`)
-- `--hint "<terms>"` (repeatable; biases Whisper `initial_prompt`)
+- `--hint "<terms>"` (repeatable; biases Whisper `initial_prompt`, or the OpenAI `prompt` field)
 - `--replace "<regex> => <correction>"` (repeatable; annotates matches in place)
 - `--save` (persists `--hint` and `--replace` entries to the working directory)
 - `--condition-on-previous` (enables Whisper cross-window text conditioning)
@@ -100,8 +104,9 @@ before `--` for one local run.
 | Variable | Default | Function |
 |---|---|---|
 | `ALLOW` | Required | Lists permitted sender names separated by commas or spaces. |
-| `ENGINE` | `auto` | Selects `auto`, `mlx-whisper`, `faster-whisper`, `parakeet-mlx`, or `whisper`. |
-| `MODEL` | `turbo` | Sets the default speech model name or Hugging Face repo ID. |
+| `ENGINE` | `auto` | Selects `auto`, `mlx-whisper`, `faster-whisper`, `parakeet-mlx`, `whisper`, or `openai`. |
+| `MODEL` | `turbo` | Sets the default speech model name, Hugging Face repo ID, or OpenAI model ID. |
+| `secret.OPENAI_API_KEY` | Empty | Sets the OpenAI API key for the `openai` engine. |
 | `LANGUAGE` | Auto-detect | Sets a fixed language code such as `en`. |
 | `FLAVOR` | `auto` | Selects `auto`, `plain`, or `fancy`. |
 | `VISION_MODEL` | `qwen3.6` | Selects the Ollama vision model for `fancy` video transcription. |
@@ -114,6 +119,42 @@ before `--` for one local run.
 a8s vars scribe set ENGINE faster-whisper
 a8s vars scribe set LANGUAGE en
 ```
+
+## OpenAI engine
+
+The `openai` engine sends the audio to the OpenAI transcription API
+(`api.openai.com`). Each request costs money. `auto` never selects `openai`;
+select it with `--engine openai` or `ENGINE=openai`.
+
+Store the key as a node secret. a8s puts it in `OPENAI_API_KEY` at wake:
+
+```bash
+printf '%s\n' "$OPENAI_API_KEY" | a8s vars scribe set secret.OPENAI_API_KEY -
+a8s vars scribe set ENGINE openai
+ar3 tool transcribe --node scribe doctor
+```
+
+- Models: the default is `whisper-1`. A local model name (`turbo`,
+  `large-v3`, and the other Whisper sizes) also selects `whisper-1`. Pass
+  `--model gpt-4o-transcribe` or `--model gpt-4o-mini-transcribe` for the newer
+  models.
+- Timed output: `fancy` flavor needs segment timestamps, and only `whisper-1`
+  returns them. The tool refuses `fancy` with another model. A video with
+  `--flavor auto` runs `fancy`, so pass `--flavor plain` with the newer models.
+- Hints: `hints.txt`, `HINTS`, and `--hint` terms go to the API `prompt` field.
+  `whisper-1` uses only the last 224 tokens of the prompt.
+- Replacements: `replacements.txt` and `--replace` rules apply to the
+  transcript as for local engines.
+- `--language` goes to the API `language` field. `--condition-on-previous` has
+  no effect.
+- Upload size: the API accepts files up to 25 MB. The tool first converts the
+  audio to 16 kHz mono MP3 at 32 kbit/s (about 100 minutes in 24 MB). It
+  splits longer audio into time chunks, sends each chunk, joins the text, and
+  shifts each chunk's timestamps by the chunk start. A word at a chunk boundary
+  can split or drop. Splitting needs `ffprobe`.
+- `TIMEOUT` limits the whole file: conversion, every chunk, and every request.
+
+The key never appears in replies, errors, or `doctor` output.
 
 ## State
 
@@ -128,7 +169,8 @@ Speech packages install under `~/.local/share/ar3/deps`.
 ## Platforms
 
 The tool runs on macOS, Linux, and Windows. `auto` selects `mlx-whisper` on
-Apple Silicon macOS and `faster-whisper` on other platforms. Subprocesses run
+Apple Silicon macOS and `faster-whisper` on other platforms. `auto` never
+selects `openai`. Subprocesses run
 in isolated process groups and stop on timeout or `a8s stop`.
 
 ## Try it by hand
@@ -147,9 +189,15 @@ ar3 tool transcribe --help
 | Bare path in message | Attach the file with `tell --attach <path>` or `ar3 tool transcribe --attach <path>`. |
 | `ffmpeg` or `ffprobe` missing | Install `ffmpeg` or pass `--flavor plain --engine faster-whisper`. |
 | Ollama not reachable | Start `ollama serve` and pull a vision model (`ollama pull qwen3.6`), or pass `--flavor plain`. |
+| `OPENAI_API_KEY is not set` | Run `a8s vars <node> set secret.OPENAI_API_KEY -` with the key on stdin. |
+| `openai model ... returns no segment timestamps` | Pass `--model whisper-1` or `--flavor plain`. |
+| `openai HTTP <status>: <message>` | Read the API message. A 401 means a bad key; a 429 means a rate or quota limit. |
+| `Unknown encoder 'libmp3lame'` | Install an `ffmpeg` build with MP3 encoding. |
 
 ## Trust
 
 The node reads only files delivered as `a8s` attachments and writes only
-`hints.txt` and `replacements.txt` in its working directory. Permitted senders
+`hints.txt` and `replacements.txt` in its working directory. Local engines keep
+audio on the machine. The `openai` engine sends audio and hints to the OpenAI
+API. Permitted senders
 can save hints and replacement rules when they pass `--save`.

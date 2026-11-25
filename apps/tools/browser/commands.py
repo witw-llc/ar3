@@ -11,6 +11,7 @@ naming a verb is a different thing from a message carrying code: `eval` and
 opt-in unless the seat turns it on.
 """
 import contextlib
+import json
 import os
 import re
 import shlex
@@ -722,16 +723,101 @@ def _local_file(path, verb):
     return path
 
 
-def _upload(seat, args, run=None):
-    """Hand one or more files to a file chooser the page has already opened.
+# How long `upload <target> ...` waits for a chooser after it clicks a target that is not a file input.
+# A page may open the chooser after the click returns (a timer, an async handler).
+UPLOAD_CHOOSER_WAIT_MS = 10000
 
-    playwright-cli's own `upload` is the only thing that answers a chooser: the
-    modal belongs to the driver, not the DOM, so no amount of page JS reaches it.
+# The code `upload <target> ...` runs. A file input (hidden or not) takes the files directly, with no
+# chooser. Any other element is clicked with the chooser already armed, so a chooser that the page
+# opens after the click still gets the files. playwright-cli's tab turns the `fileChooser` event off
+# outside `browser_click` (see `session._route_downloads_js`), so this code turns it on itself.
+UPLOAD_CODE = """async (page) => {
+  const [selector, paths, waitMs] = JSON.parse(%s);
+  const target = page.locator(selector).first();
+  const isFileInput = await target.evaluate(
+    (el) => el instanceof HTMLInputElement && el.type === 'file', null, {timeout: 10000});
+  if (isFileInput) {
+    await target.setInputFiles(paths);
+    return 'input';
+  }
+  const channel = page._channel;
+  await channel?.updateSubscription({event: 'fileChooser', enabled: true}).catch(() => {});
+  try {
+    const chooser = page.waitForEvent('filechooser', {timeout: waitMs});
+    chooser.catch(() => {});
+    await target.click({timeout: 10000});
+    let opened;
+    try {
+      opened = await chooser;
+    } catch (e) {
+      return 'no-chooser';
+    }
+    await opened.setFiles(paths);
+    return 'chooser';
+  } finally {
+    await channel?.updateSubscription({event: 'fileChooser', enabled: false}).catch(() => {});
+  }
+}
+"""
+
+
+def _upload_target(seat, argument):
+    """The Playwright selector for an `upload` target: a ref from `snap`, a CSS selector, or the
+    visible text of the element, as `click` takes it.
+
+    A CSS selector may match a hidden element: a page often hides its `<input type=file>` behind a
+    button."""
+    if resolve.REF_RE.match(argument):
+        return "aria-ref=" + resolve.element_target(seat, argument, "upload")
+    try:
+        return resolve.element_target(seat, argument, "upload")
+    except plc.BrowserError as exc:
+        if "matched no element" not in str(exc):
+            raise
+    found = resolve.click_target(seat, argument)
+    return f"aria-ref={found}" if resolve.REF_RE.match(found) else found
+
+
+def _upload(seat, args, run=None):
+    """Hand one or more files to the page.
+
+    `upload <path|@name> ...` answers a file chooser the page has already opened: the modal belongs
+    to the driver, not the DOM, so only playwright-cli's own `upload` reaches it.
+
+    `upload <target> <path|@name> ...` names the element first. A file input, hidden or not, takes
+    the files directly. Any other element (a button that opens a chooser) is clicked with the
+    chooser listener armed, so a chooser that opens after the click still gets the files. A path
+    is absolute and an attached file starts with `@`, so a first argument with neither, followed by
+    a file, is a target. A lone argument is always a file, and a relative one is refused as before.
     """
-    _need(args, 1, "upload <path|@name> [<path|@name> ...]")
-    paths = [_file_arg(arg, "upload", run) for arg in args]
-    plc.run(seat, "upload", *paths, timeout=120)
-    return ", ".join(os.path.basename(path) for path in paths)
+    _need(args, 1, "upload [<target>] <path|@name> [<path|@name> ...]")
+    first = args[0]
+    if len(args) == 1 or first.startswith(ATTACHMENT_REF) or os.path.isabs(first):
+        paths = [_file_arg(arg, "upload", run) for arg in args]
+        try:
+            plc.run(seat, "upload", *paths, timeout=120)
+        except plc.BrowserError as exc:
+            if "related modal state" not in str(exc):
+                raise
+            raise plc.BrowserError(
+                "upload: no file chooser is open. A page can open it after the click ends, so "
+                "name the target in the same step: `upload <target> <files>`. The target can be "
+                "the button or the page's <input type=file>, hidden or not"
+            ) from exc
+        return ", ".join(os.path.basename(path) for path in paths)
+    paths = [_file_arg(arg, "upload", run) for arg in args[1:]]
+    selector = _upload_target(seat, first)
+    values = json.dumps(json.dumps([selector, paths, UPLOAD_CHOOSER_WAIT_MS]))
+    output = plc.run_code_file(seat, UPLOAD_CODE % values, session.scratch_dir(seat), timeout=120)
+    how = plc.result_json(output)
+    if how == "no-chooser":
+        raise plc.BrowserError(
+            f"upload: clicked {first} but the page opened no file chooser in "
+            f"{UPLOAD_CHOOSER_WAIT_MS // 1000}s — target the page's <input type=file> instead "
+            "(it may be hidden), or use `drop`"
+        )
+    names = ", ".join(os.path.basename(path) for path in paths)
+    return f"{first} <- {names}"
 
 
 def _drop(seat, args, run=None):

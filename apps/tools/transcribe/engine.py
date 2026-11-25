@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import shutil
@@ -27,6 +28,16 @@ from .ollama import (
     resolve_ollama_url,
     resolve_vision_model,
 )
+from .openai_stt import (
+    DEFAULT_OPENAI_MODEL,
+    KEY_ENV as OPENAI_KEY_ENV,
+    MISSING_KEY_HINT,
+    OpenAISTTError,
+    api_key as openai_api_key,
+    check_timed_model,
+    require_api_key,
+    transcribe_audio,
+)
 from .store import (
     apply_replacements,
     hints_path,
@@ -46,8 +57,11 @@ PARAKEET_OVERLAP_DURATION = 15.0
 MAX_FRAMES = 50
 MAX_FPS = 1.0
 FRAME_SCALE = 512
+OPENAI_UPLOAD_LIMIT = 24 * 1024 * 1024
+OPENAI_SPLIT_MARGIN = 0.9
+_OPENAI_AUDIO_ARGS = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k")
 
-_KNOWN_ENGINES = ("auto", "mlx-whisper", "faster-whisper", "parakeet-mlx", "whisper")
+_KNOWN_ENGINES = ("auto", "mlx-whisper", "faster-whisper", "parakeet-mlx", "whisper", "openai")
 _KNOWN_FLAVORS = ("auto", "plain", "fancy")
 
 _ENGINE_GROUPS = {
@@ -280,6 +294,10 @@ def resolve_model(engine: str, requested: str | None) -> str:
         if model == "turbo":
             return "large-v3-turbo"
         return model
+    if engine == "openai":
+        if model in _MLX_WHISPER_MODELS or model == "large-v3-turbo":
+            return DEFAULT_OPENAI_MODEL
+        return model
     return model
 
 
@@ -293,6 +311,8 @@ def resolve_flavor_choice(requested: str | None) -> str:
 
 def ensure_engine_group(engine: str) -> Path | None:
     """Resolve or install the on-demand `ar3.deps` group for `engine`."""
+    if engine == "openai":
+        return None
     if engine in ("mlx-whisper", "parakeet-mlx") and not mlx_available():
         raise TranscribeError(
             f"engine {engine!r} requires Apple Silicon macOS (use faster-whisper or auto)"
@@ -453,7 +473,7 @@ def has_video_stream(path: Path) -> bool:
     return any(line.strip() == "video" for line in proc.stdout.splitlines())
 
 
-def probe_duration_seconds(path: Path) -> float | None:
+def probe_duration_seconds(path: Path, *, timeout: float = 30.0) -> float | None:
     if shutil.which("ffprobe") is None:
         return None
     try:
@@ -472,7 +492,7 @@ def probe_duration_seconds(path: Path) -> float | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
+            timeout=max(0.1, float(timeout)),
             **launch_options(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -584,6 +604,15 @@ def run_stt_subprocess(
     condition_on_previous: bool = False,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> str:
+    if engine == "openai":
+        return run_openai_stt(
+            path,
+            model=model,
+            language=language,
+            prompt=prompt,
+            timed=timed,
+            timeout=timeout,
+        )
     group_arg = str(group_dir) if group_dir is not None else ""
     timed_flag = "1" if timed else "0"
     if engine == "parakeet-mlx":
@@ -623,6 +652,117 @@ def run_stt_subprocess(
     return stdout
 
 
+def _openai_transcode(
+    src: Path,
+    dst: Path,
+    *,
+    timeout: float,
+    start: float | None = None,
+    duration: float | None = None,
+) -> None:
+    argv = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if start is not None:
+        argv += ["-ss", f"{start:.3f}"]
+    if duration is not None:
+        argv += ["-t", f"{duration:.3f}"]
+    argv += ["-i", str(src), *_OPENAI_AUDIO_ARGS, str(dst)]
+    rc, out, err = run_grouped_command(argv, timeout=timeout)
+    if rc != 0 or not dst.is_file():
+        detail = (err or out).strip()
+        raise TranscribeError(detail or f"ffmpeg audio transcode failed (exit {rc})")
+
+
+def _openai_chunks(audio: Path, tmp: Path, remaining) -> list[tuple[float, Path]]:
+    """Split `audio` into time chunks under the upload limit; return `(start_seconds, path)` pairs."""
+    size = audio.stat().st_size
+    if size <= OPENAI_UPLOAD_LIMIT:
+        return [(0.0, audio)]
+    duration = probe_duration_seconds(audio, timeout=min(30.0, remaining()))
+    remaining()
+    if duration is None:
+        raise TranscribeError(
+            "audio exceeds the openai upload limit and ffprobe cannot read its duration to split it"
+        )
+    count = math.ceil(size / (OPENAI_UPLOAD_LIMIT * OPENAI_SPLIT_MARGIN))
+    span = duration / count
+    chunks: list[tuple[float, Path]] = []
+    for idx in range(count):
+        start = idx * span
+        part = tmp / f"chunk-{idx:03d}.mp3"
+        _openai_transcode(
+            audio,
+            part,
+            timeout=remaining(),
+            start=start,
+            duration=span if idx < count - 1 else None,
+        )
+        if part.stat().st_size > OPENAI_UPLOAD_LIMIT:
+            raise TranscribeError(f"audio chunk {idx + 1} still exceeds the openai upload limit")
+        chunks.append((start, part))
+    return chunks
+
+
+def run_openai_stt(
+    path: Path,
+    *,
+    model: str,
+    language: str | None = None,
+    prompt: str = "",
+    timed: bool = False,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> str:
+    """Transcode, split if needed, and transcribe `path` with the OpenAI API.
+
+    Returns the same stdout shape as the local engine subprocesses: plain text,
+    or a `{language, text, segments}` JSON line when `timed`.
+    """
+    deadline = time.monotonic() + max(1.0, float(timeout))
+
+    def remaining() -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TranscribeError(f"transcription timed out after {timeout:.0f}s")
+        return left
+
+    results: list[tuple[float, dict]] = []
+    try:
+        require_api_key()
+        if timed:
+            check_timed_model(model)
+        with tempfile.TemporaryDirectory(prefix="ar3-transcribe-openai-") as tmp_dir:
+            tmp = Path(tmp_dir)
+            audio = tmp / "audio.mp3"
+            _openai_transcode(Path(path), audio, timeout=remaining())
+            for start, part in _openai_chunks(audio, tmp, remaining):
+                res = transcribe_audio(
+                    part,
+                    model=model,
+                    language=language,
+                    prompt=prompt,
+                    timed=timed,
+                    timeout=remaining(),
+                )
+                results.append((start, res))
+                remaining()
+    except OpenAISTTError as exc:
+        raise TranscribeError(str(exc)) from None
+
+    text = " ".join(res["text"] for _start, res in results if res["text"]).strip()
+    if not timed:
+        return text
+    detected = next((res["language"] for _start, res in results if res["language"]), "")
+    segments = [
+        {
+            "start": round(seg["start"] + start, 3),
+            "end": round(seg["end"] + start, 3),
+            "text": seg["text"],
+        }
+        for start, res in results
+        for seg in res["segments"]
+    ]
+    return json.dumps({"language": detected, "text": text, "segments": segments})
+
+
 def transcribe_file(
     path: Path,
     *,
@@ -647,6 +787,12 @@ def transcribe_file(
     model_name = resolve_model(engine_name, model)
     flavor_choice = resolve_flavor_choice(flavor)
 
+    if engine_name == "openai":
+        try:
+            require_api_key()
+        except OpenAISTTError as exc:
+            raise TranscribeError(str(exc)) from None
+
     if engine_name != "faster-whisper" and shutil.which("ffmpeg") is None:
         raise TranscribeError(
             f"ffmpeg not found on PATH (required by {engine_name}); install ffmpeg or use --engine faster-whisper"
@@ -666,6 +812,12 @@ def transcribe_file(
         effective_flavor = "plain"
     else:
         effective_flavor = "fancy" if has_video_stream(target) else "plain"
+
+    if engine_name == "openai" and effective_flavor == "fancy":
+        try:
+            check_timed_model(model_name)
+        except OpenAISTTError as exc:
+            raise TranscribeError(str(exc)) from None
 
     resolved_vision = resolve_vision_model(vision_model)
     resolved_ollama_url = resolve_ollama_url(ollama_url)
@@ -782,15 +934,22 @@ def doctor_report(
         print(f"  WARN engine: {exc}")
         chosen = "faster-whisper"
 
-    group_name, mod_name = _ENGINE_GROUPS[chosen]
-    group_ok = (
-        ar3_deps.ensure_group(group_name) is not None
-        or importlib.util.find_spec(mod_name) is not None
-    )
-    print(
-        f"  {'ok  ' if group_ok else 'NOTE'} deps ({group_name}): "
-        + ("installed" if group_ok else f"not installed yet — installs on first run or via `ar3 deps {group_name}`")
-    )
+    if chosen == "openai":
+        print("  ok   deps: none (openai sends audio to the OpenAI API)")
+        if openai_api_key():
+            print(f"  ok   {OPENAI_KEY_ENV}: set")
+        else:
+            print(f"  WARN {MISSING_KEY_HINT}")
+    else:
+        group_name, mod_name = _ENGINE_GROUPS[chosen]
+        group_ok = (
+            ar3_deps.ensure_group(group_name) is not None
+            or importlib.util.find_spec(mod_name) is not None
+        )
+        print(
+            f"  {'ok  ' if group_ok else 'NOTE'} deps ({group_name}): "
+            + ("installed" if group_ok else f"not installed yet — installs on first run or via `ar3 deps {group_name}`")
+        )
 
     for binary, note in (
         ("ffmpeg", "required for non-faster-whisper engines and fancy video"),

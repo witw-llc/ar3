@@ -60,12 +60,12 @@ def _assert_views(capsys):
         assert 'files_outcome_unrecorded' not in row
         assert cmd_convo([name]) == 0
         text = capsys.readouterr().out
-        assert ('ATTACHMENT UNAVAILABLE: a.txt' in text) == bool(unavailable)
-        assert 'ATTACHMENT UNAVAILABLE: b.txt' not in text
+        assert '- ATTACHMENT: a.txt' in text or '/a.txt' in text
+        assert 'UNAVAILABLE' not in text and 'UNRECORDED' not in text
     for name in ['Sender', 'group']:
         entry = convo.load_agent_entries(name, limit=1)[0]
         assert not entry.get('files_unavailable')
-        assert entry['files_outcome_unrecorded'] == ['a.txt', 'b.txt']
+        assert 'files_outcome_unrecorded' not in entry
 
 
 def test_real_receive_fanout_projects_actual_copies(seats, capsys):
@@ -122,8 +122,8 @@ def test_follow_projects_new_receive_rows(seats, monkeypatch, capsys, name, lost
         convo.follow_conversation(name, limit=0)
     text = capsys.readouterr().out
     assert 'two files' in text
-    assert ('ATTACHMENT UNAVAILABLE: a.txt' in text) == lost
-    assert 'ATTACHMENT UNAVAILABLE: b.txt' not in text
+    assert text.count('- ATTACHMENT: ') == 2
+    assert 'UNAVAILABLE' not in text
 
 
 def test_duplicate_records_preserve_first_canonical_recipient_outcome(seats):
@@ -135,7 +135,7 @@ def test_duplicate_records_preserve_first_canonical_recipient_outcome(seats):
     assert len(convo.load_entries()) == 1
 
 
-def test_legacy_rows_are_preserved_and_explicitly_unrecorded(seats, capsys):
+def test_legacy_rows_are_preserved_and_print_plain_attachment_lines(seats, capsys):
     msg = _message()
     convo.record(msg, recipients=['Blue'])
     with convo._connect() as conn:
@@ -148,16 +148,16 @@ def test_legacy_rows_are_preserved_and_explicitly_unrecorded(seats, capsys):
     assert cmd_convo(['Blue', '--json']) == 0
     row = json.loads(capsys.readouterr().out)
     assert row['files_unavailable'] == []
-    assert row['files_outcome_unrecorded'] == ['a.txt', 'b.txt']
+    assert 'files_outcome_unrecorded' not in row
     assert cmd_convo(['Blue']) == 0
     text = capsys.readouterr().out
-    assert 'ATTACHMENT OUTCOME UNRECORDED: a.txt' in text
-    assert 'ATTACHMENT UNAVAILABLE:' not in text
+    assert '- ATTACHMENT: a.txt' in text
+    assert 'UNRECORDED' not in text and 'UNAVAILABLE' not in text
     with convo.open_for_read() as conn:
         assert conn.execute('SELECT entry_json FROM messages').fetchone()[0] == legacy
     convo.record(msg, recipients=['Coral'])
-    assert convo.load_agent_entries('Blue', limit=1)[0]['files_outcome_unrecorded']
-    assert not convo.load_agent_entries('Coral', limit=1)[0].get('files_outcome_unrecorded')
+    assert not convo.load_agent_entries('Blue', limit=1)[0].get('files_unavailable')
+    assert not convo.load_agent_entries('Coral', limit=1)[0].get('files_unavailable')
     assert convo.load_entries()[0]['files_unavailable'] == raw['files_unavailable']
 
 
@@ -176,9 +176,11 @@ def test_local_fanout_records_only_committed_recipients(seats, monkeypatch):
 
     monkeypatch.setattr(mailbox, '_commit_staged_inboxes', commit)
     route_outboxes([sender], all_agents=seats)
-    assert not convo.load_agent_entries('Blue', limit=1)[0].get('files_outcome_unrecorded')
+    assert convo.load_agent_entries('Blue', limit=1)[0]['files'] == ['local.txt']
     assert not convo.load_agent_entries('Coral', limit=1)
-    assert convo.load_agent_entries('group', limit=1)[0]['files_outcome_unrecorded'] == ['local.txt']
+    with convo.open_for_read() as conn:
+        stored = json.loads(conn.execute('SELECT entry_json FROM messages').fetchone()[0])
+    assert set(stored['attachment_outcomes']) == {'blue'}
 
 
 def test_remote_publish_is_not_recipient_delivery(seats):
@@ -195,8 +197,11 @@ def test_remote_publish_is_not_recipient_delivery(seats):
                        configured_remote_ids=['broker'], services=[SplitStore()])
     for name in ['Sender', 'Elsewhere']:
         row = convo.load_agent_entries(name, limit=1)[0]
-        assert row['files_outcome_unrecorded'] == ['x']
+        assert row['files'] == ['x']
         assert not row.get('files_unavailable')
+    with convo.open_for_read() as conn:
+        stored = json.loads(conn.execute('SELECT entry_json FROM messages').fetchone()[0])
+    assert stored['attachment_outcomes'] == {}
 
 
 def test_local_copy_failure_is_not_archived_as_received(seats, monkeypatch):

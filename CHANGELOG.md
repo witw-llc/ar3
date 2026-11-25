@@ -10,6 +10,43 @@ history is in git.
 Add to `Unreleased` in the same PR as the change, and rename the heading to the
 version when the batch is ready to merge.
 
+## 0.1.139
+
+### Added
+
+- `tool-transcribe`: an `openai` engine (`--engine openai` or `ENGINE=openai`)
+  sends audio to the OpenAI transcription API. It reads the key from
+  `secret.OPENAI_API_KEY`, defaults to `whisper-1`, and accepts
+  `gpt-4o-transcribe` and `gpt-4o-mini-transcribe`. It converts audio to small
+  mono MP3 and splits it into chunks under the 25 MB upload limit. Hints go to
+  the API prompt and replacements apply as for local engines. `fancy` flavor
+  needs `whisper-1`. `auto` never selects `openai`.
+
+### Changed
+
+- `a8s convo`: each attachment prints as one `- ATTACHMENT: <path or name>`
+  line, with no status. The sender's own sent rows no longer read
+  "ATTACHMENT OUTCOME UNRECORDED" (a false alarm: outcomes are recorded per
+  recipient), and markdown drops the "ATTACHMENT UNAVAILABLE" line. `--json`
+  drops `files_outcome_unrecorded`; `files_unavailable` stays.
+
+### Fixed
+
+- `tool-browser`: `upload <target> <files>` puts files into the page in one
+  step. A file input takes them directly, also when the page hides it. Any
+  other target (a button) is clicked with the chooser listener already on, so
+  a chooser that opens after the click (up to 10 seconds) still gets the
+  files. Before, `click` then `upload` failed when the page opened its chooser
+  late. `upload <files>` with no chooser open now names the one-step form.
+- `tool-timer`: `stop` no longer sends a timer twice. `stop` signals the
+  worker's process group, and that signal could kill the `tell` of a reply
+  that was already written, so the worker read it as failed and queued the
+  timer again. The worker now runs `tell` in its own session and gets 5
+  seconds to finish a delivery before it is killed.
+- `tool-speak`: the `speak-kokoro` dependency group now pins spaCy 3.8 and
+  the `en_core_web_sm` model wheel. Before, Kokoro's phonemizer downloaded
+  the model with pip into the system Python, which fails on PEP 668 hosts.
+
 ## 0.1.138
 
 ### Added

@@ -212,6 +212,10 @@ class FakeBrowser:
                 answer = {"url": url, "headers": {}, **answer}
             return json.dumps(answer) + "\n"
         values = json.loads(json.loads(LITERAL.search(code).group(1)))
+        if "setInputFiles" in code:
+            selector, paths, _wait = values
+            self.calls.append(("upload", selector, *paths))
+            return json.dumps("input") + "\n"
         if "const body = async (page, values) => {" in code:
             source = code.split("const body = async (page, values) => {\n", 1)[1].rsplit("\n  };", 1)[0]
             self.calls.append(("run_code", source, values))

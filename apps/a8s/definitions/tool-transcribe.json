@@ -1,5 +1,5 @@
 {
-  "description": "Transcribe attached audio and video files with local speech and vision models.",
+  "description": "Transcribe attached audio and video files with local or OpenAI speech models and local vision models.",
   "invoke": [
     "$PYTHON",
     "$A8S_DIR/../tools/transcribe",
